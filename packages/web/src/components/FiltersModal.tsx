@@ -24,6 +24,33 @@ function SectionLabel({ children }: { children: ReactNode }) {
   );
 }
 
+function SectionHeader({
+  label,
+  resetLabel,
+  showReset,
+  onReset,
+}: {
+  label: ReactNode;
+  resetLabel: string;
+  showReset: boolean;
+  onReset: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <SectionLabel>{label}</SectionLabel>
+      {showReset ? (
+        <button
+          className="uppercase text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+          onClick={onReset}
+          type="button"
+        >
+          {resetLabel}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function IconMergeReady() {
   return (
     <svg
@@ -80,11 +107,15 @@ export interface FiltersModalProps {
   projectId: string;
   onSelectProject: (projectId: string) => void;
   agentOptions: FiltersModalAgentOption[];
+  allAgentsCount: number;
   agentFilter: AgentName[];
   onToggleAgent: (agent: AgentName) => void;
+  onClearAgents: () => void;
   tagOptions: FiltersModalTagOption[];
+  allTagsCount: number;
   activeTagFilters: string[];
   onToggleTag: (tag: string) => void;
+  onClearTags: () => void;
   activeFilterCount: number;
   onClearAll: () => void;
 }
@@ -104,11 +135,15 @@ export function FiltersModal({
   projectId,
   onSelectProject,
   agentOptions,
+  allAgentsCount,
   agentFilter,
   onToggleAgent,
+  onClearAgents,
   tagOptions,
+  allTagsCount,
   activeTagFilters,
   onToggleTag,
+  onClearTags,
   activeFilterCount,
   onClearAll,
 }: FiltersModalProps) {
@@ -295,8 +330,22 @@ export function FiltersModal({
           </div>
 
           <div className="flex flex-col gap-2">
-            <SectionLabel>Agent</SectionLabel>
+            <SectionHeader
+              label="Agent"
+              onReset={onClearAgents}
+              resetLabel="Reset agent filters"
+              showReset={agentFilter.length > 0}
+            />
             <div className="flex flex-wrap gap-2">
+              <button
+                aria-pressed={agentFilter.length === 0}
+                className={optionClass(agentFilter.length === 0)}
+                onClick={onClearAgents}
+                type="button"
+              >
+                <span>All agents:</span>
+                <span className="font-bold tabular-nums">{allAgentsCount}</span>
+              </button>
               {agentOptions.map((agent) => (
                 <button
                   aria-pressed={agentFilter.includes(agent.id)}
@@ -314,8 +363,22 @@ export function FiltersModal({
 
           {tagOptions.length > 0 ? (
             <div className="flex flex-col gap-2">
-              <SectionLabel>Tags</SectionLabel>
+              <SectionHeader
+                label="Tags"
+                onReset={onClearTags}
+                resetLabel="Reset tag filters"
+                showReset={activeTagFilters.length > 0}
+              />
               <div className="flex flex-wrap gap-2">
+                <button
+                  aria-pressed={activeTagFilters.length === 0}
+                  className={optionClass(activeTagFilters.length === 0)}
+                  onClick={onClearTags}
+                  type="button"
+                >
+                  <span>All tags:</span>
+                  <span className="font-bold tabular-nums">{allTagsCount}</span>
+                </button>
                 {tagOptions.map((tag) => {
                   const selected = activeTagFilters.includes(tag.name);
                   return (

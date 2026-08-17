@@ -598,7 +598,7 @@ function ProjectMenu({
       </button>
       {popover.open ? (
         <div
-          className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           role="menu"
         >
           <button
@@ -619,7 +619,7 @@ function ProjectMenu({
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
-            <ul className="flex flex-col" role="group">
+            <ul className="flex min-h-0 flex-col overflow-y-auto" role="group">
               {projects.map((project) => (
                 <li
                   key={project.id}
@@ -1173,6 +1173,8 @@ export function Dashboard() {
     setAgentFilter((current) =>
       current.includes(agent) ? current.filter((name) => name !== agent) : [...current, agent],
     );
+  const clearTagFilters = () => setActiveTagFilters([]);
+  const clearAgentFilters = () => setAgentFilter([]);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectDisplayName, setNewProjectDisplayName] = useState("");
   const [newProjectPrefix, setNewProjectPrefix] = useState("");
@@ -1466,8 +1468,25 @@ export function Dashboard() {
     [allSessions, facetFilters],
   );
 
+  // Counts every desk matching the other active filters, regardless of tag
+  // (including untagged desks) — NOT the sum of the individual tag chip
+  // counts above, since a multi-tag desk is only counted once here but once
+  // per tag in `tagCounts`.
+  const allTagsCount = useMemo(
+    () => buildFacetCounts(allSessions, "tag", facetFilters, () => ["all"] as const).get("all") ?? 0,
+    [allSessions, facetFilters],
+  );
+
   const tagCounts = useMemo(
     () => buildFacetCounts(allSessions, "tag", facetFilters, (s) => s.tags),
+    [allSessions, facetFilters],
+  );
+
+  // Same "all desks matching the other filters" semantics as `allTagsCount`,
+  // mirrored for the Agent section's All chip — not a sum of `agentCounts`.
+  const allAgentsCount = useMemo(
+    () =>
+      buildFacetCounts(allSessions, "agent", facetFilters, () => ["all"] as const).get("all") ?? 0,
     [allSessions, facetFilters],
   );
 
@@ -2553,9 +2572,13 @@ export function Dashboard() {
               id: agent,
               count: agentCounts.get(agent) ?? 0,
             }))}
+            allAgentsCount={allAgentsCount}
             allProjectsCount={allProjectsCount}
             allStatusesCount={allStatusesCount}
+            allTagsCount={allTagsCount}
+            onClearAgents={clearAgentFilters}
             onClearAll={resetAllFilters}
+            onClearTags={clearTagFilters}
             onClose={() => setFiltersOpen(false)}
             onPrReadyOnlyChange={setPrReadyOnly}
             onSelectProject={syncProjectFilter}

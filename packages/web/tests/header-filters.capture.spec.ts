@@ -164,6 +164,18 @@ test.describe("header + filters capture — mobile (390px)", () => {
     //    shows a count, trigger gets an accent border, FAB stays reachable.
     await page.getByRole("button", { name: /^Errors:/ }).click();
     await page.getByRole("button", { name: /^bug:/ }).click();
+
+    // 10. Tags section shows the All-tags chip unpressed and the understated
+    //     "Reset tag filters" button now that a tag is active.
+    await shot(page, "header-10-mobile-tags-reset-visible.png");
+    await page.getByRole("button", { name: "Reset tag filters" }).click();
+    // 11. Reset clears the tag selection: All-tags chip is pressed again and
+    //     the reset button is gone.
+    await shot(page, "header-11-mobile-tags-reset-cleared.png");
+    // Restore the tag selection so the existing "filters active" capture
+    // below still shows status + tag + PR-ready together, unchanged.
+    await page.getByRole("button", { name: /^bug:/ }).click();
+
     await page.getByRole("button", { name: "done", exact: true }).click();
     await shot(page, "header-03-mobile-filters-active.png");
 
