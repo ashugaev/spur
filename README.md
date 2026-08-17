@@ -11,7 +11,7 @@ Local daemon + CLI orchestrator for AI coding agents.
 Spur installs itself. Hand this to your coding agent:
 
 ```text
-Read https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md and install and run
+Read https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md and install and run
 Spur on this machine end to end, following the guide. Do the steps yourself; don't ask me to run
 what you can run.
 ```

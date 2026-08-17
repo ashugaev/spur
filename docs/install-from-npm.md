@@ -90,6 +90,8 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5555/           # 20
 
 Terminal rides `/ws` on the web port — no separate port or check.
 
+After a start/restart the units can take up to ~2 min to answer on a ~1 GB host — poll, don't fail on the first refusal.
+
 ## Connect a project
 
 ```bash
