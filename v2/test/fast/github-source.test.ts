@@ -434,6 +434,54 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("still polls a stale-parked session", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([
+      makeSession({ status: "stopped", stopReason: "stale_timeout" }),
+    ]);
+    mockLifecyclePoll(prView());
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("does not poll a killed session", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession({ status: "killed" })]);
+    mockLifecyclePoll(prView());
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("uses structured session state instead of the git worktree probe", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);

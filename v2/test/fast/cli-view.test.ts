@@ -89,6 +89,19 @@ describe("cli-view.describeSession", () => {
     ).toContain("hit rate or usage limit");
   });
 
+  it("labels a stale-parked session as parked by idle timeout, not stopped by user", () => {
+    const output = describeSession(
+      session({
+        status: "stopped",
+        stopReason: "stale_timeout",
+        state: "stale",
+      }),
+    );
+
+    expect(output).toContain("parked by idle timeout");
+    expect(output).not.toContain("stopped by user");
+  });
+
   it("shows compact persisted link ids instead of full URLs", () => {
     const output = describeSession(
       session({

@@ -192,6 +192,8 @@ function stateLabel(state: SessionState): string {
       return "Needs Input";
     case "rate_limited":
       return "Rate Limited";
+    case "stale":
+      return "Stale";
     case "stopped":
       return "Stopped";
     case "error":
@@ -215,6 +217,8 @@ export function describeSession(session: SessionView): string {
 
   if (session.stopReason === "manual_pause") {
     facts.push("stopped by user");
+  } else if (session.stopReason === "stale_timeout") {
+    facts.push("parked by idle timeout");
   } else if (session.status === "paused") {
     facts.push("paused by user");
   } else if (session.status === "completed") {

@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
 import { extractGithubErrorText, gh, isGitHubRateLimitError, runGhPollCycle } from "../gh.js";
@@ -14,7 +13,12 @@ import {
   type ReviewSnapshot,
   type WorkItemEventData,
 } from "../types.js";
-import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
+import {
+  isEligibleForSourcePoll,
+  type SourceHandle,
+  type SourceModule,
+  type SourceStartDeps,
+} from "./types.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
   deleteReviewSourceSnapshot,
@@ -304,12 +308,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   };
 
   const listPollableSessions = () =>
-    listSessions(deps.dataDir).filter(
-      (session) =>
-        session.project === deps.projectId &&
-        session.status === "running" &&
-        Boolean(session.worktreePath) &&
-        existsSync(session.worktreePath),
+    listSessions(deps.dataDir).filter((session) =>
+      isEligibleForSourcePoll(session, deps.projectId),
     );
 
   const shouldPollThisTick = (): boolean => {

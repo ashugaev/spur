@@ -64,6 +64,7 @@ const sessionsResponse = {
   sessions: [
     session("api-1", "api", "claude", "running", "working", ["bug"]),
     session("api-2", "api", "codex", "stopped", "stopped", []),
+    session("api-3", "api", "codex", "stopped", "stale", []),
     session("web-1", "web", "claude", "running", "needs_input", ["docs"]),
   ],
   daemonAlive: true,
@@ -148,6 +149,7 @@ describe("Filters modal", () => {
 
     await waitFor(() => expect(screen.queryByText("api-1")).not.toBeInTheDocument());
     expect(screen.getByText("api-2")).toBeInTheDocument();
+    expect(screen.getByText("api-3")).toBeInTheDocument();
   });
 
   it("toggles the Project section and narrows the session list", async () => {

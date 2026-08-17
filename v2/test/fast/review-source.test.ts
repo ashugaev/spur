@@ -116,6 +116,47 @@ describe("createReviewSourceModule (generic review source)", () => {
     handle.stop();
   });
 
+  it("still polls a stale-parked session", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([
+      makeSession({ status: "stopped", stopReason: "stale_timeout" }),
+    ]);
+    collectSignalsMock.mockResolvedValueOnce(collected(42, []));
+    const module = createReviewSourceModule("gitlab");
+
+    const handle = await module.start({
+      sourceId: "mr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "gitlab", intervalMs: 60_000, runOnStart: false, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(collectSignalsMock).toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("does not poll a killed session", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession({ status: "killed" })]);
+    const module = createReviewSourceModule("gitlab");
+
+    const handle = await module.start({
+      sourceId: "mr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "gitlab", intervalMs: 60_000, runOnStart: false, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(collectSignalsMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("resets the diff when the collected PR number changes, without replaying identical text", async () => {
     // The MR is resolved from the branch (review-providers/gitlab.ts), so a stale
     // baseline recorded against a prior MR number must never suppress an
