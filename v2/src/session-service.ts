@@ -874,14 +874,15 @@ function isRestorableStatus(status: SessionStatus): boolean {
 
 type WakeDeliverability = "deliverable" | "status_not_restorable" | "workspace_missing";
 
-// Mirrors ensureSessionReadyForSend's throw condition (session-service.ts:11217-11312)
-// exactly, without performing the recovery side effects: shepherd re-materializes its
-// workspace rather than ever being unrecoverable (11263); a live pane returns before
-// the workspace check (11225); only a dead runtime plus a missing workspace throws.
-// Does not model the isStaleParked admission gate further down in that function
-// (11274) — a parked session with a live workspace is "deliverable" here and hits
-// that gate only inside send() itself, via the existing SessionAdmissionDeniedError
-// handling in the interval/daily wake branches, not via suppression.
+// Mirrors ensureSessionReadyForSend's workspace-missing throw condition exactly,
+// without performing the recovery side effects: shepherd re-materializes its
+// workspace (ensureShepherdWorkspace) rather than ever being unrecoverable; a
+// live pane returns before the workspace check even runs; only a dead runtime
+// plus a missing workspace throws. Does not model the isStaleParked admission
+// gate further down in that function — a parked session with a live workspace
+// is "deliverable" here and hits that gate only inside send() itself, via the
+// existing SessionAdmissionDeniedError handling in the interval/daily wake
+// branches, not via suppression.
 // Used to decide whether a recurring wake can be delivered at all before attempting
 // send(), so a session whose workspace is gone stays silently suppressed instead of
 // emitting *_failed every tick.
@@ -3384,8 +3385,8 @@ export class SessionService {
           });
         }
 
-        // A killed session is never revived (reopenLocked() only accepts
-        // "completed", session-service.ts:11333-11336), so its schedule is
+        // A killed session is never revived (reopenLocked()'s status guard
+        // only accepts "completed"), so its schedule is
         // dead weight: clear intervalWake/dailyWake here so this loop stops
         // re-visiting it every tick and spamming interval_failed/daily_failed
         // for a send() that can only throw "Session is not running". Every

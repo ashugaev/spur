@@ -29247,7 +29247,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("H2: does not resurrect or advance an interval wake when disk status moved off the snapshot's status", async () => {
+    it("H2: does not resurrect or advance an interval wake when disk status moved to a non-restorable one (completed) since the snapshot", async () => {
       const sessions = createSessionStore();
       const stoppedSnapshot = sessionRecord({
         id: "api-1",
@@ -29272,7 +29272,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("H2: does not resurrect or advance a daily wake when disk status moved off the snapshot's status", async () => {
+    it("H2: does not resurrect or advance a daily wake when disk status moved to a non-restorable one (completed) since the snapshot", async () => {
       const sessions = createSessionStore();
       const stoppedSnapshot = sessionRecord({
         id: "api-1",
@@ -29294,6 +29294,63 @@ describe("SessionService", () => {
         ).length,
       ).toBe(0);
       expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-16T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("delivers an interval wake when disk status moved between two restorable statuses (running to stopped) since the snapshot", async () => {
+      const sessions = createSessionStore();
+      const runningSnapshot = sessionRecord({
+        id: "api-1",
+        status: "running",
+        intervalWake: pastDueIntervalWake(),
+      });
+      sessions.set("api-1", { ...runningSnapshot, status: "stopped" });
+      listSessionsMock.mockImplementation(() => [runningSnapshot]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_sent",
+        ).length,
+      ).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).not.toBe("2026-03-18T09:59:00.000Z");
+      service.dispose();
+    });
+
+    it("delivers a daily wake when disk status moved between two restorable statuses (running to stopped) since the snapshot", async () => {
+      const sessions = createSessionStore();
+      const runningSnapshot = sessionRecord({
+        id: "api-1",
+        status: "running",
+        dailyWake: pastDueDailyWake(),
+      });
+      sessions.set("api-1", { ...runningSnapshot, status: "stopped" });
+      listSessionsMock.mockImplementation(() => [runningSnapshot]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.daily_sent")
+          .length,
+      ).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).not.toBe("2026-03-16T10:06:00.000Z");
       service.dispose();
     });
 
