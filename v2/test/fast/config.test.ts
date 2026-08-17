@@ -4459,7 +4459,7 @@ describe("loadInstanceConfigReadOnly", () => {
 });
 
 describe("spur.yaml.reference", () => {
-  it("parses via loadProjectConfig (the connect-time parse mode) and exposes every capability", () => {
+  it("parses via loadProjectConfig (the connect-time parse mode) and every declared key actually survives parsing", () => {
     const config = loadProjectConfig(resolveBootstrapConfigReferencePath());
     const project = config.projects["reference-project"];
     expect(project).toBeDefined();
@@ -4470,5 +4470,23 @@ describe("spur.yaml.reference", () => {
     expect(project?.branchNaming).toBeDefined();
     expect(project?.symlinks.length).toBeGreaterThan(0);
     expect(Object.keys(project?.sidecars ?? {})).not.toContain("playwright");
+
+    // workspaceAccess must survive parsing with its item intact, not silently
+    // drop to undefined because its template referenced an unresolved env var.
+    expect(project?.workspaceAccess?.items).toHaveLength(1);
+    expect(project?.workspaceAccess?.items[0]).toMatchObject({
+      kind: "link",
+      value: `https://vscode.example.dev/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+    });
+
+    // The "api" sidecar's port carries its own reserved-port env var; the
+    // sidecar-level env dict is dead weight for a value only known once a
+    // session allocates the port, so it must not appear on the parsed config.
+    expect(project?.sidecars["api"]).not.toHaveProperty("env");
+    expect(project?.sidecars["api"]?.ports?.["api"]).toMatchObject({
+      env: "SPUR_RESERVED_PORT_API",
+      start: 4400,
+      end: 4409,
+    });
   });
 });

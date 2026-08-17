@@ -41,12 +41,13 @@ Steps:
 2. Detect capability signals: dev/test/build commands, a dev-server command and port, untracked local artifacts
    (.env, node_modules, target/, .venv), the \`git remote get-url origin\` host (no auth probe), and any
    .claude/skills/*/SKILL.md files.
-3. Write the file ${path}/spur.yaml with every key copied verbatim from the reference, restricted to:
-   id/name/path/defaultBranch/sessionPrefix plus the detected subset of symlinks, branchNaming, defaultAgent,
-   defaultModels, reasoningEffort, sidecars (with ports), workspaceAccess, and modes. A key not present in the
-   reference is forbidden. \`sources\` and \`triggers\` are FORBIDDEN in this phase: connecting reloads automation
-   unconditionally and a github source starts polling immediately, which would auto-spawn sessions before the
-   user has consented. They land only in step 6, after an affirmative answer to the GitHub automation question.
+3. Write the file ${path}/spur.yaml using only the keys listed below, each one copied verbatim from the
+   reference when you use it: id/name/path/defaultBranch/sessionPrefix plus the detected subset of symlinks,
+   branchNaming, defaultAgent, defaultModels, reasoningEffort, sidecars (with ports), workspaceAccess, and
+   modes. A key not in this list is forbidden. \`sources\` and \`triggers\` are FORBIDDEN in this phase:
+   connecting reloads automation unconditionally and a github source starts polling immediately, which would
+   auto-spawn sessions before the user has consented. They land only in step 7, after an affirmative answer to
+   the GitHub automation question.
 
    projects:
      ${id}:
@@ -56,17 +57,19 @@ Steps:
        sessionPrefix: ${prefix}
 
    Do NOT change the id "${id}" or the sessionPrefix "${prefix}".
-4. Call the Spur daemon to register it, then assert the response body contains "configured":true for "${id}":
+4. Call the Spur daemon to register it. The trailing line of the output is the HTTP status code; assert it is
+   2xx and that the body above it contains "configured":true for "${id}":
 
-   curl -sS --fail-with-body -X POST -H 'content-type: application/json' \\
+   curl -sS -w '\\n%{http_code}' -X POST -H 'content-type: application/json' \\
      -d '{"configPath":"${path}/spur.yaml"}' \\
      http://127.0.0.1:${port}/projects/connect
 
-5. If the call fails or the response lacks "configured":true, print the response body verbatim, fix spur.yaml
+5. If the status code is not 2xx or the body lacks "configured":true, print the output verbatim, fix spur.yaml
    once, and re-run the same curl once. Still failing: print the error and stop, leaving the file in place.
-6. Send this question batch as ONE message, at most 6 questions, each carrying the value you already wrote as
-   its default:
-   Q1. Per-session git worktree and branch-name regex — keep worktree: true and the regex above?
+6. Send this question batch as ONE message, at most 6 questions, each stating its default — the value you wrote
+   in step 3, or Spur's own schema default when step 3 left the key out:
+   Q1. Per-session git worktree (default: true, the schema default, unless you wrote worktree: false) and
+       branch-name regex (default: the regex you wrote in step 3, if any) — keep them?
    Q2. Default agent and model — keep the detected defaults above?
    Q3. Run the dev/preview server as a sidecar, with a port range — add it, or skip it?
    Q4. Any files to symlink into each worktree (e.g. .env, node_modules) beyond what you already added?
@@ -78,8 +81,10 @@ Steps:
    connected is final.
 7. On a reply: edit spur.yaml with the answers. This is the only step that may add \`sources\` and \`triggers\`,
    and only on an affirmative Q5 (a github source plus plain-English lifecycle triggers — no $skill or /command
-   references, which only exist in the Spur repo itself). Then re-run the same connect curl. No answer received:
-   the config already connected stands; never ask again.
+   references, which only exist in the Spur repo itself). Then re-run the same connect curl and check its status
+   code and body exactly as in step 5. If it still fails after one fix-and-retry, restore spur.yaml to the
+   version connected in step 4 — the file on disk must never diverge from what the daemon has registered — and
+   stop. No answer received: the config already connected in step 4 stands; never ask again.
 
 Constraints:
 - Do not modify any file other than spur.yaml.

@@ -27,7 +27,7 @@ projects:
       items:
         - label: Web IDE
           kind: link
-          value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
+          value: "https://vscode.example.dev/?folder=${worktreePathUrl}"
     preflight:
       prompt: "Run the project's install and typecheck commands before starting work."
     spawn:
@@ -38,8 +38,6 @@ projects:
       api:
         command: ./scripts/dev-api.sh
         autoStart: true
-        env:
-          PORT: "${SPUR_RESERVED_PORT_API}"
         ports:
           api:
             env: SPUR_RESERVED_PORT_API

@@ -45,20 +45,15 @@ Use [spur.yaml.example](../v2/spur.yaml.example) as the copyable baseline. Add `
 
 ## Project bootstrap session
 
-Dashboard "+ New project" spawns an ordinary agent session against the new, still-unconfigured project. Its
-first message points the agent at [spur.yaml.reference](../v2/spur.yaml.reference) — a parse-valid catalog of
-every `spur.yaml` key — and has it write a `spur.yaml` for the repo, restricted to detected capabilities
-(`symlinks`, `branchNaming`, `defaultAgent`/`defaultModels`, `reasoningEffort`, `sidecars`, `workspaceAccess`,
-`modes`; never `sources` or `triggers` at this point, since connecting starts polling and could auto-spawn
-sessions before anyone has agreed to it) and connect it via `POST /projects/connect`. The connect call uses
-`curl --fail-with-body`, which needs curl 7.76+; on a host with an older curl the connect step itself fails, and
-the agent falls back to reporting the raw curl error instead of a parsed response body.
+Dashboard "+ New project" spawns an ordinary agent session against the new, still-unconfigured project. It
+writes a `spur.yaml` for the repo, connects it via `POST /projects/connect`, then asks a short batch of
+defaulted questions before optionally adding automation. Ignoring the questions is safe: the config connected
+before the questions were asked stands, and the agent never asks again.
 
-Once connected, the session asks one batched message of up to 6 defaulted questions (worktree/branch naming,
-default agent/model, a dev-server sidecar, symlinks, GitHub PR automation, a default mode) and waits. Answering
-lets the agent add `sources`/`triggers` (only on an affirmative GitHub automation answer) and re-connect the
-edited file. Ignoring the questions is safe: the already-connected config from the first pass stands, and the
-agent never asks again.
+The session's exact steps, its question wording, and the connect call live in `v2/src/bootstrap-prompt.ts` —
+that file is the single source for them, not this doc. It points the agent at
+[spur.yaml.reference](../v2/spur.yaml.reference), a parse-checked (by `v2/test/fast/config.test.ts`) sample of
+many, but not all, `spur.yaml` keys — see that file for the current set.
 
 ## Full example
 
