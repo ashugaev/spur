@@ -9,7 +9,7 @@ projects:
     defaultAgent: claude
     defaultModels:
       claude: opus
-      cursor: composer-2.5
+      cursor: auto
     symlinks:
       - .env
       - node_modules
@@ -24,9 +24,10 @@ projects:
         - label: Web IDE
           kind: link
           value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
+    reasoningEffort:
+      claude: medium
+      codex: medium
     codexArgs:
-      - -c
-      - 'model_reasoning_effort="high"'
       - -c
       - 'service_tier="default"'
     preflight: {}
@@ -53,18 +54,14 @@ projects:
         env:
           SPUR_SIDECAR_PUBLIC_HOST: "*.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
           SPUR_SIDECAR_PUBLIC_URL: "https://{port}.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
-    spawn:
-      steps:
-        - "run $manager"
+    modes:
+      manager:
+        skill: manager
+        default: true
     sources:
       gh:
         type: github
-      gh-pr-review:
-        type: github
-        intervalMs: 600000
-        runOnStart: false
-        emitExisting: true
-        query: "repo:ashugaev/spur"
+      # PR-review fleet lives in the `sp-review` project (~/.spur/projects/sp-review).
       # tg:
       #   type: telegram
       #   token: ${TELEGRAM_BOT_TOKEN}
@@ -91,60 +88,11 @@ projects:
         event: github:merge_conflict
         send:
           prompt: "Resolve merge conflicts on the active PR. Rebase or merge fresh main into the branch. Push."
-      gh-pr-review-spawn:
-        source: gh-pr-review
-        event: github:work_item.new
-        spawnDeskGroup: true
-        spawn:
-          restrictWrites: true
-          allowedTriggers: []
-          blocks:
-            - agent: claude
-              model: sonnet
-              prompt: |
-                Run /code-review {{url}} --comment.
-                Apply the `review` tag to this session.
-                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI fails or the PR has merge conflicts, find the running session on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict."
-              selfDestruct:
-                enabled: true
-                conditions: "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
-              overrides:
-                worktree: true
-            - agent: cursor
-              model: composer-2.5
-              prompt: |
-                Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
-                Apply the `review` tag to this session.
-                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI fails or the PR has merge conflicts, find the running session on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict."
-              selfDestruct:
-                enabled: true
-                conditions: "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
-              overrides:
-                worktree: true
-            - agent: claude
-              model: sonnet
-              prompt: |
-                Run end-to-end browser QA on GitHub PR {{url}}. Scope it: `gh pr view {{url}}` and `gh pr diff {{url}}` for changed user-facing flows. `gh pr checkout` the PR branch and bring up the Spur web UI (packages/web) with the `spur-sidecar` skill (isolated-ui sidecar). Load and follow the `playwright-ui-runner` skill to drive the UI yourself with the Playwright MCP browser tools (navigate, click, type, snapshot, screenshot) — do NOT write or run automated test scripts; click through the changed flows by hand, analyze every screenshot visually, save evidence to $SPUR_SESSION_ARTIFACTS_DIR. `gh pr checkout`, `git`, and dev-server sidecar writes are allowed — the restricted-writes notice forbids editing source files only, not checking out the branch or the dev server writing build artifacts. Post a QA report as a PR comment via `gh pr comment`: cases checked, pass/fail per case, problems found. No questions. Post without waiting for human confirmation. Do not edit application code.
-                Apply the `review` tag to this session.
-                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
-              selfDestruct:
-                enabled: true
-                conditions: "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
-              overrides:
-                worktree: true
-            - agent: claude
-              model: sonnet
-              prompt: |
-                Docs-only review of PR {{url}}. Load the `docs` skill and judge the diff against its checklist, nothing else.
-                Flag only Spur-specific doc defects: a new command, flag, config field, source, provider, or event shipped without a doc update; content duplicated instead of linked to its one owner; a wrong command, port, path, or package name; a dead relative link; a doc in the wrong file or Diataxis mode.
-                Ignore prose style, grammar, and anything a competent dev or agent already knows. If the docs are clean, post nothing.
-                Post findings as one concise PR comment via `gh pr comment`. Do not edit files, ask questions, or wait for confirmation.
-                Apply the `review` tag to this session.
-              selfDestruct:
-                enabled: true
-                conditions: "docs review posted, or PR changes no docs and no user-facing surface."
-              overrides:
-                worktree: true
+      gh-merged:
+        source: gh
+        event: github:merged
+        send:
+          prompt: "If your task prompt defines self-destruct conditions, recheck them now and self-destruct if satisfied. Otherwise ignore."
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)

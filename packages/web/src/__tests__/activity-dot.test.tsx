@@ -18,6 +18,18 @@ describe("ActivityDot", () => {
     expect(screen.getByText("stopped")).toBeInTheDocument();
   });
 
+  it("renders 'stale' for the stale activity with no pulse", () => {
+    render(<ActivityDot activity="stale" dotOnly />);
+    const dot = document.querySelector(".shrink-0.rounded-full");
+    expect(dot).not.toBeNull();
+    expect(dot).not.toHaveClass("dot-pulse");
+  });
+
+  it("renders the stale label", () => {
+    render(<ActivityDot activity="stale" />);
+    expect(screen.getByText("stale")).toBeInTheDocument();
+  });
+
   it("hides the label when dotOnly is true", () => {
     render(<ActivityDot activity="working" dotOnly />);
     expect(screen.queryByText("working")).not.toBeInTheDocument();

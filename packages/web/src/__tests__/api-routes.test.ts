@@ -74,6 +74,8 @@ import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as removeQueuedMessage } from "@/app/api/sessions/[id]/queue/remove/route";
+import { POST as flushQueuedMessage } from "@/app/api/sessions/[id]/queue/flush/route";
 import { POST as answerQuestion } from "@/app/api/sessions/[id]/answer/route";
 import { POST as markOpened } from "@/app/api/sessions/[id]/opened/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
@@ -95,6 +97,7 @@ import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/proje
 import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
+import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -357,7 +360,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct", async () => {
+  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct, mode", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
@@ -372,6 +375,7 @@ describe("Spur web API routes", () => {
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
           selfDestruct: { enabled: true, conditions: "daemon trims this" },
+          mode: "manager",
         }),
       }),
     );
@@ -391,7 +395,23 @@ describe("Spur web API routes", () => {
       selfDestruct: { enabled: true, conditions: "daemon trims this" },
       steps: ["step 1", "step 2"],
       overrides: { worktree: true },
+      mode: "manager",
     });
+  });
+
+  it("POST /api/spawn omits mode when absent or blank", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Do work", agent: "claude", mode: "  " }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body).not.toHaveProperty("mode");
   });
 
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
@@ -497,7 +517,10 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/diagnose-update forwards prompt to /shepherd/spawn", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ project: "spur-shepherd" }));
+    mockedSpurRequestJson.mockResolvedValue({
+      disposition: "reused",
+      session: sessionFixture({ project: "spur-shepherd" }),
+    });
 
     const response = await diagnoseUpdate(
       new NextRequest("http://localhost:3000/api/diagnose-update", {
@@ -518,6 +541,22 @@ describe("Spur web API routes", () => {
     expect(body.agent).toBeUndefined();
     expect(body.prompt).toContain("1.5.0");
     expect(body.prompt).toContain("~/.spur/logs/install-and-restart.log");
+    expect(body.reportDisposition).toBe(true);
+  });
+
+  it("POST /api/diagnose-update rejects an invalid daemon success body", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ id: "legacy-session-shape" });
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toContain("invalid diagnostic-session response");
   });
 
   it("POST /api/diagnose-update preserves daemon error status", async () => {
@@ -610,6 +649,90 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/send",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  // ── POST /api/sessions/:id/queue/remove, .../queue/flush ────────────────
+
+  it("POST /api/sessions/:id/queue/remove rejects an empty message", async () => {
+    const response = await removeQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        body: JSON.stringify({ message: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/queue/flush rejects a missing message", async () => {
+    const response = await flushQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("queue/remove forwards a 404 (not queued) body and status verbatim", async () => {
+    const notFound = { error: "Message not found in queue for api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(notFound), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await removeQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        body: JSON.stringify({ message: "gone" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual(notFound);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/queue/remove",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message: "gone" }),
+      }),
+    );
+  });
+
+  it("queue/flush forwards a 409 (delivery in flight) body and status verbatim", async () => {
+    const conflict = { error: "Delivery already in flight for api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await flushQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        body: JSON.stringify({ message: "first" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/queue/flush",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message: "first" }),
+      }),
     );
   });
 
@@ -1022,7 +1145,7 @@ describe("Spur web API routes", () => {
         method: "POST",
         body: JSON.stringify({
           agent: "cursor",
-          model: "gpt-5.3-codex",
+          model: "codex-model-id",
           notes: "Continue UI polish",
         }),
       }),
@@ -1037,7 +1160,7 @@ describe("Spur web API routes", () => {
     expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
       {
         agent: "cursor",
-        model: "gpt-5.3-codex",
+        model: "codex-model-id",
         notes: "Continue UI polish",
       },
     );
@@ -2021,6 +2144,7 @@ describe("Spur web API routes", () => {
     afterEach(() => {
       vi.unstubAllGlobals();
       delete process.env["GITHUB_TOKEN"];
+      delete process.env["GITLAB_TOKEN"];
     });
 
     function makePrGql(overrides: Record<string, unknown> = {}) {
@@ -2100,6 +2224,78 @@ describe("Spur web API routes", () => {
       expect(typeof payload.fetchedAt).toBe("number");
     });
 
+    it("returns closed state for a closed draft GitLab MR (closed outranks draft)", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "closed",
+            draft: true,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/43",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("closed");
+    });
+
+    it("returns merged state for a merged draft GitLab MR (merged outranks draft and closed)", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "closed",
+            draft: true,
+            merged_at: "2026-01-01T00:00:00Z",
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/44",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("merged");
+    });
+
+    it("returns draft state for an open draft GitLab MR", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "opened",
+            draft: true,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/45",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("draft");
+    });
+
     it("returns 400 for a GitHub URL without a PR number", async () => {
       const response = await getPrStatus(
         new NextRequest("http://localhost:3000/api/pr-status?url=https://github.com/owner/repo"),
@@ -2152,6 +2348,30 @@ describe("Spur web API routes", () => {
       const payload = (await response.json()) as { state: string };
 
       expect(payload.state).toBe("closed");
+    });
+
+    it("returns closed state for a closed draft PR (closed outranks draft)", async () => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ state: "CLOSED", isDraft: true })));
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(payload.state).toBe("closed");
+    });
+
+    it("returns merged state for a merged draft PR (merged outranks draft and closed)", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(makePrGql({ state: "CLOSED", merged: true, isDraft: true })),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(payload.state).toBe("merged");
     });
 
     it("returns approved reviewDecision from GitHub without inferring it", async () => {
@@ -3156,6 +3376,48 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(502);
       expect(payload.error).toBe("daemon down");
+    });
+
+    // ── GET /api/projects/:id/spawn-defaults ──────────────────────────────
+
+    it("GET /api/projects/:id/spawn-defaults forwards the agent to the daemon", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ model: "sonnet", worktree: false });
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { model: string | null; worktree: boolean };
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/projects/api/spawn-defaults?agent=claude",
+        { timeoutMs: 8_000 },
+      );
+      expect(payload).toEqual({ model: "sonnet", worktree: false });
+    });
+
+    it("GET /api/projects/:id/spawn-defaults rejects an unsupported agent without calling the daemon", async () => {
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=nope"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/projects/:id/spawn-defaults surfaces the daemon's error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Unknown project: api", 404));
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(404);
+      expect(payload.error).toBe("Unknown project: api");
     });
   });
 });

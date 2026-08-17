@@ -2,7 +2,9 @@
 
 > Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
 
-Deploy from a GitHub checkout (dev / maintainers). `v2/` is the runtime source of truth; `pnpm main:deploy` builds and installs the systemd units. For a normal server, use [install-from-npm.md](install-from-npm.md) instead — this path is for hacking on Spur or running your own build.
+Source install is for contributors/maintainers only. Coding agents must not use it for normal installs; use npm unless the user explicitly asks for source: [install-from-npm.md](install-from-npm.md).
+
+Deploy from a GitHub checkout. `v2/` is the runtime source of truth; `pnpm main:deploy` builds and installs the systemd units. This path is for hacking on Spur or running your own build.
 
 ## Topology
 
@@ -69,8 +71,10 @@ Systemd units are templates (`deploy/spur-daemon.service`, `deploy/spur-web.serv
 
 Load-bearing unit fields:
 
-- Daemon: `EnvironmentFile=/etc/spur/daemon.env`; `PATH` includes `~/.npm-global/bin`; `KillMode=process` (restart kills only the node process, tmux sessions survive).
+- Daemon: `EnvironmentFile=/etc/spur/daemon.env`; `PATH` includes `~/.npm-global/bin`; `KillMode=process` (restart kills only the node process, tmux sessions survive); `MemoryHigh=75%`, `MemoryMax=85%`, `MemorySwapMax=2G` bound the daemon and direct-fallback tmux processes. Auto user scopes sit outside this unit's cgroup; the host sampler supplies the fleet signal.
 - Web: `WEB_HOST=127.0.0.1`, `PORT=3012` (one server for HTTP + `/ws`); `Requires=spur-daemon.service`.
+
+On a 62 GiB host, the memory limits start reclaim near 46.5 GiB and cap this unit near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB outside it. Direct fallback shares the daemon cgroup; auto user scopes do not. Sustained unit pressure can throttle the memory guard, so the 10-point gap preserves control-path room before the hard cap. `MemorySwapMax=0` is the stricter no-unit-swap override. Repository template edits have no live effect until a later `pnpm main:deploy` applies them.
 
 First install:
 
@@ -81,6 +85,18 @@ sudo systemctl enable --now spur-daemon.service spur-web.service
 ```
 
 Subsequent releases: `pnpm main:deploy` only (don't `pnpm build` or `systemctl restart` by hand).
+
+### Test deploy
+
+Verify a packaged install without touching the production one:
+
+```bash
+bash scripts/test-deploy.sh
+```
+
+Builds `packages/web`, bundles it into `v2/`, packs the tarball, validates its contents, installs to a temp prefix (removed on exit), boots `web-server.js` on an OS-assigned port until it answers `200`, then runs `spur --version`. Never calls `systemctl`.
+
+`SPUR_TEST_DEPLOY_PREFIX=<dir>` installs to `<dir>` instead of the temp prefix. Either way the script refuses a prefix equal to `$HOME/.local` — the production npm prefix.
 
 ## Reverse proxy
 

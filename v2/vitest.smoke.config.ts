@@ -8,5 +8,7 @@ export default defineConfig({
     hookTimeout: 90_000,
     fileParallelism: false,
     pool: "forks",
+    globalSetup: ["./test/setup/tmux-ledger.ts"],
+    setupFiles: ["./test/setup/temp-dirs.ts"],
   },
 });

@@ -5,6 +5,9 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_USER_ACTION_LOG_CONFIG,
+  DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
   appendUserAction,
   buildUserActionRecord,
   deleteSessionUserActions,
@@ -47,6 +50,14 @@ beforeEach(() => {
 afterEach(async () => {
   setUserActionLogConfig(DEFAULT_USER_ACTION_LOG_CONFIG);
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe("retention defaults", () => {
+  it("mirrors the event-log retention defaults: 128MB global, 16MB shard, 5 archives", () => {
+    expect(DEFAULT_USER_ACTION_LOG_HOT_BYTES).toBe(128 * 1024 * 1024);
+    expect(DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES).toBe(16 * 1024 * 1024);
+    expect(DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES).toBe(5);
+  });
 });
 
 describe("appendUserAction dual-write", () => {
@@ -324,6 +335,17 @@ describe("buildUserActionRecord decoder", () => {
       "session.memory_resolve",
     );
     expect(build({ path: "/sessions/demo-1/session-memory/k" })?.action).toBe("session.memory_set");
+  });
+
+  it("decodes queue remove/flush with sessionId, never falling through to unknown", () => {
+    expect(build({ path: "/sessions/demo-1/queue/remove" })).toMatchObject({
+      action: "session.queue_remove",
+      sessionId: "demo-1",
+    });
+    expect(build({ path: "/sessions/demo-1/queue/flush" })).toMatchObject({
+      action: "session.queue_flush",
+      sessionId: "demo-1",
+    });
   });
 
   it("decodes shared-memory writes and removals with sessionId, not falling into session-memory", () => {

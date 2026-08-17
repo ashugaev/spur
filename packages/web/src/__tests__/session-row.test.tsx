@@ -144,6 +144,62 @@ describe("SessionRow", () => {
     );
   });
 
+  it("renders the done action when PR state is closed", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "closed",
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Merge PR for api-a1" })).not.toBeInTheDocument();
+  });
+
+  it("shows done rather than restore for a restorable session with a closed PR", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "closed",
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runtimeAlive: false,
+          tmuxSession: null,
+          status: "errored",
+          state: "error",
+          error: "Agent runtime exited unexpectedly.",
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Restore session api-a1" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows interval wake timer details from the row marker", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
@@ -254,6 +310,40 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Start sidecar/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
+  });
+
+  it("colors a dashboard sidecar age by ageWarn, not a fresh sidecar's age", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runningSidecars: [
+            { name: "stale-sidecar", ageSeconds: 50_000, ageWarn: true },
+            { name: "fresh-sidecar", ageSeconds: 5, ageWarn: false },
+          ],
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
+
+    const staleAge = screen.getByTestId("dashboard-sidecar-age-stale-sidecar");
+    const freshAge = screen.getByTestId("dashboard-sidecar-age-fresh-sidecar");
+    expect(staleAge).toHaveClass("text-[var(--color-status-attention)]");
+    expect(freshAge).toHaveClass("text-[var(--color-text-tertiary)]");
+    expect(freshAge).not.toHaveClass("text-[var(--color-status-attention)]");
   });
 
   it("shows daily wake timer details from the row marker", () => {
@@ -369,6 +459,33 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows restore for a stale-parked session", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runtimeAlive: false,
+          status: "stopped",
+          state: "stale",
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Restore session api-a1" })).toBeInTheDocument();
+  });
+
   it("hides restore when the workspace no longer exists", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
@@ -448,7 +565,7 @@ describe("SessionRow", () => {
       fetchedAt: Date.now(),
     });
 
-    for (const state of ["working", "waiting", "stopped", "error"] as const) {
+    for (const state of ["working", "waiting", "stale", "stopped", "error"] as const) {
       const { unmount } = render(
         <SessionRow
           session={makeSession({ state, hasUnseenAttention: false })}

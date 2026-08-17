@@ -8,7 +8,7 @@ Local daemon + CLI orchestrator for AI coding agents.
 
 ## Install
 
-Spur installs itself. Hand this to your coding agent:
+Coding-agent installs must use npm. Hand this to your coding agent:
 
 ```text
 Read https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md and install and run
@@ -18,17 +18,18 @@ what you can run.
 
 Everything — ports, Tailscale, verification — is in that guide. Tested on Ubuntu; elsewhere, expect to sort out host differences yourself.
 
-By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/install-from-source.md](docs/install-from-source.md) (source).
+By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/install-from-source.md](docs/install-from-source.md) (source, contributors/maintainers only; not for agents unless explicitly requested).
 
 ## Docs
 
 - [docs/commands.md](docs/commands.md) — CLI reference (spawn, wake, list, service, sidecars)
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior
+- [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output
 - [docs/voice.md](docs/voice.md) — voice input setup
 - [docs/https-tailscale.md](docs/https-tailscale.md) — HTTPS on the tailnet hostname (required for voice)
 - [docs/install-from-npm.md](docs/install-from-npm.md) — install from npm (official)
-- [docs/install-from-source.md](docs/install-from-source.md) — install from source
+- [docs/install-from-source.md](docs/install-from-source.md) — install from source (contributors only)
 - [SETUP.md](SETUP.md) — contributor bootstrap and local web UI development
 - [CONTRIBUTING.md](CONTRIBUTING.md) — PR scope and required checks
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — fixes for common local failures

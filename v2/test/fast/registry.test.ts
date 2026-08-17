@@ -1,15 +1,19 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { mkdirSync, realpathSync, statSync, symlinkSync, utimesSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addUnconfiguredProject,
   buildMergedConfig,
   ConfigRegistryScanner,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
   mutateConfigRegistry,
-  readConfigRegistry,
   readConfigRegistryFile,
+  removeConfigRegistryPath,
   removeUnconfiguredProject,
+  resolveRegisteredDataDirs,
   writeConfigRegistry,
   writeConfigRegistryFile,
   type RegistryDiagnostic,
@@ -174,22 +178,57 @@ describe("registry.buildMergedConfig", () => {
   });
 });
 
-describe("registry.readConfigRegistry", () => {
-  it("drops missing config paths and rewrites the registry on disk", async () => {
-    const rootDir = await createTempDir("spur-registry-prune-");
+describe("registry.dropWorktreeInternalPaths", () => {
+  it("refuses to register a config path inside worktreeDir", async () => {
+    const rootDir = await createTempDir("spur-registry-worktree-guard-");
     tempDirs.push(rootDir);
-    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const worktreeConfigPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    mkdirSync(join(worktreeDir, "proj", "sess"), { recursive: true });
+    await writeFile(worktreeConfigPath, "stub: true\n", "utf8");
 
+    expect(isInsideWorktreeDir(worktreeConfigPath, worktreeDir)).toBe(true);
+    expect(dropWorktreeInternalPaths([worktreeConfigPath], worktreeDir)).toEqual([]);
+  });
+
+  it("keeps a path outside worktreeDir untouched, dead or alive — pruning is the scanner's job", async () => {
+    const rootDir = await createTempDir("spur-registry-worktree-guard-keep-");
+    tempDirs.push(rootDir);
+    const worktreeDir = join(rootDir, "worktrees");
     const existingPath = await writeConfig(rootDir, "exists.yaml", "stub: true\n");
     const missingPath = join(rootDir, "missing.yaml");
 
-    writeConfigRegistry(dataDir, [existingPath, missingPath]);
+    expect(dropWorktreeInternalPaths([existingPath, missingPath], worktreeDir)).toEqual([
+      existingPath,
+      missingPath,
+    ]);
+  });
+});
 
-    const firstRead = readConfigRegistry(dataDir);
-    expect(firstRead).toEqual([existingPath]);
+describe("registry.isInsideWorktreeDir", () => {
+  it("rejects a sibling path sharing the worktreeDir prefix", async () => {
+    const rootDir = await createTempDir("spur-registry-prefix-sibling-");
+    tempDirs.push(rootDir);
+    const worktreeDir = join(rootDir, "worktrees");
+    const siblingConfigPath = join(`${worktreeDir}-backup`, "spur.yaml");
 
-    const secondRead = readConfigRegistry(dataDir);
-    expect(secondRead).toEqual([existingPath]);
+    expect(isInsideWorktreeDir(siblingConfigPath, worktreeDir)).toBe(false);
+  });
+});
+
+describe("registry.removeConfigRegistryPath", () => {
+  it("removes an entry addressed by a non-canonical path", async () => {
+    const rootDir = await createTempDir("spur-registry-remove-noncanonical-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const registeredPath = await writeConfig(rootDir, "exists.yaml", "stub: true\n");
+
+    writeConfigRegistry(dataDir, [registeredPath]);
+
+    const nonCanonicalForm = join(rootDir, ".", "exists.yaml");
+    const result = removeConfigRegistryPath(dataDir, nonCanonicalForm);
+
+    expect(result).toEqual([]);
   });
 });
 
@@ -320,6 +359,24 @@ describe("registry.ConfigRegistryScanner", () => {
     expect(Object.keys(result.config.projects).sort()).toEqual(["base", "live"]);
   });
 
+  it("prunes a registered project directory, keeping the real spur config file", async () => {
+    const rootDir = await createTempDir("spur-scanner-directory-");
+    tempDirs.push(rootDir);
+    const fixture = await setupScannerFixture(rootDir);
+    const projectDir = join(rootDir, "repo-live");
+    mkdirSync(projectDir, { recursive: true });
+    const scanner = new ConfigRegistryScanner();
+
+    const result = scanner.scan({
+      bootstrapConfigPath: fixture.basePath,
+      configPaths: [fixture.basePath, projectDir, fixture.livePath],
+      protectedPaths: [fixture.basePath],
+    });
+
+    expect(result.configPaths).toEqual([fixture.basePath, fixture.livePath]);
+    expect(Object.keys(result.config.projects).sort()).toEqual(["base", "live"]);
+  });
+
   it("forgets pruned canonical paths before an orphan becomes a symlink", async () => {
     const rootDir = await createTempDir("spur-scanner-pruned-alias-");
     tempDirs.push(rootDir);
@@ -446,7 +503,7 @@ describe("registry.ConfigRegistryScanner", () => {
         if (path === fixture.missingParentAlivePath) childStats += 1;
         if (path === dirname(fixture.missingParentAlivePath)) parentStats += 1;
         const stat = statSync(path);
-        return { mtimeMs: stat.mtimeMs, size: stat.size };
+        return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
       },
       realpath: (path) => realpathSync(path),
     });
@@ -526,7 +583,7 @@ describe("registry.ConfigRegistryScanner", () => {
           throw error;
         }
         const stat = statSync(path);
-        return { mtimeMs: stat.mtimeMs, size: stat.size };
+        return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
       },
       realpath: (path) => realpathSync(path),
     });
@@ -634,12 +691,12 @@ describe("registry.ConfigRegistryScanner", () => {
     const fixture = await setupScannerFixture(rootDir);
     const invalidPath = join(rootDir, "invalid.yaml");
     await writeFile(invalidPath, "projects: [broken]\n", "utf8");
-    let candidateStamp = { mtimeMs: 1, size: 1 };
+    let candidateStamp = { mtimeMs: 1, size: 1, isFile: true };
     const scanner = new ConfigRegistryScanner({
       stat: (path) => {
         if (path === invalidPath) return candidateStamp;
         const stat = statSync(path);
-        return { mtimeMs: stat.mtimeMs, size: stat.size };
+        return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
       },
       realpath: (path) => realpathSync(path),
     });
@@ -664,7 +721,7 @@ describe("registry.ConfigRegistryScanner", () => {
     );
     expect(scanner.scan(options).config.projects["valid"]).toBeUndefined();
 
-    candidateStamp = { mtimeMs: 2, size: 1 };
+    candidateStamp = { mtimeMs: 2, size: 1, isFile: true };
     expect(scanner.scan(options).config.projects["valid"]).toBeDefined();
   });
 });
@@ -731,5 +788,113 @@ describe("registry unconfiguredProjects", () => {
       configPaths: ["/tmp/a.yaml", "/tmp/b.yaml"],
       unconfiguredProjects: [],
     });
+  });
+});
+
+describe("registry.resolveRegisteredDataDirs", () => {
+  it("returns both foreign dataDirs and excludes its own", async () => {
+    const rootDir = await createTempDir("spur-registry-foreign-dirs-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const foreignDataDirA = join(rootDir, "foreign-a-data");
+    const foreignDataDirB = join(rootDir, "foreign-b-data");
+    const worktreeDir = join(rootDir, "worktrees");
+
+    const foreignPathA = await writeConfig(
+      rootDir,
+      "foreign-a.yaml",
+      configYaml({
+        port: 4311,
+        dataDir: foreignDataDirA,
+        worktreeDir,
+        projectId: "a",
+        projectPath: join(rootDir, "repo-a"),
+        sessionPrefix: "a",
+      }),
+    );
+    const foreignPathB = await writeConfig(
+      rootDir,
+      "foreign-b.yaml",
+      configYaml({
+        port: 4312,
+        dataDir: foreignDataDirB,
+        worktreeDir,
+        projectId: "b",
+        projectPath: join(rootDir, "repo-b"),
+        sessionPrefix: "b",
+      }),
+    );
+    const ownPath = await writeConfig(
+      rootDir,
+      "own.yaml",
+      configYaml({
+        port: 4310,
+        dataDir: ownDataDir,
+        worktreeDir,
+        projectId: "own",
+        projectPath: join(rootDir, "repo-own"),
+        sessionPrefix: "own",
+      }),
+    );
+
+    writeConfigRegistry(ownDataDir, [foreignPathA, foreignPathB, ownPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir).sort()).toEqual(
+      [foreignDataDirA, foreignDataDirB].sort(),
+    );
+  });
+
+  it("skips a registered path that no longer exists, without throwing", async () => {
+    const rootDir = await createTempDir("spur-registry-dead-path-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const missingPath = join(rootDir, "gone.yaml");
+
+    writeConfigRegistry(ownDataDir, [missingPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([]);
+  });
+
+  it("skips an unparsable registered config, without throwing", async () => {
+    const rootDir = await createTempDir("spur-registry-unparsable-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const brokenPath = await writeConfig(rootDir, "broken.yaml", "not: [valid\n");
+
+    writeConfigRegistry(ownDataDir, [brokenPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([]);
+  });
+
+  it("returns [] when no registry file exists", async () => {
+    const rootDir = await createTempDir("spur-registry-no-file-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([]);
+  });
+
+  it("resolves a registered project-shaped config with no dataDir key to the default dataDir", async () => {
+    const rootDir = await createTempDir("spur-registry-project-shape-");
+    tempDirs.push(rootDir);
+    const ownDataDir = join(rootDir, "own-data");
+    const projectPath = await writeConfig(
+      rootDir,
+      "project.yaml",
+      `server:
+  host: 127.0.0.1
+  port: 4313
+worktreeDir: ${join(rootDir, "worktrees")}
+projects:
+  proj:
+    path: ${join(rootDir, "repo-proj")}
+    defaultBranch: main
+    sessionPrefix: proj
+`,
+    );
+
+    writeConfigRegistry(ownDataDir, [projectPath]);
+
+    expect(resolveRegisteredDataDirs(ownDataDir)).toEqual([join(homedir(), ".spur")]);
   });
 });

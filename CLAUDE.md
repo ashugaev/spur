@@ -1,6 +1,6 @@
 CLAUDE.md
 
-Every task starts with `$manager`. Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
+Every task starts in `manager` mode unless spawn requested another, see MODES. Manager routes work via the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers — read it before invoking.
 
 
 MIRROR
@@ -21,6 +21,7 @@ Autonomous workers invoked via the `Task` tool. Source: .claude/agents/
   reference-researcher  .claude/agents/reference-researcher.md  Extract reusable patterns from external reference repos
   critic                .claude/agents/critic.md                Verify researcher claims, score options, select winner
   architect             .claude/agents/architect.md             Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification
+  spec-critic           .claude/agents/spec-critic.md           Falsify the architect's spec before the developer builds — check cited facts, change map, bound acceptance criteria
   developer             .claude/agents/developer.md             Implement, fix-after-review, fix-after-test
   reviewer              .claude/agents/reviewer.md              Static diff analysis plus build/lint/test gate
   designer              .claude/agents/designer.md              UI review for visible web changes
@@ -47,6 +48,14 @@ Capabilities loaded by description match. Source: .claude/skills/
   pr-comments-fix     .claude/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .claude/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
   clean-install-test  .claude/skills/clean-install-test/SKILL.md  Clean-room test the npm server install on a throwaway cloud VM before release
+  spur-update         .claude/skills/spur-update/SKILL.md         Roll a Spur host onto a published npm version by hand when the automatic update fails
+
+
+MODES
+
+  One mode per session: a prompt suffix naming the skill that session follows. Resolved once at spawn; config shape in `docs/configuration.md` Modes. Prompt-level and advisory — anything mandatory belongs in hooks or the daemon.
+
+  manager  .claude/skills/manager/SKILL.md  Default for every repo task
 
 
 RESPONSE STYLE
@@ -96,6 +105,7 @@ ALWAYS-ON RULES
   Use `Spur` in code, config, docs, and CLI surfaces.
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.
   Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.claude/skills/spur/SKILL.md` Safety and In this repo for detail.
+  Deploy for review or test with `scripts/test-deploy.sh`, never `npm install -g` by hand.
   Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
   Capture what the task taught before closing it. Route by scope: reusable across projects -> global rules; specific to this repo -> the owning `SKILL.md` or `spur memory --scope project`. Skip what git history, the code, or an existing rule already records.
   Worth capturing: a protocol that worked, a tool quirk, a wrong assumption that cost a cycle, a load-bearing invariant. Not: task status, one-off trivia, anything re-derivable by reading the code.

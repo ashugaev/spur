@@ -13,7 +13,10 @@ import {
 } from "react";
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
+import { BusyContent } from "@/components/BusyContent";
+import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
@@ -22,6 +25,7 @@ import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { Skeleton } from "@/components/Skeleton";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
@@ -33,14 +37,18 @@ import { ActivityDot } from "@/components/ActivityDot";
 import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { Spinner } from "@/components/icons/Spinner";
+import { IconActionButton } from "@/components/IconActionButton";
 import { IconCloseButton } from "@/components/IconCloseButton";
+import { SendIcon } from "@/components/icons/SendIcon";
+import { Spinner } from "@/components/icons/Spinner";
+import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
+  formatSidecarAge,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
@@ -440,7 +448,7 @@ type ArtifactSwipeStart = {
 
 const COPY_TEXT_LABELS = {
   idle: "Copy",
-  copying: "Copying...",
+  copying: "Copy",
   copied: "Copied",
   error: "Copy failed",
 } as const;
@@ -619,7 +627,14 @@ function ArtifactCard({
             />
             {previewState !== "ready" ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+                {previewState === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
           </>
@@ -637,7 +652,14 @@ function ArtifactCard({
             />
             {previewState !== "ready" ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+                {previewState === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
           </>
@@ -653,7 +675,14 @@ function ArtifactCard({
             />
             {previewState !== "ready" ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+                {previewState === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
           </>
@@ -1041,18 +1070,18 @@ function ArtifactLightbox({
   if (!artifact || !artifactHref) return null;
 
   const html = isHtmlArtifact(artifact);
-  const previewStatusMessage =
+  const previewStatus =
     artifact.kind === "text" && !html
       ? textPreviewState === "loading"
-        ? "Loading preview"
+        ? "loading"
         : textPreviewState === "error"
-          ? "Preview unavailable"
+          ? "error"
           : null
       : artifact.kind === "image" || artifact.kind === "video" || html
         ? previewState !== "ready"
           ? previewState === "error"
-            ? "Preview unavailable"
-            : "Loading preview"
+            ? "error"
+            : "loading"
           : null
         : null;
 
@@ -1151,14 +1180,19 @@ function ArtifactLightbox({
           <div className="flex items-center gap-2">
             {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
               <button
-                aria-label={`Copy ${artifact.name}`}
+                aria-busy={copyState === "copying" || undefined}
+                aria-label={
+                  copyState === "copying" ? `Copying ${artifact.name}` : `Copy ${artifact.name}`
+                }
                 className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 disabled={copyState === "copying"}
                 onClick={() => void handleCopyText()}
                 type="button"
               >
-                <CopyIcon />
-                {COPY_TEXT_LABELS[copyState]}
+                <BusyContent busy={copyState === "copying"}>
+                  <CopyIcon />
+                  {COPY_TEXT_LABELS[copyState]}
+                </BusyContent>
               </button>
             ) : null}
             {html ? (
@@ -1205,9 +1239,16 @@ function ArtifactLightbox({
             onPointerDown={handlePreviewPointerDown}
             onPointerUp={handlePreviewPointerUp}
           >
-            {previewStatusMessage ? (
+            {previewStatus ? (
               <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {previewStatusMessage}
+                {previewStatus === "error" ? (
+                  "Preview unavailable"
+                ) : (
+                  <Skeleton
+                    className="h-full w-full"
+                    label={`Loading preview for ${artifact.name}`}
+                  />
+                )}
               </div>
             ) : null}
             {artifact.kind === "image" ? (
@@ -1581,6 +1622,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself.
+  // Submit gates on this, not on `respawnModel === null` — a settled-empty
+  // catalog also has a null model but is a valid, submittable state.
+  const [respawnModelResolved, setRespawnModelResolved] = useState(false);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
@@ -1590,6 +1635,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
   const [handoffModel, setHandoffModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself.
+  // Submit gates on this, not on `handoffModel === null` — a settled-empty
+  // catalog also has a null model but is a valid, submittable state.
+  const [handoffModelResolved, setHandoffModelResolved] = useState(false);
+  // Fetched once here and passed down into each modal's ModelSelect, instead
+  // of letting ModelSelect fetch its own copy (see Dashboard's spawnDefaults
+  // for the same pattern). projectId is empty while the owning modal is
+  // closed, so no request fires until it is actually open.
+  const respawnSpawnDefaults = useResolvedSpawnDefaults(
+    respawnOpen && session ? session.projectId : "",
+    respawnAgent ?? "claude",
+  );
+  const handoffSpawnDefaults = useResolvedSpawnDefaults(
+    handoffOpen && session ? session.projectId : "",
+    handoffAgent ?? "claude",
+  );
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
@@ -1898,6 +1959,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  // Content-keyed, same as the daemon: the row's exact message text travels
+  // in the body, not an index — the server has no index to resolve.
+  const handleQueueAction = async (action: "remove" | "flush", message: string, index: number) => {
+    setBusyAction(`queue:${action}:${index}`);
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/queue/${action}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message }),
+        },
+      );
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        throw new Error(responseErrorMessage(payload, `Failed to ${action} queued message`));
+      }
+      await loadSession();
+    } catch (queueError) {
+      showErrorToast(errorMessage(queueError, `Failed to ${action} queued message`));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handleOpenPrAction = async (prAction: OpenPrAction) => {
     if (!openPrAction) return;
     const body = {
@@ -1958,6 +2044,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
       if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
@@ -2037,6 +2125,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setBusyAction("handoff");
     try {
       const payload: Record<string, unknown> = { agent: handoffAgent };
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
       if (handoffModel !== null) payload.model = handoffModel;
       const notes = handoffNotes.trim();
       if (notes) payload.notes = notes;
@@ -2456,7 +2546,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
-    setRespawnModel(session.model ?? null);
+    // Not session.model directly: that would seed an unfiltered value ahead
+    // of ModelSelect's resolver, bypassing the isListed() check the `carry`
+    // rung otherwise applies (a model the session ran that has since left
+    // the agent's catalog would stay selected and submittable). Passing
+    // carry lets the resolver re-derive the same value, filtered.
+    setRespawnModel(null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -2517,7 +2612,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
 
   return (
-    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+    <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
       <Link
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildDashboardPath(projectId)}
@@ -2743,13 +2838,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
             {canHandoff(session) ? (
               <button
+                aria-busy={busyAction === "handoff" || undefined}
+                aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={openHandoffEditor}
                 title="Pass this task to another agent in the same workspace"
               >
-                {busyAction === "handoff" ? "Handing off..." : "Handoff"}
+                <BusyContent busy={busyAction === "handoff"}>Handoff</BusyContent>
               </button>
             ) : null}
             {session.agent === "claude" &&
@@ -2769,33 +2866,39 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
             {canPause(session) ? (
               <button
+                aria-busy={busyAction === "pause" || undefined}
+                aria-label={busyAction === "pause" ? "Pausing session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("pause")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "pause" ? "Pausing..." : "Pause"}
+                <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
             {isRestorable(session) ? (
               <button
+                aria-busy={busyAction === "restore" || undefined}
+                aria-label={busyAction === "restore" ? "Restoring session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("restore")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "restore" ? "Restoring..." : "Restore"}
+                <BusyContent busy={busyAction === "restore"}>Restore</BusyContent>
               </button>
             ) : null}
             {canReopen(session) ? (
               <button
+                aria-busy={busyAction === "reopen" || undefined}
+                aria-label={busyAction === "reopen" ? "Reopening session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("reopen")}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 title="Restart this completed session in place, keeping its id and history. Its Telegram topic and artifacts stay gone."
               >
-                {busyAction === "reopen" ? "Reopening..." : "Reopen"}
+                <BusyContent busy={busyAction === "reopen"}>Reopen</BusyContent>
               </button>
             ) : null}
             {canRecover(session) ? (
@@ -2810,32 +2913,38 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
             {canComplete(session) ? (
               <button
+                aria-busy={busyAction === "complete" || undefined}
+                aria-label={busyAction === "complete" ? "Completing session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("complete")}
                 className="border border-[var(--color-status-ready)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-ready)] transition hover:bg-[var(--color-status-ready)]/10 disabled:opacity-50"
               >
-                {busyAction === "complete" ? "Completing..." : "Complete"}
+                <BusyContent busy={busyAction === "complete"}>Complete</BusyContent>
               </button>
             ) : null}
             {!isTerminalSession(session) ? (
               <button
+                aria-busy={busyAction === "kill" || undefined}
+                aria-label={busyAction === "kill" ? "Killing session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("kill", { force: true })}
                 className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
               >
-                {busyAction === "kill" ? "Killing..." : "Kill"}
+                <BusyContent busy={busyAction === "kill"}>Kill</BusyContent>
               </button>
             ) : null}
             {canRespawn(session) ? (
               <button
+                aria-busy={busyAction === "respawn" || undefined}
+                aria-label={busyAction === "respawn" ? "Respawning session" : undefined}
                 type="button"
                 disabled={busyAction !== null}
                 onClick={openRespawnEditor}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
+                <BusyContent busy={busyAction === "respawn"}>Edit &amp; Respawn</BusyContent>
               </button>
             ) : null}
             <button
@@ -2862,7 +2971,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
-              session.queuedMessages.awaitingPrompt ? (
+              session.queuedMessages.awaitingPrompt ||
+              (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Queued messages
@@ -2870,27 +2980,86 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </h2>
                   {session.queuedMessages.messages.length > 0 ? (
                     <ol aria-label="Queued messages list" className="space-y-2">
-                      {session.queuedMessages.messages.map((queuedMessage, index) => (
-                        <li
-                          key={`${session.id}:queued:${index}:${queuedMessage}`}
-                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
-                        >
-                          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                            #{index + 1}
-                          </div>
-                          <div
-                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                      {session.queuedMessages.messages.map((queuedMessage, index) => {
+                        const removeBusy = busyAction === `queue:remove:${index}`;
+                        const flushBusy = busyAction === `queue:flush:${index}`;
+                        return (
+                          <li
+                            key={`${session.id}:queued:${index}:${queuedMessage}`}
+                            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
                           >
-                            {queuedMessage}
-                          </div>
-                        </li>
-                      ))}
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                                #{index + 1}
+                              </div>
+                              <div className="flex shrink-0 gap-1.5">
+                                <IconActionButton
+                                  label={`Send queued message #${index + 1} now`}
+                                  busyLabel={`Sending queued message #${index + 1}…`}
+                                  busy={flushBusy}
+                                  disabled={busyAction !== null}
+                                  onClick={() =>
+                                    void handleQueueAction("flush", queuedMessage, index)
+                                  }
+                                >
+                                  {flushBusy ? (
+                                    <Spinner className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <SendIcon className="h-3.5 w-3.5" strokeWidth={2} />
+                                  )}
+                                </IconActionButton>
+                                <IconActionButton
+                                  label={`Remove queued message #${index + 1}`}
+                                  busyLabel={`Removing queued message #${index + 1}…`}
+                                  busy={removeBusy}
+                                  disabled={busyAction !== null}
+                                  onClick={() =>
+                                    void handleQueueAction("remove", queuedMessage, index)
+                                  }
+                                >
+                                  {removeBusy ? (
+                                    <Spinner className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <TrashIcon className="h-3.5 w-3.5" strokeWidth={2} />
+                                  )}
+                                </IconActionButton>
+                              </div>
+                            </div>
+                            <div
+                              className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
+                            >
+                              {queuedMessage}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ol>
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
                     <p className="mt-2 text-[var(--color-text-secondary)]">
                       Awaiting agent prompt — queued messages will send automatically.
                     </p>
+                  ) : null}
+                  {(session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
+                    <div className="mt-2">
+                      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Auto steps
+                      </div>
+                      <ol aria-label="Auto pipeline steps list" className="mt-1 space-y-2">
+                        {session.queuedMessages.pipelineMessages?.map((stepMessage, index) => (
+                          <li
+                            key={`${session.id}:pipeline-queued:${index}:${stepMessage}`}
+                            className="border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-3 py-2"
+                          >
+                            <div
+                              className={`${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-tertiary)]`}
+                            >
+                              {stepMessage}
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
                   ) : null}
                 </section>
               ) : null}
@@ -2957,6 +3126,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onSelect={setMessage}
                         />
                         <button
+                          aria-busy={busyAction === "send" || undefined}
+                          aria-label={busyAction === "send" ? "Queueing message" : undefined}
                           type="button"
                           disabled={
                             busyAction !== null || (!message.trim() && attachments.length === 0)
@@ -2964,12 +3135,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: true })}
                           className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? (
-                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
-                          ) : null}
-                          <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
+                          <BusyContent busy={busyAction === "send"}>Queue</BusyContent>
                         </button>
                         <button
+                          aria-busy={busyAction === "send" || undefined}
+                          aria-label={busyAction === "send" ? "Sending message" : undefined}
                           type="button"
                           disabled={
                             busyAction !== null || (!message.trim() && attachments.length === 0)
@@ -2977,18 +3147,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? (
-                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
-                          ) : null}
-                          <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
-                          {busyAction !== "send" ? (
+                          <BusyContent busy={busyAction === "send"}>
+                            <span>Send now</span>
                             <span
                               aria-hidden="true"
                               className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                             >
                               {PRIMARY_SUBMIT_HINT}
                             </span>
-                          ) : null}
+                          </BusyContent>
                         </button>
                       </div>
                     </div>
@@ -3285,6 +3452,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 :{port.port}
                               </span>
                             ))}
+                            {sc.ageSeconds !== undefined ? (
+                              <span
+                                className={`shrink-0 ${sc.ageWarn ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
+                                data-testid={`sidecar-age-${sc.name}`}
+                              >
+                                {formatSidecarAge(sc.ageSeconds)}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
                             {sc.alive && canAttach ? (
@@ -3511,6 +3686,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       Cancel
                     </button>
                     <button
+                      aria-busy={isClearingConflictPort || undefined}
+                      aria-label={isClearingConflictPort ? "Clearing conflicting port" : undefined}
                       className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                       disabled={busyAction !== null || conflictClearPort === null}
                       onClick={() => {
@@ -3524,7 +3701,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }}
                       type="button"
                     >
-                      {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
+                      <BusyContent busy={isClearingConflictPort}>Clear/Retry</BusyContent>
                     </button>
                   </div>
                 </div>
@@ -3594,7 +3771,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <ModelSelect
                         agent={handoffAgent}
                         ariaLabel="Handoff model"
+                        carry={{ agent: session.agent, model: session.model }}
                         onChange={setHandoffModel}
+                        onResolvedChange={setHandoffModelResolved}
+                        spawnDefaults={handoffSpawnDefaults}
                         value={handoffModel}
                       />
                     </div>
@@ -3636,20 +3816,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         Cancel
                       </button>
                       <button
+                        aria-busy={busyAction === "handoff" || undefined}
+                        aria-label={busyAction === "handoff" ? "Handing off session" : undefined}
                         className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={busyAction === "handoff"}
+                        disabled={busyAction === "handoff" || !handoffModelResolved}
                         onClick={() => void handleHandoff()}
                         type="button"
                       >
-                        {busyAction === "handoff" ? "Handing off..." : "Handoff"}
-                        {busyAction !== "handoff" ? (
+                        <BusyContent busy={busyAction === "handoff"}>
+                          <span>Handoff</span>
                           <span
                             aria-hidden="true"
                             className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
                           >
                             {PRIMARY_SUBMIT_HINT}
                           </span>
-                        ) : null}
+                        </BusyContent>
                       </button>
                     </div>
                   </div>
@@ -3667,7 +3849,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
               mode={{
                 kind: "respawn",
-                model: { value: respawnModel, onChange: setRespawnModel },
+                model: {
+                  value: respawnModel,
+                  onChange: setRespawnModel,
+                  spawnDefaults: respawnSpawnDefaults,
+                  carry: { agent: session.agent, model: session.model },
+                  onResolvedChange: setRespawnModelResolved,
+                },
                 artifactSlot:
                   startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
@@ -3732,9 +3920,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               promptRef={respawnPromptRef}
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
-              submitBusyLabel="Respawning..."
+              submitBusyAriaLabel="Respawning session"
               submitDisabled={
                 busyAction === "respawn" ||
+                !respawnModelResolved ||
                 (!respawnPrompt.trim() &&
                   respawnStartupAttachmentIds.length === 0 &&
                   respawnAttachments.length === 0)
@@ -3781,7 +3970,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               promptRef={deskSpawnPromptRef}
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
-              submitBusyLabel="Spawning..."
+              submitBusyAriaLabel="Spawning desk agent"
               submitDisabled={deskSpawning}
               submitLabel="Spawn"
               submitting={deskSpawning}
@@ -3829,7 +4018,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           </button>
         </div>
       ) : (
-        <p className="mt-5 text-[var(--color-text-secondary)]">Loading...</p>
+        <CenteredLoader className="flex-1" label="Loading session" />
       )}
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>

@@ -89,6 +89,19 @@ describe("cli-view.describeSession", () => {
     ).toContain("hit rate or usage limit");
   });
 
+  it("labels a stale-parked session as parked by idle timeout, not stopped by user", () => {
+    const output = describeSession(
+      session({
+        status: "stopped",
+        stopReason: "stale_timeout",
+        state: "stale",
+      }),
+    );
+
+    expect(output).toContain("parked by idle timeout");
+    expect(output).not.toContain("stopped by user");
+  });
+
   it("shows compact persisted link ids instead of full URLs", () => {
     const output = describeSession(
       session({
@@ -105,6 +118,81 @@ describe("cli-view.describeSession", () => {
     expect(output).toContain("tracker API-7");
     expect(output).not.toContain("https://github.com/acme/api/pull/42");
     expect(output).not.toContain("https://tracker.example.com/browse/API-7");
+  });
+
+  it("shows a compact sidecar age indicator when a sidecar has a resolvable age", () => {
+    const output = describeSession(
+      session({
+        sidecars: [
+          {
+            name: "front-local",
+            alive: true,
+            ports: [],
+            tmuxSession: "api-1--front-local",
+            ageSeconds: 46_800,
+          },
+        ],
+      }),
+    );
+
+    expect(output).toContain("sidecar front-local 13h");
+  });
+
+  it("marks the sidecar age fact when it is past the age-warn threshold", () => {
+    const output = describeSession(
+      session({
+        sidecars: [
+          {
+            name: "front-local",
+            alive: true,
+            ports: [],
+            tmuxSession: "api-1--front-local",
+            ageSeconds: 46_800,
+            ageWarn: true,
+          },
+        ],
+      }),
+    );
+
+    expect(output).toContain("sidecar front-local 13h!");
+  });
+
+  it("names only the oldest sidecar and folds the rest into a count", () => {
+    const output = describeSession(
+      session({
+        sidecars: [
+          {
+            name: "front-local",
+            alive: true,
+            ports: [],
+            tmuxSession: "api-1--front-local",
+            ageSeconds: 60,
+          },
+          {
+            name: "front-pp-tunnel",
+            alive: true,
+            ports: [],
+            tmuxSession: "api-1--front-pp-tunnel",
+            ageSeconds: 46_800,
+          },
+        ],
+      }),
+    );
+
+    expect(output).toContain("sidecar front-pp-tunnel 13h +1 more");
+    expect(output).not.toContain("front-local");
+  });
+
+  it("adds no sidecar fact when no sidecar has a resolvable age", () => {
+    const output = describeSession(
+      session({
+        sidecars: [
+          { name: "front-local", alive: true, ports: [], tmuxSession: "api-1--front-local" },
+        ],
+      }),
+    );
+
+    expect(output).not.toContain("sidecar");
   });
 });
 

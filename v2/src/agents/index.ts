@@ -35,7 +35,12 @@ import {
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
-import type { AgentName, TranscriptEntry, SidecarMcpBinding } from "../types.js";
+import type {
+  AgentName,
+  ProviderReasoningEffort,
+  TranscriptEntry,
+  SidecarMcpBinding,
+} from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -46,6 +51,7 @@ interface AgentPlanOptions {
   claudeConfigDir?: string;
   codexHomePath?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
   cursorConfigDir?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -76,17 +82,32 @@ const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
 const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CURSOR_SUBMIT_MAX_RESENDS = 12;
+// Launch-send pacing for claude. A claude TUI still rendering the pasted launch
+// message swallows the submit Enter, and nothing is submitted until another one
+// arrives, so the launch send scans in short windows instead of the mid-session
+// default. A healthy submit reaches the transcript within ~0.4s, so 5s is a
+// wide margin, and the resends land far before the next pipeline step could
+// overwrite the composer.
+const CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS = 5_000;
+const CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS = 2;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
   codexSessionsDir: string;
   /** Pinned native session id, used to bind claude ack scanning by id. */
   agentSessionId?: string;
+  /** Send goes to an agent that just launched and has no transcript yet. */
+  freshLaunch?: boolean;
 }
 
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;
+}
+
+export interface SubmitAckPacing {
+  windowMs: number;
+  maxResends: number;
 }
 
 export interface SubmitAckBinding {
@@ -121,6 +142,7 @@ interface AgentAdapter {
     restrictWrites?: boolean;
     cursorConfigDir?: string;
     claudeConfigDir?: string;
+    modelsCacheHome?: string;
   }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -134,9 +156,12 @@ interface AgentAdapter {
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
+  sendsInterruptKey: boolean;
   waitsForSubmitAck: boolean;
   submitAckWindowMs: number;
   submitAckMaxResends: number;
+  /** Pacing for the launch send only, for an agent that needs its own. */
+  launchSubmitAck?: SubmitAckPacing;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
   /**
@@ -156,6 +181,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   model?: string;
   claudeConfigDir?: string;
   sessionId?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
@@ -165,6 +191,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
     ...(options?.model ? { model: options.model } : {}),
     ...(options?.claudeConfigDir ? { claudeConfigDir: options.claudeConfigDir } : {}),
     ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -174,6 +201,7 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   startupImagePaths?: string[];
   restrictWrites?: boolean;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
@@ -181,6 +209,7 @@ function codexPlanOptions(options?: AgentPlanOptions): {
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -302,13 +331,20 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
+    sendsInterruptKey: true,
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
+    launchSubmitAck: {
+      windowMs: CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS,
+      maxResends: CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS,
+    },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
-      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
+      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
+        freshLaunch: ctx.freshLaunch === true,
+      });
       if (!baseline) {
         return null;
       }
@@ -340,15 +376,23 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       ctx.codexSessionsDir
         ? readCodexTranscriptEntries(ctx.codexSessionsDir)
         : Promise.resolve(null),
-    setup: async ({ sessionToolDir, worktreePath, mcpBindings, restrictWrites }) => ({
+    setup: async ({
+      sessionToolDir,
+      worktreePath,
+      mcpBindings,
+      restrictWrites,
+      modelsCacheHome,
+    }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(mcpBindings?.length ? { mcpBindings } : {}),
+        ...(modelsCacheHome ? { modelsCacheHome } : {}),
       }),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
+    sendsInterruptKey: true,
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -401,6 +445,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     },
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
+    sendsInterruptKey: false,
     waitsForSubmitAck: true,
     submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
@@ -506,6 +551,7 @@ export async function setupAgentHooks(args: {
   restrictWrites?: boolean;
   cursorConfigDir?: string;
   claudeConfigDir?: string;
+  modelsCacheHome?: string;
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;
@@ -529,6 +575,10 @@ export function agentSendMode(agent: AgentName): AgentSendMode {
   return agentAdapter(agent).sendMode;
 }
 
+export function agentSendsInterruptKey(agent: AgentName): boolean {
+  return agentAdapter(agent).sendsInterruptKey;
+}
+
 export function agentProcessMatchers(agent: AgentName, launchCommand: string): string[] {
   return agentAdapter(agent).processMatchers(launchCommand);
 }
@@ -537,12 +587,24 @@ export function agentWaitsForSubmitAck(agent: AgentName): boolean {
   return agentAdapter(agent).waitsForSubmitAck;
 }
 
-export function agentSubmitAckWindowMs(agent: AgentName): number {
-  return agentAdapter(agent).submitAckWindowMs;
+export function agentSubmitAckPacing(
+  agent: AgentName,
+  options?: { freshLaunch?: boolean },
+): SubmitAckPacing {
+  const adapter = agentAdapter(agent);
+  if (options?.freshLaunch === true && adapter.launchSubmitAck) {
+    return adapter.launchSubmitAck;
+  }
+  return { windowMs: adapter.submitAckWindowMs, maxResends: adapter.submitAckMaxResends };
 }
 
-export function agentSubmitAckMaxResends(agent: AgentName): number {
-  return agentAdapter(agent).submitAckMaxResends;
+/**
+ * Whether the agent has launch-send pacing of its own, meaning its short window
+ * plus Enter resends are the launch send's whole recovery. Callers use this to
+ * scope launch-send handling to those agents instead of an agent name.
+ */
+export function agentHasLaunchSubmitAck(agent: AgentName): boolean {
+  return agentAdapter(agent).launchSubmitAck !== undefined;
 }
 
 export async function createAgentSubmitAckBinding(

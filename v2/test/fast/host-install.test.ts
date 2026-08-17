@@ -6,8 +6,10 @@ import type * as ChildProcess from "node:child_process";
 import type * as FsModule from "node:fs";
 import type * as OsModule from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as CacheRetentionModule from "../../src/cache-retention.js";
 import type * as PortProbe from "../../src/port-probe.js";
 import type * as UpdateHealth from "../../src/update-health.js";
+import type * as Workspace from "../../src/workspace.js";
 
 const {
   execFileSyncMock,
@@ -18,6 +20,8 @@ const {
   isHostPortFreeMock,
   findListenerPidsMock,
   writeFileSyncMock,
+  planCachePruneMock,
+  resolveDoctorRepoRootMock,
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
   platformMock: vi.fn(),
@@ -27,7 +31,18 @@ const {
   isHostPortFreeMock: vi.fn(),
   findListenerPidsMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  planCachePruneMock: vi.fn(),
+  resolveDoctorRepoRootMock: vi.fn(),
 }));
+
+// `reclaimable-caches` is the one check that calls `planCachePrune` (a `du`
+// sweep) — replaced with a controlled fixture everywhere except its own
+// describe block below, so the other 60+ pre-existing checks in this file
+// never pay for (or depend on) a real measurement.
+vi.mock("../../src/cache-retention.js", async () => {
+  const actual = await vi.importActual<typeof CacheRetentionModule>("../../src/cache-retention.js");
+  return { ...actual, planCachePrune: planCachePruneMock };
+});
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof ChildProcess>("node:child_process");
@@ -64,7 +79,18 @@ vi.mock("../../src/port-probe.js", async () => {
   return { ...actual, isHostPortFree: isHostPortFreeMock, findListenerPids: findListenerPidsMock };
 });
 
+// `spur doctor`'s CLI-wiring test below never wants a real `git
+// rev-parse --show-toplevel` against this checkout (whose root has its own
+// `spur.yaml`, which would pull the heavy `checkProjectWorkspace` path in) —
+// only `resolveDoctorRepoRoot` is overridden, everything else in the module
+// stays real.
+vi.mock("../../src/workspace.js", async () => {
+  const actual = await vi.importActual<typeof Workspace>("../../src/workspace.js");
+  return { ...actual, resolveDoctorRepoRoot: resolveDoctorRepoRootMock };
+});
+
 import {
+  checkConfigRegistry,
   checkServiceHealth,
   checkSpurOnPath,
   checkVersionDrift,
@@ -77,6 +103,7 @@ import {
 } from "../../src/host-install.js";
 import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
+import { createProgram } from "../../src/cli.js";
 
 const version = getVersion();
 
@@ -114,6 +141,9 @@ interface ExecState {
   dfKbLine: string;
   dfILine: string;
   nodePtyOk: boolean;
+  // data-dir-log-bytes seam: `du -sk <dataDir>/sessions` first line.
+  duAvailable: boolean;
+  duKbLine: string;
 }
 
 let execState: ExecState;
@@ -149,6 +179,8 @@ beforeEach(() => {
     dfKbLine: "/dev/sda1 100000000 5000000 90000000 10% /",
     dfILine: "/dev/sda1 1000000 200000 800000 20% /",
     nodePtyOk: true,
+    duAvailable: true,
+    duKbLine: "1000\t/data/sessions",
   };
   execFileSyncMock.mockReset();
   execFileSyncMock.mockImplementation((file: string, args: string[]) => {
@@ -178,6 +210,10 @@ beforeEach(() => {
     if (file === "node") {
       if (!execState.nodePtyOk) throw new Error('Failed to load native module "node-pty"');
       return "";
+    }
+    if (file === "du") {
+      if (!execState.duAvailable) throw new Error("du not found");
+      return execState.duKbLine;
     }
     if (file === "systemctl") {
       if (!execState.systemctlAvailable) throw new Error("systemctl not available");
@@ -242,6 +278,15 @@ beforeEach(() => {
   isHostPortFreeMock.mockResolvedValue(true);
   findListenerPidsMock.mockReset();
   findListenerPidsMock.mockResolvedValue([]);
+  planCachePruneMock.mockReset();
+  planCachePruneMock.mockResolvedValue({
+    generatedAt: new Date(0).toISOString(),
+    roots: [],
+    candidates: [],
+    reclaimableKb: 0,
+    processTreeReadable: true,
+    pinSourceCount: 1,
+  });
 });
 
 afterEach(() => {
@@ -251,6 +296,177 @@ afterEach(() => {
   } else {
     process.env["SPUR_CONFIG"] = initialSpurConfig;
   }
+});
+
+describe("checkConfigRegistry", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it("warns on dead, worktree-internal, and over-cap registry entries", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    const deadPath = join(rootDir, "missing.yaml");
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    const fillerDeadPaths = Array.from({ length: 22 }, (_, index) =>
+      join(rootDir, `filler-${index}.yaml`),
+    );
+
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({
+        configPaths: [livePath, deadPath, worktreeInternalPath, ...fillerDeadPaths],
+        unconfiguredProjects: [],
+      }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.id).toBe("config-registry");
+    expect(check.severity).toBe("warn");
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain(deadPath);
+    // Both dead and worktree-internal offenders are present, so the fix
+    // hint must cover both — and never resolve to a bare `undefined`.
+    expect(check.fix).toContain(`spur disconnect ${deadPath}`);
+    expect(check.fix).toContain("restart the daemon");
+    expect(check.fix).not.toContain("undefined");
+  });
+
+  it("omits fix and points at the count in detail when only the cap is over, with no dead or worktree-internal offenders", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-cap-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+
+    const livePaths = await Promise.all(
+      Array.from({ length: 25 }, async (_, index) => {
+        const path = join(rootDir, `live-${index}.yaml`);
+        await writeFile(path, "stub: true\n", "utf8");
+        return path;
+      }),
+    );
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: livePaths, unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("over the");
+    expect(check.detail).not.toContain(": ");
+    expect(check.fix).toBeUndefined();
+  });
+
+  it("points only at spur disconnect, never a daemon restart, when every offender is dead", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-dead-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    const deadPath = join(rootDir, "missing.yaml");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [deadPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.fix).toContain(`spur disconnect ${deadPath}`);
+    expect(check.fix).not.toContain("restart the daemon");
+  });
+
+  it("points only at a daemon restart, never spur disconnect, when every offender is worktree-internal", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-worktree-only-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+    await mkdir(dataDir, { recursive: true });
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [worktreeInternalPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.fix).toBe("restart the daemon to prune worktree-internal entries at boot");
+    expect(check.fix).not.toContain("spur disconnect");
+  });
+
+  it("reports ok when every registered path is live, outside worktreeDir, and under cap", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-ok-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [livePath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.ok).toBe(true);
+    expect(check.severity).toBe("warn");
+  });
+
+  it("carries a per-path alive/dead/worktree-internal classification alongside the aggregate detail", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-registry-per-path-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(join(worktreeDir, "proj", "sess"), { recursive: true });
+
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    const deadPath = join(rootDir, "missing.yaml");
+    const worktreeInternalPath = join(worktreeDir, "proj", "sess", "spur.yaml");
+    await writeFile(worktreeInternalPath, "stub: true\n", "utf8");
+    // Never written — both missing AND inside worktreeDir. The missing-file
+    // check runs first in `checkConfigRegistry`, so this must classify as
+    // "dead", not "worktree-internal".
+    const deadAndWorktreeInternalPath = join(worktreeDir, "proj", "sess", "missing-spur.yaml");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({
+        configPaths: [livePath, deadPath, worktreeInternalPath, deadAndWorktreeInternalPath],
+        unconfiguredProjects: [],
+      }),
+      "utf8",
+    );
+
+    const check = checkConfigRegistry(dataDir, worktreeDir);
+
+    expect(check.configRegistryPaths).toEqual([
+      { path: livePath, state: "alive" },
+      { path: deadPath, state: "dead" },
+      { path: worktreeInternalPath, state: "worktree-internal" },
+      { path: deadAndWorktreeInternalPath, state: "dead" },
+    ]);
+  });
 });
 
 describe("collectHostInstallChecks", () => {
@@ -1138,12 +1354,333 @@ describe("collectHostInstallChecks: C1/C2 worktree/data-dir writability + disk s
     });
   });
 
+  it("reports data-dir-log-bytes warn when du reports usage above the 5GB threshold", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await mkdir(join(dataDir, "sessions"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.duKbLine = `6000000\t${join(dataDir, "sessions")}`;
+    const checks = await collectHostInstallChecks(fakeHome);
+    const check = checks.find((check) => check.id === "data-dir-log-bytes");
+    expect(check).toMatchObject({ ok: false, severity: "warn" });
+    // The reported total spans both shard families, so the hint must name both
+    // knobs — lowering only eventLog.* cannot bring a user-action-heavy dataDir
+    // back under the threshold.
+    expect(check?.fix).toContain("eventLog.shardHotBytes");
+    expect(check?.fix).toContain("eventLog.retainArchives");
+    expect(check?.fix).toContain("userActionLog.shardHotBytes");
+    expect(check?.fix).toContain("userActionLog.retainArchives");
+    // Log growth must never fail `spur doctor` on its own: cli.ts exits 1 only
+    // on error severity, and this check tops out at warn.
+    expect(hasErrorSeverity(checks.filter((c) => c.id === "data-dir-log-bytes"))).toBe(false);
+  });
+
+  it("skips (info) data-dir-log-bytes when du is unavailable", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await mkdir(join(dataDir, "sessions"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    execState.duAvailable = false;
+    const checks = await collectHostInstallChecks(fakeHome);
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+
+  it("reports data-dir-log-bytes as 0KB (not skipped) when <dataDir>/sessions does not exist yet", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    // du is never invoked here: a fresh instance's <dataDir>/sessions does not
+    // exist yet, so it should short-circuit to 0KB instead of reading as "du
+    // unavailable or non-numeric".
+    execState.duAvailable = false;
+    const check = (await collectHostInstallChecks(fakeHome)).find(
+      (c) => c.id === "data-dir-log-bytes",
+    );
+    expect(check).toMatchObject({ ok: true, severity: "warn" });
+    expect(check?.detail).not.toContain("skipped");
+  });
+
   it("never pushes worktree/data-dir checks on a never-initialized host (no instance config)", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-never-init-c");
     expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(hasErrorSeverity(checks)).toBe(false);
+  });
+});
+
+describe("collectHostInstallChecks: home-disk-headroom", () => {
+  it("is ok:false, severity:warn below the default 10GB threshold, and never trips hasErrorSeverity", async () => {
+    execState.dfKbLine = "/dev/sda1 100000000 99999000 100 99% /";
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-low");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: false,
+      severity: "warn",
+      fix: "spur cache",
+    });
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+
+  it("is ok:true above the threshold", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-high");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+
+  it("is present even when unitsInstalled is false (ungated, unlike data-dir-disk-space)", async () => {
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-ungated");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toBeDefined();
+    expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+  });
+
+  it("degrades to ok:true, severity:info when df is unavailable", async () => {
+    execState.dfAvailable = false;
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-headroom-nodf");
+    expect(checks.find((check) => check.id === "home-disk-headroom")).toMatchObject({
+      ok: true,
+      severity: "info",
+    });
+  });
+});
+
+describe("collectHostInstallChecks: reclaimable-caches", () => {
+  function root(
+    rootId: CacheRetentionModule.CacheRootId,
+    status: CacheRetentionModule.CacheRootMeasurement["status"],
+    totalKb: number,
+    entryCount: number,
+    path: string,
+  ): CacheRetentionModule.CacheRootMeasurement {
+    return { rootId, path: `/home/user/${path}`, status, totalKb, entryCount };
+  }
+
+  it("is present, ok:true, severity:info, ranked by size descending, includes per-root rows", async () => {
+    planCachePruneMock.mockResolvedValue({
+      generatedAt: new Date(0).toISOString(),
+      roots: [
+        root("npm-cacache", "measured", 20_000_000, 1, ".npm/_cacache"),
+        root("npm-npx", "measured", 1_000_000, 1, ".npm/_npx"),
+        root("playwright-browsers", "absent", 0, 0, ".cache/ms-playwright"),
+      ],
+      candidates: [
+        {
+          entry: {
+            path: "/home/user/.npm/_npx/small",
+            rootId: "npm-npx",
+            entryClass: { kind: "npx-package", hash: "small" },
+            sizeKb: 1_000_000,
+            ageDays: 40,
+          },
+          verdict: { kind: "prunable" },
+        },
+        {
+          entry: {
+            path: "/home/user/.npm/_cacache",
+            rootId: "npm-cacache",
+            entryClass: { kind: "vendor-cache" },
+            sizeKb: 20_000_000,
+            ageDays: 40,
+          },
+          verdict: { kind: "prunable" },
+        },
+        {
+          entry: {
+            path: "/home/user/.cache/ms-playwright/chromium-1208",
+            rootId: "playwright-browsers",
+            entryClass: {
+              kind: "browser-revision",
+              browser: "chromium",
+              revision: "1208",
+              dirName: "chromium-1208",
+            },
+            sizeKb: 5_000_000,
+            ageDays: 400,
+          },
+          verdict: {
+            kind: "protected",
+            reason: { kind: "pinned-revision", dirName: "chromium-1208" },
+          },
+        },
+      ],
+      reclaimableKb: 21_000_000,
+      processTreeReadable: true,
+      pinSourceCount: 1,
+    });
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-reclaimable-caches");
+    const check = checks.find((c) => c.id === "reclaimable-caches");
+    expect(check).toMatchObject({ ok: true, severity: "info" });
+    expect(hasErrorSeverity(checks)).toBe(false);
+    expect(check?.detail).toBe(
+      "20.03GB reclaimable across 2 entries (top 2: 19.07GB age 40d /home/user/.npm/_cacache; 0.95GB age 40d /home/user/.npm/_npx/small) — see `spur cache` for the full report; npm-cacache measured 19.07GB 1 /home/user/.npm/_cacache; npm-npx measured 0.95GB 1 /home/user/.npm/_npx; playwright-browsers absent 0.00GB 0 /home/user/.cache/ms-playwright",
+    );
+  });
+
+  it.each([
+    {
+      name: "keeps zero-size root rows when no entry is prunable (S13/S15)",
+      roots: [
+        root("npm-cacache", "measured", 0, 0, ".npm/_cacache"),
+        root("npm-npx", "absent", 0, 0, ".npm/_npx"),
+      ],
+      detail:
+        "no reclaimable caches found; npm-cacache measured 0.00GB 0 /home/user/.npm/_cacache; npm-npx absent 0.00GB 0 /home/user/.npm/_npx",
+    },
+    {
+      name: "renders roots: none when the plan has no roots (S15)",
+      roots: [],
+      detail: "no reclaimable caches found; roots: none",
+    },
+  ])("$name", async ({ roots, detail }) => {
+    planCachePruneMock.mockResolvedValue({
+      generatedAt: new Date(0).toISOString(),
+      roots,
+      candidates: [],
+      reclaimableKb: 0,
+      processTreeReadable: true,
+      pinSourceCount: 1,
+    });
+    const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-reclaimable-caches");
+    expect(checks.find((check) => check.id === "reclaimable-caches")?.detail).toBe(detail);
+  });
+
+  it("is present even when unitsInstalled is false (ungated)", async () => {
+    const checks = await collectHostInstallChecks(
+      "/tmp/spur-host-install-test-reclaimable-caches-ungated",
+    );
+    expect(checks.find((c) => c.id === "reclaimable-caches")).toBeDefined();
+  });
+
+  it("degrades to ok:true, severity:info, 'skipped' detail when planCachePrune exceeds its measurement budget", async () => {
+    planCachePruneMock.mockRejectedValue(new Error("ETIMEDOUT"));
+    const checks = await collectHostInstallChecks(
+      "/tmp/spur-host-install-test-reclaimable-caches-timeout",
+    );
+    const check = checks.find((c) => c.id === "reclaimable-caches");
+    expect(check).toMatchObject({
+      ok: true,
+      severity: "info",
+      detail: "skipped — measurement budget exceeded",
+    });
+    expect(hasErrorSeverity(checks)).toBe(false);
+  });
+});
+
+describe("collectHostInstallChecks: sidecar-orphans", () => {
+  it("reports ok:true when no leaked sidecar process trees exist", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+    });
+  });
+
+  it("degrades to ok:true when the worktree dir itself is unreadable, instead of reporting a leak", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        "worktreeDir: /nonexistent/spur-host-install-worktree-dir",
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+
+    const checks = await collectHostInstallChecks(fakeHome);
+
+    expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
+    });
+  });
+
+  it("never writes or signals — collectHostInstallChecks stays read-only", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-host-install-data-"));
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    execState.systemctlAvailable = true;
+    const killSpy = vi.spyOn(process, "kill");
+
+    await collectHostInstallChecks(fakeHome);
+
+    expect(killSpy).not.toHaveBeenCalled();
+    killSpy.mockRestore();
   });
 });
 
@@ -1189,6 +1726,7 @@ describe("collectHostInstallChecks: F1 corrupt instance config", () => {
     expect(checks.find((check) => check.id === "worktree-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-writable")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
+    expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(checks.find((check) => check.id === "web-ui-port-drift")).toBeUndefined();
     expect(probeInfoMock).toHaveBeenCalledWith(
       expect.objectContaining({ url: expect.stringContaining(":4310/info") }),
@@ -1239,6 +1777,75 @@ describe("hasErrorSeverity", () => {
         { id: "b", ok: false, severity: "error", detail: "" },
       ]),
     ).toBe(true);
+  });
+});
+
+describe("spur doctor --json: config-registry per-path listing", () => {
+  const originalHome = process.env["HOME"];
+  const originalExitCode = process.exitCode;
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+    process.exitCode = originalExitCode;
+    resolveDoctorRepoRootMock.mockReset();
+  });
+
+  it("carries the config-registry per-path array through to the JSON doctor output", async () => {
+    // `collectHostInstallChecks()` is called with no argument from the real
+    // `doctor` action (it always inspects the live host, never a param), so
+    // this test steers it via `$HOME` (which `os.homedir()` honors, see the
+    // comment on `collectHostInstallChecks`) rather than injecting a home
+    // directly — the only lever the CLI wiring actually exposes.
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = fakeHome;
+
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-cli-registry-"));
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(worktreeDir, { recursive: true });
+    const livePath = join(rootDir, "live.yaml");
+    await writeFile(livePath, "stub: true\n", "utf8");
+    const deadPath = join(rootDir, "missing.yaml");
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [livePath, deadPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+
+    // Steers `resolveDoctorRepoRoot` away from this real checkout's own
+    // `spur.yaml` (which would otherwise pull the heavy project-config
+    // validation branch in) toward an empty directory, so the CLI action
+    // takes the plain `{ hostChecks, configRegistryPaths }` return path.
+    const emptyWorkspaceRoot = await mkdtemp(join(tmpdir(), "spur-doctor-cli-workspace-"));
+    resolveDoctorRepoRootMock.mockResolvedValue(emptyWorkspaceRoot);
+
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+
+    const parsed = JSON.parse(output) as {
+      configRegistryPaths?: Array<{ path: string; state: string }>;
+    };
+    expect(parsed.configRegistryPaths).toEqual(
+      expect.arrayContaining([
+        { path: livePath, state: "alive" },
+        { path: deadPath, state: "dead" },
+      ]),
+    );
   });
 });
 

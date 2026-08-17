@@ -122,6 +122,11 @@ function sessionFixture(overrides?: Partial<SpurSessionView>) {
     id: "api-a1",
     project: "api",
     agent: "claude",
+    // A real session always has a resolved launch model; respawn/handoff
+    // carry it forward (rung 1) so their model control opens pre-resolved
+    // without a network round trip. Tests that need the model absent (e.g.
+    // header display) override with `model: undefined` explicitly.
+    model: "sonnet",
     prompt: "Fix auth",
     branch: "feat/auth",
     worktree: true,
@@ -212,7 +217,7 @@ describe("SessionDetail header", () => {
       const url = typeof input === "string" ? input : input.url;
 
       if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture({ model: "claude-opus-4-8" })), {
+        return new Response(JSON.stringify(sessionFixture({ model: "claude-model-id" })), {
           status: 200,
         });
       }
@@ -227,7 +232,7 @@ describe("SessionDetail header", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("claude-opus-4-8")).toBeInTheDocument();
+      expect(screen.getByText("claude-model-id")).toBeInTheDocument();
     });
   });
 
@@ -236,7 +241,7 @@ describe("SessionDetail header", () => {
       const url = typeof input === "string" ? input : input.url;
 
       if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        return new Response(JSON.stringify(sessionFixture({ model: undefined })), { status: 200 });
       }
 
       if (url === "/api/sessions/api-a1/conversation") {
@@ -905,6 +910,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(
@@ -937,6 +946,7 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByAltText("edited.png")).toBeInTheDocument();
     });
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
@@ -946,6 +956,7 @@ describe("SessionDetail voice input", () => {
       prompt: "Re-run with screenshot",
       startupAttachmentIds: ["1715000000000-source.png"],
       attachments: [{ name: "edited.png", data: expect.any(String) }],
+      model: "sonnet",
     });
   });
 
@@ -962,6 +973,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnPosts += 1;
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
@@ -973,6 +988,7 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
     const respawnButton = screen.getByRole("button", { name: "Respawn" });
+    await waitFor(() => expect(respawnButton).not.toBeDisabled());
     fireEvent.click(respawnButton);
     fireEvent.click(respawnButton);
 
@@ -999,6 +1015,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         respawnCalls.push(body);
@@ -1020,6 +1040,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
@@ -1060,6 +1081,104 @@ describe("SessionDetail voice input", () => {
     expect(select.value).toBe("codex");
   });
 
+  it("re-carries the session's model when switching back to its original agent, ahead of the catalog default", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture({ agent: "claude", model: "sonnet" }),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      // Same catalog for every agent; "opus" ranks first and carries
+      // isDefault, so it is what rung 4 (first list entry) would pick absent
+      // a carry or favorite.
+      if (url.startsWith("/api/models")) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { id: "opus", label: "Opus", isDefault: true },
+              { id: "sonnet", label: "Sonnet" },
+            ],
+          }),
+        );
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    // Opens with the session's own model resolved through the carry rung,
+    // once the catalog settles (not seeded directly ahead of that check).
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn model" })).toHaveTextContent("Sonnet");
+    });
+
+    // Switching to a different agent clears the carry (agent mismatch); the
+    // control falls through to the catalog's first entry.
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "codex" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn model" })).toHaveTextContent("Opus");
+    });
+
+    // Switching back to the session's own agent re-enters the carry rung,
+    // which must win over the catalog default it just resolved to.
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "claude" },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn model" })).toHaveTextContent("Sonnet");
+    });
+  });
+
+  it("keeps Respawn disabled while the model is unresolved, then enables it once it settles", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture({ model: undefined }),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeDisabled();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
+  });
+
   it("includes the selected agent in the respawn payload when changed", async () => {
     let respawnBody: Record<string, unknown> | null = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
@@ -1077,6 +1196,15 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      // Switching to a different agent clears the carried model, so the
+      // control re-resolves against that agent's own catalog before submit
+      // re-enables.
+      if (url.startsWith("/api/models")) {
+        return new Response(JSON.stringify({ models: [{ id: "composer", label: "Composer" }] }));
+      }
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
@@ -1090,12 +1218,131 @@ describe("SessionDetail voice input", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
       target: { value: "cursor" },
     });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
       expect(respawnBody).not.toBeNull();
     });
     expect(respawnBody?.agent).toBe("cursor");
+  });
+
+  it("keeps Respawn disabled until the carried model clears the catalog filter, then re-disables and re-settles across an agent switch", async () => {
+    let resolveClaudeModels: ((response: Response) => void) | undefined;
+    const pendingClaudeModels = new Promise<Response>((resolve) => {
+      resolveClaudeModels = resolve;
+    });
+    let cursorModelsRequested = false;
+    let resolveCursorModels: ((response: Response) => void) | undefined;
+    const pendingCursorModels = new Promise<Response>((resolve) => {
+      resolveCursorModels = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/models?agent=cursor") {
+        cursorModelsRequested = true;
+        return pendingCursorModels;
+      }
+      if (url.startsWith("/api/models")) return pendingClaudeModels;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    // Carried from session.model, but not yet confirmed against the catalog:
+    // must stay disabled until that fetch settles, not enable immediately.
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeDisabled();
+    // The control must not be seeded directly from session.model ahead of
+    // that confirmation either — it should still read as unresolved (a
+    // motion-only indicator), not show the (unconfirmed) carried label.
+    expect(
+      within(screen.getByRole("button", { name: "Respawn model" })).getByRole("status", {
+        name: "Resolving model",
+      }),
+    ).toBeInTheDocument();
+
+    resolveClaudeModels?.(
+      new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }), {
+        status: 200,
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "cursor" },
+    });
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeDisabled();
+    await waitFor(() => expect(cursorModelsRequested).toBe(true));
+
+    resolveCursorModels?.(
+      new Response(JSON.stringify({ models: [{ id: "composer", label: "Composer" }] }), {
+        status: 200,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
+  });
+
+  it("keeps Respawn enabled and omits model from the payload when the switched agent's catalog settles empty", async () => {
+    let respawnBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "cursor" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(respawnBody).not.toBeNull();
+    });
+    expect(respawnBody).not.toHaveProperty("model");
   });
 
   it("omits the agent from the respawn payload when unchanged", async () => {
@@ -1115,6 +1362,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
@@ -1125,12 +1376,89 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
       expect(respawnBody).not.toBeNull();
     });
     expect(respawnBody && "agent" in respawnBody).toBe(false);
+  });
+
+  it("keeps Handoff disabled while the model resolves, enables once settled with a concrete model", async () => {
+    let resolveModels: ((response: Response) => void) | undefined;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      // The handoff target agent always differs from the session's own
+      // agent, so nothing carries over here; the model always starts
+      // unresolved.
+      if (url.startsWith("/api/models")) return pendingModels;
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Handoff" }));
+    const submitButton = screen.getAllByRole("button", { name: /^handoff$/i }).at(-1)!;
+    expect(submitButton).toBeDisabled();
+
+    resolveModels?.(
+      new Response(JSON.stringify({ models: [{ id: "composer", label: "Composer" }] }), {
+        status: 200,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(submitButton).not.toBeDisabled();
+    });
+  });
+
+  it("keeps Handoff enabled and omits model from the payload when the catalog settles empty", async () => {
+    let handoffBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults")) {
+        return new Response(JSON.stringify({ model: null, worktree: true }));
+      }
+      if (url === "/api/sessions/api-a1/handoff" && init?.method === "POST") {
+        handoffBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Handoff" }));
+    const submitButton = screen.getAllByRole("button", { name: /^handoff$/i }).at(-1)!;
+    await waitFor(() => {
+      expect(submitButton).not.toBeDisabled();
+    });
+    fireEvent.click(submitButton);
+
+    await waitFor(() => {
+      expect(handoffBody).not.toBeNull();
+    });
+    expect(handoffBody).not.toHaveProperty("model");
   });
 
   it("renders slash suggestions and input history in the respawn modal footer", async () => {
@@ -1167,6 +1495,10 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: null, worktree: true }));
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
       }
@@ -1179,6 +1511,7 @@ describe("SessionDetail voice input", () => {
     fireEvent.change(screen.getByPlaceholderText(/^Initial message\.\.\./), {
       target: { value: "Retry with new plan" },
     });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Respawn" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
     await waitFor(() => {
@@ -1769,7 +2102,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Clear/Retry" }));
 
-    expect(within(dialog).getByRole("button", { name: "Clearing..." })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Clearing conflicting port" }),
+    ).toBeDisabled();
     expect(
       within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" }),
     ).toBeDisabled();
@@ -1920,10 +2255,16 @@ describe("SessionDetail voice input", () => {
     expect(dialogSection).not.toBeNull();
     expect(queuedSection).not.toBeNull();
 
-    const dialogText = within(dialogSection as HTMLElement).getByText(longToken);
+    // The Dialog heading renders as soon as ConversationView mounts (e.g. while
+    // isWorking), which can be before the /conversation fetch resolves, so the
+    // assistant text must be awaited rather than queried synchronously.
+    const dialogText = await within(dialogSection as HTMLElement).findByText(longToken);
     expect(dialogText).toHaveClass("[overflow-wrap:anywhere]");
     expect(dialogText.parentElement).toHaveClass("min-w-0");
 
+    // The queued-messages heading and its text both come from the same
+    // /api/sessions/api-a1 fetch (session.queuedMessages), so once the
+    // heading is in the DOM the text is already there too — no race here.
     const queuedText = within(queuedSection as HTMLElement).getByText(longToken);
     expect(queuedText).toHaveClass("[overflow-wrap:anywhere]");
   });
@@ -2444,6 +2785,147 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(screen.queryByRole("heading", { name: /queued messages/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionDetail queue controls", () => {
+  it("removes and flushes real queued rows only, leaves auto-step rows uncontrolled, and surfaces a 409 toast", async () => {
+    let queuedMessages: {
+      messages: string[];
+      awaitingPrompt: boolean;
+      pipelineMessages: string[];
+    } = {
+      messages: ["first follow-up", "second follow-up"],
+      awaitingPrompt: false,
+      pipelineMessages: ["Ship the feature — step 2/3: implement"],
+    };
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture({ queuedMessages })), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/remove" && init?.method === "POST") {
+        const body = JSON.parse(init.body as string) as { message: string };
+        queuedMessages = {
+          ...queuedMessages,
+          messages: queuedMessages.messages.filter((message) => message !== body.message),
+        };
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/flush" && init?.method === "POST") {
+        const body = JSON.parse(init.body as string) as { message: string };
+        if (body.message === "second follow-up") {
+          return new Response(JSON.stringify({ error: "Delivery already in flight for api-a1" }), {
+            status: 409,
+          });
+        }
+        queuedMessages = {
+          ...queuedMessages,
+          messages: queuedMessages.messages.filter((message) => message !== body.message),
+        };
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByText("first follow-up");
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+    expect(screen.getByText("Ship the feature — step 2/3: implement")).toBeInTheDocument();
+
+    // Both controls render only on the two real queued rows, never on the
+    // auto (pipeline-derived) row.
+    expect(screen.getAllByLabelText(/^Remove queued message #\d+$/)).toHaveLength(2);
+    expect(screen.getAllByLabelText(/^Send queued message #\d+ now$/)).toHaveLength(2);
+
+    fireEvent.click(screen.getByLabelText("Remove queued message #1"));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "first follow-up" }),
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("first follow-up")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+
+    // Flushing the remaining row hits a 409 (delivery already in flight):
+    // the row stays and the daemon's message surfaces as an error toast.
+    fireEvent.click(screen.getByLabelText("Send queued message #1 now"));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "second follow-up" }),
+      });
+    });
+    expect(await screen.findByText("Delivery already in flight for api-a1")).toBeInTheDocument();
+    expect(screen.getByText("second follow-up")).toBeInTheDocument();
+  });
+
+  it("announces the busy state on a per-row control via aria-busy and a swapped aria-label, for a screen reader, not only the visible spinner", async () => {
+    let resolveFlush: ((response: Response) => void) | null = null;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              queuedMessages: { messages: ["first follow-up"], awaitingPrompt: false },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/queue/flush" && init?.method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveFlush = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByText("first follow-up");
+    const flushButton = screen.getByLabelText("Send queued message #1 now");
+    const removeButton = screen.getByLabelText("Remove queued message #1");
+    expect(flushButton).not.toHaveAttribute("aria-busy");
+    expect(removeButton).not.toHaveAttribute("aria-busy");
+
+    fireEvent.click(flushButton);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Sending queued message #1…")).toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
+    });
+    // The remove button on the SAME row stays idle — only the control the
+    // user actually triggered announces busy.
+    expect(screen.getByLabelText("Remove queued message #1")).not.toHaveAttribute("aria-busy");
+
+    resolveFlush!(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Send queued message #1 now")).not.toHaveAttribute("aria-busy");
+    });
+    fetchMock.mockRestore();
   });
 });
 

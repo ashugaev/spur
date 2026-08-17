@@ -5,8 +5,32 @@ import type {
   SpurSessionSidecarView,
   SpurSessionView,
 } from "../src/lib/types";
+import type { PrState } from "../src/lib/pr-status-shape";
 
 const NOW = new Date().toISOString();
+
+interface AgentModelFixture {
+  id: string;
+  label: string;
+  isDefault?: boolean;
+}
+
+// A baseline, non-empty catalog per agent so a spec that never touches the
+// model picker still resolves to a concrete preselection instead of hitting
+// the real daemon. A spec exercising the picker itself registers its own
+// /api/models route after calling mockSessions to override this.
+const DEFAULT_AGENT_MODELS: Record<string, AgentModelFixture[]> = {
+  claude: [
+    { id: "opus", label: "Opus", isDefault: true },
+    { id: "sonnet", label: "Sonnet" },
+  ],
+  codex: [{ id: "gpt-5.1-codex", label: "GPT-5.1 Codex" }],
+  cursor: [
+    { id: "auto", label: "Auto", isDefault: true },
+    { id: "composer-2.5", label: "Composer 2.5" },
+  ],
+};
+
 const DEFAULT_GITHUB_STATUS = {
   ok: true,
   requestedAt: "2026-04-28T10:00:00.000Z",
@@ -23,6 +47,10 @@ function baseSession(id: string): SpurSessionView {
     id,
     project: "test-project",
     agent: "claude",
+    // A real session always has a resolved launch model; respawn/handoff
+    // carry it forward so their model control opens pre-resolved. A spec
+    // testing the resolved-empty carve-out overrides with `model: undefined`.
+    model: "opus",
     prompt: "Implement the feature",
     branch: "feature/test",
     worktree: true,
@@ -267,8 +295,48 @@ export async function mockSessions(
     });
   });
 
+  await mockAgentModels(page, DEFAULT_AGENT_MODELS);
+  await mockSpawnDefaults(page);
   await mockGitHubStatus(page, DEFAULT_GITHUB_STATUS);
   await mockGitLabStatus(page, DEFAULT_GITLAB_STATUS);
+}
+
+/**
+ * Stub `GET /api/models?agent=<name>`. A spec exercising the model picker
+ * with its own catalog calls this after `mockSessions` (or standalone, for a
+ * spec that never calls `mockSessions`) — the later `page.route` registration
+ * wins.
+ */
+export async function mockAgentModels(
+  page: Page,
+  byAgent: Record<string, AgentModelFixture[]>,
+): Promise<void> {
+  await page.route(/\/api\/models(\?.*)?$/, (route) => {
+    const url = new URL(route.request().url());
+    const agent = url.searchParams.get("agent") ?? "";
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ models: byAgent[agent] ?? [] }),
+    });
+  });
+}
+
+/**
+ * Stub `GET /api/projects/:id/spawn-defaults`, same override rule as
+ * {@link mockAgentModels}.
+ */
+export async function mockSpawnDefaults(
+  page: Page,
+  response: { model: string | null; worktree: boolean } = { model: null, worktree: true },
+): Promise<void> {
+  await page.route(/\/api\/projects\/[^/]+\/spawn-defaults(\?.*)?$/, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(response),
+    });
+  });
 }
 
 export async function mockGitHubStatus(
@@ -328,6 +396,22 @@ export async function mockPrStatusBatch(
   return { count: () => requestCount };
 }
 
+export async function mockPrState(page: Page, state: PrState): Promise<void> {
+  await page.route(/\/api\/pr-status\?/, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state,
+        ciStatus: null,
+        canMerge: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
+    });
+  });
+}
+
 export async function mockTagCatalog(page: Page): Promise<void> {
   await page.route("/api/tags", (route) => {
     void route.fulfill({
@@ -351,9 +435,8 @@ export async function gotoMocked(
 ): Promise<void> {
   await mockSessions(page, sessions, projects);
   await page.goto(path);
-  // Wait for the loading state to clear — the dashboard replaces "Loading..."
-  // with actual content once the first mocked fetch resolves.
-  await page.waitForFunction(() => !document.body.innerText.includes("Loading..."), {
+  // Wait for route-level feedback to clear before interacting with content.
+  await page.waitForFunction(() => !document.querySelector(".loader-bar, .loader-centered-mark"), {
     timeout: 8000,
   });
 }

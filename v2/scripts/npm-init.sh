@@ -77,9 +77,7 @@ if [[ "$npm_prefix" != "$HOME/.local" ]]; then
   die "npm prefix must be ~/.local (got: $npm_prefix). Run: npm config set prefix ~/.local --location=global --globalconfig \"\$HOME/.spur/npmrc\" && chmod 600 \"\$HOME/.spur/npmrc\""
 fi
 
-for f in deploy/spur-daemon.npm.service deploy/spur-web.npm.service dist/cli.js web/dist-server/web-server.js; do
-  [[ -f "$PKG_ROOT/$f" ]] || die "package file missing: $PKG_ROOT/$f (reinstall @shugaev/spur)"
-done
+bash "$PKG_ROOT/scripts/verify-package-files.sh" "$PKG_ROOT" || die "package validation failed (reinstall @shugaev/spur)"
 
 if ! systemctl --user status >/dev/null 2>&1; then
   die "user systemd is unavailable (systemctl --user status failed)"
@@ -166,7 +164,10 @@ web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 
 # later crash).
 active_daemon=0
 active_web=0
-for _ in $(seq 1 10); do
+# A registry with many configs and sources can take over 20 seconds to become
+# reachable after systemd reports the unit active. Keep the install alive long
+# enough for that normal boot path before update treats it as a failed deploy.
+for _ in $(seq 1 60); do
   active_daemon=0
   active_web=0
   systemctl --user is-active --quiet spur-daemon.service && active_daemon=1

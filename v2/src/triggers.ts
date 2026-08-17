@@ -11,6 +11,7 @@ import {
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
+  isStaleParked,
   WORK_ITEM_NEW_EVENT_NAMES,
   type AppConfig,
   type SendTriggerConfig,
@@ -51,6 +52,7 @@ interface PendingBatch {
   customPrompt: string | undefined;
   customPromptRecorded: boolean;
   batch: SendBatch;
+  notBeforeAt: number;
 }
 
 interface RetryState {
@@ -62,6 +64,7 @@ interface RetryState {
 interface DeliveryFailure {
   attempts: number;
   nextAttemptAt: number;
+  recordedAt: number;
 }
 
 // Rate-limit suppression is deliberately excluded from the failure/backoff
@@ -87,7 +90,11 @@ const CI_FAILED_MAX_ATTEMPTS = 3;
 // acknowledges). Without these, the flush loop would retry every 5s forever.
 // Start short so a session that was only briefly busy stays responsive, then
 // double the backoff on each failure (10s, 20s, 40s, ... 640s) and give up
-// after 8 attempts (~21 min total elapsed), dropping and logging the batch.
+// after 8 attempts, dropping and logging the batch. Backoff alone sums to
+// 1270s; each attempt can also block up to the submit-ack window
+// (agents/index.ts DEFAULT_SUBMIT_ACK_WINDOW_MS x (1 + resends)) and, on a
+// busy pane, queue behind another send's withPaneWriteLock (session-service.ts),
+// so worst case elapsed time is unbounded, not just the backoff sum.
 const DELIVERY_RETRY_BASE_MS = 10_000;
 const DELIVERY_MAX_ATTEMPTS = 8;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
@@ -98,9 +105,10 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "needs_input",
 ]);
 
-// A running claude session whose live state is "error" is wedged on a
-// transient Claude server error (session-service.ts's reactivation nudge
-// self-clears it once it recovers), not actually closed or dead — the same
+// A running session whose live state is "error" is wedged on a transient
+// last-turn failure — a Claude server error (session-service.ts's
+// reactivation nudge self-clears it once it recovers) or a Cursor
+// terminalError record — not actually closed or dead — the same
 // "still alive, just blocked" shape as rate_limited. Scoped to
 // status === "running" because a genuinely closed session (status stopped,
 // errored, or killed) can also carry state "error", and that case IS closed.
@@ -142,7 +150,15 @@ function isSessionNotFoundError(message: string): boolean {
   return message.startsWith("Session not found:");
 }
 
+// A stale-parked session (status "stopped", stopReason "stale_timeout") is
+// still the owner of its work item — it merely went idle and any incoming
+// event wakes it silently (session-service.ts parkStaleSession/finishStaleWake).
+// Treating it as replaceable here would spawn a second session for the same
+// work item on top of the one that is about to be woken.
 function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
+  if (isStaleParked(session)) {
+    return false;
+  }
   return (
     session.status === "stopped" ||
     session.status === "errored" ||
@@ -301,6 +317,7 @@ async function runSpawnTrigger(
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
           ...(block.model !== undefined ? { model: block.model } : {}),
+          ...(block.mode !== undefined ? { mode: block.mode } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
@@ -508,11 +525,14 @@ function isSendTrigger(
 
 function isDeliverableState(session: SessionView): boolean {
   return (
-    session.state === "waiting" &&
-    isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs())
+    session.state === "stale" ||
+    (session.state === "waiting" &&
+      isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs()))
   );
 }
 
+// "stale" is deliberately never closed: a parked session has no live agent to
+// interrupt, so it must stay deliverable rather than dropping the batch.
 function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
@@ -566,6 +586,7 @@ function mergeIntoBatch(
     customPrompt,
     customPromptRecorded: false,
     batch: incoming,
+    notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
   };
 }
 
@@ -784,13 +805,24 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       );
       return;
     }
+    const now = Date.now();
     const backoff = DELIVERY_RETRY_BASE_MS * 2 ** (attempts - 1);
-    deliveryFailures.set(queueKey, { attempts, nextAttemptAt: Date.now() + backoff });
+    deliveryFailures.set(queueKey, { attempts, nextAttemptAt: now + backoff, recordedAt: now });
   };
 
   const isInDeliveryBackoff = (queueKey: string): boolean => {
     const failure = deliveryFailures.get(queueKey);
     return failure !== undefined && Date.now() < failure.nextAttemptAt;
+  };
+
+  // Clears a stale delivery-failure entry when the session has restarted since
+  // the failure was recorded. A restart invalidates the prior failure context,
+  // so backoff should not block the fresh session.
+  const clearBackoffIfRestarted = (queueKey: string, session: SessionView): void => {
+    const failure = deliveryFailures.get(queueKey);
+    if (failure && sessionRestartedSince(session, failure.recordedAt)) {
+      deliveryFailures.delete(queueKey);
+    }
   };
 
   // Delivers outside the CI-failed retry path and, on a thrown error, feeds
@@ -802,9 +834,17 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     interrupt: boolean,
   ): Promise<void> => {
     const result = await deliverBatch(queueKey, batch, interrupt);
-    if (result.status === "failed") {
-      recordDeliveryFailure(queueKey, batch, interrupt, result.error);
-    }
+    if (result.status !== "failed") return;
+    // A delivery decided against a live state can still land after a pause or
+    // restore has torn the pane down — the send then fails with "can't find
+    // session". That is the pane going away mid-flight, not the target
+    // rejecting the message, and the backoff it would open (10s, doubling)
+    // spans exactly the window the restore replay has to be delivered in.
+    // Re-read the state at failure time: a closed session leaves the batch
+    // queued for the flush loop instead.
+    const current = await loadSessionOrClear(queueKey, batch);
+    if (current && isClosedState(current.state)) return;
+    recordDeliveryFailure(queueKey, batch, interrupt, result.error);
   };
 
   const flushPending = async (queueKey: string, batch: PendingBatch): Promise<void> => {
@@ -873,6 +913,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    const deliverable = isDeliverableState(session);
     const retry = retryStates.get(queueKey);
     if (retry) {
       if (retry.attempts >= CI_FAILED_MAX_ATTEMPTS) {
@@ -892,7 +933,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return;
       }
 
-      if (!retry.interrupt && !isDeliverableState(session)) {
+      const interrupt = retry.interrupt && session.state === "working";
+      if (!deliverable && !interrupt) {
         return;
       }
 
@@ -901,10 +943,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return;
       }
 
+      // Escalation (interrupt=true, working) bypasses the window gate.
+      if (!interrupt && now < batch.notBeforeAt) {
+        return;
+      }
+
       retry.attempts += 1;
       retry.nextAttemptAt =
         retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
-      await deliverBatch(queueKey, batch, retry.interrupt && !isDeliverableState(session), {
+      await deliverBatch(queueKey, batch, interrupt, {
         attempt: retry.attempts,
         clearAfter: false,
         keepRetryState: true,
@@ -912,9 +959,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    clearBackoffIfRestarted(queueKey, session);
     if (isInDeliveryBackoff(queueKey)) return;
 
-    if (isDeliverableState(session)) {
+    if (deliverable) {
+      if (!isStaleParked(session) && Date.now() < batch.notBeforeAt) return;
       interruptedKeys.delete(queueKey);
       await deliverAndTrackFailure(queueKey, batch, false);
       return;
@@ -1025,9 +1074,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     // A delivery already failing its backoff window stays queued for the flush
     // loop; a fresh event must not bypass the backoff and re-spam the target.
+    // If the session restarted since the failure, the stale backoff is cleared.
+    clearBackoffIfRestarted(queueKey, session);
     if (isInDeliveryBackoff(queueKey)) return;
 
-    if (isDeliverableState(session)) {
+    if (isStaleParked(session)) {
       await deliverAndTrackFailure(queueKey, batch, false);
       return;
     }
@@ -1086,6 +1137,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         customPrompt: sendTrigger.send.prompt,
         customPromptRecorded: false,
         batch,
+        notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
       });
       // Without this, a restored ci_failed batch would skip the retry/backoff
       // branch entirely (no retryStates entry) and deliver once immediately

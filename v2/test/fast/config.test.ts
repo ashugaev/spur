@@ -2,11 +2,13 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  deriveAdmissionFloorBytes,
   deriveMaxLiveSessions,
+  deriveShedCriticalFloorBytes,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
@@ -15,6 +17,12 @@ import {
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
+import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+} from "../../src/event-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -51,6 +59,7 @@ async function createConfigSearchMissDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   process.chdir(initialCwd);
   if (initialSpurConfig === undefined) {
     delete process.env["SPUR_CONFIG"];
@@ -83,6 +92,7 @@ projects:
     expect(config.defaultAgent).toBe("claude");
     expect(config.dataDir).toContain(".spur");
     expect(config.worktreeDir).toContain(".spur/worktrees");
+    expect(config.models.codexHome).toContain(".codex");
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
     if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
@@ -105,6 +115,32 @@ projects:
         interrupt: false,
       },
     });
+  });
+
+  it("uses the instance Codex cache home and ignores a project value", async () => {
+    const instancePath = await writeConfig(`
+models:
+  codexHome: ~/.cache/codex
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    const projectPath = await writeNamedConfig(
+      "project.yaml",
+      `
+models:
+  - ignored
+projects:
+  backend:
+    path: $REPO_PATH
+`,
+    );
+
+    const instance = loadConfig(instancePath);
+    const project = loadProjectConfig(projectPath, instance);
+
+    expect(instance.models.codexHome).toContain(".cache/codex");
+    expect(project.models.codexHome).toBe(instance.models.codexHome);
   });
 
   it("accepts cursor as an instance and project default agent", async () => {
@@ -1091,6 +1127,7 @@ projects:
   });
 
   it("parses telegram sources with env token and matching trigger events", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -1238,6 +1275,144 @@ projects:
     });
   });
 
+  it("parses a project modes registry", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      manager:
+        skill: manager
+        default: true
+      council:
+        skill: council
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.modes).toEqual({
+      manager: { skill: "manager", default: true },
+      council: { skill: "council" },
+    });
+  });
+
+  it("parses a mode literally named __proto__ as a genuine own key, not a prototype mutation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      __proto__:
+        skill: manager
+`);
+
+    const config = loadConfig(configPath);
+    const modes = config.projects["backend"]?.modes;
+
+    expect(Object.hasOwn(modes ?? {}, "__proto__")).toBe(true);
+    expect(Object.entries(modes ?? {})).toEqual([["__proto__", { skill: "manager" }]]);
+  });
+
+  it("rejects a modes registry with more than one default", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      manager:
+        skill: manager
+        default: true
+      council:
+        skill: council
+        default: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.modes: at most one mode may set default: true",
+    );
+  });
+
+  it("rejects a mode with an empty skill", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      manager:
+        skill: ""
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.modes.manager.skill must be a non-empty string",
+    );
+  });
+
+  it("rejects an invalid mode name", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    modes:
+      "bad name":
+        skill: manager
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /projects\.backend\.modes\.bad name is invalid: mode names must match/,
+    );
+  });
+
+  it("parses a trigger spawn block mode field", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          mode: council
+`);
+
+    const config = loadConfig(configPath);
+    const trigger = config.projects["backend"]?.triggers["review"];
+    if (!trigger || !("spawn" in trigger)) {
+      throw new Error("expected review to be a spawn trigger");
+    }
+
+    expect(trigger.spawn.blocks[0]?.mode).toBe("council");
+  });
+
+  it("rejects a spawn-level mode field alongside blocks[]", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          mode: council
+          blocks:
+            - prompt: "review"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn: put per-block fields inside blocks[]",
+    );
+  });
+
   it("parses project codex args", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1245,19 +1420,44 @@ projects:
     path: $REPO_PATH
     codexArgs:
       - -c
-      - 'model_reasoning_effort="high"'
-      - --enable
-      - fast_mode
+      - 'service_tier="fast"'
 `);
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.codexArgs).toEqual([
+    expect(config.projects["backend"]?.codexArgs).toEqual(["-c", 'service_tier="fast"']);
+  });
+
+  it("allows legacy reasoning effort in raw Codex args", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.codexArgs).toEqual([
       "-c",
       'model_reasoning_effort="high"',
-      "--enable",
-      "fast_mode",
     ]);
+  });
+
+  it("parses provider reasoning effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: low
+      codex: high
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({
+      claude: "low",
+      codex: "high",
+    });
   });
 
   it("rejects non-string project codex args", async () => {
@@ -2436,73 +2636,41 @@ projects:
     });
   });
 
-  it("parses the root CodeReview work-item trigger", async () => {
+  it("keeps the root sp project free of a review fleet", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
-    const trigger = config.projects["sp"]?.triggers["gh-pr-review-spawn"];
 
-    if (!trigger || !("spawn" in trigger)) {
-      throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
+    expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
+    expect(config.projects["sp"]?.triggers["gh-pr-review-spawn"]).toBeUndefined();
+    expect(config.projects["sp"]?.sources["gh-pr-review"]).toBeUndefined();
+  });
+
+  it("parses the root PR-merged send trigger", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+    const trigger = config.projects["sp"]?.triggers["gh-merged"];
+    if (!trigger || !("send" in trigger)) {
+      throw new Error("expected gh-merged to be a send trigger");
     }
-
-    const [claudeBlock, cursorBlock, uiBlock, docsBlock] = trigger.spawn.blocks;
-
-    expect([
-      trigger.source,
-      trigger.event,
-      trigger.spawnDeskGroup,
-      trigger.spawn.blocks.length,
-      claudeBlock?.agent,
-      claudeBlock?.model,
-      claudeBlock?.overrides?.worktree,
-      claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 4, "claude", "sonnet", true, true]);
-    expect([
-      cursorBlock?.agent,
-      cursorBlock?.model,
-      cursorBlock?.overrides?.worktree,
-      cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", true, true]);
-    expect([
-      uiBlock?.agent,
-      uiBlock?.model,
-      uiBlock?.overrides?.worktree,
-      uiBlock?.selfDestruct?.enabled,
-    ]).toEqual(["claude", "sonnet", true, true]);
-    expect([
-      docsBlock?.agent,
-      docsBlock?.model,
-      docsBlock?.overrides?.worktree,
-      docsBlock?.selfDestruct?.enabled,
-    ]).toEqual(["claude", "sonnet", true, true]);
-    expect(docsBlock?.selfDestruct?.conditions).toBe(
-      "docs review posted, or PR changes no docs and no user-facing surface.",
-    );
-    expect([
-      trigger.spawn.restrictWrites,
-      trigger.spawn.autoComplete,
-      trigger.spawn.allowedTriggers,
-    ]).toEqual([true, undefined, []]);
-    expect(claudeBlock?.prompt).toBe(
-      [
-        "Run /code-review {{url}} --comment.",
-        "Apply the `review` tag to this session.",
-        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI fails or the PR has merge conflicts, find the running session on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict."',
-      ].join("\n"),
-    );
-    expect(claudeBlock?.selfDestruct?.conditions).toBe(
-      "PR merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+    expect(trigger.source).toBe("gh");
+    expect(trigger.event).toBe("github:merged");
+    expect(trigger.send.interrupt).toBe(false);
+    expect(trigger.send.prompt).toBe(
+      "If your task prompt defines self-destruct conditions, recheck them now and self-destruct if satisfied. Otherwise ignore.",
     );
   });
 
-  it("pins codex non-fast service_tier and high reasoning for the sp project", async () => {
+  it("sets medium provider reasoning for the sp project", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
-    expect(config.projects["sp"]?.codexArgs).toEqual([
-      "-c",
-      'model_reasoning_effort="high"',
-      "-c",
-      'service_tier="default"',
-    ]);
+    expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
+    expect(config.projects["sp"]?.defaultModels?.cursor).toBe("auto");
+    expect(config.projects["sp"]?.codexArgs).toEqual(["-c", 'service_tier="default"']);
+  });
+
+  it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+
+    expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);
+    expect(config.projects["sp"]?.spawn?.steps).toBeUndefined();
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
@@ -3585,6 +3753,61 @@ projects:
     );
   });
 
+  it("parses eventLog in instance mode and defaults when absent", async () => {
+    const withBlock = await writeConfig(`
+eventLog:
+  hotBytes: 12345
+  shardHotBytes: 678
+  retainArchives: 3
+  collapseWindowMs: 5000
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(withBlock).eventLog).toEqual({
+      hotBytes: 12345,
+      shardHotBytes: 678,
+      retainArchives: 3,
+      collapseWindowMs: 5000,
+    });
+
+    const absent = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).eventLog).toEqual({
+      hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
+      shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+      retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+      collapseWindowMs: DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
+    });
+  });
+
+  it("accepts eventLog.collapseWindowMs of 0", async () => {
+    const configPath = await writeConfig(`
+eventLog:
+  collapseWindowMs: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(configPath).eventLog?.collapseWindowMs).toBe(0);
+  });
+
+  it("rejects a negative eventLog.collapseWindowMs", async () => {
+    const configPath = await writeConfig(`
+eventLog:
+  collapseWindowMs: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "eventLog.collapseWindowMs must be a non-negative number",
+    );
+  });
+
   it("accepts rateLimitReactivation.afterHours of 0", async () => {
     const configPath = await writeConfig(`
 rateLimitReactivation:
@@ -3707,6 +3930,60 @@ projects:
     });
   });
 
+  it("parses diskRetention.warnFreeGb in instance mode", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: 25
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 25 });
+  });
+
+  it("defaults diskRetention.warnFreeGb to 10 when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 10 });
+  });
+
+  it("ignores diskRetention in project mode", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: 25
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.diskRetention).toEqual({ warnFreeGb: 10 });
+  });
+
+  it("rejects a negative diskRetention.warnFreeGb", async () => {
+    const configPath = await writeConfig(`
+diskRetention:
+  warnFreeGb: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "diskRetention.warnFreeGb must be a non-negative number",
+    );
+  });
+
   it("parses admission.maxLiveSessions and memoryGuard in instance mode", async () => {
     const configPath = await writeConfig(`
 admission:
@@ -3731,7 +4008,18 @@ projects:
       maxLiveSessionsSource: "config",
       perSessionBytes: 1,
       reserveFraction: 0.5,
-      memoryGuard: { enforce: true, minAvailableBytes: 1000, minFreeSwapBytes: 500 },
+      memoryGuard: {
+        enforce: true,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: 1000,
+        minFreeSwapBytes: 500,
+        admissionFloorBytes: deriveAdmissionFloorBytes(totalmem()),
+        shedCriticalFloorBytes: deriveShedCriticalFloorBytes(totalmem()),
+        restoreFloorBytes: deriveAdmissionFloorBytes(totalmem()) + 1,
+        pressureSomeAvg10Refuse: 20,
+        shedSwapUsedFraction: 0.9,
+      },
     });
   });
 
@@ -3851,6 +4139,37 @@ projects:
     );
   });
 
+  it("rejects inverted memory shed and admission floors", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    admissionFloorBytes: 1000
+    shedCriticalFloorBytes: 1000
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "shedCriticalFloorBytes (1000) must be less than admissionFloorBytes (1000)",
+    );
+  });
+
+  it("rejects PSI percentages outside 0 through 100", async () => {
+    const configPath = await writeConfig(`
+admission:
+  memoryGuard:
+    pressureSomeAvg10Refuse: 101
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.memoryGuard.pressureSomeAvg10Refuse must be a number from 0 to 100",
+    );
+  });
+
   it("ignores a project admission block before semantic parsing", async () => {
     const configPath = await writeConfig(`
 admission:
@@ -3878,6 +4197,62 @@ projects:
 
     expect(loadConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
     expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
+  });
+
+  it("defaults staleAfterMinutes to 12 hours when the config does not set it", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(720);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBeUndefined();
+  });
+
+  it("parses projects.<id>.staleAfterMinutes as a per-project override", async () => {
+    const configPath = await writeConfig(`
+staleAfterMinutes: 60
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: 15
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(60);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBe(15);
+  });
+
+  it("lets a project's staleAfterMinutes of 0 disable parking while the instance stays enabled", async () => {
+    const configPath = await writeConfig(`
+staleAfterMinutes: 60
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: 0
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(60);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBe(0);
+  });
+
+  it("rejects a negative projects.<id>.staleAfterMinutes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: -1
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.staleAfterMinutes must be a non-negative number",
+    );
   });
 });
 
@@ -3964,6 +4339,118 @@ projects:
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     });
+  });
+});
+
+describe("sidecarGc", () => {
+  it("defaults to enabled true / 120 / 360 when absent (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    });
+  });
+
+  it("parses sidecarGc in instance mode", async () => {
+    const configPath = await writeConfig(`
+sidecarGc:
+  enabled: false
+  idleTtlMinutes: 240
+  maxAgeWarnMinutes: 720
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: false,
+      idleTtlMinutes: 240,
+      maxAgeWarnMinutes: 720,
+    });
+  });
+
+  it("ignores a project-level sidecarGc block", async () => {
+    const configPath = await writeConfig(`
+sidecarGc:
+  enabled: false
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.sidecarGc).toEqual({
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    });
+  });
+
+  it("reads a per-sidecar idleTtlMinutes override instead of silently dropping it (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      front-local:
+        command: "pnpm dev"
+        idleTtlMinutes: 240
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["front-local"]).toEqual({
+      command: "pnpm dev",
+      autoStart: false,
+      idleTtlMinutes: 240,
+    });
+  });
+
+  it("still rejects idleTtlMinutes on a built-in sidecar (AC10)", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sidecars:
+      playwright:
+        idleTtlMinutes: 30
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.sidecars.playwright is a built-in sidecar; only "autoStart" may be set here (got: idleTtlMinutes)',
+    );
+  });
+});
+
+describe("derive memory floors", () => {
+  it("derives ordered defaults for the measured 62.789 GiB host", () => {
+    const totalBytes = 67_418_697_728;
+    const admission = deriveAdmissionFloorBytes(totalBytes);
+    const critical = deriveShedCriticalFloorBytes(totalBytes);
+
+    expect(admission).toBe(8_427_337_216);
+    expect(critical).toBe(4_213_668_608);
+    expect(critical).toBeLessThan(admission);
+    expect(admission).toBeLessThan(admission + 1_610_612_736);
+  });
+
+  it("keeps floors ordered on a 1 GiB host", () => {
+    const admission = deriveAdmissionFloorBytes(1024 ** 3);
+    const critical = deriveShedCriticalFloorBytes(1024 ** 3);
+    expect(critical).toBe(512 * 1024 ** 2);
+    expect(admission).toBe(1024 ** 3);
+    expect(critical).toBeLessThan(admission);
   });
 });
 

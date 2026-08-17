@@ -1421,38 +1421,43 @@ export async function collectGitHubSignalsBatch(
           selected.push(...group.map((target) => ({ ...target, lookupClaim: claim })));
           continue;
         }
-        const outcome = claim.status === "cached" ? claim.outcome : await claim.outcome;
+        // Never await a claim another actor owns: an actor holding its own
+        // owner claims while waiting on a foreign claim closes a
+        // hold-and-wait cycle that wedges the poll cycle latch for the
+        // process's life. The sibling writes the answer to the pr-lookup
+        // cache; this tick reads it from disk on the next pass.
         for (const target of group) {
-          results.set(
-            target.session.id,
-            outcome.status === "skipped" && outcome.reason === "budget"
-              ? { status: "skipped", reason: "budget" }
-              : outcome.status === "skipped"
-                ? { status: "error", error: new Error(outcome.message ?? outcome.reason) }
-                : { status: "skipped", reason: "cached" },
-          );
+          results.set(target.session.id, { status: "skipped", reason: "cached" });
         }
       }
       if (selected.length === 0) continue;
-      const admission = await withGhPollBudget(() =>
-        runReviewRepoBatch(selected, dataDir, projectId, sourceId),
-      );
-      if (admission.status === "blocked") {
-        for (const target of selected) {
-          settleTargetLookup(target, { status: "skipped", reason: "budget" });
+      try {
+        const admission = await withGhPollBudget(() =>
+          runReviewRepoBatch(selected, dataDir, projectId, sourceId),
+        );
+        if (admission.status === "blocked") {
+          for (const target of selected) {
+            settleTargetLookup(target, { status: "skipped", reason: "budget" });
+          }
         }
-      }
-      const batch =
-        admission.status === "blocked"
-          ? new Map(
-              selected.map((target) => [
-                target.session.id,
-                { status: "skipped", reason: "budget" } satisfies GitHubSignalBatchResult,
-              ]),
-            )
-          : admission.value;
-      for (const [sessionId, result] of batch) {
-        results.set(sessionId, result);
+        const batch =
+          admission.status === "blocked"
+            ? new Map(
+                selected.map((target) => [
+                  target.session.id,
+                  { status: "skipped", reason: "budget" } satisfies GitHubSignalBatchResult,
+                ]),
+              )
+            : admission.value;
+        for (const [sessionId, result] of batch) {
+          results.set(sessionId, result);
+        }
+      } finally {
+        // Releases only what runReviewRepoBatch left unsettled — a throw mid-batch. settle ignores
+        // repeat calls, so every success and budget path above keeps its real outcome.
+        for (const target of selected) {
+          settleTargetLookup(target, { status: "skipped", reason: "error" });
+        }
       }
     }
   }

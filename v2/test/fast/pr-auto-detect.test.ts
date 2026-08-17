@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
+import type * as prLookupModule from "../../src/pr-lookup.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const { existsSyncMock } = vi.hoisted(() => ({
@@ -58,12 +59,16 @@ vi.mock("../../src/config.js", () => ({
   loadConfig: vi.fn(),
   loadProjectConfig: vi.fn(),
   findProjectConfigPathInDirectory: vi.fn(),
+  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
 }));
 vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: vi.fn(),
 }));
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
+  // The reaper tick flushes the warn-collapse map; these tests advance timers
+  // past REAP_INTERVAL_MS, so the mock has to carry it.
+  flushEventLogCollapse: vi.fn(),
 }));
 vi.mock("../../src/desktop-notify.js", () => ({
   sendDesktopNotification: vi.fn(),
@@ -115,7 +120,6 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxSidecarSession: vi.fn(),
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
-  killSidecarTmux: vi.fn(),
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: vi.fn(() => Promise.resolve(null)),
@@ -171,9 +175,14 @@ vi.mock("../../src/registry.js", () => ({
     mutate({ configPaths: [], unconfiguredProjects: [] }),
   ),
   readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
+  dropWorktreeInternalPaths: vi.fn((paths: string[]) => paths),
+  canonicalConfigKey: vi.fn((path: string) => path),
+  isInsideWorktreeDir: vi.fn(() => false),
+  removeConfigRegistryPath: vi.fn(() => []),
   // Keep existing per-test buildMergedConfigMock setups driving the merged config.
   ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
     invalidateRemovedPaths: vi.fn(),
+    canonicalizePath: vi.fn((path: string) => path),
     scan: () => {
       const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
       return {
@@ -209,6 +218,7 @@ function baseConfig(): AppConfig {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    models: { codexHome: "/tmp/codex" },
     voice: {
       provider: "whisper_cpp",
       language: "en",
@@ -220,6 +230,7 @@ function baseConfig(): AppConfig {
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
     },
+    diskRetention: { warnFreeGb: 10 },
     sessionGc: {
       enabled: false,
       olderThanDays: 30,
@@ -227,14 +238,31 @@ function baseConfig(): AppConfig {
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     },
+    sidecarGc: {
+      enabled: true,
+      idleTtlMinutes: 120,
+      maxAgeWarnMinutes: 360,
+    },
     admission: {
       enabled: true,
       maxLiveSessions: 1000,
       maxLiveSessionsSource: "derived",
       perSessionBytes: 1_610_612_736,
       reserveFraction: 0.7,
-      memoryGuard: { enforce: false, minAvailableBytes: 1_073_741_824, minFreeSwapBytes: 0 },
+      memoryGuard: {
+        enforce: false,
+        enforceFloors: true,
+        shedEnabled: true,
+        minAvailableBytes: 1_073_741_824,
+        minFreeSwapBytes: 0,
+        admissionFloorBytes: 8_000_000_000,
+        shedCriticalFloorBytes: 4_000_000_000,
+        restoreFloorBytes: 9_610_612_736,
+        pressureSomeAvg10Refuse: 20,
+        shedSwapUsedFraction: 0.9,
+      },
     },
+    staleAfterMinutes: 60,
     projects: {
       api: {
         path: "/repo/api",
@@ -505,6 +533,105 @@ describe("PR auto-detect", () => {
       links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
     });
     expect(writeSessionMock).toHaveBeenCalled();
+    service.dispose();
+  });
+
+  function apiProjectWithSources(sources: ProjectConfig["sources"]): ProjectConfig {
+    const baseProject = baseConfig().projects.api;
+    if (!baseProject) {
+      throw new Error("Missing api project fixture");
+    }
+    return { ...baseProject, sources };
+  }
+
+  it("does not call glab when every remote is github.com and no PR exists", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    mockGraphql({});
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: { api: apiProjectWithSources({}) },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(glabMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ event: "session.pr_auto_detect.failed" }),
+    );
+
+    service.dispose();
+  });
+
+  it("does not call glab when every remote is github.com and the gh lookup errors", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockRejectedValue(new Error("gh: server error"));
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: { api: apiProjectWithSources({}) },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(glabMock).not.toHaveBeenCalled();
+
+    service.dispose();
+  });
+
+  it("still gives glab its turn when a gitlab remote sits beside a github upstream", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    readRemoteUrlsMock.mockResolvedValue(
+      new Map([
+        ["upstream", "git@github.com:acme/api.git"],
+        ["origin", "git@gitlab.com:acme/api.git"],
+      ]),
+    );
+    mockGraphql({});
+    glabMock.mockResolvedValue(
+      JSON.stringify([
+        {
+          iid: 42,
+          title: "Support GitLab provider",
+          web_url: "https://gitlab.com/org/repo/-/merge_requests/42",
+        },
+      ]),
+    );
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: { api: apiProjectWithSources({}) },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(glabMock).toHaveBeenCalled();
+
     service.dispose();
   });
 
@@ -919,5 +1046,53 @@ describe("PR auto-detect", () => {
     expect(ghMock).toHaveBeenCalledTimes(1);
 
     service.dispose();
+  });
+
+  it("releases the sweep's poll claim when enqueuePrLookup rejects", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    // Real `enqueuePrLookup` never rejects (its own doc comment says so):
+    // every gh failure it sees is caught and settled as a `skipped` outcome.
+    // Proving `resolveQueuedPrLookup`'s finally releases the claim on a
+    // rejection needs a synthetic one, scoped to this test only with
+    // `vi.doMock` (not the file-wide `vi.mock`) so the other 18 tests in this
+    // file keep importing a genuinely fresh, unmocked `pr-lookup.js` module
+    // per `vi.resetModules()` cycle.
+    vi.doMock("../../src/pr-lookup.js", async (importOriginal) => {
+      const original = await importOriginal<typeof prLookupModule>();
+      return { ...original, enqueuePrLookup: () => Promise.reject(new Error("gh unavailable")) };
+    });
+
+    try {
+      const { SessionService } = await loadModule();
+      const { claimPollPrLookup } = await import("../../src/pr-lookup.js");
+      const service = new SessionService();
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      // The rejection is not swallowed: the sweep logs it instead of hanging.
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        DATA_DIR,
+        expect.objectContaining({ event: "session.pr_auto_detect.failed" }),
+      );
+      // And the claim taken before the rejecting await is released, not
+      // leaked: a later claimant owns the key instead of joining a claim
+      // nobody settles.
+      const claim = claimPollPrLookup({
+        dataDir: DATA_DIR,
+        slug: PR_SLUG,
+        branch: session.branch,
+        capMs: 5 * 60_000,
+      });
+      expect(claim.status).toBe("owner");
+
+      service.dispose();
+    } finally {
+      // Unregister unconditionally: an assertion failure above must not leave
+      // a rejecting `enqueuePrLookup` mock for a test appended after this one.
+      vi.doUnmock("../../src/pr-lookup.js");
+    }
   });
 });

@@ -5,11 +5,22 @@ import {
   hasErrorSeverity,
   renderHostInstallChecks,
   runNpmInit,
+  type ConfigRegistryPathEntry,
   type HostInstallCheck,
 } from "./host-install.js";
+import {
+  byEntrySizeDesc,
+  executePrune,
+  formatCacheSizeGb,
+  planCachePrune,
+  prunableCandidates,
+  type CachePlan,
+  type CacheCandidate,
+  type PruneOutcome,
+} from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -29,14 +40,17 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
+  assertConfigMayUseProdSlot,
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
+  loadInstanceConfigReadOnly,
   loadProjectConfig,
   writeProjectConfigScaffold,
 } from "./config.js";
+import { checkAgentProcessOwnership } from "./agent-processes.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
@@ -59,13 +73,23 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
-import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import {
+  isForeignAgentProcessMessage,
+  isKillConfirmationRequiredMessage,
+  isRestorableSession,
+} from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
+import type { SidecarSweepResult } from "./sidecars/reap.js";
 import { setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
 import { assertValidSharedMemoryScope } from "./shared-memory.js";
 import { reinitUnits, runUpdate, runUpdateMonitor } from "./update.js";
-import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
+import {
+  buildMergedConfig,
+  dropWorktreeInternalPaths,
+  isInsideWorktreeDir,
+  readConfigRegistryFile,
+} from "./registry.js";
 import { listSessions } from "./metadata.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
@@ -295,6 +319,46 @@ function renderSessionMemoryRecord(record: SessionMemoryRecord): string {
   return lines.join("\n");
 }
 
+// 1-based numbered queue: real entries only (the ones remove/flush can act
+// on); pipeline steps render separately, unnumbered, since they are not a
+// valid remove/flush target.
+function renderQueuedMessages(sessionId: string, session: SessionView): string {
+  const messages = session.queuedMessages?.messages ?? [];
+  const pipelineMessages = session.queuedMessages?.pipelineMessages ?? [];
+  if (messages.length === 0 && pipelineMessages.length === 0) {
+    return dimText(`No queued messages for ${sessionId}.`);
+  }
+  const lines: string[] = [];
+  messages.forEach((message, index) => {
+    lines.push(`${boldText(`#${index + 1}`)} ${message}`);
+  });
+  if (pipelineMessages.length > 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push(dimText("Auto steps (not selectable):"));
+    for (const stepMessage of pipelineMessages) {
+      lines.push(dimText(`- ${stepMessage}`));
+    }
+  }
+  return lines.join("\n");
+}
+
+function resolveQueuedMessageByIndex(
+  sessionId: string,
+  session: SessionView,
+  index: number,
+): string {
+  const messages = session.queuedMessages?.messages ?? [];
+  const message = index >= 1 ? messages[index - 1] : undefined;
+  if (message === undefined) {
+    throw new Error(
+      `Index ${index} is out of range: ${sessionId} has ${messages.length} queued message(s)`,
+    );
+  }
+  return message;
+}
+
 function renderSessionMemoryList(sessionId: string, response: SessionMemoryListResponse): string {
   if (response.records.length === 0) {
     return dimText(`No session memory for ${sessionId}.`);
@@ -383,7 +447,8 @@ function getConfigPath(program: Command): string | undefined {
 export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
   const base = loadConfig(configPath);
   const registry = readConfigRegistryFile(base.dataDir);
-  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
+  const paths = dropWorktreeInternalPaths(registry.configPaths, base.worktreeDir);
+  const config = buildMergedConfig(configPath, paths, { skipInvalid: true }).config;
   const project = config.projects[projectId];
   if (!project) {
     throw new Error(`Unknown project: ${projectId}`);
@@ -397,7 +462,7 @@ function prepareInstanceConfig(program: Command): { configPath: string; initiali
   return ensured;
 }
 
-async function maybeAutoConnectProject(
+export async function maybeAutoConnectProject(
   cliEntrypoint: string,
   configPath: string,
   explicitProjectConfigPath?: string,
@@ -419,6 +484,9 @@ async function maybeAutoConnectProject(
   }
   const projectConfigPath = [...candidates][0];
   if (!projectConfigPath) {
+    return {};
+  }
+  if (isInsideWorktreeDir(projectConfigPath, loadConfig(configPath).worktreeDir)) {
     return {};
   }
 
@@ -799,6 +867,7 @@ interface HelpRow {
 
 interface DoctorResult {
   hostChecks: HostInstallCheck[];
+  configRegistryPaths: ConfigRegistryPathEntry[];
   configPath?: string;
   defaultBranch?: string;
   projectId?: string;
@@ -826,8 +895,23 @@ function displayPathFromCwd(path: string): string {
   return rendered.startsWith(".") ? rendered : `./${rendered}`;
 }
 
+function renderConfigRegistryPaths(paths: ConfigRegistryPathEntry[]): string[] {
+  if (paths.length === 0) return [];
+  return [
+    dimText("Registered config paths:"),
+    ...paths.map((entry) =>
+      dimText(`  ${entry.state.padEnd("worktree-internal".length)}  ${entry.path}`),
+    ),
+    "",
+  ];
+}
+
 function renderDoctorResult(result: DoctorResult): string {
-  const lines = [renderHostInstallChecks(result.hostChecks), ""];
+  const lines = [
+    renderHostInstallChecks(result.hostChecks),
+    "",
+    ...renderConfigRegistryPaths(result.configRegistryPaths),
+  ];
   if (result.existingProjectConfigPath) {
     lines.push(
       dimText(
@@ -856,6 +940,208 @@ function renderDoctorResult(result: DoctorResult): string {
   }
   return lines.join("\n");
 }
+
+const MAX_LISTED_CANDIDATES = 20;
+
+function formatProtectedReason(candidate: CacheCandidate): string {
+  if (candidate.verdict.kind !== "protected") return "";
+  const reason = candidate.verdict.reason;
+  switch (reason.kind) {
+    case "too-recent":
+      return `too recent (${reason.ageDays}d < ${reason.floorDays}d floor)`;
+    case "in-use":
+      return `in use by pid ${reason.pid} (${reason.evidence})`;
+    case "package-manager-active":
+      return `package manager active (pid ${reason.pid})`;
+    case "pinned-revision":
+      return `pinned browser revision (${reason.dirName})`;
+    case "pin-unresolved":
+      return "no browsers.json pin sources resolved";
+    case "pin-source":
+      return "npx-package is a browsers.json pin source";
+    case "spur-owned":
+      return "resolves inside Spur data directory";
+    case "class-never-pruned":
+      return "never pruned (this class is report-only)";
+    case "process-tree-unreadable":
+      return "process tree unreadable";
+    case "process-list-unavailable":
+      return "process listing unavailable";
+    case "not-owned":
+      return `not owned by this user (uid ${reason.uid})`;
+    case "symlink":
+      return "symlink";
+  }
+}
+
+function renderCachePlan(plan: CachePlan): string {
+  const lines: string[] = [boldText("Cache roots")];
+  for (const root of plan.roots) {
+    lines.push(
+      `  ${accent(root.rootId.padEnd(20))}  ${root.status.padEnd(9)}  ${formatCacheSizeGb(root.totalKb).padStart(9)}  ${String(root.entryCount).padStart(5)} entries  ${dimText(root.path)}`,
+    );
+  }
+
+  const prunable = prunableCandidates(plan);
+  const protectedCandidates = plan.candidates
+    .filter(
+      (candidate): candidate is CacheCandidate & { verdict: { kind: "protected" } } =>
+        candidate.verdict.kind === "protected",
+    )
+    .sort(byEntrySizeDesc);
+
+  lines.push(
+    "",
+    boldText(
+      `Prunable: ${prunable.length} entries, ${formatCacheSizeGb(plan.reclaimableKb)} reclaimable`,
+    ),
+  );
+  for (const candidate of prunable.slice(0, MAX_LISTED_CANDIDATES)) {
+    lines.push(
+      `  ${formatCacheSizeGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}`,
+    );
+  }
+  if (prunable.length > MAX_LISTED_CANDIDATES) {
+    lines.push(dimText(`  … and ${prunable.length - MAX_LISTED_CANDIDATES} more`));
+  }
+
+  lines.push("", boldText(`Protected: ${protectedCandidates.length} entries`));
+  for (const candidate of protectedCandidates.slice(0, MAX_LISTED_CANDIDATES)) {
+    lines.push(
+      dimText(
+        `  ${formatCacheSizeGb(candidate.entry.sizeKb).padStart(9)}  age ${candidate.entry.ageDays}d  ${candidate.entry.path}  — ${formatProtectedReason(candidate)}`,
+      ),
+    );
+  }
+  if (protectedCandidates.length > MAX_LISTED_CANDIDATES) {
+    lines.push(dimText(`  … and ${protectedCandidates.length - MAX_LISTED_CANDIDATES} more`));
+  }
+
+  if (!plan.processTreeReadable) {
+    lines.push("", dimText("Process tree unreadable — every candidate is protected."));
+  }
+  if (plan.pinSourceCount === 0) {
+    lines.push(
+      dimText(
+        "No playwright browsers.json pin sources resolved — every browser revision is protected.",
+      ),
+    );
+  }
+  return lines.join("\n");
+}
+
+function renderPruneOutcome(outcome: PruneOutcome): string {
+  const lines = [
+    boldText(
+      `Removed ${outcome.removed.length} entries, freed ${formatCacheSizeGb(outcome.freedKb)}`,
+    ),
+  ];
+  if (outcome.failures.length > 0) {
+    lines.push(dimText(`${outcome.failures.length} failures:`));
+    for (const failure of outcome.failures.slice(0, MAX_LISTED_CANDIDATES)) {
+      lines.push(dimText(`  ${failure.path}: ${failure.message}`));
+    }
+  }
+  return lines.join("\n");
+}
+
+interface CacheActionResult {
+  plan: CachePlan;
+  outcome?: PruneOutcome;
+  wouldPrune: boolean;
+}
+
+function renderCacheActionResult(result: CacheActionResult): string {
+  const lines = [renderCachePlan(result.plan)];
+  if (result.outcome) {
+    lines.push("", renderPruneOutcome(result.outcome));
+  } else if (result.wouldPrune) {
+    const prunableCount = result.plan.candidates.filter(
+      (c) => c.verdict.kind === "prunable",
+    ).length;
+    lines.push(
+      "",
+      dimText(
+        `Would remove ${prunableCount} entries, ${formatCacheSizeGb(result.plan.reclaimableKb)} — re-run with --prune --yes to actually delete.`,
+      ),
+    );
+  }
+  return lines.join("\n");
+}
+
+interface SidecarPortRow {
+  sidecar: string;
+  id: string;
+  env: string;
+  port: number;
+  alive: boolean;
+}
+
+// Flattens a session's per-sidecar reserved ports into rows for the `sidecar
+// ports` command. Read-through: no state of its own, just a reshape of the
+// SessionView the daemon already owner-resolves per sidecar.
+function sidecarPortRows(view: SessionView, name?: string): SidecarPortRow[] {
+  if (name !== undefined && !view.sidecars.some((sidecar) => sidecar.name === name)) {
+    throw new Error(`Session ${view.id} has no sidecar "${name}"`);
+  }
+  const sidecars =
+    name === undefined ? view.sidecars : view.sidecars.filter((sidecar) => sidecar.name === name);
+  const rows = sidecars.flatMap((sidecar) =>
+    sidecar.ports.map((port) => ({
+      sidecar: sidecar.name,
+      id: port.id,
+      env: port.env,
+      port: port.port,
+      alive: sidecar.alive,
+    })),
+  );
+  // Plain string comparison, not localeCompare: this output is machine-read
+  // and must not reorder under a non-C locale.
+  rows.sort((a, b) => {
+    if (a.sidecar !== b.sidecar) return a.sidecar < b.sidecar ? -1 : 1;
+    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+    return 0;
+  });
+  return rows;
+}
+
+function renderSidecarSweepResult(result: SidecarSweepResult): string {
+  if (!result.supported) {
+    return dimText("Process table or procfs unreadable on this host — sweep skipped.");
+  }
+  if (result.leaked.length === 0) {
+    return dimText("No leaked sidecar process trees found.");
+  }
+  // Keyed by rootPid, not just presence: an outcome with survivors left
+  // alive after the SIGKILL confirmation window is a partial kill, not a
+  // clean reap — surfacing it as "[reaped]" would tell the operator nothing
+  // is left running when something still is.
+  const outcomeByRootPid = new Map(result.reaped.map((outcome) => [outcome.panePid, outcome]));
+  const lines = result.leaked.map((tree) => {
+    const ageMinutes = Math.floor(tree.ageSeconds / 60);
+    const outcome = outcomeByRootPid.get(tree.rootPid);
+    const status =
+      outcome === undefined
+        ? tree.reapable
+          ? "reapable"
+          : "report-only"
+        : outcome.survivors.length === 0
+          ? "reaped"
+          : "partial";
+    const survivorsSuffix =
+      outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
+    // Tree total, not the root pid's own rss — the root alone understated
+    // the measured 863333/863351 leak by 17x.
+    return dimText(
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+    );
+  });
+  return lines.join("\n");
+}
+
+// Test-only: exercises the sweep summary's status/survivors formatting
+// without spinning up a live CLI command or the daemon route it calls.
+export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
 
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
@@ -1066,7 +1352,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `cache`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `memory`, `service run`, and `service status` for scripts.",
       "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
     ];
   }
@@ -1074,6 +1360,14 @@ function helpNotes(command: Command): string[] {
     return [
       "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web.",
       "`npm install` alone does not register or start services.",
+    ];
+  }
+  if (command.name() === "cache") {
+    return [
+      "Dry-run by default: no flags, or `--prune` alone, only report — never deletes. `--prune --yes` deletes prunable entries.",
+      "Prunable classes: vendor-cache (~/.npm/_cacache), npx-package (~/.npm/_npx), browser-revision (~/.cache/ms-playwright(-mcp)). All other classes are report-only.",
+      "`--prune --yes` requires a resolved instance config; aborts non-zero if the config is absent or invalid.",
+      "Never deletes ~/.spur (dataDir/worktreeDir) or an npx-package hash that supplies a browsers.json pin source.",
     ];
   }
   if (command.name() === "doctor") {
@@ -1119,6 +1413,13 @@ function helpNotes(command: Command): string[] {
     return [
       "Exact forms: `spur session-memory <sessionId> list`, `get <key>`, `set <key> <body>`, `resolve <key>`.",
       "Session memory is daemon-managed and scoped to one existing session id.",
+    ];
+  }
+  if (command.name() === "queue") {
+    return [
+      "Exact forms: `spur queue <sessionId> list`, `remove <index>`, `flush <index>`.",
+      "`remove`/`flush` take a 1-based index from the most recent `list`; the CLI resolves it to exact text via a fresh read immediately before acting.",
+      "A pipeline-derived auto step is never a valid index — only real queued messages are numbered.",
     ];
   }
   return [];
@@ -1192,9 +1493,11 @@ async function runInteractiveSessionList(
   let refreshing = false;
   let pendingKillConfirmationSessionId: string | null = null;
   let pendingRespawnConfirmationSessionId: string | null = null;
+  let pendingRestoreConfirmationSessionId: string | null = null;
   const clearPendingConfirmations = (): void => {
     pendingKillConfirmationSessionId = null;
     pendingRespawnConfirmationSessionId = null;
+    pendingRestoreConfirmationSessionId = null;
   };
   let attachedPane: {
     tmuxSession: string;
@@ -1327,6 +1630,12 @@ async function runInteractiveSessionList(
   };
 
   const restoreSelectedSession = async (): Promise<void> => {
+    // Disarm the other verbs' confirmations up front, including on the early
+    // returns below: pressing r must never leave a kill or respawn armed for
+    // a later single keypress. Restore's own pending survives — that is the
+    // latch forceRestore reads.
+    pendingKillConfirmationSessionId = null;
+    pendingRespawnConfirmationSessionId = null;
     const session = getSelectedSessionOrWarn();
     if (!session) return;
     if (!isRestorableSession(session)) {
@@ -1335,15 +1644,19 @@ async function runInteractiveSessionList(
       return;
     }
 
+    const forceRestore = pendingRestoreConfirmationSessionId === session.id;
+
     busy = true;
-    statusMessage = brandLine(`Restoring ${session.id}...`);
+    statusMessage = brandLine(
+      forceRestore ? `Restoring ${session.id} anyway...` : `Restoring ${session.id}...`,
+    );
     render();
 
     try {
       const restored = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/restore`,
-        {},
+        forceRestore ? { force: true } : {},
         configPath,
       );
       sessions = replaceListedSession(sessions, restored);
@@ -1352,7 +1665,15 @@ async function runInteractiveSessionList(
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      statusMessage = brandLine(message);
+      if (!forceRestore && isForeignAgentProcessMessage(message)) {
+        pendingKillConfirmationSessionId = null;
+        pendingRespawnConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = session.id;
+        statusMessage = brandLine(`${message}. Press r again to restore anyway.`);
+      } else {
+        clearPendingConfirmations();
+        statusMessage = brandLine(message);
+      }
     } finally {
       busy = false;
       render();
@@ -1530,6 +1851,7 @@ async function runInteractiveSessionList(
       const message = error instanceof Error ? error.message : String(error);
       if (!force && isKillConfirmationRequiredMessage(message)) {
         pendingRespawnConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = null;
         pendingKillConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press k again to kill anyway.`);
       } else {
@@ -1580,6 +1902,7 @@ async function runInteractiveSessionList(
       const message = error instanceof Error ? error.message : String(error);
       if (!forceRespawn && isKillConfirmationRequiredMessage(message)) {
         pendingKillConfirmationSessionId = null;
+        pendingRestoreConfirmationSessionId = null;
         pendingRespawnConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press s again to respawn anyway.`);
       } else {
@@ -1668,7 +1991,6 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "r" || key.sequence === "r") {
-        clearPendingConfirmations();
         void restoreSelectedSession().catch(fail);
         return;
       }
@@ -1892,12 +2214,37 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Check host install and project config health (read-only).")
     .option("--json", "Print raw JSON")
     .option("--scaffold", "Write spur.yaml when no project config is found")
-    .action(async (options) => {
+    .action(async (options, command) => {
       await outputResult({
         json: Boolean(options.json),
         label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
-          const hostChecks = await collectHostInstallChecks();
+          const collectedChecks = await collectHostInstallChecks();
+          // Read-only: never bootstrap-writes the instance config. "absent"
+          // (never initialized) and "invalid" (unparsable) both skip the
+          // check entirely — there is no dataDir to scan sessions under.
+          const instanceConfig = loadInstanceConfigReadOnly(
+            getConfigPath(command.parent as Command),
+          );
+          if (instanceConfig.status === "ok") {
+            collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+          }
+          // `configRegistryPaths` rides on the "config-registry" check purely
+          // as an internal carrier from `collectHostInstallChecks` to here
+          // (see the field's doc comment in host-install.ts). The documented
+          // public shape only has it at the top level of `DoctorResult`, so
+          // strip it off the check before `hostChecks` is JSON-serialized —
+          // otherwise `--json` emits the same array twice.
+          const configRegistryPaths =
+            collectedChecks.find((check) => check.id === "config-registry")?.configRegistryPaths ??
+            [];
+          const hostChecks = collectedChecks.map((check) => {
+            if (check.id !== "config-registry" || check.configRegistryPaths === undefined) {
+              return check;
+            }
+            const { configRegistryPaths: _perPathEntries, ...checkWithoutPaths } = check;
+            return checkWithoutPaths;
+          });
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
@@ -1938,10 +2285,10 @@ export function createProgram(cliEntrypoint: string): Command {
                 fix: "Fix the reported error in spur.yaml",
               });
             }
-            return { hostChecks, existingProjectConfigPath };
+            return { hostChecks, configRegistryPaths, existingProjectConfigPath };
           }
           if (!options.scaffold) {
-            return { hostChecks };
+            return { hostChecks, configRegistryPaths };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1950,6 +2297,7 @@ export function createProgram(cliEntrypoint: string): Command {
           writeProjectConfigScaffold(scaffold);
           return {
             hostChecks,
+            configRegistryPaths,
             configPath: scaffold.configPath,
             defaultBranch: scaffold.defaultBranch,
             projectId: scaffold.projectId,
@@ -1964,6 +2312,36 @@ export function createProgram(cliEntrypoint: string): Command {
               : "Host and project checks complete.",
         render: renderDoctorResult,
         exitCode: (result) => (hasErrorSeverity(result.hostChecks) ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("cache")
+    .description(
+      "Report host caches outside ~/.spur (npm, browser MCP, ~/.cache, /tmp) and optionally prune them. Dry-run by default.",
+    )
+    .option("--json", "Print raw JSON")
+    .option("--prune", "Preview or execute deletion of prunable entries (dry-run without --yes)")
+    .option("--yes", "Confirm --prune non-interactively; required to actually delete anything")
+    .action(async (options: { json?: boolean; prune?: boolean; yes?: boolean }, command) => {
+      const instanceConfig = loadInstanceConfigReadOnly(getConfigPath(command.parent as Command));
+      if (options.prune && options.yes && instanceConfig.status !== "ok") {
+        throw new Error(
+          `--prune --yes requires a resolved instance config (status: ${instanceConfig.status}); run \`spur init\` first`,
+        );
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "measuring host caches",
+        action: async (): Promise<CacheActionResult> => {
+          const plan = await planCachePrune({ instanceConfig });
+          if (options.prune && options.yes && instanceConfig.status === "ok") {
+            const outcome = await executePrune(plan.candidates, instanceConfig);
+            return { plan, outcome, wouldPrune: false };
+          }
+          return { plan, wouldPrune: Boolean(options.prune) };
+        },
+        render: renderCacheActionResult,
       });
     });
 
@@ -2034,6 +2412,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .option(
       "--model <id>",
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
+    )
+    .option(
+      "--mode <name>",
+      "Session mode from projects.<id>.modes; overrides the project default mode",
     )
     .option(
       "--plan",
@@ -2122,6 +2504,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
         ...(options.model !== undefined ? { model: options.model as string } : {}),
+        ...(options.mode !== undefined ? { mode: options.mode as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
@@ -2203,7 +2586,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to connect");
       }
@@ -2228,7 +2611,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (path: string | undefined, options, command) => {
       const instance = prepareInstanceConfig(command.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
-      const projectConfigPath = path ?? findProjectConfigPath();
+      const projectConfigPath = path ? resolve(path) : findProjectConfigPath();
       if (!projectConfigPath) {
         throw new Error("No local spur.yaml or spur.yml found to disconnect");
       }
@@ -2540,13 +2923,21 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("reopen")
     .description("Restart a completed session in place, keeping its id and history.")
     .argument("<sessionId>", "Session id")
+    .option(
+      "--force",
+      "Reopen even if a live agent process for this session id already exists outside its pane",
+    )
     .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, options: { force?: boolean; json?: boolean }, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body: { force?: true } = {};
+      if (options.force) {
+        body.force = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "reopening session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "reopen", configPath, body),
         success: (session) => `Reopened ${session.id}.`,
         render: renderSessionCard,
       });
@@ -2681,6 +3072,75 @@ export function createProgram(cliEntrypoint: string): Command {
 
       throw new Error("session-memory action must be list, get, set, or resolve");
     });
+
+  program
+    .command("queue")
+    .description("Manage a session's message queue.")
+    .usage("<sessionId> <list|remove|flush> [index]")
+    .argument("<sessionId>", "Session id")
+    .argument("<action>", "list, remove, or flush")
+    .argument("[index]", "1-based queue index (remove/flush only)")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (sessionId: string, action: string, index: string | undefined, options, command) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        if (action === "list") {
+          if (index !== undefined) {
+            throw new Error("queue list does not accept an index");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: `loading queue for ${sessionId}`,
+            action: () =>
+              getJson<SessionView>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(sessionId)}`,
+                configPath,
+              ),
+            render: (session) => renderQueuedMessages(sessionId, session),
+          });
+          return;
+        }
+
+        if (action !== "remove" && action !== "flush") {
+          throw new Error("queue action must be list, remove, or flush");
+        }
+
+        const parsedIndex = index === undefined ? NaN : Number(index);
+        if (!Number.isInteger(parsedIndex)) {
+          throw new Error(`queue ${action} requires a 1-based index`);
+        }
+
+        // Resolved text is captured here so the success line can echo what
+        // was acted on: the GET -> POST window is one round trip wide, so
+        // this may act on a slightly different queue than an earlier `list`
+        // printed, and the caller must see which text actually moved.
+        let resolvedMessage = "";
+        await outputResult({
+          json: Boolean(options.json),
+          label: `${action === "remove" ? "removing" : "flushing"} queued message #${parsedIndex}`,
+          action: async () => {
+            const session = await getJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}`,
+              configPath,
+            );
+            resolvedMessage = resolveQueuedMessageByIndex(sessionId, session, parsedIndex);
+            return postJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/queue/${action}`,
+              { message: resolvedMessage },
+              configPath,
+            );
+          },
+          success: () =>
+            action === "remove"
+              ? `Removed queued message: ${resolvedMessage}`
+              : `Flushed queued message: ${resolvedMessage}`,
+          render: renderSessionCard,
+        });
+      },
+    );
 
   program
     .command("memory")
@@ -3094,6 +3554,71 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  sidecar
+    .command("ports")
+    .description("Print this session's reserved sidecar ports.")
+    .requiredOption("--session <id>", "Session id")
+    .option("--name <name>", "Only this sidecar")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      const session = options.session as string;
+      const name = options.name as string | undefined;
+      if (options.json) {
+        await outputResult({
+          json: true,
+          label: "loading sidecar ports",
+          action: async () =>
+            sidecarPortRows(
+              await getJson<SessionView>(cliEntrypoint, `/sessions/${session}`, configPath),
+              name,
+            ),
+          render: () => "",
+        });
+        return;
+      }
+      const rows = sidecarPortRows(
+        await withSpinner("loading sidecar ports", () =>
+          getJson<SessionView>(cliEntrypoint, `/sessions/${session}`, configPath),
+        ),
+        name,
+      );
+      for (const row of rows) {
+        writeStdout(
+          `${row.sidecar}\t${row.id}\t${row.env}\t${row.port}\t${row.alive ? "alive" : "dead"}`,
+        );
+      }
+    });
+
+  sidecar
+    .command("sweep")
+    .description("Report sidecar process trees no live session claims; --reap to kill them.")
+    .option("--reap", "Signal reapable leaked trees instead of only reporting them")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "sweeping sidecar process trees",
+        action: () =>
+          postJson<SidecarSweepResult>(
+            cliEntrypoint,
+            "/sidecars/sweep",
+            { reap: Boolean(options.reap) },
+            configPath,
+          ),
+        success: (result) =>
+          result.leaked.length === 0
+            ? "No leaked sidecar process trees found."
+            : `Found ${result.leaked.length} leaked sidecar process tree(s).`,
+        render: renderSidecarSweepResult,
+      });
+    });
+
   const branch = program
     .command("branch", { hidden: true })
     .description("Internal branch policy helpers.");
@@ -3179,6 +3704,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
@@ -3221,6 +3747,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop the local daemon if it is running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
@@ -3236,6 +3763,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Restart the local daemon if it is already running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
+      assertConfigMayUseProdSlot(getConfigPath(command.parent?.parent as Command));
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),

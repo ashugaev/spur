@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,8 +17,14 @@ export const CLI_PATH = join(V2_DIR, "dist/cli.js");
 const TMUX_CONFIG_PATH = join(V2_DIR, "tmux.conf");
 const TMUX_BOOTSTRAP_SESSION = `spur-runtime-bootstrap-${process.pid}`;
 let tmuxBootstrapReady = false;
-let tmuxBootstrapCleanupRegistered = false;
 let activeTmuxSocketName: string | null = null;
+// Every socket this process has armed via setActiveTmuxSocketName, drained by
+// killTmuxServer. The single process.once("exit") net below iterates this
+// set, not just the first-registered socket — a per-context single-socket
+// capture (the prior design) only ever protects the FIRST context in a file;
+// every later context got no net at all.
+const liveTmuxSockets = new Set<string>();
+let tmuxExitNetRegistered = false;
 
 export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
@@ -26,6 +32,49 @@ export function setActiveTmuxSocketName(socketName: string | null): void {
     tmuxBootstrapReady = false;
   }
   activeTmuxSocketName = next;
+  if (next) {
+    liveTmuxSockets.add(next);
+  }
+  if (!tmuxExitNetRegistered) {
+    tmuxExitNetRegistered = true;
+    const sweep = (): void => {
+      for (const socket of liveTmuxSockets) {
+        spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+      }
+    };
+    process.once("exit", sweep);
+    // A vitest fork-pool worker is torn down by its parent sending SIGTERM,
+    // not by the worker's own event loop going idle — plain `process.once
+    // ("exit", ...)` alone never fires on that path (measured: a fixture that
+    // arms two sockets and returns normally still leaves both tmux servers
+    // alive after the whole `vitest run` invocation exits). Translating the
+    // signal into an explicit process.exit() makes the exit path uniform:
+    // the "exit" listener above still does the actual kill, this only
+    // ensures it gets invoked instead of the default signal disposition
+    // terminating the process without emitting "exit" at all. A prior
+    // listener for either signal (there is none installed in this test
+    // tree) would be overridden by design — teardown safety wins here.
+    process.once("SIGTERM", () => process.exit(0));
+    process.once("SIGINT", () => process.exit(0));
+  }
+}
+
+// Builds the `-L <socket> ...` argv this module always shapes tmux calls
+// with — the one place argv is built, so a test can assert it directly
+// instead of relying on "does not throw" (vacuous: killTmuxSessionsByPrefix's
+// catch swallows any error either way).
+export function buildTmuxSocketArgs(socketName: string, args: string[]): string[] {
+  return ["-L", socketName, ...args];
+}
+
+// Test-only: exercises the armed-socket tracking set directly.
+export const _liveTmuxSocketsForTests = liveTmuxSockets;
+
+// spawnSync + kill-server, then drop the socket from the tracked set so a
+// later exit-net pass never double-kills an already-torn-down server.
+export function killTmuxServer(socketName: string): void {
+  spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
+  liveTmuxSockets.delete(socketName);
 }
 
 export function withTmuxSocket(args: string[]): string[] {
@@ -34,7 +83,7 @@ export function withTmuxSocket(args: string[]): string[] {
       "no isolated tmux socket active; createRuntimeTestContext or setActiveTmuxSocketName must run first",
     );
   }
-  return ["-L", activeTmuxSocketName, ...args];
+  return buildTmuxSocketArgs(activeTmuxSocketName, args);
 }
 
 export interface FakeGhState {
@@ -105,6 +154,7 @@ export interface RuntimeTestContext {
   agentLogDir: string;
   ghStateFile: string;
   port: number;
+  tmuxSocketName: string;
   env: NodeJS.ProcessEnv;
   writeConfig(name: string, content: string): Promise<string>;
   execCli(
@@ -123,7 +173,14 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
+function fakeAgentScript(
+  agentName: "claude" | "codex" | "cursor",
+  options?: { hupResistant?: boolean },
+): string {
+  // Opt-in only: real agents don't ignore SIGHUP, and the terminate-then-
+  // confirm guard's own default grace windows assume it lands. This exists
+  // solely so a runtime test can force the SIGKILL path deterministically.
+  const hupTrap = options?.hupResistant ? "\ntrap '' HUP" : "";
   const header =
     agentName === "claude"
       ? "Claude Code"
@@ -155,7 +212,7 @@ fi
 # the leading C-c in sendMessageToTmux. Without this trap the default SIGINT
 # action kills the script, so the interrupt drops the process instead of
 # just clearing its input line, and the send never reaches the read loop.
-trap '' INT
+trap '' INT${hupTrap}
 mode="launch"
 resume_id=""
 pinned_session_id=""
@@ -183,6 +240,10 @@ else
   # one (Spur passes this on every launch); mirror that so sessionFileForId
   # can find it by the pinned id instead of falling through to a fresh launch.
   # pinned_session_id is parsed once above, before the resume/launch branch.
+  # Divergence to know about: this fake writes the file at launch, while real
+  # claude creates it only when it persists the first submitted message. That
+  # is why runtime tests never saw the launch send's missing submit ack, which
+  # loses pipeline step 1 whenever the claude TUI swallows the submit Enter.
   if [[ -n "$pinned_session_id" ]]; then
     session_uuid="$pinned_session_id"
   else
@@ -446,7 +507,7 @@ $extra"
   esac
 done`
       : agentName === "codex"
-        ? `trap '' INT
+        ? `trap '' INT${hupTrap}
 codex_paste_start=$'\\e[200~'
 codex_paste_end=$'\\e[201~'
 codex_buffer=""
@@ -791,21 +852,10 @@ process.exit(1);
 async function startTmuxServer(): Promise<void> {
   if (tmuxBootstrapReady) return;
 
-  if (!tmuxBootstrapCleanupRegistered) {
-    tmuxBootstrapCleanupRegistered = true;
-    const socketName = activeTmuxSocketName;
-    process.once("exit", () => {
-      // The bootstrap session lives on the isolated socket; tearing down the
-      // whole server is the safety net for any leaked context.
-      if (socketName) {
-        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
-      }
-    });
-  }
-
   try {
     await execFileAsync("tmux", withTmuxSocket(["has-session", "-t", TMUX_BOOTSTRAP_SESSION]));
     tmuxBootstrapReady = true;
+    if (activeTmuxSocketName) await recordTmuxServer(activeTmuxSocketName);
     return;
   } catch {
     // Fall through and create a bootstrap session when no server is live yet.
@@ -827,9 +877,36 @@ async function startTmuxServer(): Promise<void> {
       "sleep 3600",
     ]);
     tmuxBootstrapReady = true;
+    if (activeTmuxSocketName) await recordTmuxServer(activeTmuxSocketName);
   } catch {
     // Best effort only.
   }
+}
+
+// Appends {socketName, serverPid} to the per-run ledger at
+// SPUR_TEST_TMUX_LEDGER (armed by test/setup/tmux-ledger.ts's globalSetup on
+// the runtime/smoke configs; unset and a no-op on the fast tier). No `ps`, no
+// socket-name matching — only a live server this call itself just confirmed
+// gets its pid recorded, and the pid is used later only as an identity gate
+// before a kill, never as a signal target.
+export async function recordTmuxServer(socketName: string): Promise<void> {
+  const ledgerPath = process.env["SPUR_TEST_TMUX_LEDGER"];
+  if (!ledgerPath) return;
+  let serverPid: string;
+  try {
+    const { stdout } = await execFileAsync("tmux", [
+      "-L",
+      socketName,
+      "display-message",
+      "-p",
+      "#{pid}",
+    ]);
+    serverPid = stdout.trim();
+  } catch {
+    return;
+  }
+  if (!serverPid) return;
+  appendFileSync(ledgerPath, `${JSON.stringify({ socketName, serverPid })}\n`, "utf8");
 }
 
 export async function isTmuxAvailable(): Promise<boolean> {
@@ -945,19 +1022,26 @@ export async function stopDaemonByPid(pid?: number): Promise<void> {
   }
 }
 
-export async function killTmuxSession(sessionName: string): Promise<void> {
+// `socketName` optional: an explicit socket (used by killTmuxSessionsByPrefix)
+// targets that socket directly; omitted, it falls back to the armed global
+// via withTmuxSocket — every other call site in this test tree relies on
+// that implicit-global form.
+export async function killTmuxSession(sessionName: string, socketName?: string): Promise<void> {
   try {
-    await execFileAsync("tmux", withTmuxSocket(["kill-session", "-t", sessionName]));
+    const args = socketName
+      ? buildTmuxSocketArgs(socketName, ["kill-session", "-t", sessionName])
+      : withTmuxSocket(["kill-session", "-t", sessionName]);
+    await execFileAsync("tmux", args);
   } catch {
     // Already gone.
   }
 }
 
-export async function killTmuxSessionsByPrefix(prefix: string): Promise<void> {
+export async function killTmuxSessionsByPrefix(prefix: string, socketName: string): Promise<void> {
   try {
     const { stdout } = await execFileAsync(
       "tmux",
-      withTmuxSocket(["list-sessions", "-F", "#{session_name}"]),
+      buildTmuxSocketArgs(socketName, ["list-sessions", "-F", "#{session_name}"]),
     );
     const sessions = stdout
       .trim()
@@ -965,7 +1049,7 @@ export async function killTmuxSessionsByPrefix(prefix: string): Promise<void> {
       .map((session) => session.trim())
       .filter((session) => session.startsWith(prefix));
     for (const session of sessions) {
-      await killTmuxSession(session);
+      await killTmuxSession(session, socketName);
     }
   } catch {
     // No tmux server or no matching sessions.
@@ -1001,7 +1085,7 @@ async function writeExecutable(path: string, content: string): Promise<void> {
 
 export async function createRuntimeTestContext(
   port: number,
-  options?: { useFakeTools?: boolean },
+  options?: { useFakeTools?: boolean; hupResistantAgents?: boolean },
 ): Promise<RuntimeTestContext> {
   _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
@@ -1011,15 +1095,24 @@ export async function createRuntimeTestContext(
   const fakeBinDir = join(rootDir, "bin");
   const agentLogDir = join(rootDir, "agent-logs");
   const ghStateFile = join(rootDir, "gh-state.json");
+  const tmuxSocketName = `spur-${port}`;
   const useFakeTools = options?.useFakeTools ?? true;
+  const hupResistant = options?.hupResistantAgents ?? false;
   await mkdir(fakeBinDir, { recursive: true });
   await mkdir(agentLogDir, { recursive: true });
   await writeFile(join(rootDir, ".zshrc"), "# runtime test shell init\n", "utf8");
   if (useFakeTools) {
-    await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
-    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));
-    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor"));
-    await writeExecutable(join(fakeBinDir, "cursor-agent"), fakeAgentScript("cursor"));
+    const agentScriptOptions = { hupResistant };
+    await writeExecutable(
+      join(fakeBinDir, "claude"),
+      fakeAgentScript("claude", agentScriptOptions),
+    );
+    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex", agentScriptOptions));
+    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor", agentScriptOptions));
+    await writeExecutable(
+      join(fakeBinDir, "cursor-agent"),
+      fakeAgentScript("cursor", agentScriptOptions),
+    );
     await writeExecutable(join(fakeBinDir, "gh"), FAKE_GH_SCRIPT);
     await writeFile(ghStateFile, "{}\n", "utf8");
   }
@@ -1031,7 +1124,7 @@ export async function createRuntimeTestContext(
       ? {
           HOME: rootDir,
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
-          SPUR_TMUX_SOCKET_NAME: `spur-${port}`,
+          SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
           SPUR_CURSOR_BIN: join(fakeBinDir, "agent"),
@@ -1046,12 +1139,20 @@ export async function createRuntimeTestContext(
   // spur-<port>` and never the host's default server. Only the fake-tools path
   // drives tmux, matching the SPUR_TMUX_SOCKET_NAME env above.
   if (useFakeTools) {
-    setActiveTmuxSocketName(`spur-${port}`);
+    setActiveTmuxSocketName(tmuxSocketName);
   }
 
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
-    await writeFile(configPath, content, "utf8");
+    await writeFile(
+      configPath,
+      `admission:
+  enabled: false
+  memoryGuard:
+    enforceFloors: false
+${content}`,
+      "utf8",
+    );
     return configPath;
   };
 
@@ -1133,7 +1234,7 @@ export async function createRuntimeTestContext(
     if (useFakeTools) {
       // Tear down the isolated tmux server and re-arm the guard so the next
       // context in this file must activate its own socket.
-      spawnSync("tmux", ["-L", `spur-${port}`, "kill-server"], { stdio: "ignore" });
+      killTmuxServer(tmuxSocketName);
       setActiveTmuxSocketName(null);
     }
     await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -1151,6 +1252,7 @@ export async function createRuntimeTestContext(
     agentLogDir,
     ghStateFile,
     port,
+    tmuxSocketName,
     env,
     writeConfig,
     execCli,

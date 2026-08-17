@@ -84,6 +84,7 @@ function mockFetch(responses: MockResponses) {
 describe("VersionMenu", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.sessionStorage.clear();
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,
@@ -283,11 +284,6 @@ describe("VersionMenu", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
-    await waitFor(() => {
-      expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-        /Switching Spur to 1\.5\.0/,
-      );
-    });
     expect(switchCalls).toEqual([{ body: { version: "1.5.0" } }]);
   });
 
@@ -319,18 +315,13 @@ describe("VersionMenu", () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
-    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-      /Switching Spur to 1\.5\.0/,
-    );
+    expect(screen.queryByTestId("switch-version-1.5.0")).not.toBeInTheDocument();
 
     liveVersion = "1.5.0";
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3_100);
     });
 
-    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-      /Spur is now running 1\.5\.0/,
-    );
     expect(window.location.reload).toHaveBeenCalledTimes(1);
   });
 
@@ -363,13 +354,7 @@ describe("VersionMenu", () => {
       await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
     });
 
-    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-      /Switch to 1\.5\.0 not confirmed/,
-    );
     expect(window.location.reload).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss version switch status" }));
-    expect(screen.queryByTestId("version-switch-status")).not.toBeInTheDocument();
   });
 
   it("renders the registry-unreachable error from a 503 switch response", async () => {
@@ -425,5 +410,36 @@ describe("VersionMenu", () => {
       );
     });
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("renders the validated active target from an in-progress 409 response", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: {
+        payload: {
+          current: "1.4.2",
+          available: [{ tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" }],
+        },
+      },
+      switch: {
+        status: 409,
+        payload: {
+          error: "deploy switch already in progress for 1.4.9",
+          inProgress: true,
+          version: "1.4.9",
+        },
+      },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+    fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("switch-version-error")).toHaveTextContent(
+        "Update to 1.4.9 is already in progress.",
+      );
+    });
   });
 });

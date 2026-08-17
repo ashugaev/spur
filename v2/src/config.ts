@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, totalmem } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -11,6 +11,7 @@ import {
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AdmissionCapSource,
   type AdmissionConfig,
+  type AgentReasoningEffortConfig,
   type AgentName,
   type AppConfig,
   type BacklogConfig,
@@ -27,6 +28,7 @@ import {
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
+  type SessionModeConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -41,6 +43,7 @@ import {
   type TriggerConfig,
 } from "./types.js";
 import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
   DEFAULT_EVENT_LOG_CONFIG,
   DEFAULT_EVENT_LOG_HOT_BYTES,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
@@ -60,7 +63,7 @@ import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
-const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+export const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_SERVER_PORT = 4310;
@@ -86,6 +89,7 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
+  codexHome: string;
   voiceProvider:
     | "whisper_cpp"
     | "faster_whisper"
@@ -192,6 +196,14 @@ function asOptionalFraction(value: unknown, label: string): number | undefined {
   return value;
 }
 
+function asOptionalPercent(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+    throw new Error(`${label} must be a number from 0 to 100`);
+  }
+  return value;
+}
+
 // Used for values consumed as loop bounds / archive indices, where a fractional value
 // would produce unreadable, never-cleaned-up filenames (e.g. `...jsonl.2.5.gz`).
 function asOptionalPositiveInteger(value: unknown, label: string): number | undefined {
@@ -263,6 +275,27 @@ function parseDefaultModels(
   return models;
 }
 
+function parseProjectReasoningEffort(
+  projectId: string,
+  value: unknown,
+): AgentReasoningEffortConfig | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `projects.${projectId}.reasoningEffort`);
+  const effort: AgentReasoningEffortConfig = {};
+  for (const [agent, entry] of Object.entries(raw)) {
+    if (agent !== "claude" && agent !== "codex") {
+      throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
+    }
+    if (entry !== "low" && entry !== "medium" && entry !== "high") {
+      throw new Error(
+        `projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`,
+      );
+    }
+    effort[agent] = entry;
+  }
+  return effort;
+}
+
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
@@ -277,6 +310,7 @@ function parseTriggerSpawnBlock(
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
+  const mode = asOptionalString(raw["mode"], `${label}.mode`);
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
   let selfDestruct: SelfDestructConfig | undefined;
@@ -292,6 +326,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(mode !== undefined ? { mode } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -328,6 +363,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "mode",
       "branch",
       "overrides",
       "selfDestruct",
@@ -469,6 +505,7 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     defaultAgent: "claude",
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
+    codexHome: join(homedir(), ".codex"),
     voiceProvider: DEFAULT_VOICE_PROVIDER,
     voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
     voiceLanguage: DEFAULT_VOICE_LANGUAGE,
@@ -1101,12 +1138,17 @@ function parseSidecars(
         );
       }
     }
+    const idleTtlMinutes = asOptionalPositiveInteger(
+      entryRaw["idleTtlMinutes"],
+      `${entryLabel}.idleTtlMinutes`,
+    );
     result[name] = {
       command,
       autoStart,
       ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
       ...(env ? { env } : {}),
       ...(ports ? { ports } : {}),
+      ...(idleTtlMinutes !== undefined ? { idleTtlMinutes } : {}),
     };
   }
   validateSidecarDependencies(label, result);
@@ -1302,6 +1344,43 @@ function parseTrigger(
   };
 }
 
+function parseModes(
+  projectId: string,
+  value: unknown,
+): Record<string, SessionModeConfig> | undefined {
+  if (value === undefined) return undefined;
+  const label = `projects.${projectId}.modes`;
+  const raw = asObject(value, label);
+  // Object.create(null): a mode literally named "__proto__" must land as a
+  // genuine own key, not silently mutate the prototype and vanish from
+  // Object.entries below.
+  const modes: Record<string, SessionModeConfig> = Object.create(null);
+  let defaultName: string | undefined;
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!VALID_ID_RE.test(name)) {
+      throw new Error(`${label}.${name} is invalid: mode names must match ${VALID_ID_RE.source}`);
+    }
+    const entryLabel = `${label}.${name}`;
+    const entryRaw = asObject(entry, entryLabel);
+    const skill = asString(entryRaw["skill"], `${entryLabel}.skill`);
+    if (skill.trim().length === 0) {
+      throw new Error(`${entryLabel}.skill must be a non-empty string`);
+    }
+    const isDefault = asOptionalBoolean(entryRaw["default"], `${entryLabel}.default`);
+    if (isDefault === true) {
+      if (defaultName !== undefined) {
+        throw new Error(`${label}: at most one mode may set default: true`);
+      }
+      defaultName = name;
+    }
+    modes[name] = {
+      skill,
+      ...(isDefault !== undefined ? { default: isDefault } : {}),
+    };
+  }
+  return modes;
+}
+
 function parseProject(configDir: string, projectId: string, value: unknown): ProjectConfig {
   if (!VALID_ID_RE.test(projectId)) {
     throw new Error(
@@ -1322,6 +1401,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
+  const reasoningEffort = parseProjectReasoningEffort(projectId, raw["reasoningEffort"]);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
@@ -1343,6 +1423,11 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const staleAfterMinutes = asNonNegativeNumber(
+    raw["staleAfterMinutes"],
+    `${label}.staleAfterMinutes`,
+  );
+  const modes = parseModes(projectId, raw["modes"]);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1426,6 +1511,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     restoreAfterReboot,
     symlinks,
     ...(codexArgs !== undefined ? { codexArgs } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     ...(branchNaming !== undefined ? { branchNaming } : {}),
@@ -1433,10 +1519,12 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     ...(defaultModels !== undefined ? { defaultModels } : {}),
+    ...(modes !== undefined ? { modes } : {}),
     sources,
     backlog,
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
+    ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }
 
@@ -1484,6 +1572,13 @@ const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
   maxRotationsPerEpisode: 2,
 };
 
+// Minutes a running/waiting session may sit idle before pollAttentionStates
+// parks it (stopReason: "stale_timeout"). 0 disables parking. 12 hours: long
+// enough that a session pausing overnight between review rounds is still there
+// in the morning, short enough that a forgotten one does not hold its pane and
+// sidecars for days.
+const DEFAULT_STALE_AFTER_MINUTES = 720;
+
 // Agent-agnostic rotation policy (applies to any agent that hits a rate limit;
 // per-agent account stores plug in separately). Instance-only, same footgun as
 // rateLimitReactivation/tags: parsed only when mode === "instance", so a
@@ -1504,6 +1599,24 @@ function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
     maxRotationsPerEpisode:
       asNonNegativeNumber(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
       DEFAULT_AUTH_ROTATION.maxRotationsPerEpisode,
+  };
+}
+
+export const DEFAULT_DISK_RETENTION: AppConfig["diskRetention"] = { warnFreeGb: 10 };
+
+// Instance-only, same footgun as authRotation/rateLimitReactivation/tags: a
+// project-mode diskRetention block parses without error and is discarded.
+// Drives both doctor's home-disk-headroom check and SessionService's
+// pre-spawn low-disk warning.
+function parseDiskRetention(value: unknown): AppConfig["diskRetention"] {
+  if (value === undefined) {
+    return DEFAULT_DISK_RETENTION;
+  }
+  const root = asObject(value, "diskRetention");
+  return {
+    warnFreeGb:
+      asNonNegativeNumber(root["warnFreeGb"], "diskRetention.warnFreeGb") ??
+      DEFAULT_DISK_RETENTION.warnFreeGb,
   };
 }
 
@@ -1562,6 +1675,35 @@ function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
   };
 }
 
+// Ship enabled by default (unlike sessionGc): this reaper is a memory-safety
+// control that kills a restartable sidecar process, never a worktree or a
+// record, so the destructive-by-default caution sessionGc needs does not
+// apply here.
+export const DEFAULT_SIDECAR_GC: AppConfig["sidecarGc"] = {
+  enabled: true,
+  idleTtlMinutes: 120,
+  maxAgeWarnMinutes: 360,
+};
+
+// Instance-only, same footgun as sessionGc/authRotation/rateLimitReactivation:
+// parsed only when mode === "instance", so a per-project sidecarGc block is
+// silently ignored.
+function parseSidecarGc(value: unknown): AppConfig["sidecarGc"] {
+  if (value === undefined) {
+    return DEFAULT_SIDECAR_GC;
+  }
+  const root = asObject(value, "sidecarGc");
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "sidecarGc.enabled") ?? DEFAULT_SIDECAR_GC.enabled,
+    idleTtlMinutes:
+      asOptionalPositiveInteger(root["idleTtlMinutes"], "sidecarGc.idleTtlMinutes") ??
+      DEFAULT_SIDECAR_GC.idleTtlMinutes,
+    maxAgeWarnMinutes:
+      asOptionalPositiveInteger(root["maxAgeWarnMinutes"], "sidecarGc.maxAgeWarnMinutes") ??
+      DEFAULT_SIDECAR_GC.maxAgeWarnMinutes,
+  };
+}
+
 // Estimated from an agent, Playwright MCP sidecar, and isolated daemon:
 // 1.5 GiB per session leaves room above the 1.21 GiB design estimate.
 const DEFAULT_ADMISSION_MAX_LIVE_SESSIONS = 100;
@@ -1569,6 +1711,10 @@ const DEFAULT_ADMISSION_PER_SESSION_BYTES = 1_610_612_736;
 const DEFAULT_ADMISSION_RESERVE_FRACTION = 0.7;
 const DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES = 1_073_741_824;
 const DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES = 0;
+const DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE = 20;
+const DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION = 0.9;
+const ADMISSION_FLOOR_MIN_BYTES = 1_073_741_824;
+const SHED_CRITICAL_FLOOR_MIN_BYTES = 536_870_912;
 
 export function deriveMaxLiveSessions(
   totalBytes: number,
@@ -1578,12 +1724,23 @@ export function deriveMaxLiveSessions(
   return Math.max(1, Math.floor((totalBytes * reserveFraction) / perSessionBytes));
 }
 
+export function deriveAdmissionFloorBytes(totalBytes: number): number {
+  return Math.max(ADMISSION_FLOOR_MIN_BYTES, Math.floor(totalBytes / 8));
+}
+
+export function deriveShedCriticalFloorBytes(totalBytes: number): number {
+  return Math.max(SHED_CRITICAL_FLOOR_MIN_BYTES, Math.floor(totalBytes / 16));
+}
+
 // Instance-only, same footgun as rateLimitReactivation/authRotation/tags: a
 // per-project `admission` block is ignored before semantic parsing. Only
 // projects.<id>.maxLiveSessions works per-project.
 function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
   const perSessionBytes = DEFAULT_ADMISSION_PER_SESSION_BYTES;
   const reserveFraction = DEFAULT_ADMISSION_RESERVE_FRACTION;
+  const totalBytes = totalmem();
+  const admissionFloorBytes = deriveAdmissionFloorBytes(totalBytes);
+  const shedCriticalFloorBytes = deriveShedCriticalFloorBytes(totalBytes);
   if (mode !== "instance" || value === undefined) {
     return {
       enabled: true,
@@ -1593,8 +1750,15 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
       reserveFraction,
       memoryGuard: {
         enforce: false,
+        enforceFloors: true,
+        shedEnabled: true,
         minAvailableBytes: DEFAULT_ADMISSION_MIN_AVAILABLE_BYTES,
         minFreeSwapBytes: DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+        admissionFloorBytes,
+        shedCriticalFloorBytes,
+        restoreFloorBytes: admissionFloorBytes + perSessionBytes,
+        pressureSomeAvg10Refuse: DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE,
+        shedSwapUsedFraction: DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
       },
     };
   }
@@ -1610,6 +1774,21 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
     root["maxLiveSessions"],
     "admission.maxLiveSessions",
   );
+  const resolvedAdmissionFloorBytes =
+    asNonNegativeNumber(
+      memoryGuardRaw["admissionFloorBytes"],
+      "admission.memoryGuard.admissionFloorBytes",
+    ) ?? admissionFloorBytes;
+  const resolvedShedCriticalFloorBytes =
+    asNonNegativeNumber(
+      memoryGuardRaw["shedCriticalFloorBytes"],
+      "admission.memoryGuard.shedCriticalFloorBytes",
+    ) ?? shedCriticalFloorBytes;
+  if (resolvedShedCriticalFloorBytes >= resolvedAdmissionFloorBytes) {
+    throw new Error(
+      `admission.memoryGuard.shedCriticalFloorBytes (${resolvedShedCriticalFloorBytes}) must be less than admissionFloorBytes (${resolvedAdmissionFloorBytes})`,
+    );
+  }
   const hasSizingInput =
     root["perSessionBytes"] !== undefined || root["reserveFraction"] !== undefined;
   const maxLiveSessionsSource: AdmissionCapSource =
@@ -1617,7 +1796,7 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
   const maxLiveSessions =
     configuredMaxLiveSessions ??
     (hasSizingInput
-      ? deriveMaxLiveSessions(totalmem(), resolvedPerSessionBytes, resolvedReserveFraction)
+      ? deriveMaxLiveSessions(totalBytes, resolvedPerSessionBytes, resolvedReserveFraction)
       : DEFAULT_ADMISSION_MAX_LIVE_SESSIONS);
   return {
     enabled: asOptionalBoolean(root["enabled"], "admission.enabled") ?? true,
@@ -1628,6 +1807,12 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
     memoryGuard: {
       enforce:
         asOptionalBoolean(memoryGuardRaw["enforce"], "admission.memoryGuard.enforce") ?? false,
+      enforceFloors:
+        asOptionalBoolean(memoryGuardRaw["enforceFloors"], "admission.memoryGuard.enforceFloors") ??
+        true,
+      shedEnabled:
+        asOptionalBoolean(memoryGuardRaw["shedEnabled"], "admission.memoryGuard.shedEnabled") ??
+        true,
       minAvailableBytes:
         asNonNegativeNumber(
           memoryGuardRaw["minAvailableBytes"],
@@ -1638,6 +1823,19 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
           memoryGuardRaw["minFreeSwapBytes"],
           "admission.memoryGuard.minFreeSwapBytes",
         ) ?? DEFAULT_ADMISSION_MIN_FREE_SWAP_BYTES,
+      admissionFloorBytes: resolvedAdmissionFloorBytes,
+      shedCriticalFloorBytes: resolvedShedCriticalFloorBytes,
+      restoreFloorBytes: resolvedAdmissionFloorBytes + resolvedPerSessionBytes,
+      pressureSomeAvg10Refuse:
+        asOptionalPercent(
+          memoryGuardRaw["pressureSomeAvg10Refuse"],
+          "admission.memoryGuard.pressureSomeAvg10Refuse",
+        ) ?? DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE,
+      shedSwapUsedFraction:
+        asOptionalFraction(
+          memoryGuardRaw["shedSwapUsedFraction"],
+          "admission.memoryGuard.shedSwapUsedFraction",
+        ) ?? DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
     },
   };
 }
@@ -1655,6 +1853,7 @@ function parseConfigFile(
   const server = root["server"] ? asObject(root["server"], "server") : {};
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const models = mode === "instance" && root["models"] ? asObject(root["models"], "models") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
   const userActionLog = root["userActionLog"]
@@ -1741,6 +1940,16 @@ function parseConfigFile(
         mode === "instance"
           ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
           : resolvedDefaults.uiPort,
+    },
+    models: {
+      codexHome:
+        mode === "instance"
+          ? resolveFrom(
+              configDir,
+              asOptionalString(models["codexHome"], "models.codexHome") ??
+                resolvedDefaults.codexHome,
+            )
+          : resolvedDefaults.codexHome,
     },
     voice: (() => {
       if (mode === "project") {
@@ -1845,6 +2054,9 @@ function parseConfigFile(
             retainArchives:
               asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+            collapseWindowMs:
+              asNonNegativeNumber(eventLog["collapseWindowMs"], "eventLog.collapseWindowMs") ??
+              DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
     userActionLog:
@@ -1875,8 +2087,16 @@ function parseConfigFile(
         : { afterHours: 0 },
     authRotation:
       mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
+    diskRetention:
+      mode === "instance" ? parseDiskRetention(root["diskRetention"]) : DEFAULT_DISK_RETENTION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
+    sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
     admission: parseAdmission(root["admission"], mode),
+    staleAfterMinutes:
+      mode === "instance"
+        ? (asNonNegativeNumber(root["staleAfterMinutes"], "staleAfterMinutes") ??
+          DEFAULT_STALE_AFTER_MINUTES)
+        : DEFAULT_STALE_AFTER_MINUTES,
     projects: normalizedProjects,
     tags,
   };
@@ -1927,6 +2147,80 @@ export function resolveInstanceConfigPath(input?: string): string {
 
 export function instanceConfigExists(input?: string): boolean {
   return existsSync(resolveInstanceConfigPath(input));
+}
+
+// Tolerant of a symlinked/bind-mounted $HOME: resolves both paths to their
+// real on-disk location before comparing, falling back to a plain resolved
+// string compare when either side does not exist (e.g. a config path that is
+// about to be bootstrap-created).
+function samePathOnDisk(a: string, b: string): boolean {
+  try {
+    return realpathSync.native(a) === realpathSync.native(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
+}
+
+function isDefaultInstanceConfigPath(configPath: string): boolean {
+  return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
+}
+
+// Pure guard, no writes: `daemon start`/`stop`/`restart` (and any other
+// `startServer` caller) must neither bootstrap a prod-default config
+// template at an arbitrary path, nor bind or target the production slot
+// (server.port 4310 or dataDir ~/.spur) from a non-default config path —
+// that slot belongs only to whatever daemon boots from the default config
+// path (see deploy/spur-daemon.service, which has no --config and
+// Restart=always). Resolving and (read-only) parsing the config here, before
+// any bootstrap write or HTTP call, is what closes both holes at once:
+//   - a missing non-default path is refused instead of silently
+//     bootstrap-written with prod defaults (port 4310, dataDir ~/.spur);
+//   - an existing non-default path that (explicitly or by omission) still
+//     resolves to port 4310 or dataDir ~/.spur is refused before `stop`/
+//     `restart` can resolve a base URL from it and target production.
+// The default instance config path is always exempt, regardless of
+// existence or contents: refusing it would crash-loop production on first
+// boot or on a legitimate restart.
+//
+// Known limit: the default path is homedir()-relative, so a child process
+// with a temp HOME running `daemon start` with no --config gets a
+// default-path config under that HOME and is exempted here, even though it
+// can still win the host-global :4310 bind during a restart window. Do not
+// "fix" this by re-basing on os.userInfo().homedir() — if the unit's
+// Environment=HOME ever diverges from the passwd home, that flips this
+// guard fail-closed on the real prod daemon and crash-loops it instead.
+export function assertConfigMayUseProdSlot(input?: string): void {
+  const configPath = resolveInstanceConfigPath(input);
+  if (isDefaultInstanceConfigPath(configPath)) {
+    return;
+  }
+  if (!existsSync(configPath)) {
+    throw new Error(
+      `Instance config ${configPath} does not exist. ` +
+        `'daemon start'/'stop'/'restart' only bootstrap the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
+        `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
+    );
+  }
+  const result = loadInstanceConfigReadOnly(input);
+  if (result.status !== "ok") {
+    // Unparseable (or, unreachably here, absent): a config that cannot be
+    // parsed cannot claim the prod slot either way. Let the real,
+    // non-read-only config load surface the parse error right after.
+    return;
+  }
+  const config = result.config;
+  const prodDataDir = resolveFrom(dirname(DEFAULT_INSTANCE_CONFIG_PATH), DEFAULT_DATA_DIR);
+  const claimsProdPort = config.server.port === DEFAULT_SERVER_PORT;
+  const claimsProdDataDir = samePathOnDisk(config.dataDir, prodDataDir);
+  if (!claimsProdPort && !claimsProdDataDir) {
+    return;
+  }
+  throw new Error(
+    `Instance config ${configPath} may not bind the production slot ` +
+      `(server.port ${config.server.port}, dataDir ${config.dataDir}). ` +
+      `A non-default config path must not claim port ${DEFAULT_SERVER_PORT} or dataDir ${prodDataDir}. ` +
+      `Set server.port and dataDir explicitly in this config, or use scripts/spur-isolated-daemon.sh.`,
+  );
 }
 
 export function ensureInstanceConfig(input?: string): { configPath: string; initialized: boolean } {
@@ -2003,6 +2297,7 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           defaultAgent: defaults.defaultAgent,
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
+          codexHome: defaults.models.codexHome,
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
           voiceModel: defaults.voice.model,

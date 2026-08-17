@@ -37,6 +37,82 @@ test.describe("R1: Mobile viewport", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("busy spawn keeps its mobile width and stops motion when reduced", async ({
+    page,
+  }, testInfo) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.route("**/api/preflight", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/mobile-loader" }),
+      });
+    });
+    let releaseSpawn: (() => void) | undefined;
+    const spawnReady = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    await page.route("**/api/spawn", async (route) => {
+      await spawnReady;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeWorkingSession({ id: "mobile-loader" })),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const idleButton = page.getByRole("button", { name: /^spawn$/i });
+    const idleBox = await idleButton.boundingBox();
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await idleButton.click();
+    const busyButton = page.getByRole("button", { name: "Spawning session" });
+    const busyBox = await busyButton.boundingBox();
+    expect(idleBox?.width).toBe(busyBox?.width);
+    expect(idleBox?.height).toBe(busyBox?.height);
+    await expect(busyButton.locator(".voice-spinner")).toHaveCSS("animation-name", "none");
+    await page.screenshot({ path: testInfo.outputPath("spawn-busy-mobile-reduced.png") });
+    releaseSpawn?.();
+  });
+
+  test("spawn draft survives mobile close and full reload", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    let settledPreflights = 0;
+    await page.route("**/api/preflight", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/auto-branch" }),
+      });
+      settledPreflights += 1;
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByPlaceholder("Prompt...").fill("Keep mobile draft");
+    await page.getByLabel("branch name").fill("feature/mobile-draft");
+    await page.getByLabel("Plan").check();
+    await expect.poll(() => settledPreflights).toBe(1);
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect.poll(() => settledPreflights).toBe(1);
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await page.reload();
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect.poll(() => settledPreflights).toBe(2);
+    await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep mobile draft");
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/mobile-draft");
+    await expect(page.getByLabel("Plan")).toBeChecked();
+  });
+
   // Design acceptance criteria 1-3: the header collapses to a single row at
   // every width, the spawn FAB is reachable, and nothing overflows.
   test("header controls share one y-band, the FAB is visible, and there is no horizontal scroll", async ({
@@ -182,9 +258,12 @@ test.describe("R1: Mobile viewport", () => {
       window.localStorage.setItem("spur:mobile-collapsed-categories", JSON.stringify(["stopped"]));
     });
     await page.reload();
-    await page.waitForFunction(() => !document.body.innerText.includes("Loading..."), {
-      timeout: 8000,
-    });
+    await page.waitForFunction(
+      () => !document.querySelector(".loader-bar, .loader-centered-mark"),
+      {
+        timeout: 8000,
+      },
+    );
 
     const zoneToggle = page
       .locator("section button")
@@ -315,6 +394,53 @@ test.describe("R1: Mobile viewport", () => {
     expect(box.y).toBeLessThanOrEqual(1);
     expect(box.width).toBeGreaterThanOrEqual(389);
     expect(box.width).toBeLessThanOrEqual(391);
+  });
+});
+
+// R1b: mobile landscape / touch, project menu popover scroll
+test.describe("R1b: mobile landscape project menu scroll", () => {
+  test.use({ viewport: { width: 844, height: 390 }, hasTouch: true });
+
+  test("project menu popover caps its height and scrolls with the header pinned", async ({
+    page,
+  }) => {
+    const manyProjects = Array.from({ length: 20 }, (_, index) => ({
+      id: `project-${index}`,
+      name: `Project ${index}`,
+    }));
+    await mockSessions(page, [makeWorkingSession({ id: "landscape-1" })], manyProjects);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /Project filter:/ }).click();
+    const menu = page.getByRole("menu");
+    await expect(menu).toBeVisible();
+
+    const menuBox = await menu.boundingBox();
+    expect(menuBox).not.toBeNull();
+    if (!menuBox) throw new Error("Expected project menu bounds");
+    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(390);
+
+    const list = menu.getByRole("group");
+    const [scrollHeight, clientHeight] = await list.evaluate((el) => [
+      el.scrollHeight,
+      el.clientHeight,
+    ]);
+    expect(scrollHeight).toBeGreaterThan(clientHeight);
+
+    await expect(menu.getByText("All Projects")).toBeVisible();
+    await expect(menu.getByText("+ New project")).toBeVisible();
+
+    // Scroll the list itself, never the page: the menu must stay attached
+    // and within the viewport.
+    await list.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await expect(menu).toBeVisible();
+    const menuBoxAfter = await menu.boundingBox();
+    expect(menuBoxAfter).not.toBeNull();
+    if (!menuBoxAfter) throw new Error("Expected project menu bounds after scroll");
+    expect(menuBoxAfter.y).toBeGreaterThanOrEqual(0);
+    expect(menuBoxAfter.y + menuBoxAfter.height).toBeLessThanOrEqual(390);
   });
 });
 

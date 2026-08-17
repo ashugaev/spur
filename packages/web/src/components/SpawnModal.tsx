@@ -2,10 +2,10 @@
 
 import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
+import { BusyContent } from "@/components/BusyContent";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
-import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -20,11 +20,24 @@ import {
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
+import type { CarrySpawnModel, ResolvedSpawnDefaults } from "@/lib/spawn-defaults";
+import type { WorkspaceMode } from "@/lib/types";
 
 export interface FieldControl<T> {
   value: T;
   onChange: (next: T) => void;
   onBlur?: () => void;
+}
+
+// A model FieldControl plus the two inputs ModelSelect needs to resolve a
+// concrete preselection instead of a "server decides" sentinel, plus the
+// settled/unsettled signal callers gate submit on (see ModelSelect's
+// onResolvedChange) instead of inferring it from a null value.
+export interface ModelFieldControl extends FieldControl<string | null> {
+  // Owned and fetched once by the caller (see ModelSelectProps.spawnDefaults).
+  spawnDefaults: ResolvedSpawnDefaults;
+  carry: CarrySpawnModel | null;
+  onResolvedChange: (resolved: boolean, error: string | null) => void;
 }
 
 export interface ToggleControl {
@@ -54,9 +67,14 @@ export type SpawnModalMode =
   | {
       kind: "spawn";
       project: ProjectControl;
-      model: FieldControl<string | null>;
+      model: ModelFieldControl;
+      sessionMode?: {
+        value: string;
+        onChange: (next: string) => void;
+        options: { value: string; label: string }[];
+      };
       branch: FieldControl<string>;
-      workspaceMode: FieldControl<"default" | "worktree" | "shared">;
+      workspaceMode: FieldControl<WorkspaceMode>;
       planMode: ToggleControl;
       selfDestruct: ToggleControl;
       steps: StepsControl;
@@ -66,7 +84,7 @@ export type SpawnModalMode =
     }
   | {
       kind: "respawn";
-      model: FieldControl<string | null>;
+      model: ModelFieldControl;
       noteSlot?: ReactNode;
       artifactSlot?: ReactNode;
     }
@@ -86,7 +104,7 @@ interface SpawnModalProps {
   onSubmit: () => void;
   submitting: boolean;
   submitLabel: string;
-  submitBusyLabel: string;
+  submitBusyAriaLabel: string;
   submitDisabled: boolean;
   showCancel: boolean;
   // Agent
@@ -158,14 +176,14 @@ function ModeFields({
   if (mode.kind === "spawn") {
     return (
       <>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <select
             aria-label="Spawn project"
             className={`flex-1 ${INPUT_CLASS}`}
+            disabled={mode.project.options.length === 0}
             onChange={(event) => mode.project.onChange(event.target.value)}
             value={mode.project.value}
           >
-            <option value="">Select project</option>
             {mode.project.options.map((project) => (
               <option key={project.id} value={project.id}>
                 {project.label}
@@ -177,11 +195,31 @@ function ModeFields({
             <ModelSelect
               agent={agent}
               ariaLabel="Spawn model"
+              carry={mode.model.carry}
               onChange={mode.model.onChange}
+              onResolvedChange={mode.model.onResolvedChange}
+              spawnDefaults={mode.model.spawnDefaults}
               value={mode.model.value}
             />
           </div>
+          {mode.sessionMode ? (
+            <select
+              aria-label="Spawn session mode"
+              className={`min-w-24 flex-1 ${INPUT_CLASS}`}
+              onChange={(event) => mode.sessionMode?.onChange(event.target.value)}
+              value={mode.sessionMode.value}
+            >
+              {mode.sessionMode.options.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
         </div>
+        {mode.project.options.length === 0 ? (
+          <p className="text-xs text-[var(--color-text-tertiary)]">No projects configured yet.</p>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <input
             aria-label="branch name"
@@ -194,12 +232,9 @@ function ModeFields({
           <select
             aria-label="workspace mode"
             className={INPUT_CLASS}
-            onChange={(event) =>
-              mode.workspaceMode.onChange(event.target.value as "default" | "worktree" | "shared")
-            }
+            onChange={(event) => mode.workspaceMode.onChange(event.target.value as WorkspaceMode)}
             value={mode.workspaceMode.value}
           >
-            <option value="default">Default</option>
             <option value="worktree">Worktree</option>
             <option value="shared">Shared</option>
           </select>
@@ -244,7 +279,10 @@ function ModeFields({
           <ModelSelect
             agent={agent}
             ariaLabel="Respawn model"
+            carry={mode.model.carry}
             onChange={mode.model.onChange}
+            onResolvedChange={mode.model.onResolvedChange}
+            spawnDefaults={mode.model.spawnDefaults}
             value={mode.model.value}
           />
         </div>
@@ -286,7 +324,7 @@ export function SpawnModal({
   onSubmit,
   submitting,
   submitLabel,
-  submitBusyLabel,
+  submitBusyAriaLabel,
   submitDisabled,
   showCancel,
   agent,
@@ -393,21 +431,22 @@ export function SpawnModal({
               </button>
             ) : null}
             <button
+              aria-busy={submitting || undefined}
+              aria-label={submitting ? submitBusyAriaLabel : undefined}
               className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
               disabled={submitDisabled}
               onClick={onSubmit}
               type="button"
             >
-              {submitting ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
-              <span>{submitting ? submitBusyLabel : submitLabel}</span>
-              {!submitting ? (
+              <BusyContent busy={submitting}>
+                <span>{submitLabel}</span>
                 <span
                   aria-hidden="true"
                   className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>
-              ) : null}
+              </BusyContent>
             </button>
           </div>
         </div>

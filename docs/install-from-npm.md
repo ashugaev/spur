@@ -2,7 +2,9 @@
 
 > Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
 
-Run Spur on a fresh Linux server. Package ships the web UI prebuilt — no on-box build. Dev/maintainer setup instead: [install-from-source.md](install-from-source.md).
+Run Spur on a fresh Linux server. This is the required path for coding-agent installs. Use source only for contributors/maintainers, and only when the user explicitly asks for source: [install-from-source.md](install-from-source.md).
+
+Package ships the web UI prebuilt — no on-box build.
 
 Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (Ubuntu's apt build is too old — use nodesource or nvm).
 
@@ -31,6 +33,8 @@ Units installed:
 | --------------------- | ------------------------------------------------------------------------------- |
 | `spur-daemon.service` | HTTP API `:4310`, tmux sessions                                                 |
 | `spur-web.service`    | Web UI `:5555`; terminal WebSocket in-process on `/ws` (same port, no own unit) |
+
+Daemon unit bounds the shared fleet cgroup with `MemoryHigh=75%`, `MemoryMax=85%`, and `MemorySwapMax=2G`. On a 62 GiB host, reclaim starts near 46.5 GiB and the hard cap lands near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB for the host. The daemon shares this cgroup, so sustained pressure can throttle its guard; the gap preserves control-path room. Set `MemorySwapMax=0` in a systemd drop-in for no fleet swap. Package templates have no live effect until `spur init` or `spur update` reinstalls units.
 
 Spur drives Claude Code and Codex. Install whichever the host doesn't already have; keep any that are present:
 
@@ -102,7 +106,7 @@ spur spawn <project-id> --branch <branch> "smoke test" --json
 spur update
 ```
 
-`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and health-checks with auto-rollback on failure. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). Deploy switch route behavior lives in [commands.md](commands.md#daemon-http-api): default `install-and-restart.sh` installs the package and runs `spur reinit`; non-default `SYSTEMCTL` (for example `SYSTEMCTL="sudo systemctl"`) falls back to `$SYSTEMCTL restart spur-daemon.service spur-web.service`.
+`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and makes up to 60 daemon and web readiness polls. A failed reinit exits the command; after a successful reinit, the detached health monitor owns auto-rollback. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). Deploy switch route behavior lives in [commands.md](commands.md#daemon-http-api).
 
 ## Security
 
@@ -122,7 +126,7 @@ spur update
 
 ## System-wide units (advanced)
 
-`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`), adapt `deploy/spur-daemon.service` / `deploy/spur-web.service` and set `SYSTEMCTL="sudo systemctl"` in the daemon env. Don't run `spur update` / `spur reinit` on a system-unit host — both take the user-scope path and spin up a conflicting `:4310` daemon; restart the system units directly, and re-copy the templates when a version changes the unit contract. The `~/.spur/npmrc` pin file itself still gets created here — every `daemon start` writes it, regardless of scope. Only the `~/.npmrc` heal is `spur init`/`update`/`reinit`-only (unsupported on this scope): if `spur doctor`'s `npmrc-nvm-conflict` check fires, remove the reported `prefix=`/`globalconfig=` line from `~/.npmrc` by hand — the check's `fix` field spells out the exact line to look for.
+`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`), adapt `deploy/spur-daemon.service` / `deploy/spur-web.service` and set `SYSTEMCTL="sudo systemctl"` in the daemon env. Don't run `spur update` / `spur reinit` on a system-unit host — both take the user-scope path and spin up a conflicting `:4310` daemon. When a version changes the unit contract, re-copy the adapted templates, run `systemctl daemon-reload`, then restart the system units in a maintenance window. The `~/.spur/npmrc` pin file itself still gets created here — every `daemon start` writes it, regardless of scope. Only the `~/.npmrc` heal is `spur init`/`update`/`reinit`-only (unsupported on this scope): if `spur doctor`'s `npmrc-nvm-conflict` check fires, remove the reported `prefix=`/`globalconfig=` line from `~/.npmrc` by hand — the check's `fix` field spells out the exact line to look for.
 
 ## Reference
 

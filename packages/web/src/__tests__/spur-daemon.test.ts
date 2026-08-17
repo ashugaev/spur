@@ -88,6 +88,37 @@ describe("spur-daemon", () => {
     });
   });
 
+  it("spurRequest with no timeoutMs passes no signal, and never leaks timeoutMs into fetch's own init", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await spurRequest("/health");
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(init).not.toHaveProperty("timeoutMs");
+    expect((init as RequestInit).signal).toBeUndefined();
+  });
+
+  it("spurRequest with timeoutMs passes an AbortSignal that fires after that duration", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementationOnce(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          (init as RequestInit).signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "TimeoutError"));
+          });
+        }),
+    );
+
+    // A 1ms timeout keeps this test fast and real-time (AbortSignal.timeout's
+    // internal timer is not reliably advanceable via vi.useFakeTimers in this
+    // environment); the exact duration passed through is covered separately.
+    const call = spurRequest("/projects/api/spawn-defaults?agent=cursor", { timeoutMs: 1 });
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
+
+    await expect(call).rejects.toThrow();
+  });
+
   it("spurJsonInit returns JSON init with content-type and JSON body; undefined body stays undefined", () => {
     expect(spurJsonInit("POST", { id: 1 })).toEqual({
       method: "POST",

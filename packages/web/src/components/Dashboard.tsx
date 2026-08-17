@@ -11,6 +11,8 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
+import { BusyContent } from "@/components/BusyContent";
+import { CenteredLoader } from "@/components/CenteredLoader";
 import { BrandGlyph } from "@/components/BrandGlyph";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
@@ -18,6 +20,7 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
 import { FiltersModal } from "@/components/FiltersModal";
+import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -47,13 +50,22 @@ import { matchesSessionSearch } from "@/lib/session-search";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
+import {
+  clearSpawnDraft,
+  readSpawnDraft,
+  writeSpawnDraft,
+  type SpawnDraft,
+} from "@/lib/spawn-draft";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
+import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
   ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
+  isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
   toDashboardSession,
@@ -64,6 +76,7 @@ import {
   type CreateProjectResponse,
   type DashboardSession,
   type DeskCollapsedRow,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type ProjectInfo,
@@ -72,6 +85,7 @@ import {
   type SpurSessionsResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
+  type WorkspaceMode,
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useBackendConnection } from "@/lib/backend-connection-context";
@@ -88,6 +102,7 @@ const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const SPAWN_DRAFT_SAVE_DELAY_MS = 500;
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
@@ -196,6 +211,22 @@ function buildFacetCounts<T extends string>(
   const counts = new Map<T, number>();
   for (const [key, deskKeys] of deskKeysByValue) counts.set(key, deskKeys.size);
   return counts;
+}
+
+// Desks matching every active filter except `exclude` — the "All" chip count
+// for that dimension. Not the sum of that section's per-option counts: a desk
+// carrying two tags counts once here but once per tag in `buildFacetCounts`,
+// and untagged desks count here but appear in no per-tag bucket.
+function countFacetDesks(
+  sessions: readonly DashboardSession[],
+  exclude: FacetDimension,
+  filters: FacetFilterState,
+): number {
+  const deskKeys = new Set<string>();
+  for (const session of sessions) {
+    if (sessionMatchesFacetFilters(session, exclude, filters)) deskKeys.add(session.deskKey);
+  }
+  return deskKeys.size;
 }
 
 function sameDeskActiveSessions(
@@ -518,16 +549,12 @@ function readLocationSearch(): string {
   return window.location.search;
 }
 
-function buildSpawnOverrides(
-  workspaceMode: "default" | "worktree" | "shared",
-  defaultBranch: string,
-): SpawnOverrides | undefined {
+function buildSpawnOverrides(workspaceMode: WorkspaceMode, defaultBranch: string): SpawnOverrides {
   if (workspaceMode === "worktree") {
     const trimmed = defaultBranch.trim();
     return trimmed ? { worktree: true, defaultBranch: trimmed } : { worktree: true };
   }
-  if (workspaceMode === "shared") return { worktree: false };
-  return undefined;
+  return { worktree: false };
 }
 
 function projectOptionLabel(project: ProjectInfo): string {
@@ -587,7 +614,7 @@ function ProjectMenu({
       </button>
       {popover.open ? (
         <div
-          className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           role="menu"
         >
           <button
@@ -608,7 +635,7 @@ function ProjectMenu({
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
-            <ul className="flex flex-col" role="group">
+            <ul className="flex min-h-0 flex-col overflow-y-auto" role="group">
               {projects.map((project) => (
                 <li
                   key={project.id}
@@ -813,12 +840,14 @@ function NewProjectModal({
             Cancel
           </button>
           <button
+            aria-busy={submitting || undefined}
+            aria-label={submitting ? "Creating project" : undefined}
             className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
             disabled={submitting}
             onClick={onSubmit}
             type="button"
           >
-            {submitting ? "Creating…" : "Create"}
+            <BusyContent busy={submitting}>Create</BusyContent>
           </button>
         </div>
       </div>
@@ -966,13 +995,17 @@ function EditProjectModal({
                 Cancel {deleteLabel}
               </button>
               <button
+                aria-busy={deleting || undefined}
+                aria-label={deleting ? `${deleteLabel} in progress` : undefined}
                 className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={deleting}
                 onClick={onDelete}
                 type="button"
               >
-                <IconTrash />
-                {deleting ? "Deleting…" : `Confirm ${deleteLabel}`}
+                <BusyContent busy={deleting}>
+                  <IconTrash />
+                  {`Confirm ${deleteLabel}`}
+                </BusyContent>
               </button>
             </div>
           </div>
@@ -1001,12 +1034,14 @@ function EditProjectModal({
             </button>
             {editable ? (
               <button
+                aria-busy={submitting || undefined}
+                aria-label={submitting ? "Saving project" : undefined}
                 className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={submitting}
                 onClick={onSubmit}
                 type="button"
               >
-                {submitting ? "Saving…" : "Save"}
+                <BusyContent busy={submitting}>Save</BusyContent>
               </button>
             ) : null}
           </div>
@@ -1036,6 +1071,11 @@ export function Dashboard() {
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
+  const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    session: DashboardSession;
+    payload: GithubPrCheckUnavailablePayload;
+  } | null>(null);
+  const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -1043,15 +1083,34 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  // Settled/unsettled model resolution, reported by ModelSelect itself. Submit
+  // gates on this, not on `spawnModel === null` — a settled-empty catalog
+  // also has a null model but is a valid, submittable state.
+  const [spawnModelResolved, setSpawnModelResolved] = useState(false);
+  // The model catalog's own fetch error (distinct from spawnDefaults.error
+  // below); ModelSelect keeps `resolved` false while this is set, same as an
+  // unresolved workspace-mode default, and this surfaces in the same banner.
+  const [spawnModelError, setSpawnModelError] = useState<string | null>(null);
+  const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
+  const spawnBranchExplicitRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
-    "default",
-  );
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<WorkspaceMode>("worktree");
+  // The project id spawnWorkspaceMode was last explicitly confirmed for (a
+  // manual select pick or an error-banner "Use worktree/shared" click), or
+  // null if it has never been explicitly confirmed. A confirmation belongs
+  // to exactly one project; it never carries over to a different one, so
+  // "auto" below is derived by comparing against the CURRENT project rather
+  // than stored as its own flag — a project switch re-derives it for free,
+  // with nothing to keep in sync by hand.
+  const [spawnWorkspaceModeConfirmedFor, setSpawnWorkspaceModeConfirmedFor] = useState<
+    string | null
+  >(null);
+  const spawnWorkspaceModeAuto = spawnWorkspaceModeConfirmedFor !== spawnProjectId;
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
@@ -1062,8 +1121,9 @@ export function Dashboard() {
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
-    onTranscribed: (text) =>
-      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) => {
+      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
+    },
   });
   const searchVoice = useVoiceInput({
     contextKey: "dashboard-search",
@@ -1129,6 +1189,8 @@ export function Dashboard() {
     setAgentFilter((current) =>
       current.includes(agent) ? current.filter((name) => name !== agent) : [...current, agent],
     );
+  const clearTagFilters = () => setActiveTagFilters([]);
+  const clearAgentFilters = () => setAgentFilter([]);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectDisplayName, setNewProjectDisplayName] = useState("");
   const [newProjectPrefix, setNewProjectPrefix] = useState("");
@@ -1169,18 +1231,6 @@ export function Dashboard() {
       window.removeEventListener("popstate", syncFromLocation);
     };
   }, []);
-
-  useEffect(() => {
-    if (!spawnOpen) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSpawnOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [spawnOpen]);
 
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
@@ -1434,8 +1484,18 @@ export function Dashboard() {
     [allSessions, facetFilters],
   );
 
+  const allAgentsCount = useMemo(
+    () => countFacetDesks(allSessions, "agent", facetFilters),
+    [allSessions, facetFilters],
+  );
+
   const tagCounts = useMemo(
     () => buildFacetCounts(allSessions, "tag", facetFilters, (s) => s.tags),
+    [allSessions, facetFilters],
+  );
+
+  const allTagsCount = useMemo(
+    () => countFacetDesks(allSessions, "tag", facetFilters),
     [allSessions, facetFilters],
   );
 
@@ -1485,6 +1545,12 @@ export function Dashboard() {
     [filterProjectOptions],
   );
 
+  const selectedSpawnProjectModes = filterProjectOptions.find(
+    (project) => project.id === spawnProjectId,
+  )?.modes;
+  const effectiveSessionMode = reconcileSessionMode(selectedSpawnProjectModes, spawnSessionMode);
+  const spawnModeOptions = sessionModeOptions(selectedSpawnProjectModes);
+
   const isValidSpawnProject = (candidateProjectId: string) =>
     configuredProjectOptions.some((project) => project.id === candidateProjectId);
 
@@ -1505,6 +1571,31 @@ export function Dashboard() {
     }
 
     return configuredProjectOptions[0]?.id ?? "";
+  };
+
+  const applySpawnDraft = (nextProjectId: string, draft: SpawnDraft | null) => {
+    setSpawnProjectId(nextProjectId);
+    setSpawnPrompt(draft?.prompt ?? "");
+    setSpawnAgent(draft?.agent ?? "claude");
+    setSpawnModel(draft?.model ?? null);
+    setSpawnSessionMode(draft?.sessionMode ?? null);
+    setSpawnBranch(draft?.branch ?? "");
+    spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
+    setSpawnPlanMode(draft?.planMode ?? false);
+    setSpawnSelfDestruct(draft?.selfDestruct ?? false);
+    setSpawnSelfDestructConditions(draft?.selfDestructConditions ?? "");
+    setSpawnSteps(draft?.steps.map((value, index) => ({ id: -(index + 1), value })) ?? []);
+    // A draft is a single storage key shared by every project, so a stored
+    // workspaceMode is usually the auto-derived default for whatever
+    // project it was last saved against, not a confirmation for
+    // nextProjectId. Restoring the project the confirmation actually
+    // belongs to (rather than a bare yes/no flag) means the "auto" derived
+    // above naturally comes out false only when nextProjectId matches it.
+    setSpawnWorkspaceModeConfirmedFor(draft?.workspaceModeConfirmedFor ?? null);
+    setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
+    setSpawnDefaultBranch(draft?.defaultBranch ?? "");
+    setSpawnTrackerUrl(draft?.trackerUrl ?? null);
+    setSpawnAttachments([]);
   };
 
   useEffect(() => {
@@ -1529,6 +1620,12 @@ export function Dashboard() {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
+    // No explicit reset needed here: spawnWorkspaceModeAuto is derived from
+    // spawnWorkspaceModeConfirmedFor !== spawnProjectId, so switching the
+    // project alone re-derives it — a confirmation made for the previous
+    // project stops applying the instant the project changes, and one made
+    // for THIS project (from before an earlier switch away) re-applies for
+    // free once the project matches again.
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -1536,6 +1633,81 @@ export function Dashboard() {
     }
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
+
+  // Fetched once here and passed down into ModelSelect (mode.model.spawnDefaults)
+  // instead of letting it fetch its own copy — one request per project+agent,
+  // and the workspace-mode default below and the model rung 3 default both
+  // read the same settle. projectId is empty while the owning modal is
+  // closed, so no request fires until it is actually open.
+  const spawnDefaults = useResolvedSpawnDefaults(spawnOpen ? spawnProjectId : "", spawnAgent);
+  useEffect(() => {
+    if (!spawnWorkspaceModeAuto || spawnDefaults.worktree === null) return;
+    setSpawnWorkspaceMode(spawnDefaults.worktree ? "worktree" : "shared");
+  }, [spawnWorkspaceModeAuto, spawnDefaults.worktree]);
+  // While still on the auto-derived workspace mode, an in-flight or failed
+  // spawn-defaults request means the true project default is unknown; block
+  // submit rather than silently spawning against the "worktree" fallback
+  // state. A manual pick (auto false) always overrides this.
+  const spawnWorkspaceModeUnresolved =
+    spawnWorkspaceModeAuto && (spawnDefaults.loading || spawnDefaults.error !== null);
+
+  const spawnDraft = useMemo<SpawnDraft>(() => {
+    return {
+      prompt: spawnPrompt,
+      agent: spawnAgent,
+      model: spawnModel,
+      branch: spawnBranch,
+      branchIsExplicit: spawnBranchExplicitRef.current,
+      workspaceMode: spawnWorkspaceMode,
+      workspaceModeConfirmedFor: spawnWorkspaceModeConfirmedFor,
+      defaultBranch: spawnDefaultBranch,
+      planMode: spawnPlanMode,
+      selfDestruct: spawnSelfDestruct,
+      selfDestructConditions: spawnSelfDestructConditions,
+      steps: spawnSteps.map((step) => step.value),
+      trackerUrl: spawnTrackerUrl,
+      sessionMode: spawnSessionMode,
+    };
+  }, [
+    spawnAgent,
+    spawnBranch,
+    spawnDefaultBranch,
+    spawnModel,
+    spawnPlanMode,
+    spawnPrompt,
+    spawnSelfDestruct,
+    spawnSelfDestructConditions,
+    spawnSessionMode,
+    spawnSteps,
+    spawnTrackerUrl,
+    spawnWorkspaceMode,
+    spawnWorkspaceModeConfirmedFor,
+  ]);
+  const spawnDraftRef = useRef(spawnDraft);
+  spawnDraftRef.current = spawnDraft;
+
+  useEffect(() => {
+    if (!spawnOpen) return;
+    const timer = setTimeout(() => writeSpawnDraft(spawnDraft), SPAWN_DRAFT_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [spawnDraft, spawnOpen]);
+
+  const closeSpawnModal = useCallback(() => {
+    writeSpawnDraft(spawnDraftRef.current);
+    setSpawnOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!spawnOpen) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSpawnModal();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [closeSpawnModal, spawnOpen]);
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
@@ -1592,20 +1764,33 @@ export function Dashboard() {
   const addStep = () => {
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
-  const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
-  const updateStep = (id: number, value: string) =>
+  const removeStep = (id: number) => {
+    setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
+  };
+  const updateStep = (id: number, value: string) => {
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
+  };
 
   useEffect(() => {
     const project = spawnProjectId.trim();
     const prompt = spawnPrompt.trim();
     if (!project || !prompt) return;
+    // Same gate as submit: while still on the auto-derived workspace mode,
+    // an in-flight or failed spawn-defaults request means spawnWorkspaceMode
+    // is still the hardcoded "worktree" fallback, not the project's real
+    // default. Firing preflight against it would compute a branch suggestion
+    // for the wrong mode. Re-runs (and re-debounces) once the defaults settle.
+    if (spawnWorkspaceModeUnresolved) return;
 
     let cancelled = false;
     const timer = setTimeout(() => {
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-      const payload: Record<string, unknown> = { projectId: project, prompt, agent: spawnAgent };
-      if (overrides) payload.overrides = overrides;
+      const payload: Record<string, unknown> = {
+        projectId: project,
+        prompt,
+        agent: spawnAgent,
+        overrides,
+      };
 
       fetch("/api/preflight", {
         method: "POST",
@@ -1614,7 +1799,9 @@ export function Dashboard() {
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((result: { branch: string | null } | null) => {
-          if (!cancelled && result?.branch) setSpawnBranch(result.branch);
+          if (!cancelled && result?.branch && !spawnBranchExplicitRef.current) {
+            setSpawnBranch(result.branch);
+          }
         })
         .catch(() => {});
     }, 500);
@@ -1623,7 +1810,14 @@ export function Dashboard() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
+  }, [
+    spawnProjectId,
+    spawnPrompt,
+    spawnAgent,
+    spawnWorkspaceMode,
+    spawnDefaultBranch,
+    spawnWorkspaceModeUnresolved,
+  ]);
 
   const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
 
@@ -1671,7 +1865,11 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
+      // Only the settled-empty-catalog case omits `model`; every other model
+      // state (including a manual pick or a resolved default) sends it.
       if (spawnModel !== null) payload.model = spawnModel;
+      payload.overrides = overrides;
+      if (effectiveSessionMode) payload.mode = effectiveSessionMode;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       assertAttachmentsWithinLimit(encodedAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
@@ -1686,7 +1884,6 @@ export function Dashboard() {
         };
       }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
-      if (overrides) payload.overrides = overrides;
       if (spawnTrackerUrl) {
         payload.slots = { links: [{ label: "tracker", url: spawnTrackerUrl }] };
       }
@@ -1701,6 +1898,7 @@ export function Dashboard() {
       }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
+      clearSpawnDraft();
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = (current?.sessions ?? []).filter(
           (existingSession) => existingSession.id !== session.id,
@@ -1713,12 +1911,15 @@ export function Dashboard() {
       });
       setSpawnPrompt("");
       setSpawnModel(null);
+      setSpawnSessionMode(null);
       setSpawnBranch("");
+      spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
-      setSpawnWorkspaceMode("default");
+      setSpawnWorkspaceModeConfirmedFor(null);
+      setSpawnWorkspaceMode("worktree");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
       setSpawnPinnedProjectId(null);
@@ -1982,18 +2183,23 @@ export function Dashboard() {
     }
   };
 
-  const handleCompleteSession = async (session: DashboardSession, prAction?: OpenPrAction) => {
+  const handleCompleteSession = async (
+    session: DashboardSession,
+    options?: { prAction?: OpenPrAction; retry?: true; skipPrCheck?: true },
+  ): Promise<boolean> => {
+    const prAction = options?.prAction;
     const activeDeskSessions = sameDeskActiveSessions(allSessions, session);
     const activeSubagentCount = activeDeskSessions.filter(
       (candidate) => candidate.id !== session.id,
     ).length;
-    if (!prAction && activeSubagentCount > 0 && typeof window !== "undefined") {
+    // A dialog retry is the same Done click the user already confirmed.
+    if (!options?.retry && activeSubagentCount > 0 && typeof window !== "undefined") {
       const ok = window.confirm(
         `Complete this desk? ${activeSubagentCount} subagent${
           activeSubagentCount === 1 ? "" : "s"
         } on this checkout will be ended.`,
       );
-      if (!ok) return;
+      if (!ok) return false;
     }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
@@ -2018,7 +2224,11 @@ export function Dashboard() {
     });
 
     try {
-      const body = { scope: "desk", ...(prAction ? { prAction } : {}) };
+      const body = {
+        scope: "desk",
+        ...(prAction ? { prAction } : {}),
+        ...(options?.skipPrCheck ? { skipPrCheck: true } : {}),
+      };
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2030,8 +2240,20 @@ export function Dashboard() {
           if (previousResponse) {
             queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
           }
+          setPrCheckUnavailable(null);
           setOpenPrAction({ session, payload });
-          return;
+          return false;
+        }
+        if (isGithubPrCheckUnavailablePayload(payload)) {
+          if (previousResponse) {
+            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+          }
+          // The two PR dialogs are alternatives for one complete attempt. Leaving
+          // the sibling mounted stacks both, and the stale one survives a later
+          // success and re-fires /complete on a terminal session.
+          setOpenPrAction(null);
+          setPrCheckUnavailable({ session, payload });
+          return false;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
@@ -2056,6 +2278,7 @@ export function Dashboard() {
           };
         });
       }
+      return true;
     } catch (completeError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
@@ -2071,41 +2294,55 @@ export function Dashboard() {
     if (!openPrAction) return;
     setOpenPrActionBusy(true);
     try {
-      await handleCompleteSession(openPrAction.session, prAction);
-      setOpenPrAction(null);
+      // Clear only on a real completion: a second failure re-opens a dialog,
+      // and dismissing it here would drop the user back to a bare row.
+      if (await handleCompleteSession(openPrAction.session, { prAction, retry: true })) {
+        setOpenPrAction(null);
+      }
+    } catch {
+      // handleCompleteSession already toasted; keep the dialog reachable.
     } finally {
       setOpenPrActionBusy(false);
     }
   };
 
+  const handlePrCheckUnavailable = async (options: { skipPrCheck?: true }) => {
+    if (!prCheckUnavailable) return;
+    setPrCheckUnavailableBusy(true);
+    try {
+      if (await handleCompleteSession(prCheckUnavailable.session, { ...options, retry: true })) {
+        setPrCheckUnavailable(null);
+      }
+    } catch {
+      // handleCompleteSession already toasted. Keep the dialog open so Skip
+      // stays reachable instead of dropping the user back to a bare row.
+    } finally {
+      setPrCheckUnavailableBusy(false);
+    }
+  };
+
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(resolvePreferredSpawnProjectId());
-    setSpawnAttachments([]);
-    setSpawnPrompt("");
-    setSpawnTrackerUrl(null);
+    applySpawnDraft(resolvePreferredSpawnProjectId(), readSpawnDraft());
     setSpawnOpen(true);
   };
 
   const openShepherdSpawnModal = () => {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnAgent("claude");
-    setSpawnModel(null);
-    setSpawnWorkspaceMode("default");
-    setSpawnDefaultBranch("");
-    setSpawnAttachments([]);
-    setSpawnPrompt("");
-    setSpawnTrackerUrl(null);
+    applySpawnDraft(SHEPHERD_PROJECT_ID, null);
     setSpawnOpen(true);
   };
 
   const openBacklogSpawnModal = (item: AvailableBacklogItem) => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(item.projectId);
-    setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
-    setSpawnAttachments([]);
-    setSpawnTrackerUrl(item.url);
+    const draft = readSpawnDraft();
+    if (draft?.trackerUrl === item.url) {
+      applySpawnDraft(item.projectId, draft);
+    } else {
+      applySpawnDraft(item.projectId, null);
+      setSpawnPrompt(`Work on ${item.key}: ${item.title}\n\n${item.url}`);
+      setSpawnTrackerUrl(item.url);
+    }
     setSpawnOpen(true);
   };
 
@@ -2171,7 +2408,8 @@ export function Dashboard() {
         !event.shiftKey &&
         ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
       if (!exactFindShortcut || event.isComposing) return;
-      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction || prCheckUnavailable)
+        return;
 
       const target = event.target;
       if (
@@ -2192,419 +2430,528 @@ export function Dashboard() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
+  }, [newProjectOpen, openPrAction, prCheckUnavailable, spawnOpen, terminalSession]);
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
-      <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
-        <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
-          <BrandGlyph />
-          <span className="hidden min-w-0 md:inline-flex">
-            <ProjectMenu
-              activeProjectName={activeProjectName}
-              projects={filterProjectOptions}
-              selectedProjectId={projectId}
-              onSelectProject={syncProjectFilter}
-              onNewProject={openNewProjectModal}
-              onEdit={openEditProjectModal}
-            />
-          </span>
-          <button
-            aria-label="Filters"
-            className={`inline-flex h-7 shrink-0 items-center gap-[7px] border px-[9px] uppercase tracking-[0.08em] transition ${
-              activeFilterCount > 0
-                ? "border-[var(--color-accent)] text-[var(--color-accent)]"
-                : "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
-            }`}
-            onClick={() => setFiltersOpen(true)}
-            type="button"
-          >
-            <IconSliders />
-            <span className="hidden text-[10px] md:inline">Filters</span>
-            {activeFilterCount > 0 ? (
-              <span className="min-w-4 border border-[var(--color-accent)] px-1 text-center font-bold tabular-nums">
-                {activeFilterCount}
-              </span>
-            ) : null}
-          </button>
-          <div className="relative flex min-w-0 max-w-[32rem] flex-1 items-center">
-            <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 focus-within:border-[var(--color-accent)]">
-              <svg
-                aria-hidden="true"
-                className="h-[13px] w-[13px] shrink-0 text-[var(--color-text-tertiary)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              <input
-                aria-label="Filter sessions"
-                className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                onChange={(event) => setSearchQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (isVoiceToggleHotkey(event)) {
-                    event.preventDefault();
-                    searchVoice.toggleRecording();
-                  }
-                }}
-                placeholder={voicePlaceholder("Filter...", searchVoice)}
-                ref={searchInputRef}
-                value={searchQuery}
+      <div className="flex min-h-dvh flex-col">
+        <header className="sticky top-0 z-40 border-b border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
+          <div className="mx-auto flex min-h-10 max-w-[1500px] items-center gap-2.5 px-4 py-[7px] sm:px-5 lg:px-6">
+            <BrandGlyph />
+            <span className="hidden min-w-0 md:inline-flex">
+              <ProjectMenu
+                activeProjectName={activeProjectName}
+                projects={filterProjectOptions}
+                selectedProjectId={projectId}
+                onSelectProject={syncProjectFilter}
+                onNewProject={openNewProjectModal}
+                onEdit={openEditProjectModal}
               />
-              {searchQuery.length > 0 ? (
-                <button
-                  aria-label="Clear dashboard search"
-                  className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
-                  onClick={() => {
-                    setSearchQuery("");
-                    searchInputRef.current?.focus();
-                  }}
-                  type="button"
-                >
-                  <CloseIcon />
-                </button>
+            </span>
+            <button
+              aria-label="Filters"
+              className={`inline-flex h-7 shrink-0 items-center gap-[7px] border px-[9px] uppercase tracking-[0.08em] transition ${
+                activeFilterCount > 0
+                  ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+                  : "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
+              }`}
+              onClick={() => setFiltersOpen(true)}
+              type="button"
+            >
+              <IconSliders />
+              <span className="hidden text-[10px] md:inline">Filters</span>
+              {activeFilterCount > 0 ? (
+                <span className="min-w-4 border border-[var(--color-accent)] px-1 text-center font-bold tabular-nums">
+                  {activeFilterCount}
+                </span>
               ) : null}
-              {searchVoice.canUseVoice ? (
-                <VoiceControls
-                  borderless
-                  className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
-                  groupClassName="flex items-center gap-1"
-                  voice={searchVoice}
+            </button>
+            <div className="relative flex min-w-0 max-w-[32rem] flex-1 items-center">
+              <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 focus-within:border-[var(--color-accent)]">
+                <svg
+                  aria-hidden="true"
+                  className="h-[13px] w-[13px] shrink-0 text-[var(--color-text-tertiary)]"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.35-4.35" />
+                </svg>
+                <input
+                  aria-label="Filter sessions"
+                  className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (isVoiceToggleHotkey(event)) {
+                      event.preventDefault();
+                      searchVoice.toggleRecording();
+                    }
+                  }}
+                  placeholder={voicePlaceholder("Filter...", searchVoice)}
+                  ref={searchInputRef}
+                  value={searchQuery}
                 />
+                {searchQuery.length > 0 ? (
+                  <button
+                    aria-label="Clear dashboard search"
+                    className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                    onClick={() => {
+                      setSearchQuery("");
+                      searchInputRef.current?.focus();
+                    }}
+                    type="button"
+                  >
+                    <CloseIcon />
+                  </button>
+                ) : null}
+                {searchVoice.canUseVoice ? (
+                  <VoiceControls
+                    borderless
+                    className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                    groupClassName="flex items-center gap-1"
+                    voice={searchVoice}
+                  />
+                ) : null}
+              </div>
+              {searchVoice.voiceError ? (
+                <div
+                  className="absolute left-0 top-full z-10 mt-1 w-full border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
+                  role="alert"
+                >
+                  {searchVoice.voiceError}
+                </div>
+              ) : searchVoice.recording || searchVoice.voiceBusy ? (
+                <div className="absolute left-0 top-full z-10 mt-1 px-2 text-[10px] text-[var(--color-text-tertiary)]">
+                  <VoiceStatusHint voice={searchVoice} />
+                </div>
               ) : null}
             </div>
-            {searchVoice.voiceError ? (
-              <div
-                className="absolute left-0 top-full z-10 mt-1 w-full border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
-                role="alert"
+            {hasActiveFilters ? (
+              <button
+                aria-label="Reset all filters"
+                className="h-7 shrink-0 border border-[var(--color-border-default)] px-2 uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                onClick={resetAllFilters}
+                type="button"
               >
-                {searchVoice.voiceError}
-              </div>
-            ) : searchVoice.recording || searchVoice.voiceBusy ? (
-              <div className="absolute left-0 top-full z-10 mt-1 px-2 text-[10px] text-[var(--color-text-tertiary)]">
-                <VoiceStatusHint voice={searchVoice} />
-              </div>
+                Reset
+              </button>
             ) : null}
-          </div>
-          {hasActiveFilters ? (
             <button
-              aria-label="Reset all filters"
-              className="h-7 shrink-0 border border-[var(--color-border-default)] px-2 uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              onClick={resetAllFilters}
+              aria-label="Spawn Shepherd"
+              className="ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+              onClick={openShepherdSpawnModal}
+              title="Spawn Shepherd"
               type="button"
             >
-              Reset
+              <IconShepherd />
             </button>
-          ) : null}
+            {!isMobile ? (
+              <button
+                className="inline-flex h-7 shrink-0 items-center gap-[7px] whitespace-nowrap border border-[var(--color-accent)] bg-[var(--color-accent)] px-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+                onClick={openSpawnModal}
+                type="button"
+              >
+                <IconPlus className="h-3 w-3" />
+                Spawn Session
+              </button>
+            ) : null}
+          </div>
+        </header>
+
+        {isMobile && !spawnOpen && !terminalSession ? (
           <button
-            aria-label="Spawn Shepherd"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-transparent text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
-            onClick={openShepherdSpawnModal}
-            title="Spawn Shepherd"
+            aria-label="Spawn Session"
+            className="fixed bottom-[38px] right-3.5 z-[35] flex h-12 w-12 items-center justify-center rounded-[14px] border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] shadow-[0_6px_20px_var(--color-shadow-modal-lg)] transition hover:bg-[var(--color-accent-hover)]"
+            onClick={openSpawnModal}
             type="button"
           >
-            <IconShepherd />
+            <IconPlus className="h-4 w-4" />
           </button>
-          {!isMobile ? (
-            <button
-              className="inline-flex h-7 shrink-0 items-center gap-[7px] whitespace-nowrap border border-[var(--color-accent)] bg-[var(--color-accent)] px-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={openSpawnModal}
-              type="button"
-            >
-              <IconPlus className="h-3 w-3" />
-              Spawn Session
-            </button>
-          ) : null}
-        </div>
-      </header>
-
-      {isMobile && !spawnOpen && !terminalSession ? (
-        <button
-          aria-label="Spawn Session"
-          className="fixed bottom-[38px] right-3.5 z-[35] flex h-12 w-12 items-center justify-center rounded-[14px] border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] shadow-[0_6px_20px_var(--color-shadow-modal-lg)] transition hover:bg-[var(--color-accent-hover)]"
-          onClick={openSpawnModal}
-          type="button"
-        >
-          <IconPlus className="h-4 w-4" />
-        </button>
-      ) : null}
-
-      {filtersOpen ? (
-        <FiltersModal
-          activeFilterCount={activeFilterCount}
-          activeStatFilter={activeStatFilter}
-          activeTagFilters={activeTagFilters}
-          agentFilter={agentFilter}
-          agentOptions={AGENT_OPTIONS.map((agent) => ({
-            id: agent,
-            count: agentCounts.get(agent) ?? 0,
-          }))}
-          allProjectsCount={allProjectsCount}
-          allStatusesCount={allStatusesCount}
-          onClearAll={resetAllFilters}
-          onClose={() => setFiltersOpen(false)}
-          onPrReadyOnlyChange={setPrReadyOnly}
-          onSelectProject={syncProjectFilter}
-          onSelectStatus={selectStatFilter}
-          onToggleAgent={toggleAgentFilter}
-          onToggleTag={(tag) =>
-            setActiveTagFilters((current) =>
-              current.includes(tag) ? current.filter((name) => name !== tag) : [...current, tag],
-            )
-          }
-          prReadyCount={prReadyCount}
-          prReadyLoaded={prReady.loaded}
-          prReadyOnly={prReadyOnly}
-          projectId={projectId}
-          projectOptions={filterProjectOptions.map((project) => ({
-            id: project.id,
-            name: project.name,
-            count: projectCounts.get(project.id) ?? 0,
-          }))}
-          statusOptions={ATTENTION_ZONE_ORDER.map((level) => ({
-            level,
-            label: ATTENTION_LANE_META[level].label,
-            color: ATTENTION_LANE_META[level].color,
-            icon: STATUS_LANE_ICONS[level],
-            count: stats[level],
-          }))}
-          tagOptions={filterTagCatalog.map((tag) => ({
-            name: tag.name,
-            color: tag.color,
-            count: tagCounts.get(tag.name) ?? 0,
-          }))}
-        />
-      ) : null}
-
-      <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        {newProjectOpen ? (
-          <NewProjectModal
-            displayName={newProjectDisplayName}
-            prefix={newProjectPrefix}
-            path={newProjectPath}
-            error={newProjectError}
-            missingPath={newProjectMissingPath}
-            submitting={newProjectSubmitting}
-            onDisplayNameChange={setNewProjectDisplayName}
-            onPrefixChange={setNewProjectPrefix}
-            onPathChange={(value) => {
-              setNewProjectPath(value);
-              setNewProjectMissingPath(null);
-            }}
-            onSubmit={() => {
-              void handleCreateProject();
-            }}
-            onCreateFolder={() => {
-              void handleCreateFolderAndContinue();
-            }}
-            onClose={() => setNewProjectOpen(false)}
-          />
         ) : null}
 
-        {editingProject ? (
-          <EditProjectModal
-            project={editingProject}
-            displayName={editProjectDisplayName}
-            prefix={editProjectPrefix}
-            path={editProjectPath}
-            error={editProjectError}
-            submitting={editProjectSubmitting}
-            deleting={editProjectDeleting}
-            onDisplayNameChange={setEditProjectDisplayName}
-            onPrefixChange={setEditProjectPrefix}
-            onPathChange={setEditProjectPath}
-            onSubmit={() => {
-              void handleUpdateProject();
-            }}
-            onDelete={() => {
-              void handleDeleteEditingProject();
-            }}
-            onClose={closeEditProjectModal}
-          />
-        ) : null}
-
-        {projectActionError ? (
-          <div
-            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
-            role="alert"
-          >
-            {projectActionError}
-          </div>
-        ) : null}
-
-        {spawnOpen ? (
-          <SpawnModal
-            agent={spawnAgent}
-            agentAriaLabel="Spawn agent"
-            attachments={spawnAttachments}
-            canClose
-            clearLabel="Clear spawn prompt"
-            history={{ entries: spawnHistory.entries, onSelect: setSpawnPrompt }}
-            mode={{
-              kind: "spawn",
-              project: {
-                value: spawnProjectId,
-                onChange: syncSpawnProject,
-                options: configuredProjectOptions.map((project) => ({
-                  id: project.id,
-                  label: projectOptionLabel(project),
-                })),
-              },
-              model: { value: spawnModel, onChange: setSpawnModel },
-              branch: {
-                value: spawnBranch,
-                onChange: setSpawnBranch,
-                onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
-              },
-              workspaceMode: { value: spawnWorkspaceMode, onChange: setSpawnWorkspaceMode },
-              planMode: { value: spawnPlanMode, onChange: setSpawnPlanMode },
-              selfDestruct: { value: spawnSelfDestruct, onChange: setSpawnSelfDestruct },
-              steps: {
-                items: spawnSteps,
-                onUpdate: updateStep,
-                onAdd: addStep,
-                onRemove: removeStep,
-              },
-              branchNotesSlot: (
-                <>
-                  {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
-                    <p className="text-xs text-[var(--color-text-tertiary)]">
-                      will create {normalizedBranchPreview}
-                    </p>
-                  ) : null}
-                  {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
-                    <p className="text-xs text-[var(--color-text-tertiary)]">
-                      branch already exists — will attach instead of creating new
-                    </p>
-                  ) : null}
-                  {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                      already checked out in another worktree — spawn will fail; pick a different
-                      name
-                    </div>
-                  ) : null}
-                  {branchExists && !branchExists.exists && branchExists.remote ? (
-                    <p className="text-xs text-[var(--color-text-tertiary)]">
-                      exists on origin — will track it
-                    </p>
-                  ) : null}
-                </>
-              ),
-              selfDestructSlot: spawnSelfDestruct ? (
-                <textarea
-                  aria-label="Self-destruct conditions"
-                  className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
-                  onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
-                  placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
-                  value={spawnSelfDestructConditions}
-                />
-              ) : null,
-              baseBranchSlot:
-                spawnWorkspaceMode === "worktree" ? (
-                  <input
-                    className={`w-full ${INPUT_CLASS}`}
-                    onChange={(event) => setSpawnDefaultBranch(event.target.value)}
-                    placeholder="Base branch"
-                    value={spawnDefaultBranch}
-                  />
-                ) : null,
-            }}
-            onAddFiles={addSpawnFiles}
-            onAgentChange={(next) => {
-              setSpawnAgent(next);
-              setSpawnModel(null);
-            }}
-            onClose={() => setSpawnOpen(false)}
-            onPromptChange={setSpawnPrompt}
-            onRemoveAttachment={(index) =>
-              setSpawnAttachments((current) =>
-                current.filter((_, currentIndex) => currentIndex !== index),
+        {filtersOpen ? (
+          <FiltersModal
+            activeFilterCount={activeFilterCount}
+            activeStatFilter={activeStatFilter}
+            activeTagFilters={activeTagFilters}
+            agentFilter={agentFilter}
+            agentOptions={AGENT_OPTIONS.map((agent) => ({
+              id: agent,
+              count: agentCounts.get(agent) ?? 0,
+            }))}
+            allAgentsCount={allAgentsCount}
+            allProjectsCount={allProjectsCount}
+            allStatusesCount={allStatusesCount}
+            allTagsCount={allTagsCount}
+            onClearAgents={clearAgentFilters}
+            onClearAll={resetAllFilters}
+            onClearTags={clearTagFilters}
+            onClose={() => setFiltersOpen(false)}
+            onPrReadyOnlyChange={setPrReadyOnly}
+            onSelectProject={syncProjectFilter}
+            onSelectStatus={selectStatFilter}
+            onToggleAgent={toggleAgentFilter}
+            onToggleTag={(tag) =>
+              setActiveTagFilters((current) =>
+                current.includes(tag) ? current.filter((name) => name !== tag) : [...current, tag],
               )
             }
-            onSubmit={() => void handleSpawn()}
-            prompt={spawnPrompt}
-            promptAriaLabel="Prompt..."
-            promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
-            promptPlaceholder="Prompt..."
-            promptRef={spawnPromptRef}
-            showCancel={false}
-            slashEndpoint={
-              spawnProjectId.trim()
-                ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
-                : null
-            }
-            submitBusyLabel="Spawning..."
-            submitDisabled={spawning || !spawnProjectId.trim()}
-            submitLabel="Spawn"
-            submitting={spawning}
-            title="Spawn Session"
-            voice={voice}
+            prReadyCount={prReadyCount}
+            prReadyLoaded={prReady.loaded}
+            prReadyOnly={prReadyOnly}
+            projectId={projectId}
+            projectOptions={filterProjectOptions.map((project) => ({
+              id: project.id,
+              name: project.name,
+              count: projectCounts.get(project.id) ?? 0,
+            }))}
+            statusOptions={ATTENTION_ZONE_ORDER.map((level) => ({
+              level,
+              label: ATTENTION_LANE_META[level].label,
+              color: ATTENTION_LANE_META[level].color,
+              icon: STATUS_LANE_ICONS[level],
+              count: stats[level],
+            }))}
+            tagOptions={filterTagCatalog.map((tag) => ({
+              name: tag.name,
+              color: tag.color,
+              count: tagCounts.get(tag.name) ?? 0,
+            }))}
           />
         ) : null}
 
-        {loading ? (
-          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading...</p>
-        ) : null}
+        <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-4 py-4 pb-8 sm:px-5 lg:px-6">
+          {newProjectOpen ? (
+            <NewProjectModal
+              displayName={newProjectDisplayName}
+              prefix={newProjectPrefix}
+              path={newProjectPath}
+              error={newProjectError}
+              missingPath={newProjectMissingPath}
+              submitting={newProjectSubmitting}
+              onDisplayNameChange={setNewProjectDisplayName}
+              onPrefixChange={setNewProjectPrefix}
+              onPathChange={(value) => {
+                setNewProjectPath(value);
+                setNewProjectMissingPath(null);
+              }}
+              onSubmit={() => {
+                void handleCreateProject();
+              }}
+              onCreateFolder={() => {
+                void handleCreateFolderAndContinue();
+              }}
+              onClose={() => setNewProjectOpen(false)}
+            />
+          ) : null}
 
-        {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
-          <section className="mt-5">
-            <EmptyState message={emptyStateMessage} />
-            {hasActiveFilters ? (
-              <div className="mt-3 flex justify-center">
-                <button
-                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                  onClick={resetAllFilters}
-                  type="button"
-                >
-                  Reset Filters
-                </button>
-              </div>
-            ) : null}
-          </section>
-        ) : null}
+          {editingProject ? (
+            <EditProjectModal
+              project={editingProject}
+              displayName={editProjectDisplayName}
+              prefix={editProjectPrefix}
+              path={editProjectPath}
+              error={editProjectError}
+              submitting={editProjectSubmitting}
+              deleting={editProjectDeleting}
+              onDisplayNameChange={setEditProjectDisplayName}
+              onPrefixChange={setEditProjectPrefix}
+              onPathChange={setEditProjectPath}
+              onSubmit={() => {
+                void handleUpdateProject();
+              }}
+              onDelete={() => {
+                void handleDeleteEditingProject();
+              }}
+              onClose={closeEditProjectModal}
+            />
+          ) : null}
 
-        {!loading && (hasVisibleBacklog || hasVisibleSessions) ? (
-          <section className="mt-5 space-y-4">
-            {hasVisibleBacklog ? (
-              <BacklogZone
-                items={visibleBacklog}
-                projectNameMap={projectNameMap}
-                onTake={openBacklogSpawnModal}
-              />
-            ) : null}
-            {visibleLevels.map((level) => (
-              <AttentionZone
-                key={level}
-                collapsed={isMobile ? collapsedLevels.has(level) : undefined}
-                level={level}
-                onCompleteSession={handleCompleteSession}
-                onOpenTerminal={openTerminal}
-                onRestoreSession={handleRestoreSession}
-                projectFilterId={projectId || undefined}
-                onToggle={isMobile ? toggleCollapsed : undefined}
-                rows={grouped[level]}
-              />
-            ))}
-          </section>
-        ) : null}
+          {projectActionError ? (
+            <div
+              className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
+              role="alert"
+            >
+              {projectActionError}
+            </div>
+          ) : null}
 
-        {terminalSession ? (
-          <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
-        ) : null}
-        {openPrAction ? (
-          <OpenPrActionDialog
-            busy={openPrActionBusy}
-            onAction={(action) => void handleOpenPrAction(action)}
-            onCancel={() => setOpenPrAction(null)}
-            payload={openPrAction.payload}
-          />
-        ) : null}
-      </main>
-      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
-      <StatusBar />
+          {spawnOpen ? (
+            <SpawnModal
+              agent={spawnAgent}
+              agentAriaLabel="Spawn agent"
+              attachments={spawnAttachments}
+              canClose
+              clearLabel="Clear spawn prompt"
+              history={{
+                entries: spawnHistory.entries,
+                onSelect: (next) => {
+                  setSpawnPrompt(next);
+                },
+              }}
+              mode={{
+                kind: "spawn",
+                project: {
+                  value: spawnProjectId,
+                  onChange: syncSpawnProject,
+                  options: configuredProjectOptions.map((project) => ({
+                    id: project.id,
+                    label: projectOptionLabel(project),
+                  })),
+                },
+                model: {
+                  value: spawnModel,
+                  onChange: (next) => {
+                    setSpawnModel(next);
+                  },
+                  spawnDefaults,
+                  carry: null,
+                  onResolvedChange: (resolved, error) => {
+                    setSpawnModelResolved(resolved);
+                    setSpawnModelError(error);
+                  },
+                },
+                ...(spawnModeOptions.length > 0
+                  ? {
+                      sessionMode: {
+                        value: effectiveSessionMode ?? "",
+                        onChange: (next: string) => {
+                          setSpawnSessionMode(next === "" ? null : next);
+                        },
+                        options: spawnModeOptions,
+                      },
+                    }
+                  : {}),
+                branch: {
+                  value: spawnBranch,
+                  onChange: (next) => {
+                    spawnBranchExplicitRef.current = next.trim().length > 0;
+                    setSpawnBranch(next);
+                  },
+                  onBlur: () => {
+                    const normalizedBranch = normalizeBranchName(spawnBranch);
+                    spawnBranchExplicitRef.current = normalizedBranch.length > 0;
+                    setSpawnBranch(normalizedBranch);
+                  },
+                },
+                workspaceMode: {
+                  value: spawnWorkspaceMode,
+                  onChange: (next) => {
+                    setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
+                    setSpawnWorkspaceMode(next);
+                  },
+                },
+                planMode: {
+                  value: spawnPlanMode,
+                  onChange: (next) => {
+                    setSpawnPlanMode(next);
+                  },
+                },
+                selfDestruct: {
+                  value: spawnSelfDestruct,
+                  onChange: (next) => {
+                    setSpawnSelfDestruct(next);
+                  },
+                },
+                steps: {
+                  items: spawnSteps,
+                  onUpdate: updateStep,
+                  onAdd: addStep,
+                  onRemove: removeStep,
+                },
+                branchNotesSlot: (
+                  <>
+                    {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
+                      <p className="text-xs text-[var(--color-text-tertiary)]">
+                        will create {normalizedBranchPreview}
+                      </p>
+                    ) : null}
+                    {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
+                      <p className="text-xs text-[var(--color-text-tertiary)]">
+                        branch already exists — will attach instead of creating new
+                      </p>
+                    ) : null}
+                    {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        already checked out in another worktree — spawn will fail; pick a different
+                        name
+                      </div>
+                    ) : null}
+                    {branchExists && !branchExists.exists && branchExists.remote ? (
+                      <p className="text-xs text-[var(--color-text-tertiary)]">
+                        exists on origin — will track it
+                      </p>
+                    ) : null}
+                    {spawnWorkspaceModeAuto && spawnDefaults.error ? (
+                      <div className="flex flex-wrap items-center gap-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        <span>
+                          couldn&apos;t resolve this project&apos;s workspace default:{" "}
+                          {spawnDefaults.error}
+                        </span>
+                        <span className="flex gap-2">
+                          <button
+                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            onClick={() => {
+                              setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
+                              setSpawnWorkspaceMode("worktree");
+                            }}
+                            type="button"
+                          >
+                            Use worktree
+                          </button>
+                          <button
+                            className="border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-chip-error-border)]/20"
+                            onClick={() => {
+                              setSpawnWorkspaceModeConfirmedFor(spawnProjectId);
+                              setSpawnWorkspaceMode("shared");
+                            }}
+                            type="button"
+                          >
+                            Use shared
+                          </button>
+                        </span>
+                      </div>
+                    ) : null}
+                    {spawnModelError ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        couldn&apos;t load the model catalog: {spawnModelError}
+                      </div>
+                    ) : null}
+                  </>
+                ),
+                selfDestructSlot: spawnSelfDestruct ? (
+                  <textarea
+                    aria-label="Self-destruct conditions"
+                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                    onChange={(event) => {
+                      setSpawnSelfDestructConditions(event.target.value);
+                    }}
+                    placeholder={`Leave empty for default: ${DEFAULT_SELF_DESTRUCT_CONDITION}`}
+                    value={spawnSelfDestructConditions}
+                  />
+                ) : null,
+                baseBranchSlot:
+                  spawnWorkspaceMode === "worktree" ? (
+                    <input
+                      className={`w-full ${INPUT_CLASS}`}
+                      onChange={(event) => {
+                        setSpawnDefaultBranch(event.target.value);
+                      }}
+                      placeholder="Base branch"
+                      value={spawnDefaultBranch}
+                    />
+                  ) : null,
+              }}
+              onAddFiles={addSpawnFiles}
+              onAgentChange={(next) => {
+                setSpawnAgent(next);
+                setSpawnModel(null);
+              }}
+              onClose={closeSpawnModal}
+              onPromptChange={(next) => {
+                setSpawnPrompt(next);
+              }}
+              onRemoveAttachment={(index) => {
+                setSpawnAttachments((current) =>
+                  current.filter((_, currentIndex) => currentIndex !== index),
+                );
+              }}
+              onSubmit={() => void handleSpawn()}
+              prompt={spawnPrompt}
+              promptAriaLabel="Prompt..."
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
+              promptPlaceholder="Prompt..."
+              promptRef={spawnPromptRef}
+              showCancel={false}
+              slashEndpoint={
+                spawnProjectId.trim()
+                  ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
+                  : null
+              }
+              submitBusyAriaLabel="Spawning session"
+              submitDisabled={
+                spawning ||
+                !spawnProjectId.trim() ||
+                !spawnModelResolved ||
+                spawnWorkspaceModeUnresolved
+              }
+              submitLabel="Spawn"
+              submitting={spawning}
+              title="Spawn Session"
+              voice={voice}
+            />
+          ) : null}
+
+          {loading ? <CenteredLoader className="flex-1" label="Loading dashboard" /> : null}
+
+          {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
+            <section className="mt-5">
+              <EmptyState message={emptyStateMessage} />
+              {hasActiveFilters ? (
+                <div className="mt-3 flex justify-center">
+                  <button
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                    onClick={resetAllFilters}
+                    type="button"
+                  >
+                    Reset Filters
+                  </button>
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
+          {!loading && (hasVisibleBacklog || hasVisibleSessions) ? (
+            <section className="mt-5 space-y-4">
+              {hasVisibleBacklog ? (
+                <BacklogZone
+                  items={visibleBacklog}
+                  projectNameMap={projectNameMap}
+                  onTake={openBacklogSpawnModal}
+                />
+              ) : null}
+              {visibleLevels.map((level) => (
+                <AttentionZone
+                  key={level}
+                  collapsed={isMobile ? collapsedLevels.has(level) : undefined}
+                  level={level}
+                  onCompleteSession={handleCompleteSession}
+                  onOpenTerminal={openTerminal}
+                  onRestoreSession={handleRestoreSession}
+                  projectFilterId={projectId || undefined}
+                  onToggle={isMobile ? toggleCollapsed : undefined}
+                  rows={grouped[level]}
+                />
+              ))}
+            </section>
+          ) : null}
+
+          {terminalSession ? (
+            <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
+          ) : null}
+          {openPrAction ? (
+            <OpenPrActionDialog
+              busy={openPrActionBusy}
+              onAction={(action) => void handleOpenPrAction(action)}
+              onCancel={() => setOpenPrAction(null)}
+              payload={openPrAction.payload}
+            />
+          ) : null}
+          {prCheckUnavailable ? (
+            <GithubRateLimitDialog
+              busy={prCheckUnavailableBusy}
+              onCancel={() => setPrCheckUnavailable(null)}
+              onRetry={() => void handlePrCheckUnavailable({})}
+              onSkip={() => void handlePrCheckUnavailable({ skipPrCheck: true })}
+              payload={prCheckUnavailable.payload}
+            />
+          ) : null}
+        </main>
+        <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+        <StatusBar />
+      </div>
     </TagsContext.Provider>
   );
 }

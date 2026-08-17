@@ -4,9 +4,17 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { fileURLToPath, URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
+import { assertConfigMayUseProdSlot } from "./config.js";
 import { EventBus } from "./event-bus.js";
 import {
+  deploySwitchStatePath,
+  readProcessStartTime,
+  reconcileDeploySwitchState,
+  writeDeploySwitchState,
+} from "./deploy-switch-state.js";
+import {
   DEFAULT_EVENT_LOG_CONFIG,
+  flushEventLogCollapse,
   logSpurEvent,
   setEventLogConfig,
   type SpurLogEntry,
@@ -30,10 +38,12 @@ import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
+  InvalidConfigPathError,
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
@@ -56,6 +66,7 @@ import {
   type PreflightRequest,
   type HandoffSessionRequest,
   type RespawnSessionRequest,
+  type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
@@ -107,12 +118,28 @@ const DEFAULT_LOGGER: ServiceLogger = {
 };
 const SHUTDOWN_GRACE_MS = 5_000;
 
+// Total budget for a shutdown, measured from the signal to the last teardown step.
+// Every await inside shutdown() is bounded by what is left of it, so no single step
+// (source poller stop, trigger drain, connection close) can overrun the service
+// manager's stop timeout. The packaged systemd unit uses the default
+// TimeoutStopSec=90s; overrunning that means SIGKILL, which skips teardown entirely
+// and leaves half-written state behind. 45s leaves room for the slowest healthy
+// teardown observed in production (~17s) while keeping a wide margin under 90s.
+const SHUTDOWN_DEADLINE_MS = 45_000;
+
+// Hard backstop for the signal path: if teardown itself wedges past the budget (a step
+// that never yields back, a pending microtask chain), exit anyway and log the handles
+// still open. Sits above SHUTDOWN_DEADLINE_MS so the bounded path always wins the race
+// when it is working, and far below TimeoutStopSec so systemd never has to SIGKILL.
+const SHUTDOWN_FORCE_EXIT_MS = 60_000;
+
 // Upper bound on how long a reload waits for triggers.stop() to drain in-flight
 // deliveries. A blocked delivery (e.g. one awaiting a submit-ack that never matches)
 // would otherwise hang stop() forever and leave the daemon stuck on 503. The bound
 // exceeds a delivery's own ack timeout (~2 min observed) so natural completion wins
 // the race in the common case; pathological reloads unblock within an operator-
-// tolerable window.
+// tolerable window. Shutdown does NOT use this bound: it exceeds TimeoutStopSec, so
+// shutdown passes its own remaining budget instead.
 const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
 
 // Bound the shutdown drain of in-flight background spawns so teardown never hangs
@@ -199,6 +226,13 @@ function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   return request;
 }
 
+function parseSweepSidecarsRequest(raw: unknown): { reap: boolean } {
+  if (!isRecord(raw)) {
+    return { reap: false };
+  }
+  return { reap: raw["reap"] === true };
+}
+
 function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
   if (!isRecord(raw)) {
     return {};
@@ -269,6 +303,13 @@ export function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   return request;
 }
 
+export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  return raw["force"] === true ? { force: true } : {};
+}
+
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
 // normally whether stop() completed, overran the timeout, or rejected — teardown is
 // best-effort and must never block (or fail) a reload. On timeout/rejection the old
@@ -284,6 +325,31 @@ export async function stopTriggersBounded(
   } catch (error) {
     report(error instanceof Error ? error.message : String(error));
   }
+}
+
+// Counts the handles still keeping the event loop alive, grouped by resource kind
+// (e.g. { Timeout: 2, TCPSocketWrap: 7 }). Reported when the shutdown backstop fires so
+// a wedged teardown names what held it instead of just "timed out".
+export function summarizeActiveResources(): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const resource of process.getActiveResourcesInfo()) {
+    counts[resource] = (counts[resource] ?? 0) + 1;
+  }
+  return counts;
+}
+
+// Arms the last-resort exit for the signal path: `onForceExit` runs once `timeoutMs`
+// elapses without teardown reaching its disarm call. The timer is unref'd so arming it
+// can never be the thing that keeps a healthy process alive. Returns the disarm.
+export function armShutdownBackstop(
+  timeoutMs: number,
+  onForceExit: (activeResources: Record<string, number>) => void,
+): () => void {
+  const timer = setTimeout(() => {
+    onForceExit(summarizeActiveResources());
+  }, timeoutMs);
+  timer.unref();
+  return () => clearTimeout(timer);
 }
 
 export interface ReloadApplyHooks {
@@ -400,8 +466,10 @@ export async function startServer(
       `${ghPathState.message}; GitHub automation disabled until gh is available`,
     );
   }
+  assertConfigMayUseProdSlot(configPath);
   const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
   let ready = false;
+  const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
   // effect without a full daemon restart.
   const applyLogConfigs = (cfg: typeof service.config): void => {
@@ -619,11 +687,25 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/deploy/switch/status") {
+        sendJson(response, 200, reconcileDeploySwitchState(switchStatePath) ?? { phase: "idle" });
+        return;
+      }
+
       if (method === "POST" && path === "/deploy/switch") {
         const body = await readJsonBody<{ version?: unknown }>(request);
         const requestedVersion = typeof body.version === "string" ? body.version : "";
         if (!isReleaseVersion(requestedVersion)) {
           sendError(response, 400, "invalid version");
+          return;
+        }
+        const activeSwitch = reconcileDeploySwitchState(switchStatePath);
+        if (activeSwitch?.phase === "running") {
+          sendJson(response, 409, {
+            error: `deploy switch already in progress for ${activeSwitch.version}`,
+            inProgress: true,
+            version: activeSwitch.version,
+          });
           return;
         }
         // Guard: refuse to run when the daemon is executing from a source
@@ -651,7 +733,41 @@ export async function startServer(
           const child = spawn("bash", [helperPath, requestedVersion], {
             detached: true,
             stdio: "ignore",
+            env: { ...process.env, SPUR_INSTALL_STATUS_FILE: switchStatePath },
           });
+          if (child.pid === undefined) {
+            sendError(response, 500, "failed to start deploy switch");
+            return;
+          }
+          const startedAt = new Date().toISOString();
+          const processStartTime = readProcessStartTime(child.pid);
+          if (!processStartTime) {
+            sendError(response, 500, "failed to identify deploy switch process");
+            return;
+          }
+          writeDeploySwitchState(switchStatePath, {
+            phase: "running",
+            version: requestedVersion,
+            pid: child.pid,
+            processStartTime,
+            startedAt,
+          });
+          // The helper writes its own terminal status, but only after it arms the
+          // trap: this covers a spawn error and the exits before that (bad
+          // version, lock timeout). Losing the race to the helper is harmless —
+          // both writes carry the same outcome.
+          const finishSwitch = (exitCode: number): void => {
+            writeDeploySwitchState(switchStatePath, {
+              phase: exitCode === 0 ? "succeeded" : "failed",
+              version: requestedVersion,
+              pid: child.pid ?? process.pid,
+              startedAt,
+              finishedAt: new Date().toISOString(),
+              exitCode,
+            });
+          };
+          child.once("error", () => finishSwitch(-1));
+          child.once("exit", (code) => finishSwitch(code ?? -1));
           child.unref();
         }
         sendJson(response, 202, { accepted: true, version: requestedVersion });
@@ -741,7 +857,9 @@ export async function startServer(
           sendError(response, 400, `Unsupported agent: ${rawAgent}`);
           return;
         }
-        sendJson(response, 200, { models: await listAgentModels(agent) });
+        sendJson(response, 200, {
+          models: await listAgentModels(agent, { codexHomePath: service.config.models.codexHome }),
+        });
         return;
       }
 
@@ -893,6 +1011,20 @@ export async function startServer(
             url.searchParams.get("agent")?.trim() || undefined,
           ),
         );
+        return;
+      }
+
+      const spawnDefaultsProjectId = path.match(/^\/projects\/([^/]+)\/spawn-defaults$/)?.[1];
+      if (method === "GET" && spawnDefaultsProjectId) {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, await service.spawnDefaults(spawnDefaultsProjectId, agent));
         return;
       }
 
@@ -1168,8 +1300,15 @@ export async function startServer(
       }
 
       if (method === "POST" && path === "/shepherd/spawn") {
-        const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnShepherd(body));
+        const body = await readJsonBody<{ prompt?: unknown; reportDisposition?: unknown }>(
+          request,
+          15_000_000,
+        );
+        const shepherd = await service.spawnShepherd(
+          typeof body.prompt === "string" ? { prompt: body.prompt } : {},
+        );
+        // Legacy callers (web /api/shepherd) still expect the session alone.
+        sendJson(response, 201, body.reportDisposition === true ? shepherd : shepherd.session);
         return;
       }
 
@@ -1177,6 +1316,31 @@ export async function startServer(
       if (method === "POST" && sendSessionId) {
         const body = await readJsonBody<SendMessageRequest>(request, 15_000_000);
         sendJson(response, 200, await service.send(sendSessionId, body));
+        return;
+      }
+
+      const queueOpMatch = path.match(/^\/sessions\/([^/]+)\/queue\/(remove|flush)$/);
+      if (method === "POST" && queueOpMatch?.[1]) {
+        const body = await readJsonBody<{ message?: unknown }>(request);
+        // Forward the same trimmed value validation checks: a queued message
+        // is always trimmed at enqueue (send()'s prepareSendMessage and the
+        // web proxy's send route both trim before it ever reaches the
+        // queue), so an untrimmed value here can never match a real entry —
+        // validating trimmed but looking up raw would 404 a caller who
+        // padded the text, for no reason.
+        const message = typeof body.message === "string" ? body.message.trim() : "";
+        if (!message) {
+          sendError(response, 400, "message must be a non-empty string");
+          return;
+        }
+        const queueSessionId = queueOpMatch[1];
+        sendJson(
+          response,
+          200,
+          queueOpMatch[2] === "remove"
+            ? await service.removeQueuedMessage(queueSessionId, message)
+            : await service.flushQueuedMessage(queueSessionId, message),
+        );
         return;
       }
 
@@ -1263,13 +1427,15 @@ export async function startServer(
 
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
-        sendJson(response, 200, await service.restore(restoreSessionId));
+        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.restore(restoreSessionId, body));
         return;
       }
 
       const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
       if (method === "POST" && reopenSessionId) {
-        sendJson(response, 200, await service.reopen(reopenSessionId));
+        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.reopen(reopenSessionId, body));
         return;
       }
 
@@ -1348,6 +1514,12 @@ export async function startServer(
         return;
       }
 
+      if (method === "POST" && path === "/sidecars/sweep") {
+        const { reap } = parseSweepSidecarsRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.sweepSidecarProcesses(reap));
+        return;
+      }
+
       const listServicesSessionId = path.match(/^\/sessions\/([^/]+)\/services$/)?.[1];
       if (method === "GET" && listServicesSessionId) {
         sendJson(response, 200, await service.listServices(listServicesSessionId));
@@ -1390,13 +1562,15 @@ export async function startServer(
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
+        error instanceof InvalidConfigPathError ||
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidJsonBodyError ||
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
-        error instanceof SessionNotReopenableError
+        error instanceof SessionNotReopenableError ||
+        error instanceof QueueDeliveryInFlightError
       ) {
         logEvent("http.request.failed", {
           level: "warn",
@@ -1530,6 +1704,17 @@ export async function startServer(
     });
   }
 
+  const memoryCeilingWarning = service.getMemoryCeilingWarning();
+  if (memoryCeilingWarning) {
+    const message = `Spur fleet cgroup ${memoryCeilingWarning.cgroupPath} has unlimited memory.max and systemd-oomd is absent`;
+    logEvent("daemon.memory.unbounded", {
+      level: "warn",
+      message,
+      details: memoryCeilingWarning,
+    });
+    process.stderr.write(`${message}\n`);
+  }
+
   ready = true;
   logEvent("daemon.started", {
     level: "info",
@@ -1549,38 +1734,88 @@ export async function startServer(
         level: "info",
         message: "Stopping Spur daemon",
       });
-      service.dispose();
-      const closePromise = closeServer();
-      await sources?.stop();
-      backlogs?.stop();
-      runtimeLogs?.stop();
-      const triggerController = triggers;
-      if (triggerController) {
-        await stopTriggersBounded(triggerController, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
-          logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
-        );
-      }
+      const deadline = Date.now() + SHUTDOWN_DEADLINE_MS;
+      const remainingBudgetMs = (): number => Math.max(0, deadline - Date.now());
+      // Every teardown await goes through here: a step that never settles costs its
+      // slice of the budget and a warning, never the whole stop window.
+      const awaitBounded = async (
+        event: string,
+        label: string,
+        task: Promise<unknown>,
+        timeoutMs = remainingBudgetMs(),
+      ): Promise<void> => {
+        try {
+          await withTimeout(task, timeoutMs, `${label} timeout`);
+        } catch (error) {
+          logEvent(event, {
+            level: "warn",
+            message: `Shutdown step ${label} did not finish: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            details: { step: label, timeoutMs },
+          });
+        }
+      };
+      // Armed before the first await so a step that wedges inside its own bound still
+      // ends the process well under the service manager's stop timeout.
+      const disarmBackstop = exitProcess
+        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) => {
+            logEvent("daemon.shutdown.forced_exit", {
+              level: "error",
+              message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
+                activeResources,
+              )}`,
+              details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
+            });
+            process.exit(0);
+          })
+        : null;
       try {
-        await withTimeout(
+        // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
+        // poll, sidecar reaper, session reaper, 2s dashboard tick — before the first
+        // await, so no tick can re-enter teardown or hold the loop open behind it.
+        service.dispose();
+        const closePromise = closeServer();
+        const sourceController = sources;
+        if (sourceController) {
+          await awaitBounded(
+            "daemon.shutdown.sources_stop_timeout",
+            "sources.stop",
+            // SourceGroupController.stop() is sync-or-async by contract.
+            Promise.resolve(sourceController.stop()),
+          );
+        }
+        backlogs?.stop();
+        runtimeLogs?.stop();
+        const triggerController = triggers;
+        if (triggerController) {
+          await stopTriggersBounded(triggerController, remainingBudgetMs(), (message) =>
+            logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
+          );
+        }
+        await awaitBounded(
+          "daemon.shutdown.spawn_drain_timeout",
+          "settleBackgroundSpawns",
           service.settleBackgroundSpawns(),
-          BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS,
-          "settleBackgroundSpawns timeout",
+          Math.min(BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS, remainingBudgetMs()),
         );
-      } catch (error) {
-        logEvent("daemon.shutdown.spawn_drain_timeout", {
-          level: "warn",
-          message: `Background spawn drain did not settle: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+        await awaitBounded("daemon.shutdown.server_close_timeout", "server.close", closePromise);
+        flushEventLogCollapse(service.config.dataDir);
+        logEvent("daemon.stopped", {
+          level: "info",
+          message: "Stopped Spur daemon",
         });
-      }
-      await closePromise;
-      logEvent("daemon.stopped", {
-        level: "info",
-        message: "Stopped Spur daemon",
-      });
-      if (exitProcess) {
-        process.exit(0);
+      } finally {
+        // Reached even when a teardown step throws, so a failed cleanup costs the signal
+        // path nothing: it still exits here instead of waiting out the backstop or
+        // systemd's SIGKILL. Note the awaits above swallow their own failures by design —
+        // awaitBounded and stopTriggersBounded log and continue, because a best-effort
+        // teardown must not abandon the steps behind it. Only a synchronous throw
+        // (dispose(), the sync stops) escapes, and only programmatic stop() sees it.
+        disarmBackstop?.();
+        if (exitProcess) {
+          process.exit(0);
+        }
       }
     })();
     return shutdownPromise;

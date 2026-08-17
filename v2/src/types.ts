@@ -16,6 +16,7 @@ export const SESSION_STATES = [
   "waiting",
   "needs_input",
   "rate_limited",
+  "stale",
   "stopped",
   "error",
   "killed",
@@ -24,6 +25,10 @@ export type SessionState = (typeof SESSION_STATES)[number];
 
 export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
+}
+
+export function isStaleParked(session: Pick<SessionRecord, "status" | "stopReason">): boolean {
+  return session.status === "stopped" && session.stopReason === "stale_timeout";
 }
 
 export type StateSource = "jsonl" | "codex_stale" | "hook" | "claude_status" | "status";
@@ -360,6 +365,8 @@ export interface SidecarConfig {
   agents?: AgentName[];
   /** Present when this sidecar exposes an MCP server to the launching agent. */
   mcp?: SidecarMcpConfig;
+  /** Overrides sidecarGc.idleTtlMinutes for this sidecar only. */
+  idleTtlMinutes?: number;
 }
 
 export interface SidecarPortConfig {
@@ -408,6 +415,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -538,6 +546,11 @@ export interface PersistedPendingBatch {
   batch: PersistedSendBatch;
 }
 
+export interface SessionModeConfig {
+  skill: string;
+  default?: boolean;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -547,18 +560,26 @@ export interface ProjectConfig {
   restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
+  reasoningEffort?: AgentReasoningEffortConfig;
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
   defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
+  modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
+  staleAfterMinutes?: number;
 }
+
+export type ProviderReasoningEffort = "low" | "medium" | "high";
+export type AgentReasoningEffortConfig = Partial<
+  Record<"claude" | "codex", ProviderReasoningEffort>
+>;
 
 export type AdmissionCapSource = "default" | "config" | "derived";
 
@@ -575,8 +596,15 @@ export interface AdmissionConfig {
   reserveFraction: number;
   memoryGuard: {
     enforce: boolean;
+    enforceFloors: boolean;
+    shedEnabled: boolean;
     minAvailableBytes: number;
     minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
+    shedSwapUsedFraction: number;
   };
 }
 
@@ -602,8 +630,13 @@ export interface HeadroomReport {
   memory: HostMemory | null;
   guard: {
     enforce: boolean;
+    enforceFloors: boolean;
     minAvailableBytes: number;
     minFreeSwapBytes: number;
+    admissionFloorBytes: number;
+    shedCriticalFloorBytes: number;
+    restoreFloorBytes: number;
+    pressureSomeAvg10Refuse: number;
     crossed: boolean;
   };
 }
@@ -623,6 +656,9 @@ export interface AppConfig {
   };
   ui: {
     port: number;
+  };
+  models: {
+    codexHome: string;
   };
   voice:
     | {
@@ -655,6 +691,7 @@ export interface AppConfig {
     hotBytes: number;
     shardHotBytes: number;
     retainArchives: number;
+    collapseWindowMs: number;
   };
   userActionLog?: {
     hotBytes: number;
@@ -669,6 +706,9 @@ export interface AppConfig {
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
   };
+  diskRetention: {
+    warnFreeGb: number;
+  };
   sessionGc: {
     enabled: boolean;
     olderThanDays: number;
@@ -676,7 +716,13 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  sidecarGc: {
+    enabled: boolean;
+    idleTtlMinutes: number;
+    maxAgeWarnMinutes: number;
+  };
   admission: AdmissionConfig;
+  staleAfterMinutes: number;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -698,6 +744,19 @@ export interface SessionPipelineState {
 export interface SessionQueuedMessagesState {
   messages: string[];
   awaitingPrompt: boolean;
+}
+
+// View-only shape: `messages` carries only real queued entries (the ones a
+// remove/flush control can act on), `pipelineMessages` carries derived future
+// pipeline step text separately and is omitted when empty. Kept distinct
+// from SessionQueuedMessagesState (the persisted record shape, whitelisted
+// to exactly two fields by metadata.ts's normalizeQueuedMessagesState) so a
+// pipeline-derived string can never be mistaken for a real queued message at
+// the type level.
+export interface SessionQueuedMessagesView {
+  messages: string[];
+  awaitingPrompt: boolean;
+  pipelineMessages?: string[];
 }
 
 export interface SessionScheduledWakeState {
@@ -744,6 +803,18 @@ export interface SessionStateSubscriptionRecordResponse {
   record: SessionStateSubscription;
 }
 
+export interface SidecarProcessIdentity {
+  /** tmux pane pid at start. On Linux this is also the pane's pgid and sid. */
+  pid: number;
+  /** Process group id of the pane at start. Signal target for a leaked tree. */
+  pgid: number;
+  /**
+   * /proc/<pid>/stat field 22 (starttime, clock ticks since boot). The only
+   * pid-reuse guard: a wall-clock timestamp cannot distinguish a reused pid.
+   */
+  starttime: number;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -764,6 +835,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   claudeAccountId?: string;
@@ -780,7 +852,7 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
-  stopReason?: "manual_pause";
+  stopReason?: "manual_pause" | "stale_timeout";
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;
@@ -788,7 +860,16 @@ export interface SessionRecord {
   slots?: SessionSlots;
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
+  // Sidecar names that were tmux-alive at park time (stale_timeout), replayed
+  // on wake by finishStaleWake. Absent once the session has woken.
+  staleSidecars?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
+  /**
+   * Pane identity of each sidecar's CURRENT instance, keyed by sidecar name.
+   * Written on the sidecar OWNER's record (the workspace anchor for a
+   * desk-shared sidecar, the session itself for an mcp sidecar).
+   */
+  sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
@@ -798,6 +879,14 @@ export interface SessionRecord {
   serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+}
+
+// Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
+// and reap.ts's sidecar-claims sweep — one definition, never two copies.
+export function isTerminalSessionStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" {
+  return status === "completed" || status === "killed";
 }
 
 export interface ServiceInstanceRecord {
@@ -841,9 +930,13 @@ export interface SessionSidecarView {
   alive: boolean;
   ports: SidecarPortView[];
   tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
+  ageWarn?: boolean;
 }
 
-export interface SessionView extends SessionRecord {
+export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -857,6 +950,7 @@ export interface SessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
+  queuedMessages?: SessionQueuedMessagesView;
 }
 
 export interface DashboardSessionView extends SessionRecord {
@@ -914,6 +1008,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -926,7 +1021,6 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
-  allowUnvalidatedFallbackBranch?: boolean;
   // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
   // respawn so a rotated session relaunches onto its current account instead of
   // falling back to the (still-rate-limited) default.
@@ -1009,6 +1103,13 @@ export interface KillSessionRequest {
   skipPrCheck?: boolean;
 }
 
+// `force`: bypass the P2 (env-rooted) duplicate-agent launch guard — see
+// assertNoForeignAgentForSession in session-service.ts. Never bypasses the P1
+// (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
+export interface RestoreSessionRequest {
+  force?: boolean;
+}
+
 export interface OpenPrActionRequiredPayload {
   code: "open_pr_action_required";
   sessionId: string;
@@ -1066,6 +1167,16 @@ export interface ProjectListEntry {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeConfig>;
+}
+
+// What a spawn would resolve to for this project+agent if the request named
+// neither field. Lets a client preselect a concrete option instead of a
+// "server decides" sentinel; `model` is null when the agent has no configured
+// or built-in default.
+export interface SpawnDefaultsResponse {
+  model: string | null;
+  worktree: boolean;
 }
 
 export interface CreateProjectRequest {
