@@ -55,9 +55,9 @@ Claude Code ships a native binary: `~/.itest-harness/bin/claude` resolves to `li
   cat ~/.claude/.credentials.json | ssh ... 'umask 077; mkdir -p ~/.claude; cat > ~/.claude/.credentials.json'
   ssh ... 'node -e "const f=require(\"os\").homedir()+\"/.claude/settings.json\";const fs=require(\"fs\");const d=fs.existsSync(f)?JSON.parse(fs.readFileSync(f)):{};d.skipDangerousModePermissionPrompt=true;d.skipAutoPermissionPrompt=true;fs.writeFileSync(f,JSON.stringify(d,null,2))"'
 
-Launch with a sanitized environment so its child shells see the node-free box under test, never the harness node:
+Launch with a sanitized environment so its child shells see the node-free box under test, never the harness node. Read the prompt from a file on the box (write it first — see 4 RUN THE TEST) instead of an ssh-local `"$PROMPT"`: the whole remote command sits inside one pair of local single quotes, so a local shell variable never expands there, it ships as its own three literal characters and the agent launches with an empty prompt.
 
-  env -i HOME=$HOME USER=$USER TERM=dumb PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin ~/.itest-harness/bin/claude -p "$PROMPT" --dangerously-skip-permissions --output-format stream-json --verbose
+  ssh ... 'env -i HOME=$HOME USER=$USER TERM=dumb PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin ~/.itest-harness/bin/claude -p "$(cat /tmp/prompt.txt)" --dangerously-skip-permissions --output-format stream-json --verbose'
 
 Verified: a planted Claude launched this way runs `command -v node` and gets NO-NODE. Same itest-only credential caveat as cursor-agent applies.
 
@@ -67,9 +67,15 @@ Run twice per cycle, once per agent, with a full reset (step 2) between the two 
 
 The prompt is the Install block of the repo README verbatim — that block is the artifact under test, not a prompt the runner writes. It tells the agent to fetch `raw.githubusercontent.com/<owner>/spur/<ref>/docs/install-from-npm.md`, never a `github.com/.../blob/...` URL — that form returns an empty document under cursor's webFetch. `<ref>` is `main` by default; point it at the PR branch to test an unmerged doc fix. No docs are staged on the VM — the agent fetches this one file over HTTPS; do not tar the repo docs onto the box, the prompt never reads them.
 
-Launch detached from `~` (no CLAUDE.md there), stream-json, poll a done-file. The launch ssh call can hang even after the remote process has detached — never wait on it, verify with a separate ssh call instead:
+Write the prompt to a file on the box first, one ssh call, no nested quoting to get wrong — the same file backs both agents' launches:
 
-  ssh ... 'nohup bash -c "timeout 1800 ~/.local/bin/cursor-agent -p \"\$0\" --model <m> --force --output-format stream-json </dev/null > /tmp/agent-run.jsonl 2>&1; echo \$? > /tmp/agent-run.done" "$PROMPT" >/dev/null 2>&1 &'
+  ssh ... "cat > /tmp/prompt.txt" <<'EOP'
+  <the README Install block, verbatim>
+  EOP
+
+Launch detached from `~` (no CLAUDE.md there), stream-json, poll a done-file, prompt read from the file with `$(cat ...)` — never a local `"$PROMPT"` inside the single-quoted remote command, that never expands and ships empty. The launch ssh call can hang even after the remote process has detached — never wait on it, verify with a separate ssh call instead:
+
+  ssh ... 'nohup bash -c "timeout 1800 ~/.local/bin/cursor-agent -p \"$(cat /tmp/prompt.txt)\" --model <m> --force --output-format stream-json </dev/null > /tmp/agent-run.jsonl 2>&1; echo \$? > /tmp/agent-run.done" >/dev/null 2>&1 &'
   ssh ... 'pgrep -af cursor-agent; ls -l /tmp/agent-run.jsonl'
 
 Long shell commands the planted cursor-agent runs go background inside cursor-agent itself: it gets `awaitToolCall` polls carrying a taskId, and the command's own output lands in `~/.cursor/projects/<slug>/terminals/<taskId>.txt` — check there when the jsonl shows a pending tool_call and nothing else.
@@ -82,7 +88,7 @@ cursor-agent stream-json event shapes, needed to parse a transcript at all:
   {"type":"assistant","message":{"content":[{"type":"text","text":...}]}}
   {"type":"result","subtype":"success","duration_ms":...,"result":"<final message>"}
 
-A transcript under 1 KB with no tool_call event is a harness failure, not a doc failure — read the last line for a plain-text agent-side error (account quota, expired credentials, unavailable model), report that agent's run as blocked, never add it to the friction list. The other agent's run still stands on its own. One agent blocked: report the cycle as partial and name which agent produced evidence — never report a pass or invent friction to fill the gap.
+A transcript under 1 KB with no tool_call event is a harness failure, not a doc failure — read the last line for a plain-text agent-side error (account quota, expired credentials, unavailable model), report that agent's run as blocked, never add it to the friction list. The other agent's run still stands on its own. One agent blocked: report the cycle as partial and name which agent produced evidence — never report a pass or invent friction to fill the gap. Same check before trusting any run: confirm the transcript's first user event carries the real prompt text, not an empty string — an empty prompt is a harness failure too.
 
 Walk each tool_call with its result, each error, and the final result message. Look for steps the agent got wrong, retried, or did not infer from the docs (doc gap); anything it hard-blocked on versus correctly deferring to the user TODO; whether it chose the safe path (private/Tailscale, never public expose). Identity gates — agent login and `sudo tailscale up` — land in the final TODO as a pass, not friction, when reached cleanly with the user's action stated; real friction is anything the agent should have handled from the docs but didn't.
 
