@@ -18,7 +18,7 @@ import {
   type CachePlan,
 } from "./cache-retention.js";
 import { dimText } from "./cli-view.js";
-import { isAccountAuthenticated, isAccountReady, onboardingFilePath } from "./claude-accounts.js";
+import { isAccountAuthenticated, onboardingFilePath } from "./claude-accounts.js";
 import {
   DEFAULT_DISK_RETENTION,
   loadInstanceConfigReadOnly,
@@ -260,7 +260,7 @@ function checkClaudeOnboarding(home: string): HostInstallCheck {
     };
   }
   const filePath = onboardingFilePath(account.configDir);
-  let raw: string | undefined;
+  let raw: string;
   try {
     raw = readFileSync(filePath, "utf-8");
   } catch {
@@ -271,8 +271,9 @@ function checkClaudeOnboarding(home: string): HostInstallCheck {
       detail: `skipped — ${filePath} not found`,
     };
   }
+  let parsed: unknown;
   try {
-    JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
     return {
       id: "claude-onboarding",
@@ -281,14 +282,17 @@ function checkClaudeOnboarding(home: string): HostInstallCheck {
       detail: `skipped — ${filePath} is not valid JSON`,
     };
   }
-  const completed = isAccountReady(account);
+  const completed =
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as Record<string, unknown>).hasCompletedOnboarding === true;
   return {
     id: "claude-onboarding",
     ok: completed,
     severity: "warn",
     detail: completed
       ? "Claude Code has completed onboarding"
-      : `Claude Code is authenticated but has never completed interactive onboarding (hasCompletedOnboarding unset in ${filePath})`,
+      : `Claude Code is authenticated but has never completed interactive onboarding (hasCompletedOnboarding missing or false in ${filePath})`,
     ...(completed
       ? {}
       : {
