@@ -33,8 +33,16 @@ rm -f "$HOME/.local/bin/claude" "$HOME/.local/bin/codex"
 log "removing node and tailscale"
 sudo apt-get remove -y nodejs >/dev/null 2>&1
 sudo rm -f /etc/apt/sources.list.d/nodesource.list
+sudo rm -f /etc/apt/sources.list.d/nodesource.sources
+sudo rm -f /usr/share/keyrings/nodesource.gpg
+sudo rm -f /etc/apt/preferences.d/nodejs
+sudo rm -f /etc/apt/preferences.d/nsolid
 sudo apt-get remove --purge -y tailscale >/dev/null 2>&1
 sudo rm -rf /var/lib/tailscale
+sudo rm -f /etc/apt/sources.list.d/tailscale.list
+
+log "removing claude onboarding state"
+rm -f "$HOME/.claude.json" "$HOME/.claude.json.bak-spur-install"
 
 log "clearing run artifacts"
 rm -f /tmp/agent-run.jsonl /tmp/agent-run.done /tmp/prompt.txt
@@ -48,4 +56,6 @@ done
 printf '  %-10s %s\n' "~/.spur" "$([ -e "$HOME/.spur" ] && echo present || echo absent)"
 printf '  %-10s %s\n' "units" "$(systemctl --user list-unit-files 'spur*' --no-legend 2>/dev/null | wc -l)"
 printf '  %-10s %s\n' "agents" "$(command -v cursor-agent >/dev/null && echo cursor-agent || echo none)"
+apt_leftover=$(ls /etc/apt/sources.list.d/nodesource.* /etc/apt/sources.list.d/tailscale.list 2>/dev/null | tr '\n' ' ')
+printf '  %-10s %s\n' "apt-repos" "$([ -n "$apt_leftover" ] && echo "leftover: $apt_leftover" || echo clean)"
 log "done"
