@@ -125,7 +125,7 @@ function formatDaemonError(status: number, payload: unknown, path: string): stri
       : "Retry with --skip-pr-check to skip it.";
     const cause = payload.rateLimited
       ? "GitHub rate limit"
-      : "gh is missing, unauthenticated, or unreachable";
+      : "commonly gh missing, unauthenticated, or unreachable";
     return `GitHub PR check unavailable for ${payload.sessionId}: ${cause}. ${retry}`;
   }
   if (typeof payload === "object" && payload !== null && "error" in payload) {
