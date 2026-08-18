@@ -339,4 +339,28 @@ describe("client.ensureServer", () => {
       "Open pull request action required for api-1: https://github.com/acme/api/pull/42. Retry `spur complete api-1 --pr-action leave_open` to keep it open or `spur complete api-1 --pr-action close` to close it.",
     );
   });
+
+  it("formats github PR check unavailable errors with skip-pr-check guidance", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "github_pr_check_unavailable",
+            sessionId: "api-1",
+            pr: null,
+            rateLimited: false,
+          }),
+          { status: 409 },
+        ),
+      );
+
+    const { postJson } = await loadClientModule();
+
+    await expect(
+      postJson("/tmp/dist/cli.js", "/sessions/api-1/complete", {}, "/tmp/spur.yaml"),
+    ).rejects.toThrow(
+      "GitHub PR check unavailable for api-1: gh is missing, unauthenticated, or unreachable. Retry `spur complete api-1 --skip-pr-check` to skip it.",
+    );
+  });
 });
