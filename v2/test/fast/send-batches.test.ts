@@ -185,8 +185,13 @@ describe("Telegram batch", () => {
     const batch = makeBatch();
     const formatted = batch.format();
     expect(formatted).toContain("chat -100123 thread 42");
-    expect(formatted).toContain("Source: telegram");
-    expect(formatted).toContain('spur source reply "message"');
+    expect(formatted).toContain(
+      "Source: telegram. The requester only sees messages you send with:",
+    );
+    expect(formatted).toContain('spur source reply "<message>"');
+    expect(formatted).toContain(
+      "Your terminal output is invisible to them. Reply to the same Telegram thread when you need input and when the task completes, with a short result summary.",
+    );
     expect(formatted).toContain("@alek: fix the failing test");
   });
 
@@ -216,7 +221,12 @@ describe("Telegram batch", () => {
     const batch = makeBatch("Answer this Telegram thread.");
     const formatted = batch.format();
     expect(formatted).toContain("Answer this Telegram thread.");
-    expect(formatted).toContain("Source: telegram");
+    expect(formatted).toContain(
+      "Source: telegram. The requester only sees messages you send with:",
+    );
+    expect(formatted).toContain(
+      "Your terminal output is invisible to them. Reply to the same Telegram thread when you need input and when the task completes, with a short result summary.",
+    );
     expect(formatted).not.toContain("Telegram message for this Spur session");
   });
 });

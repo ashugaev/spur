@@ -48,7 +48,7 @@ vi.mock("@grammyjs/runner", () => ({
   run: runMock,
 }));
 
-const { parseTelegramCommand, telegramSourceModule } =
+const { parseTelegramCommand, telegramSourceModule, wrapTelegramSpawnPrompt } =
   await import("../../src/event-sources/telegram.js");
 
 const tempDirs: string[] = [];
@@ -171,6 +171,22 @@ describe("parseTelegramCommand", () => {
   });
 });
 
+describe("wrapTelegramSpawnPrompt", () => {
+  it("produces exactly the suffix that packages/web strips via TELEGRAM_REPLY_SUFFIX", () => {
+    // Mirror of TELEGRAM_REPLY_SUFFIX in packages/web/src/lib/session-prompt.ts.
+    // Both must stay in sync: if one changes, the web UI will display the raw
+    // suffix instead of stripping it.
+    const suffix = [
+      "",
+      "",
+      "Source: telegram. The requester only sees messages you send with:",
+      'spur source reply "<message>"',
+      "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
+    ].join("\n");
+    expect(wrapTelegramSpawnPrompt("fix the sidecar")).toBe(`fix the sidecar${suffix}`);
+  });
+});
+
 describe("telegramSourceModule", () => {
   beforeEach(() => {
     botInstances.splice(0);
@@ -217,7 +233,7 @@ describe("telegramSourceModule", () => {
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"sourceId": "telegram"');
   });
 
-  it("shows active sessions when /watch has no session id", async () => {
+  it("shows project selection when /watch or /agents has no session id", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot, listSessions } = await startSource(dataDir);
@@ -227,14 +243,136 @@ describe("telegramSourceModule", () => {
     await bot.emitText(watchCtx);
 
     expect(listSessions).toHaveBeenCalled();
-    expect(watchCtx.reply).toHaveBeenCalledWith("Select a Spur session:", {
+    expect(watchCtx.reply).toHaveBeenCalledWith("Select a project:", {
       reply_markup: {
         inline_keyboard: [
-          [{ text: "api-1 codex waiting", callback_data: "spur_watch:api-1" }],
-          [{ text: "api-2 claude working", callback_data: "spur_watch:api-2" }],
+          [{ text: "api (2)", callback_data: "spur_project:api" }],
+          [{ text: "web (1)", callback_data: "spur_project:web" }],
         ],
       },
     });
+
+    const agentsCtx = telegramContext({ text: "/agents" });
+    await bot.emitText(agentsCtx);
+    expect(agentsCtx.reply).toHaveBeenCalledWith("Select a project:", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "api (2)", callback_data: "spur_project:api" }],
+          [{ text: "web (1)", callback_data: "spur_project:web" }],
+        ],
+      },
+    });
+  });
+
+  it("navigates project sessions with status emojis and back button", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_project:api",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalled();
+    expect(editMessageText).toHaveBeenCalledWith("Select a Spur session in api:", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🟡 api-1 codex waiting", callback_data: "spur_watch:api-1" }],
+          [{ text: "🟢 api-2 claude working", callback_data: "spur_watch:api-2" }],
+          [{ text: "« Back to projects", callback_data: "spur_projects" }],
+        ],
+      },
+    });
+
+    editMessageText.mockClear();
+    answerCallbackQuery.mockClear();
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_projects",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalled();
+    expect(editMessageText).toHaveBeenCalledWith("Select a project:", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "api (2)", callback_data: "spur_project:api" }],
+          [{ text: "web (1)", callback_data: "spur_project:web" }],
+        ],
+      },
+    });
+  });
+
+  it("handles empty sessions and formats all state emojis", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi.fn().mockResolvedValue([
+      { id: "s-1", project: "proj", agent: "codex", state: "working" },
+      { id: "s-2", project: "proj", agent: "claude", state: "waiting" },
+      { id: "s-3", project: "proj", agent: "cursor", state: "needs_input" },
+      { id: "s-4", project: "proj", agent: "codex", state: "error" },
+      { id: "s-5", project: "proj", agent: "claude", state: "stopped" },
+      { id: "s-6", project: "proj", agent: "cursor", state: "rate_limited" },
+      { id: "s-7", project: "proj", agent: "cursor", state: "other" },
+    ]);
+    const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_project:proj",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(editMessageText).toHaveBeenCalledWith("Select a Spur session in proj:", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🟢 s-1 codex working", callback_data: "spur_watch:s-1" }],
+          [{ text: "🟡 s-2 claude waiting", callback_data: "spur_watch:s-2" }],
+          [{ text: "🔴 s-3 cursor needs_input", callback_data: "spur_watch:s-3" }],
+          [{ text: "🔴 s-4 codex error", callback_data: "spur_watch:s-4" }],
+          [{ text: "⚫ s-5 claude stopped", callback_data: "spur_watch:s-5" }],
+          [{ text: "⏳ s-6 cursor rate_limited", callback_data: "spur_watch:s-6" }],
+          [{ text: "⚪ s-7 cursor other", callback_data: "spur_watch:s-7" }],
+          [{ text: "« Back to projects", callback_data: "spur_projects" }],
+        ],
+      },
+    });
+
+    // Test empty sessions on /watch
+    listSessions.mockResolvedValueOnce([]);
+    const emptyCtx = telegramContext({ text: "/watch" });
+    await bot.emitText(emptyCtx);
+    expect(emptyCtx.reply).toHaveBeenCalledWith("No active Spur sessions.");
   });
 
   it("shows help and spawn menus without emitting to agents", async () => {
@@ -651,7 +789,7 @@ describe("telegramSourceModule", () => {
     expect(spawnSession).not.toHaveBeenCalled();
   });
 
-  it("rejects invalid or cross-project watch targets", async () => {
+  it("rejects invalid or unknown watch targets", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot } = await startSource(dataDir);
@@ -661,11 +799,9 @@ describe("telegramSourceModule", () => {
     await bot.emitText(invalidCtx);
     expect(invalidCtx.reply).toHaveBeenCalledWith("Usage: /watch <sessionId>");
 
-    const crossProjectCtx = telegramContext({ text: "/watch web-1" });
-    await bot.emitText(crossProjectCtx);
-    expect(crossProjectCtx.reply).toHaveBeenCalledWith(
-      "No active Spur session web-1 for this project.",
-    );
+    const unknownCtx = telegramContext({ text: "/watch unknown-1" });
+    await bot.emitText(unknownCtx);
+    expect(unknownCtx.reply).toHaveBeenCalledWith("No active Spur session unknown-1.");
   });
 
   it("reports watch bind persist failure", async () => {

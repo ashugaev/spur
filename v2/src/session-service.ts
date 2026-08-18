@@ -169,6 +169,7 @@ import {
   editTelegramTopic,
   sendTelegramReply,
 } from "./telegram-source-state.js";
+import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
@@ -2167,14 +2168,6 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
   return Object.values(project.sources).some(
     (source) => source.type === "service" && source.service === serviceId,
   );
-}
-
-function telegramStatusEmoji(state: string): string {
-  if (state === "working") return "🟢";
-  if (state === "waiting") return "🟡";
-  if (state === "needs_input") return "🔴";
-  if (state === "error" || state === "killed" || state === "stopped") return "⚫";
-  return "⚪";
 }
 
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state">): string {
@@ -5538,12 +5531,16 @@ export class SessionService {
       urgent: attention === "error",
     });
 
+    const paneTail =
+      attention !== "rate_limited"
+        ? await this.buildPaneTail(session.tmuxSession).catch(() => "")
+        : "";
     const text =
       attention === "needs_input"
-        ? `🔴 ${session.id} needs input${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+        ? `${telegramStatusEmoji("needs_input")} ${session.id} needs input${paneTail}`
         : attention === "error"
-          ? `⚫ ${session.id} error${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
-          : `🟠 ${session.id} rate limited`;
+          ? `${telegramStatusEmoji("error")} ${session.id} error${paneTail}`
+          : `${telegramStatusEmoji("rate_limited")} ${session.id} rate limited`;
     await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
   }
 
@@ -5606,10 +5603,14 @@ export class SessionService {
         target.lastReplyAt !== undefined &&
         (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
       if (alreadyReplied) return;
-      const paneTail = await this.buildPaneTail(view.tmuxSession).catch(() => "");
-      await this.pushTelegramNotice(view.id, view, `🟡 ${view.id} is waiting.${paneTail}`, {
-        updateTopicName: true,
-      });
+      await this.pushTelegramNotice(
+        view.id,
+        view,
+        `${telegramStatusEmoji("waiting")} ${view.id} is waiting.`,
+        {
+          updateTopicName: true,
+        },
+      );
       const { updatedAt: _updatedAt, ...rest } = target;
       writeTelegramReplyTarget(this.config.dataDir, {
         ...rest,
