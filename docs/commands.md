@@ -18,6 +18,8 @@ When the daemon is reachable, `doctor` also fetches `GET /headroom` and reports 
 
 Two checks are `warn`/`info` only, so a low-disk host never flips the exit code: `home-disk-headroom` (`df` on `$HOME`, `warn` below [`diskRetention.warnFreeGb`](configuration.md), default 10GB) and `reclaimable-caches` (an info-only `spur cache` measurement; detail shows the reclaimable summary, top 5 prunable entries by size, and one row per cache root with its `rootId`, status, size, entry count, and path; degrades to "skipped" if it exceeds its own measurement budget).
 
+`claude-onboarding` (`warn`) flags a host Claude Code that is authenticated (`~/.claude/.credentials.json` present) but has never completed its interactive first-run onboarding (`hasCompletedOnboarding` missing or `false` in `~/.claude.json`) — that state passes `claude -p` but walks the first `spur spawn` into Claude's first-run OAuth/login screen, where Spur's injected session prompt lands in the login-code field and produces a misleading `OAuth error: Invalid code`. `fix` names the one remedy: run `claude` once interactively and complete onboarding. Read-only — it never writes `~/.claude.json`; not authenticated at all, the file missing, or unparseable JSON all read as inert (`info`, `ok: true`), not a failure.
+
 ## gc
 
 ```bash

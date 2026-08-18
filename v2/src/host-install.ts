@@ -18,6 +18,7 @@ import {
   type CachePlan,
 } from "./cache-retention.js";
 import { dimText } from "./cli-view.js";
+import { isAccountAuthenticated, isAccountReady, onboardingFilePath } from "./claude-accounts.js";
 import {
   DEFAULT_DISK_RETENTION,
   loadInstanceConfigReadOnly,
@@ -238,6 +239,61 @@ function checkGitInstalled(): HostInstallCheck {
     severity: "error",
     detail: detail ?? "git not found on PATH",
     ...(detail === undefined ? { fix: "install git" } : {}),
+  };
+}
+
+// F-onboarding: an installed, authenticated Claude Code that has never
+// completed its interactive first-run onboarding (`hasCompletedOnboarding`
+// unset/false in ~/.claude.json) still passes `claude -p`, but the first
+// `spur spawn` walks it into the first-run OAuth/login screen and Spur's
+// injected session prompt lands in the login-code field, producing a
+// misleading "OAuth error: Invalid code" while credentials are actually
+// fine. Read-only: this check never writes ~/.claude.json.
+function checkClaudeOnboarding(home: string): HostInstallCheck {
+  const account = { configDir: join(home, ".claude") };
+  if (!isAccountAuthenticated(account)) {
+    return {
+      id: "claude-onboarding",
+      ok: true,
+      severity: "info",
+      detail: "skipped — no authenticated host Claude Code account detected",
+    };
+  }
+  const filePath = onboardingFilePath(account.configDir);
+  let raw: string | undefined;
+  try {
+    raw = readFileSync(filePath, "utf-8");
+  } catch {
+    return {
+      id: "claude-onboarding",
+      ok: true,
+      severity: "info",
+      detail: `skipped — ${filePath} not found`,
+    };
+  }
+  try {
+    JSON.parse(raw);
+  } catch {
+    return {
+      id: "claude-onboarding",
+      ok: true,
+      severity: "info",
+      detail: `skipped — ${filePath} is not valid JSON`,
+    };
+  }
+  const completed = isAccountReady(account);
+  return {
+    id: "claude-onboarding",
+    ok: completed,
+    severity: "warn",
+    detail: completed
+      ? "Claude Code has completed onboarding"
+      : `Claude Code is authenticated but has never completed interactive onboarding (hasCompletedOnboarding unset in ${filePath})`,
+    ...(completed
+      ? {}
+      : {
+          fix: "run `claude` once interactively and complete the onboarding/login screen to completion",
+        }),
   };
 }
 
@@ -1250,6 +1306,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkTmuxInstalled());
   checks.push(checkGitInstalled());
   checks.push(checkNodeVersion());
+  checks.push(checkClaudeOnboarding(home));
 
   const warnFreeGb =
     instanceConfig.status === "ok"

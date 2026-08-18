@@ -621,6 +621,72 @@ describe("collectHostInstallChecks", () => {
     });
   });
 
+  describe("claude-onboarding check", () => {
+    let tmpHome: string;
+
+    beforeEach(async () => {
+      tmpHome = await mkdtemp(join(tmpdir(), "spur-host-install-claude-onboarding-"));
+    });
+
+    afterEach(async () => {
+      await rm(tmpHome, { recursive: true, force: true });
+    });
+
+    it("is ok:true (info) when Claude Code was never authenticated on this host", async () => {
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "info",
+      });
+    });
+
+    it("is ok:true when hasCompletedOnboarding is true", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      await writeFile(
+        join(tmpHome, ".claude", ".claude.json"),
+        JSON.stringify({ hasCompletedOnboarding: true }),
+        "utf8",
+      );
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "warn",
+      });
+    });
+
+    it("is ok:false with a fix when authenticated but hasCompletedOnboarding is unset", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      await writeFile(join(tmpHome, ".claude", ".claude.json"), JSON.stringify({}), "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      const check = checks.find((c) => c.id === "claude-onboarding");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.fix).toContain("run `claude`");
+    });
+
+    it("is ok:true (info) when authenticated but the onboarding file is absent (never read/written)", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "info",
+      });
+    });
+
+    it("is ok:true (info) when the onboarding file exists but is not valid JSON", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      await writeFile(join(tmpHome, ".claude", ".claude.json"), "{not json", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "info",
+      });
+    });
+  });
+
   it("keeps a fresh, never-initialized host exit-safe (no error severity)", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
     expect(hasErrorSeverity(checks)).toBe(false);
