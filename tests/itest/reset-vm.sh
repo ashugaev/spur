@@ -41,21 +41,44 @@ sudo apt-get remove --purge -y tailscale >/dev/null 2>&1
 sudo rm -rf /var/lib/tailscale
 sudo rm -f /etc/apt/sources.list.d/tailscale.list
 
+log "removing nvm and the PATH lines the install doc tells the agent to add"
+rm -rf "$HOME/.nvm"
+for f in "$HOME/.bashrc" "$HOME/.profile"; do
+  [ -f "$f" ] && sed -i -e '/NVM_DIR/d' -e '/nvm\.sh/d' -e '/nvm bash_completion/d' -e '/\.local\/bin/d' "$f"
+done
+
+# ~/.claude/.credentials.json stays — the planted harness Claude runs `-p`
+# print mode only, verified working while authenticated but never onboarded.
+# Do not purge it to "fix" onboarding; that state is load-bearing here, not
+# a leftover. See docs/install-from-npm.md onboarding note for the trap this
+# avoids in interactive use.
 log "removing claude onboarding state"
-rm -f "$HOME/.claude.json" "$HOME/.claude.json.bak-spur-install"
+rm -f "$HOME/.claude.json"
 
 log "clearing run artifacts"
 rm -f /tmp/agent-run.jsonl /tmp/agent-run.done /tmp/prompt.txt
 rm -rf "$HOME/.cursor/projects" "$HOME/.claude/projects" "$HOME/.claude/todos"
 rm -rf "$HOME/spur-docs"
 
+# Assert on the paths this script removes, not on PATH lookup: `bash
+# ~/itest-reset.sh` over ssh sources no profile, so `command -v node` reports
+# absent for an nvm-installed node whose files (and PATH lines) are still
+# there — a dirty box would read as clean. Probe both systemd unit scopes
+# too; `systemctl --user` alone reads 0 when the user manager is unreachable
+# and never sees /etc/systemd/system (v2/src/host-install.ts:171).
 log "state after reset"
-for b in node npm spur claude codex tailscale; do
-  printf '  %-10s %s\n' "$b" "$(command -v "$b" || echo absent)"
-done
-printf '  %-10s %s\n' "~/.spur" "$([ -e "$HOME/.spur" ] && echo present || echo absent)"
-printf '  %-10s %s\n' "units" "$(systemctl --user list-unit-files 'spur*' --no-legend 2>/dev/null | wc -l)"
-printf '  %-10s %s\n' "agents" "$(command -v cursor-agent >/dev/null && echo cursor-agent || echo none)"
+printf '  %-14s %s\n' "node-apt"      "$(dpkg -s nodejs >/dev/null 2>&1 && echo present || echo absent)"
+printf '  %-14s %s\n' "node-nvm"      "$([ -e "$HOME/.nvm" ] && echo present || echo absent)"
+printf '  %-14s %s\n' "spur"          "$([ -e "$HOME/.local/lib/node_modules/@shugaev" ] && echo present || echo absent)"
+printf '  %-14s %s\n' "~/.spur"       "$([ -e "$HOME/.spur" ] && echo present || echo absent)"
+printf '  %-14s %s\n' "claude"        "$([ -e "$HOME/.local/bin/claude" ] && echo present || echo absent)"
+printf '  %-14s %s\n' "codex"         "$([ -e "$HOME/.local/bin/codex" ] && echo present || echo absent)"
+printf '  %-14s %s\n' "tailscale"     "$(dpkg -s tailscale >/dev/null 2>&1 && echo present || echo absent)"
+printf '  %-14s %s\n' "units-user"    "$(ls "$HOME"/.config/systemd/user/spur-*.service 2>/dev/null | wc -l)"
+printf '  %-14s %s\n' "units-system"  "$(ls /etc/systemd/system/spur-*.service 2>/dev/null | wc -l)"
 apt_leftover=$(ls /etc/apt/sources.list.d/nodesource.* /etc/apt/sources.list.d/tailscale.list 2>/dev/null | tr '\n' ' ')
-printf '  %-10s %s\n' "apt-repos" "$([ -n "$apt_leftover" ] && echo "leftover: $apt_leftover" || echo clean)"
+printf '  %-14s %s\n' "apt-repos"     "$([ -n "$apt_leftover" ] && echo "leftover: $apt_leftover" || echo clean)"
+profile_leftover=$(grep -l 'NVM_DIR\|\.local/bin' "$HOME/.bashrc" "$HOME/.profile" 2>/dev/null | tr '\n' ' ')
+printf '  %-14s %s\n' "profile-lines" "$([ -n "$profile_leftover" ] && echo "leftover: $profile_leftover" || echo clean)"
+printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] && echo cursor-agent || echo none)"
 log "done"
