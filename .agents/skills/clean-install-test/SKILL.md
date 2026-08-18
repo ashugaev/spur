@@ -93,7 +93,9 @@ cursor-agent stream-json event shapes, needed to parse a transcript at all:
   {"type":"assistant","message":{"content":[{"type":"text","text":...}]}}
   {"type":"result","subtype":"success","duration_ms":...,"result":"<final message>"}
 
-Walk each tool_call with its result, each error, and the final result message. Look for steps the agent got wrong, retried, or did not infer from the docs (doc gap); anything it hard-blocked on versus correctly deferring to the user TODO; whether it chose the safe path (private/Tailscale, never public expose). Identity gates — agent login and `sudo tailscale up` — land in the final TODO as a pass, not friction, when the agent reached them cleanly and stated what the user must do; real friction is anything it should have handled from the docs but didn't.
+A transcript under 1 KB with no tool_call event is a harness failure, not a doc failure — read the last line for a plain-text agent-side error (account quota, expired credentials, unavailable model), report that agent's run as blocked, never add it to the friction list. The other agent's run still stands on its own. One agent blocked: report the cycle as partial and name which agent produced evidence — never report a pass or invent friction to fill the gap.
+
+Walk each tool_call with its result, each error, and the final result message. Look for steps the agent got wrong, retried, or did not infer from the docs (doc gap); anything it hard-blocked on versus correctly deferring to the user TODO; whether it chose the safe path (private/Tailscale, never public expose). Identity gates — agent login and `sudo tailscale up` — land in the final TODO as a pass, not friction, when reached cleanly with the user's action stated; real friction is anything the agent should have handled from the docs but didn't.
 
 7 VERIFY SERVICES (INFRA LEVEL, NOT UI)
 
