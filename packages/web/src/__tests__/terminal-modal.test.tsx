@@ -80,4 +80,11 @@ describe("TerminalModal", () => {
     render(<TerminalModal session={makeSession()} onClose={() => undefined} />);
     expect(screen.getByTestId("direct-terminal")).not.toHaveAttribute("data-model");
   });
+
+  it("insets the fullscreen overlay top by the display safe area", () => {
+    render(<TerminalModal session={makeSession()} onClose={() => undefined} />);
+    const overlay = screen.getByRole("dialog");
+    expect(overlay.className).toContain("pt-[max(0.5rem,var(--safe-top))]");
+    expect(overlay.className).not.toMatch(/(^|\s)p-2(\s|$)/);
+  });
 });

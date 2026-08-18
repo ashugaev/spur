@@ -48,7 +48,7 @@ export function TerminalModal({
     <div
       aria-label={`Terminal ${session.id}`}
       aria-modal="true"
-      className="fixed inset-0 z-[90] overflow-hidden bg-[var(--color-modal-backdrop)] p-2 backdrop-blur-sm sm:p-3"
+      className="fixed inset-0 z-[90] overflow-hidden bg-[var(--color-modal-backdrop)] px-2 pb-2 pt-[max(0.5rem,var(--safe-top))] backdrop-blur-sm sm:px-3 sm:pb-3 sm:pt-3"
       role="dialog"
     >
       <DirectTerminal

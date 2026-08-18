@@ -162,7 +162,7 @@ export function FiltersModal({
     <div
       aria-labelledby="filters-modal-title"
       aria-modal="true"
-      className="fixed inset-0 z-[85] flex items-start justify-center bg-[var(--color-modal-backdrop)] px-4 pb-4 pt-11"
+      className="fixed inset-0 z-[85] flex items-start justify-center bg-[var(--color-modal-backdrop)] px-4 pb-4 pt-[max(2.75rem,calc(var(--safe-top)_+_0.75rem))]"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

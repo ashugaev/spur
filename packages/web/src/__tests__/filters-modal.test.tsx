@@ -324,4 +324,13 @@ describe("Filters modal — PR-ready batch failure", () => {
       expect(toggle).toHaveAttribute("title", "GitHub only — status unavailable");
     });
   });
+
+  it("insets the overlay top by the display safe area instead of a fixed offset", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("api-1")).toBeInTheDocument());
+    openFilters();
+    const overlay = screen.getByRole("dialog", { name: "Filters" });
+    expect(overlay.className).toContain("pt-[max(2.75rem,calc(var(--safe-top)_+_0.75rem))]");
+    expect(overlay.className).not.toMatch(/(^|\s)pt-11(\s|$)/);
+  });
 });
