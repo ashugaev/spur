@@ -872,6 +872,30 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
 }
 
+type WakeDeliverability = "deliverable" | "status_not_restorable" | "workspace_missing";
+
+// Mirrors ensureSessionReadyForSend's workspace-missing throw condition exactly,
+// without performing the recovery side effects: shepherd re-materializes its
+// workspace (ensureShepherdWorkspace) rather than ever being unrecoverable; a
+// live pane returns before the workspace check even runs; only a dead runtime
+// plus a missing workspace throws. Does not model the isStaleParked admission
+// gate further down in that function — a parked session with a live workspace
+// is "deliverable" here and hits that gate only inside send() itself, via the
+// existing SessionAdmissionDeniedError handling in the interval/daily wake
+// branches, not via suppression.
+// Used to decide whether a recurring wake can be delivered at all before attempting
+// send(), so a session whose workspace is gone stays silently suppressed instead of
+// emitting *_failed every tick.
+async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverability> {
+  if (!isRestorableStatus(session.status)) return "status_not_restorable";
+  if (session.project === SHEPHERD_PROJECT_ID) return "deliverable";
+  if (session.worktreePath && workspaceExists(session.worktreePath)) return "deliverable";
+  if (!(await tmuxSessionExists(session.tmuxSession))) return "workspace_missing";
+  return (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)))
+    ? "deliverable"
+    : "workspace_missing";
+}
+
 function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
   return typeof session.error === "string" && session.error.trim().length > 0;
 }
@@ -2209,6 +2233,12 @@ export class SessionService {
   // instead of at delivery-loop cadence. Swept alongside the other
   // discovery-scoped maps in pruneSessionScopedState.
   private readonly agentSessionIdPersistBackoffUntil = new Map<string, number>();
+  // Tracks sessions currently in the workspace_missing wake-suppression state, so
+  // session.wake.suppressed fires once on the transition into it instead of every
+  // tick (1s tick = 86,400 events/day/session otherwise). Cleared on the transition
+  // back to deliverable. In-memory only, no persisted field. Swept alongside the
+  // other wake/discovery-scoped maps in pruneSessionScopedState.
+  private readonly wakeSuppressionNotified = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Report-only pre-spawn disk-headroom probe (see `warnIfHostDiskLow`),
@@ -3241,6 +3271,42 @@ export class SessionService {
     ].join("\n");
   }
 
+  // Gates a recurring wake (interval/daily) on wakeDeliverability before send()
+  // is ever attempted. Emits session.wake.suppressed once on the transition into
+  // workspace_missing and clears the once-per-session marker on the transition
+  // back to deliverable, so a persistently missing workspace logs once instead of
+  // every tick. status_not_restorable never emits: it is the documented, user-
+  // triggered killed/completed/errored case (#717 doctrine), not the undiagnosable
+  // one this event exists for.
+  private async evaluateWakeDeliverability(
+    session: SessionRecord,
+    wakeType: "interval" | "daily",
+    nextDueAt: string,
+  ): Promise<boolean> {
+    const deliverability = await wakeDeliverability(session);
+    if (deliverability === "workspace_missing") {
+      if (!this.wakeSuppressionNotified.has(session.id)) {
+        this.wakeSuppressionNotified.add(session.id);
+        this.logEvent("session.wake.suppressed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Suppressed ${wakeType} wake for ${session.id}: workspace is missing`,
+          details: {
+            reason: "workspace_missing",
+            status: session.status,
+            worktreePath: session.worktreePath,
+            wakeType,
+            nextDueAt,
+          },
+        });
+      }
+      return false;
+    }
+    this.wakeSuppressionNotified.delete(session.id);
+    return deliverability === "deliverable";
+  }
+
   private async processScheduledWakes(): Promise<void> {
     if (this.scheduledWakeMonitorRunning) {
       return;
@@ -3319,15 +3385,19 @@ export class SessionService {
           });
         }
 
-        // A killed session is never revived (reopen() only accepts
-        // "completed", session-service.ts:11069-11074), so its schedule is
+        // A killed session is never revived (reopenLocked()'s status guard
+        // only accepts "completed"), so its schedule is
         // dead weight: clear intervalWake/dailyWake here so this loop stops
         // re-visiting it every tick and spamming interval_failed/daily_failed
         // for a send() that can only throw "Session is not running". Every
         // other status — stopped, paused, errored, and completed itself — can
         // still come back (restore() or reopen()), so its schedule stays
-        // armed-but-suppressed via the isRestorableStatus guards below rather
-        // than being dropped here. Deliberately does NOT `continue`: the
+        // armed-but-suppressed via evaluateWakeDeliverability below rather
+        // than being dropped here: a restorable status whose runtime workspace
+        // is missing stays silently suppressed (session.wake.suppressed, once
+        // per transition) instead of emitting interval_failed/daily_failed
+        // every tick, and resumes with exactly one catch-up wake once the
+        // workspace or pane comes back. Deliberately does NOT `continue`: the
         // reactivation blocks below (auto-rotate, rate-limit, server-error)
         // still need to run for every status.
         if (session.status === "killed" && (session.intervalWake || session.dailyWake)) {
@@ -3368,9 +3438,9 @@ export class SessionService {
 
         const intervalWake = session.intervalWake;
         if (
-          isRestorableStatus(session.status) &&
           intervalWake &&
-          Date.parse(intervalWake.nextDueAt) <= now
+          Date.parse(intervalWake.nextDueAt) <= now &&
+          (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
             // Claim the due tick BEFORE sending: advance nextDueAt to the next
@@ -3382,8 +3452,15 @@ export class SessionService {
               nextDueMs += intervalWake.intervalMs;
             } while (nextDueMs <= now);
             const nextDueAt = new Date(nextDueMs).toISOString();
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (!isRestorableStatus(current.status)) return;
+            const current = readSession(this.config.dataDir, session.id);
+            // A null read means the session was archived between the snapshot and
+            // here; skip the claim entirely rather than resurrecting it via
+            // writeSession. A non-restorable current status (e.g. killed while
+            // this tick waited on the lock) must also bail: sendLocked's own
+            // precondition is isRestorableStatus, and re-checking it here closes
+            // the gap between the outer evaluateWakeDeliverability snapshot and
+            // the lock actually being acquired.
+            if (current === null || !isRestorableStatus(current.status)) return;
             // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
             const claimed =
               current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
@@ -3613,9 +3690,9 @@ export class SessionService {
 
         const dailyWake = session.dailyWake;
         if (
-          !isRestorableStatus(session.status) ||
           !dailyWake ||
-          Date.parse(dailyWake.nextDueAt) > now
+          Date.parse(dailyWake.nextDueAt) > now ||
+          !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
           continue;
         }
@@ -3624,8 +3701,20 @@ export class SessionService {
           // next future scheduled time and persist it first. A slow or failing
           // send must not leave the wake due, or the `<= now` guard stays true
           // and it re-fires every tick forever.
-          const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
-          if (!isRestorableStatus(currentDailyWakeSession.status)) return;
+          const currentDailyWakeSession = readSession(this.config.dataDir, session.id);
+          // A null read means the session was archived between the snapshot and
+          // here; skip the claim entirely rather than resurrecting it via
+          // writeSession. A non-restorable current status (e.g. killed while
+          // this tick waited on the lock) must also bail: sendLocked's own
+          // precondition is isRestorableStatus, and re-checking it here closes
+          // the gap between the outer evaluateWakeDeliverability snapshot and
+          // the lock actually being acquired.
+          if (
+            currentDailyWakeSession === null ||
+            !isRestorableStatus(currentDailyWakeSession.status)
+          ) {
+            return;
+          }
           // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
           const dailyWakeClaimed =
             currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
@@ -4673,6 +4762,11 @@ export class SessionService {
     for (const sessionId of this.agentSessionIdPersistBackoffUntil.keys()) {
       if (!liveIds.has(sessionId)) {
         this.agentSessionIdPersistBackoffUntil.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.wakeSuppressionNotified) {
+      if (!liveIds.has(sessionId)) {
+        this.wakeSuppressionNotified.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {

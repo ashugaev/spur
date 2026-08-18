@@ -29145,6 +29145,395 @@ describe("SessionService", () => {
     });
   });
 
+  describe("recurring wake suppression on a missing workspace", () => {
+    function pastDueIntervalWake(
+      overrides: Partial<NonNullable<SessionRecord["intervalWake"]>> = {},
+    ) {
+      return {
+        nextDueAt: "2026-03-18T09:59:00.000Z",
+        intervalMs: 60_000,
+        message: "Check progress",
+        stopCondition: "Task done",
+        ...overrides,
+      };
+    }
+    function pastDueDailyWake(overrides: Partial<NonNullable<SessionRecord["dailyWake"]>> = {}) {
+      return {
+        dailyAt: ["10:06"],
+        nextDueAt: "2026-03-16T10:06:00.000Z",
+        message: "Check progress",
+        stopCondition: "Task done",
+        ...overrides,
+      };
+    }
+
+    it("suppresses an interval wake on a stopped session whose runtime is gone and workspace is missing", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "stopped", intervalWake: pastDueIntervalWake() }),
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T09:59:00.000Z");
+      service.dispose();
+    });
+
+    it("suppresses a daily wake on a stopped session whose runtime is gone and workspace is missing", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "stopped", dailyWake: pastDueDailyWake() }),
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-16T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("resumes an interval wake with exactly one catch-up send once the workspace is restored", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "stopped", intervalWake: pastDueIntervalWake() }),
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+      mockClaudeJsonlState("waiting");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+      workspaceExistsMock.mockReturnValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      await advanceSeconds(1);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      const nextDueAt = sessions.get("api-1")?.intervalWake?.nextDueAt;
+      expect(nextDueAt).toBeDefined();
+      expect(Date.parse(nextDueAt as string)).toBeGreaterThan(
+        Date.parse("2026-03-18T10:00:03.000Z"),
+      );
+
+      await advanceSeconds(2);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("H2: does not resurrect or advance an interval wake when disk status moved to a non-restorable one (completed) since the snapshot", async () => {
+      const sessions = createSessionStore();
+      const stoppedSnapshot = sessionRecord({
+        id: "api-1",
+        status: "stopped",
+        intervalWake: pastDueIntervalWake(),
+      });
+      sessions.set("api-1", { ...stoppedSnapshot, status: "completed" });
+      listSessionsMock.mockImplementation(() => [stoppedSnapshot]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T09:59:00.000Z");
+      service.dispose();
+    });
+
+    it("H2: does not resurrect or advance a daily wake when disk status moved to a non-restorable one (completed) since the snapshot", async () => {
+      const sessions = createSessionStore();
+      const stoppedSnapshot = sessionRecord({
+        id: "api-1",
+        status: "stopped",
+        dailyWake: pastDueDailyWake(),
+      });
+      sessions.set("api-1", { ...stoppedSnapshot, status: "completed" });
+      listSessionsMock.mockImplementation(() => [stoppedSnapshot]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-16T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("delivers an interval wake when disk status moved between two restorable statuses (running to stopped) since the snapshot", async () => {
+      const sessions = createSessionStore();
+      const runningSnapshot = sessionRecord({
+        id: "api-1",
+        status: "running",
+        intervalWake: pastDueIntervalWake(),
+      });
+      sessions.set("api-1", { ...runningSnapshot, status: "stopped" });
+      listSessionsMock.mockImplementation(() => [runningSnapshot]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_sent",
+        ).length,
+      ).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).not.toBe("2026-03-18T09:59:00.000Z");
+      service.dispose();
+    });
+
+    it("delivers a daily wake when disk status moved between two restorable statuses (running to stopped) since the snapshot", async () => {
+      const sessions = createSessionStore();
+      const runningSnapshot = sessionRecord({
+        id: "api-1",
+        status: "running",
+        dailyWake: pastDueDailyWake(),
+      });
+      sessions.set("api-1", { ...runningSnapshot, status: "stopped" });
+      listSessionsMock.mockImplementation(() => [runningSnapshot]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.daily_sent")
+          .length,
+      ).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(0);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).not.toBe("2026-03-16T10:06:00.000Z");
+      service.dispose();
+    });
+
+    it("fires an interval wake exactly once for a shepherd session with a dead process and missing workspace", async () => {
+      seedShepherdSession({
+        status: "stopped",
+        intervalWake: pastDueIntervalWake(),
+      });
+      mockExitedThenRestoredProcess();
+      workspaceExistsMock.mockReturnValue(false);
+      mockClaudeJsonlState("waiting");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(2);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("emits session.wake.suppressed once per transition into workspace_missing, never per tick", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "stopped",
+          // A short interval so the wake is due again shortly after the
+          // catch-up send re-arms nextDueAt, without waiting out a full
+          // 60s interval in the second suppression window.
+          intervalWake: pastDueIntervalWake({ intervalMs: 2_000 }),
+        }),
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+      mockClaudeJsonlState("waiting");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(5);
+      const suppressedAfterFirstRun = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.wake.suppressed",
+      );
+      expect(suppressedAfterFirstRun.length).toBe(1);
+      expect(suppressedAfterFirstRun[0]?.[1].details).toEqual(
+        expect.objectContaining({ reason: "workspace_missing" }),
+      );
+
+      // Restore delivers exactly one catch-up wake.
+      workspaceExistsMock.mockReturnValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      await advanceSeconds(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+
+      // Suppress again: a fresh transition into workspace_missing logs exactly
+      // one more session.wake.suppressed, never a third. nextDueAt re-armed
+      // 2s past the delivery, so it goes due again well within this window.
+      workspaceExistsMock.mockReturnValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      await advanceSeconds(5);
+      const suppressedAfterSecondRun = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.wake.suppressed",
+      );
+      expect(suppressedAfterSecondRun.length).toBe(2);
+
+      await advanceSeconds(3);
+      const suppressedAfterThirdRun = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.wake.suppressed",
+      );
+      expect(suppressedAfterThirdRun.length).toBe(2);
+      service.dispose();
+    });
+
+    it("emits session.wake.suppressed only once when both an interval and a daily wake are due and suppressed in the same tick", async () => {
+      createSessionStore().set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "stopped",
+          intervalWake: pastDueIntervalWake(),
+          dailyWake: pastDueDailyWake(),
+        }),
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.suppressed")
+          .length,
+      ).toBe(1);
+      service.dispose();
+    });
+
+    it("does not resurrect a session via writeSession when the fresh read is null during an interval wake claim", async () => {
+      createSessionStore().set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "stopped", intervalWake: pastDueIntervalWake() }),
+      );
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockImplementation(() => null);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+
+      expect(writeSessionMock.mock.calls.filter(([, record]) => record.id === "api-1").length).toBe(
+        0,
+      );
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.interval_failed",
+        ).length,
+      ).toBe(0);
+      service.dispose();
+    });
+
+    it("does not resurrect a session via writeSession when the fresh read is null during a daily wake claim", async () => {
+      createSessionStore().set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "stopped", dailyWake: pastDueDailyWake() }),
+      );
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockImplementation(() => null);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+
+      expect(writeSessionMock.mock.calls.filter(([, record]) => record.id === "api-1").length).toBe(
+        0,
+      );
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.daily_failed",
+        ).length,
+      ).toBe(0);
+      service.dispose();
+    });
+
+    it("mirror-exactness: a running session with a live pane still delivers an interval wake when the workspace is missing", async () => {
+      createSessionStore().set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "running", intervalWake: pastDueIntervalWake() }),
+      );
+      workspaceExistsMock.mockReturnValue(false);
+      mockClaudeJsonlState("waiting");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("mirror-exactness: a paused session with a live pane still delivers an interval wake when the workspace is missing", async () => {
+      createSessionStore().set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "paused", intervalWake: pastDueIntervalWake() }),
+      );
+      workspaceExistsMock.mockReturnValue(false);
+      mockClaudeJsonlState("waiting");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+  });
+
   describe("shepherd workspace recovery across a reboot", () => {
     it("re-creates a deleted shepherd workspace and recovers on send after a daemon restart", async () => {
       mockClaudeJsonlState("waiting");
@@ -30702,6 +31091,7 @@ describe("SessionService", () => {
       prCheckTrackers: Map<string, unknown>;
       usageMenuConfirmedAt: Map<string, number>;
       claudeRotationEpisode: Map<string, unknown>;
+      wakeSuppressionNotified: Set<string>;
       attentionStates: Map<string, string>;
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
@@ -30850,6 +31240,7 @@ describe("SessionService", () => {
         });
         internals.usageMenuConfirmedAt.set(id, Date.now());
         internals.claudeRotationEpisode.set(id, { episode: "e1", count: 1 });
+        internals.wakeSuppressionNotified.add(id);
       }
 
       // api-1 stays running (non-terminal). api-2 completes. api-3 was
@@ -30921,6 +31312,13 @@ describe("SessionService", () => {
       // lastEntry and reopen the oscillation covered by the two tests below).
       expect(internals.stateHistory.get("api-2")).toHaveLength(1);
       expect(internals.stateHistory.get("api-3")).toHaveLength(1);
+
+      // wakeSuppressionNotified follows the same non-terminal liveIds sweep
+      // as the flat Map prunes above: it drops both terminal ids and keeps
+      // the still-running one.
+      expect(internals.wakeSuppressionNotified.has("api-2")).toBe(false);
+      expect(internals.wakeSuppressionNotified.has("api-3")).toBe(false);
+      expect(internals.wakeSuppressionNotified.has("api-1")).toBe(true);
 
       service.dispose();
     });
