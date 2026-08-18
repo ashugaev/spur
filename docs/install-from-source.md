@@ -2,7 +2,9 @@
 
 > Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
 
-Deploy from a GitHub checkout (dev / maintainers). `v2/` is the runtime source of truth; `pnpm main:deploy` builds and installs the systemd units. For a normal server, use [install-from-npm.md](install-from-npm.md) instead — this path is for hacking on Spur or running your own build.
+Source install is for contributors/maintainers only. Coding agents must not use it for normal installs; use npm unless the user explicitly asks for source: [install-from-npm.md](install-from-npm.md).
+
+Deploy from a GitHub checkout. `v2/` is the runtime source of truth; `pnpm main:deploy` builds and installs the systemd units. This path is for hacking on Spur or running your own build.
 
 ## Topology
 

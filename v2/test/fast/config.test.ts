@@ -2638,14 +2638,16 @@ projects:
   });
 
   it("keeps the root sp project free of a review fleet", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
     expect(config.projects["sp"]?.triggers["gh-pr-review-spawn"]).toBeUndefined();
-    expect(config.projects["sp"]?.sources["gh-pr-review"]).toBeUndefined();
+    expect(config.projects["sp"]?.sources["gh-pr-review"]?.type).toBe("github");
   });
 
   it("parses the root PR-merged send trigger", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
     const trigger = config.projects["sp"]?.triggers["gh-merged"];
     if (!trigger || !("send" in trigger)) {
@@ -2660,6 +2662,7 @@ projects:
   });
 
   it("sets medium provider reasoning for the sp project", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
@@ -2668,6 +2671,7 @@ projects:
   });
 
   it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);
@@ -4198,6 +4202,62 @@ projects:
 
     expect(loadConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
     expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
+  });
+
+  it("defaults staleAfterMinutes to 12 hours when the config does not set it", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(720);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBeUndefined();
+  });
+
+  it("parses projects.<id>.staleAfterMinutes as a per-project override", async () => {
+    const configPath = await writeConfig(`
+staleAfterMinutes: 60
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: 15
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(60);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBe(15);
+  });
+
+  it("lets a project's staleAfterMinutes of 0 disable parking while the instance stays enabled", async () => {
+    const configPath = await writeConfig(`
+staleAfterMinutes: 60
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: 0
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.staleAfterMinutes).toBe(60);
+    expect(config.projects["backend"]?.staleAfterMinutes).toBe(0);
+  });
+
+  it("rejects a negative projects.<id>.staleAfterMinutes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    staleAfterMinutes: -1
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.staleAfterMinutes must be a non-negative number",
+    );
   });
 });
 

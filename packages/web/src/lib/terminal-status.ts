@@ -23,6 +23,8 @@ export function resolveActivityStatus(
       return { colorVar: "var(--color-status-error)", pulse: false, title: "needs input" };
     case "rate_limited":
       return { colorVar: "var(--color-status-attention)", pulse: false, title: "rate limited" };
+    case "stale":
+      return { colorVar: "var(--color-text-tertiary)", pulse: false, title: "stale" };
     case "error":
       return { colorVar: "var(--color-status-error)", pulse: false, title: "error" };
     case "stopped":

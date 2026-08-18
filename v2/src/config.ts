@@ -1423,6 +1423,10 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const staleAfterMinutes = asNonNegativeNumber(
+    raw["staleAfterMinutes"],
+    `${label}.staleAfterMinutes`,
+  );
   const modes = parseModes(projectId, raw["modes"]);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
@@ -1520,6 +1524,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     backlog,
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
+    ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }
 
@@ -1566,6 +1571,13 @@ const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
   cooldownMinutes: 60,
   maxRotationsPerEpisode: 2,
 };
+
+// Minutes a running/waiting session may sit idle before pollAttentionStates
+// parks it (stopReason: "stale_timeout"). 0 disables parking. 12 hours: long
+// enough that a session pausing overnight between review rounds is still there
+// in the morning, short enough that a forgotten one does not hold its pane and
+// sidecars for days.
+const DEFAULT_STALE_AFTER_MINUTES = 720;
 
 // Agent-agnostic rotation policy (applies to any agent that hits a rate limit;
 // per-agent account stores plug in separately). Instance-only, same footgun as
@@ -2080,6 +2092,11 @@ function parseConfigFile(
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
     sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
     admission: parseAdmission(root["admission"], mode),
+    staleAfterMinutes:
+      mode === "instance"
+        ? (asNonNegativeNumber(root["staleAfterMinutes"], "staleAfterMinutes") ??
+          DEFAULT_STALE_AFTER_MINUTES)
+        : DEFAULT_STALE_AFTER_MINUTES,
     projects: normalizedProjects,
     tags,
   };

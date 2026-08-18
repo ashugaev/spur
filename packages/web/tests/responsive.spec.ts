@@ -397,6 +397,53 @@ test.describe("R1: Mobile viewport", () => {
   });
 });
 
+// R1b: mobile landscape / touch, project menu popover scroll
+test.describe("R1b: mobile landscape project menu scroll", () => {
+  test.use({ viewport: { width: 844, height: 390 }, hasTouch: true });
+
+  test("project menu popover caps its height and scrolls with the header pinned", async ({
+    page,
+  }) => {
+    const manyProjects = Array.from({ length: 20 }, (_, index) => ({
+      id: `project-${index}`,
+      name: `Project ${index}`,
+    }));
+    await mockSessions(page, [makeWorkingSession({ id: "landscape-1" })], manyProjects);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /Project filter:/ }).click();
+    const menu = page.getByRole("menu");
+    await expect(menu).toBeVisible();
+
+    const menuBox = await menu.boundingBox();
+    expect(menuBox).not.toBeNull();
+    if (!menuBox) throw new Error("Expected project menu bounds");
+    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(390);
+
+    const list = menu.getByRole("group");
+    const [scrollHeight, clientHeight] = await list.evaluate((el) => [
+      el.scrollHeight,
+      el.clientHeight,
+    ]);
+    expect(scrollHeight).toBeGreaterThan(clientHeight);
+
+    await expect(menu.getByText("All Projects")).toBeVisible();
+    await expect(menu.getByText("+ New project")).toBeVisible();
+
+    // Scroll the list itself, never the page: the menu must stay attached
+    // and within the viewport.
+    await list.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await expect(menu).toBeVisible();
+    const menuBoxAfter = await menu.boundingBox();
+    expect(menuBoxAfter).not.toBeNull();
+    if (!menuBoxAfter) throw new Error("Expected project menu bounds after scroll");
+    expect(menuBoxAfter.y).toBeGreaterThanOrEqual(0);
+    expect(menuBoxAfter.y + menuBoxAfter.height).toBeLessThanOrEqual(390);
+  });
+});
+
 // R2: Tablet
 test.describe("R2: Tablet viewport (768px)", () => {
   test.use({ viewport: { width: 768, height: 1024 } });

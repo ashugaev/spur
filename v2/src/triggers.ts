@@ -11,6 +11,7 @@ import {
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
+  isStaleParked,
   WORK_ITEM_NEW_EVENT_NAMES,
   type AppConfig,
   type SendTriggerConfig,
@@ -149,7 +150,15 @@ function isSessionNotFoundError(message: string): boolean {
   return message.startsWith("Session not found:");
 }
 
+// A stale-parked session (status "stopped", stopReason "stale_timeout") is
+// still the owner of its work item — it merely went idle and any incoming
+// event wakes it silently (session-service.ts parkStaleSession/finishStaleWake).
+// Treating it as replaceable here would spawn a second session for the same
+// work item on top of the one that is about to be woken.
 function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
+  if (isStaleParked(session)) {
+    return false;
+  }
   return (
     session.status === "stopped" ||
     session.status === "errored" ||
@@ -516,11 +525,14 @@ function isSendTrigger(
 
 function isDeliverableState(session: SessionView): boolean {
   return (
-    session.state === "waiting" &&
-    isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs())
+    session.state === "stale" ||
+    (session.state === "waiting" &&
+      isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs()))
   );
 }
 
+// "stale" is deliberately never closed: a parked session has no live agent to
+// interrupt, so it must stay deliverable rather than dropping the batch.
 function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
@@ -951,7 +963,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (isInDeliveryBackoff(queueKey)) return;
 
     if (deliverable) {
-      if (Date.now() < batch.notBeforeAt) return;
+      if (!isStaleParked(session) && Date.now() < batch.notBeforeAt) return;
       interruptedKeys.delete(queueKey);
       await deliverAndTrackFailure(queueKey, batch, false);
       return;
@@ -1065,6 +1077,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     // If the session restarted since the failure, the stale backoff is cleared.
     clearBackoffIfRestarted(queueKey, session);
     if (isInDeliveryBackoff(queueKey)) return;
+
+    if (isStaleParked(session)) {
+      await deliverAndTrackFailure(queueKey, batch, false);
+      return;
+    }
 
     if (session.state !== "working" && session.state !== "needs_input") return;
     if (session.state === "needs_input" || !trigger.send.interrupt) return;

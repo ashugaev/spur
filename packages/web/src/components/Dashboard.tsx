@@ -213,6 +213,22 @@ function buildFacetCounts<T extends string>(
   return counts;
 }
 
+// Desks matching every active filter except `exclude` — the "All" chip count
+// for that dimension. Not the sum of that section's per-option counts: a desk
+// carrying two tags counts once here but once per tag in `buildFacetCounts`,
+// and untagged desks count here but appear in no per-tag bucket.
+function countFacetDesks(
+  sessions: readonly DashboardSession[],
+  exclude: FacetDimension,
+  filters: FacetFilterState,
+): number {
+  const deskKeys = new Set<string>();
+  for (const session of sessions) {
+    if (sessionMatchesFacetFilters(session, exclude, filters)) deskKeys.add(session.deskKey);
+  }
+  return deskKeys.size;
+}
+
 function sameDeskActiveSessions(
   sessions: readonly DashboardSession[],
   session: DashboardSession,
@@ -598,7 +614,7 @@ function ProjectMenu({
       </button>
       {popover.open ? (
         <div
-          className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           role="menu"
         >
           <button
@@ -619,7 +635,7 @@ function ProjectMenu({
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
-            <ul className="flex flex-col" role="group">
+            <ul className="flex min-h-0 flex-col overflow-y-auto" role="group">
               {projects.map((project) => (
                 <li
                   key={project.id}
@@ -1173,6 +1189,8 @@ export function Dashboard() {
     setAgentFilter((current) =>
       current.includes(agent) ? current.filter((name) => name !== agent) : [...current, agent],
     );
+  const clearTagFilters = () => setActiveTagFilters([]);
+  const clearAgentFilters = () => setAgentFilter([]);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectDisplayName, setNewProjectDisplayName] = useState("");
   const [newProjectPrefix, setNewProjectPrefix] = useState("");
@@ -1466,8 +1484,18 @@ export function Dashboard() {
     [allSessions, facetFilters],
   );
 
+  const allAgentsCount = useMemo(
+    () => countFacetDesks(allSessions, "agent", facetFilters),
+    [allSessions, facetFilters],
+  );
+
   const tagCounts = useMemo(
     () => buildFacetCounts(allSessions, "tag", facetFilters, (s) => s.tags),
+    [allSessions, facetFilters],
+  );
+
+  const allTagsCount = useMemo(
+    () => countFacetDesks(allSessions, "tag", facetFilters),
     [allSessions, facetFilters],
   );
 
@@ -2553,9 +2581,13 @@ export function Dashboard() {
               id: agent,
               count: agentCounts.get(agent) ?? 0,
             }))}
+            allAgentsCount={allAgentsCount}
             allProjectsCount={allProjectsCount}
             allStatusesCount={allStatusesCount}
+            allTagsCount={allTagsCount}
+            onClearAgents={clearAgentFilters}
             onClearAll={resetAllFilters}
+            onClearTags={clearTagFilters}
             onClose={() => setFiltersOpen(false)}
             onPrReadyOnlyChange={setPrReadyOnly}
             onSelectProject={syncProjectFilter}

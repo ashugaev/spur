@@ -169,6 +169,7 @@ import {
   editTelegramTopic,
   sendTelegramReply,
 } from "./telegram-source-state.js";
+import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
@@ -332,6 +333,7 @@ import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  isStaleParked,
   isTerminalSessionStatus,
   type AdmissionCapSource,
   type AgentName,
@@ -871,15 +873,42 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
 }
 
+type WakeDeliverability = "deliverable" | "status_not_restorable" | "workspace_missing";
+
+// Mirrors ensureSessionReadyForSend's workspace-missing throw condition exactly,
+// without performing the recovery side effects: shepherd re-materializes its
+// workspace (ensureShepherdWorkspace) rather than ever being unrecoverable; a
+// live pane returns before the workspace check even runs; only a dead runtime
+// plus a missing workspace throws. Does not model the isStaleParked admission
+// gate further down in that function — a parked session with a live workspace
+// is "deliverable" here and hits that gate only inside send() itself, via the
+// existing SessionAdmissionDeniedError handling in the interval/daily wake
+// branches, not via suppression.
+// Used to decide whether a recurring wake can be delivered at all before attempting
+// send(), so a session whose workspace is gone stays silently suppressed instead of
+// emitting *_failed every tick.
+async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverability> {
+  if (!isRestorableStatus(session.status)) return "status_not_restorable";
+  if (session.project === SHEPHERD_PROJECT_ID) return "deliverable";
+  if (session.worktreePath && workspaceExists(session.worktreePath)) return "deliverable";
+  if (!(await tmuxSessionExists(session.tmuxSession))) return "workspace_missing";
+  return (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)))
+    ? "deliverable"
+    : "workspace_missing";
+}
+
 function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
   return typeof session.error === "string" && session.error.trim().length > 0;
 }
 
-function statusFallbackState(session: Pick<SessionRecord, "status" | "error">): SessionState {
+function statusFallbackState(
+  session: Pick<SessionRecord, "status" | "error" | "stopReason">,
+): SessionState {
   const status = session.status;
   if (status === "killed") return "killed";
   if (status === "errored") return "error";
   if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
+  if (isStaleParked(session)) return "stale";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
 }
@@ -1405,13 +1434,34 @@ export function isRestorableSession(
   // error) — not that the session died, so it must not read as restorable.
   // Only "stopped" state (the pane/process actually went away) qualifies
   // while status is still "running".
+  // state "stale" only ever comes from statusFallbackState for
+  // status === "stopped" (stopReason "stale_timeout") — never for "paused" —
+  // so that combination is not a case to guard against here.
   return (
     ((session.status === "running" && session.state === "stopped") ||
-      ((session.status === "stopped" || session.status === "paused") &&
-        (session.state === "stopped" || session.state === "error")) ||
+      (session.status === "stopped" &&
+        (session.state === "stopped" || session.state === "error" || session.state === "stale")) ||
+      (session.status === "paused" && (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
+}
+
+// Pure park predicate, exported for direct unit coverage the same way
+// isIdleEnoughToReceive is. `staleAfterMs <= 0` means the feature is
+// disabled (instance/project resolution turns 0 into "never park").
+// `state === "waiting"` already implies a usable pane and a live agent
+// process (see classifySessionRecord/statusFallbackState), so working,
+// needs_input, rate_limited, and every terminal-ish state are excluded by
+// construction, not by an extra check here.
+export function shouldParkForStale(
+  view: Pick<SessionView, "status" | "state" | "lastActivityAt">,
+  staleAfterMs: number,
+  now: number = Date.now(),
+): boolean {
+  if (staleAfterMs <= 0) return false;
+  if (view.status !== "running" || view.state !== "waiting") return false;
+  return now - Date.parse(view.lastActivityAt) >= staleAfterMs;
 }
 
 export function buildRestorePrompt(
@@ -1687,6 +1737,29 @@ function buildLastActivityAt(
   return (
     latestActivityAt(updatedAt, resolveAgentActivityAt(classified)) ?? updatedAt
   ).toISOString();
+}
+
+// Park-specific activity resolver, deliberately NOT buildLastActivityAt.
+// lastActivityAt legitimately takes the max of the transcript signal AND
+// session.updatedAt, because every consumer of lastActivityAt (the UI, sort
+// order, hasUnseenAttention) wants "the latest thing that happened to this
+// session at all" — including a routine record write (agentSessionId
+// capture, a PR field update, a slot unlink, a serverError/rateLimitedAt
+// clear). The stale-park clock must not: a routine write is not the agent
+// doing anything, and folding it in would reset the idle clock on every
+// such write, making the feature inert in practice while every unit test
+// (which only ever drives the pure predicate against a synthetic
+// lastActivityAt) stays green. This resolver is transcript-first and
+// deliberately does NOT fall back to classified.runtime.tmuxActivityAt: tmux
+// activity is an attach clock (bumped by opening the web terminal, not by
+// agent output), so falling back to it would keep an attached session
+// unparkable forever and measure a never-attached one against a timestamp
+// that means nothing. Returns null when there is no transcript signal at
+// all; callers must treat null as "never park" (fail safe), not "park now".
+function resolveParkActivityAt(
+  classified: Pick<SessionStateResult, "agentActivityAt">,
+): Date | null {
+  return classified.agentActivityAt ?? null;
 }
 
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
@@ -2097,14 +2170,6 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
   );
 }
 
-function telegramStatusEmoji(state: string): string {
-  if (state === "working") return "🟢";
-  if (state === "waiting") return "🟡";
-  if (state === "needs_input") return "🔴";
-  if (state === "error" || state === "killed" || state === "stopped") return "⚫";
-  return "⚪";
-}
-
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state">): string {
   return `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
 }
@@ -2161,6 +2226,12 @@ export class SessionService {
   // instead of at delivery-loop cadence. Swept alongside the other
   // discovery-scoped maps in pruneSessionScopedState.
   private readonly agentSessionIdPersistBackoffUntil = new Map<string, number>();
+  // Tracks sessions currently in the workspace_missing wake-suppression state, so
+  // session.wake.suppressed fires once on the transition into it instead of every
+  // tick (1s tick = 86,400 events/day/session otherwise). Cleared on the transition
+  // back to deliverable. In-memory only, no persisted field. Swept alongside the
+  // other wake/discovery-scoped maps in pruneSessionScopedState.
+  private readonly wakeSuppressionNotified = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Report-only pre-spawn disk-headroom probe (see `warnIfHostDiskLow`),
@@ -2231,6 +2302,11 @@ export class SessionService {
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
   private readonly reopensInFlight = new Set<string>();
+  // Serializes lifecycle mutations that can kill, relaunch, write to, or
+  // snapshot one session's agent and sidecar panes. Distinct from the pane
+  // write lock: callers acquire lifecycle first, then pane-write. Helpers
+  // suffixed Locked run only under this lock and never acquire it again.
+  private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
@@ -2648,20 +2724,25 @@ export class SessionService {
         const project = this.resolveProjectForSession(candidate);
         for (const name of sessionSidecarNames(candidate, project)) {
           if (Boolean(BUILTIN_SIDECARS[name]?.config.mcp) !== mcp) continue;
-          const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
-          if (!tmuxName || !liveTmux.has(tmuxName)) continue;
-          const stopped = await killTmuxSessionTree(tmuxName);
-          // Drop the owner's sidecarProcs entry the same way every other
-          // sidecar kill site does — otherwise its dead pane's pgid stays
-          // "live" to buildSidecarClaims/findLeakedSidecarTrees until the
-          // sidecar restarts, masking the orphan from the sweep and doctor.
-          const ownerId = this.sidecarOwnerIdForName(candidate, project, name);
-          this.clearSidecarProcEntry(ownerId, name);
-          return {
-            attempted: true,
-            stoppedTmux: stopped ? tmuxName : null,
-            tier: mcp ? "mcp_sidecar" : "user_sidecar",
-          };
+          const result = await this.withWorkspaceLifecycleLocks(candidate.id, async () => {
+            const tmuxName = await this.memoryShedSidecarTarget(candidate.id, name);
+            if (!tmuxName || !liveTmux.has(tmuxName)) return null;
+            const stopped = await killTmuxSessionTree(tmuxName);
+            // Drop the owner's sidecarProcs entry the same way every other
+            // sidecar kill site does — otherwise its dead pane's pgid stays
+            // "live" to buildSidecarClaims/findLeakedSidecarTrees until the
+            // sidecar restarts, masking the orphan from the sweep and doctor.
+            const latest = readSession(this.config.dataDir, candidate.id) ?? candidate;
+            const latestProject = this.resolveProjectForSession(latest);
+            const ownerId = this.sidecarOwnerIdForName(latest, latestProject, name);
+            this.clearSidecarProcEntry(ownerId, name);
+            return {
+              attempted: true,
+              stoppedTmux: stopped ? tmuxName : null,
+              tier: mcp ? ("mcp_sidecar" as const) : ("user_sidecar" as const),
+            };
+          });
+          if (result) return result;
         }
       }
     }
@@ -2735,7 +2816,16 @@ export class SessionService {
           for (const candidate of candidates) {
             if (!(await this.memoryShedEligibleRecord(candidate.id))) continue;
             sessionAttempted = true;
-            await this.applyManualStatus(candidate.id, "stopped", {}, { skipEnrichment: true });
+            await this.withWorkspaceLifecycleLocks(candidate.id, () =>
+              this.applyManualStatusLocked(
+                candidate.id,
+                "stopped",
+                {},
+                {
+                  skipEnrichment: true,
+                },
+              ),
+            );
             stoppedSessions.push(candidate.id);
             afterPressure = this.readMemoryPressure(Date.now());
             break;
@@ -3174,6 +3264,42 @@ export class SessionService {
     ].join("\n");
   }
 
+  // Gates a recurring wake (interval/daily) on wakeDeliverability before send()
+  // is ever attempted. Emits session.wake.suppressed once on the transition into
+  // workspace_missing and clears the once-per-session marker on the transition
+  // back to deliverable, so a persistently missing workspace logs once instead of
+  // every tick. status_not_restorable never emits: it is the documented, user-
+  // triggered killed/completed/errored case (#717 doctrine), not the undiagnosable
+  // one this event exists for.
+  private async evaluateWakeDeliverability(
+    session: SessionRecord,
+    wakeType: "interval" | "daily",
+    nextDueAt: string,
+  ): Promise<boolean> {
+    const deliverability = await wakeDeliverability(session);
+    if (deliverability === "workspace_missing") {
+      if (!this.wakeSuppressionNotified.has(session.id)) {
+        this.wakeSuppressionNotified.add(session.id);
+        this.logEvent("session.wake.suppressed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Suppressed ${wakeType} wake for ${session.id}: workspace is missing`,
+          details: {
+            reason: "workspace_missing",
+            status: session.status,
+            worktreePath: session.worktreePath,
+            wakeType,
+            nextDueAt,
+          },
+        });
+      }
+      return false;
+    }
+    this.wakeSuppressionNotified.delete(session.id);
+    return deliverability === "deliverable";
+  }
+
   private async processScheduledWakes(): Promise<void> {
     if (this.scheduledWakeMonitorRunning) {
       return;
@@ -3184,54 +3310,87 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
-          // Claim the due occurrence BEFORE sending: clear scheduledWake and
-          // persist it first. A slow or failing send must not leave the wake
-          // due, or the `<= now` guard stays true and it re-fires every tick
-          // forever.
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
-          const claimed =
-            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-            current.scheduledWake.message === scheduledWake.message;
-          if (claimed) {
-            const { scheduledWake: _scheduledWake, ...base } = current;
-            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-            writeSession(this.config.dataDir, cleared);
-            try {
-              await this.send(session.id, { message: scheduledWake.message });
-              this.logEvent("session.wake.sent", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent scheduled wake to ${session.id}`,
-                details: {
-                  dueAt: scheduledWake.dueAt,
-                },
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.wake.failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-                details: {
-                  dueAt: scheduledWake.dueAt,
-                },
-              });
+          await this.withWorkspaceLifecycleLocks(session.id, async () => {
+            // Claim the due occurrence BEFORE sending: clear scheduledWake and
+            // persist it first. A slow or failing send must not leave the wake
+            // due, or the `<= now` guard stays true and it re-fires every tick
+            // forever.
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+            const claimed =
+              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+              current.scheduledWake.message === scheduledWake.message;
+            if (claimed) {
+              const { scheduledWake: _scheduledWake, ...base } = current;
+              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+              writeSession(this.config.dataDir, cleared);
+              try {
+                await this.sendLocked(session.id, { message: scheduledWake.message });
+                this.logEvent("session.wake.sent", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent scheduled wake to ${session.id}`,
+                  details: {
+                    dueAt: scheduledWake.dueAt,
+                  },
+                });
+              } catch (error) {
+                if (error instanceof SessionAdmissionDeniedError) {
+                  // Admission refused this stale-parked wake, not a delivery
+                  // failure — the occurrence above was already claimed
+                  // (scheduledWake cleared and persisted) before this send
+                  // attempt, so losing it here would drop the wake forever.
+                  // Re-arm the exact same occurrence (CAS: only if nothing
+                  // else re-armed/cancelled it in the meantime) so the next
+                  // poll tick retries once the fleet has headroom again.
+                  const afterDenial = readSession(this.config.dataDir, session.id);
+                  if (afterDenial && !afterDenial.scheduledWake) {
+                    writeSession(this.config.dataDir, {
+                      ...afterDenial,
+                      scheduledWake,
+                      updatedAt: nowIso(),
+                    });
+                  }
+                  this.logEvent("session.wake.deferred", {
+                    level: "warn",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Deferred scheduled wake for ${session.id}: ${error.message}`,
+                    details: {
+                      dueAt: scheduledWake.dueAt,
+                    },
+                  });
+                } else {
+                  const message = error instanceof Error ? error.message : String(error);
+                  this.logEvent("session.wake.failed", {
+                    level: "error",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+                    details: {
+                      dueAt: scheduledWake.dueAt,
+                    },
+                  });
+                }
+              }
             }
-          }
+          });
         }
 
-        // A killed session is never revived (reopen() only accepts
-        // "completed", session-service.ts:11069-11074), so its schedule is
+        // A killed session is never revived (reopenLocked()'s status guard
+        // only accepts "completed"), so its schedule is
         // dead weight: clear intervalWake/dailyWake here so this loop stops
         // re-visiting it every tick and spamming interval_failed/daily_failed
         // for a send() that can only throw "Session is not running". Every
         // other status — stopped, paused, errored, and completed itself — can
         // still come back (restore() or reopen()), so its schedule stays
-        // armed-but-suppressed via the isRestorableStatus guards below rather
-        // than being dropped here. Deliberately does NOT `continue`: the
+        // armed-but-suppressed via evaluateWakeDeliverability below rather
+        // than being dropped here: a restorable status whose runtime workspace
+        // is missing stays silently suppressed (session.wake.suppressed, once
+        // per transition) instead of emitting interval_failed/daily_failed
+        // every tick, and resumes with exactly one catch-up wake once the
+        // workspace or pane comes back. Deliberately does NOT `continue`: the
         // reactivation blocks below (auto-rotate, rate-limit, server-error)
         // still need to run for every status.
         if (session.status === "killed" && (session.intervalWake || session.dailyWake)) {
@@ -3272,68 +3431,108 @@ export class SessionService {
 
         const intervalWake = session.intervalWake;
         if (
-          isRestorableStatus(session.status) &&
           intervalWake &&
-          Date.parse(intervalWake.nextDueAt) <= now
+          Date.parse(intervalWake.nextDueAt) <= now &&
+          (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
-          // Claim the due tick BEFORE sending: advance nextDueAt to the next
-          // future interval (catching up past any missed intervals) and persist
-          // it first. A slow or failing send must not leave the wake due, or the
-          // `<= now` guard stays true and it re-fires every tick forever.
-          let nextDueMs = Date.parse(intervalWake.nextDueAt);
-          do {
-            nextDueMs += intervalWake.intervalMs;
-          } while (nextDueMs <= now);
-          const nextDueAt = new Date(nextDueMs).toISOString();
-          const current = readSession(this.config.dataDir, session.id) ?? session;
-          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
-          const claimed =
-            current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
-            current.intervalWake.intervalMs === intervalWake.intervalMs &&
-            current.intervalWake.message === intervalWake.message &&
-            current.intervalWake.stopCondition === intervalWake.stopCondition;
-          if (claimed) {
-            const updated: SessionRecord = {
-              ...current,
-              intervalWake: {
-                ...intervalWake,
-                nextDueAt,
-              },
-              updatedAt: nowIso(),
-            };
-            writeSession(this.config.dataDir, updated);
-            try {
-              await this.send(session.id, {
-                message: this.formatIntervalWakeMessage(
-                  session.id,
-                  intervalWake.message,
-                  intervalWake.stopCondition,
-                ),
-              });
-              this.logEvent("session.wake.interval_sent", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent interval wake to ${session.id}`,
-                details: {
+          await this.withWorkspaceLifecycleLocks(session.id, async () => {
+            // Claim the due tick BEFORE sending: advance nextDueAt to the next
+            // future interval (catching up past any missed intervals) and persist
+            // it first. A slow or failing send must not leave the wake due, or the
+            // `<= now` guard stays true and it re-fires every tick forever.
+            let nextDueMs = Date.parse(intervalWake.nextDueAt);
+            do {
+              nextDueMs += intervalWake.intervalMs;
+            } while (nextDueMs <= now);
+            const nextDueAt = new Date(nextDueMs).toISOString();
+            const current = readSession(this.config.dataDir, session.id);
+            // A null read means the session was archived between the snapshot and
+            // here; skip the claim entirely rather than resurrecting it via
+            // writeSession. A non-restorable current status (e.g. killed while
+            // this tick waited on the lock) must also bail: sendLocked's own
+            // precondition is isRestorableStatus, and re-checking it here closes
+            // the gap between the outer evaluateWakeDeliverability snapshot and
+            // the lock actually being acquired.
+            if (current === null || !isRestorableStatus(current.status)) return;
+            // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+            const claimed =
+              current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+              current.intervalWake.intervalMs === intervalWake.intervalMs &&
+              current.intervalWake.message === intervalWake.message &&
+              current.intervalWake.stopCondition === intervalWake.stopCondition;
+            if (claimed) {
+              const updated: SessionRecord = {
+                ...current,
+                intervalWake: {
+                  ...intervalWake,
                   nextDueAt,
-                  intervalMs: intervalWake.intervalMs,
                 },
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.wake.interval_failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send interval wake to ${session.id}: ${message}`,
-                details: {
-                  nextDueAt,
-                  intervalMs: intervalWake.intervalMs,
-                },
-              });
+                updatedAt: nowIso(),
+              };
+              writeSession(this.config.dataDir, updated);
+              try {
+                await this.sendLocked(session.id, {
+                  message: this.formatIntervalWakeMessage(
+                    session.id,
+                    intervalWake.message,
+                    intervalWake.stopCondition,
+                  ),
+                });
+                this.logEvent("session.wake.interval_sent", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent interval wake to ${session.id}`,
+                  details: {
+                    nextDueAt,
+                    intervalMs: intervalWake.intervalMs,
+                  },
+                });
+              } catch (error) {
+                if (error instanceof SessionAdmissionDeniedError) {
+                  // Same reasoning as the scheduled-wake branch above: this
+                  // occurrence was already claimed (nextDueAt advanced and
+                  // persisted) before the send attempt. Roll nextDueAt back to
+                  // the occurrence that was just refused (CAS: only if nothing
+                  // else re-armed it meanwhile) so the next poll tick retries
+                  // it promptly instead of waiting a full interval.
+                  const afterDenial = readSession(this.config.dataDir, session.id);
+                  if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+                    writeSession(this.config.dataDir, {
+                      ...afterDenial,
+                      intervalWake: {
+                        ...afterDenial.intervalWake,
+                        nextDueAt: intervalWake.nextDueAt,
+                      },
+                      updatedAt: nowIso(),
+                    });
+                  }
+                  this.logEvent("session.wake.interval_deferred", {
+                    level: "warn",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Deferred interval wake for ${session.id}: ${error.message}`,
+                    details: {
+                      nextDueAt,
+                      intervalMs: intervalWake.intervalMs,
+                    },
+                  });
+                } else {
+                  const message = error instanceof Error ? error.message : String(error);
+                  this.logEvent("session.wake.interval_failed", {
+                    level: "error",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Failed to send interval wake to ${session.id}: ${message}`,
+                    details: {
+                      nextDueAt,
+                      intervalMs: intervalWake.intervalMs,
+                    },
+                  });
+                }
+              }
             }
-          }
+          });
         }
 
         const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
@@ -3484,103 +3683,145 @@ export class SessionService {
 
         const dailyWake = session.dailyWake;
         if (
-          !isRestorableStatus(session.status) ||
           !dailyWake ||
-          Date.parse(dailyWake.nextDueAt) > now
+          Date.parse(dailyWake.nextDueAt) > now ||
+          !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
           continue;
         }
-        // Claim the due occurrence BEFORE sending: advance nextDueAt to the
-        // next future scheduled time and persist it first. A slow or failing
-        // send must not leave the wake due, or the `<= now` guard stays true
-        // and it re-fires every tick forever.
-        const currentDailyWakeSession = readSession(this.config.dataDir, session.id) ?? session;
-        // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
-        const dailyWakeClaimed =
-          currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
-          currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
-          currentDailyWakeSession.dailyWake.message === dailyWake.message &&
-          currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
-        if (dailyWakeClaimed) {
-          // Resolving the next occurrence can throw on a malformed dailyAt
-          // (e.g. a stray "99:99" that slipped into an existing record
-          // before validation covered it). Scope this to the session,
-          // mirroring the auto-rotate catch above: one bad record must not
-          // escape the loop and starve every later session's wake
-          // processing this tick. Unlike a delivery failure, a malformed
-          // dailyAt has no next occurrence to advance to, so skip 24h ahead
-          // instead of clearing the schedule -- an absent dailyWake is
-          // invisible in the web UI and in `spur list`, and disabling a
-          // schedule is meant to be an explicit user action (cancelWake).
-          // This bounds the storm to one failure event per day and keeps
-          // message/stopCondition intact for repair via re-arm.
-          let nextDueAt: Date;
-          try {
-            nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            const skipped: SessionRecord = {
+        await this.withWorkspaceLifecycleLocks(session.id, async () => {
+          // Claim the due occurrence BEFORE sending: advance nextDueAt to the
+          // next future scheduled time and persist it first. A slow or failing
+          // send must not leave the wake due, or the `<= now` guard stays true
+          // and it re-fires every tick forever.
+          const currentDailyWakeSession = readSession(this.config.dataDir, session.id);
+          // A null read means the session was archived between the snapshot and
+          // here; skip the claim entirely rather than resurrecting it via
+          // writeSession. A non-restorable current status (e.g. killed while
+          // this tick waited on the lock) must also bail: sendLocked's own
+          // precondition is isRestorableStatus, and re-checking it here closes
+          // the gap between the outer evaluateWakeDeliverability snapshot and
+          // the lock actually being acquired.
+          if (
+            currentDailyWakeSession === null ||
+            !isRestorableStatus(currentDailyWakeSession.status)
+          ) {
+            return;
+          }
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const dailyWakeClaimed =
+            currentDailyWakeSession.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+            currentDailyWakeSession.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+            currentDailyWakeSession.dailyWake.message === dailyWake.message &&
+            currentDailyWakeSession.dailyWake.stopCondition === dailyWake.stopCondition;
+          if (dailyWakeClaimed) {
+            // Resolving the next occurrence can throw on a malformed dailyAt
+            // (e.g. a stray "99:99" that slipped into an existing record
+            // before validation covered it). Scope this to the session,
+            // mirroring the auto-rotate catch above: one bad record must not
+            // escape the loop and starve every later session's wake
+            // processing this tick. Unlike a delivery failure, a malformed
+            // dailyAt has no next occurrence to advance to, so skip 24h ahead
+            // instead of clearing the schedule -- an absent dailyWake is
+            // invisible in the web UI and in `spur list`, and disabling a
+            // schedule is meant to be an explicit user action (cancelWake).
+            // This bounds the storm to one failure event per day and keeps
+            // message/stopCondition intact for repair via re-arm.
+            let nextDueAt: Date;
+            try {
+              nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              const skipped: SessionRecord = {
+                ...currentDailyWakeSession,
+                dailyWake: {
+                  ...dailyWake,
+                  nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
+                },
+                updatedAt: nowIso(),
+              };
+              writeSession(this.config.dataDir, skipped);
+              this.logEvent("session.wake.daily_failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
+                details: {
+                  nextDueAt: dailyWake.nextDueAt,
+                  dailyAt: dailyWake.dailyAt,
+                },
+              });
+              return;
+            }
+            const updated: SessionRecord = {
               ...currentDailyWakeSession,
               dailyWake: {
                 ...dailyWake,
-                nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
+                nextDueAt: nextDueAt.toISOString(),
               },
               updatedAt: nowIso(),
             };
-            writeSession(this.config.dataDir, skipped);
-            this.logEvent("session.wake.daily_failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to resolve next daily wake time for ${session.id}: ${message}`,
-              details: {
-                nextDueAt: dailyWake.nextDueAt,
-                dailyAt: dailyWake.dailyAt,
-              },
-            });
-            continue;
+            writeSession(this.config.dataDir, updated);
+            try {
+              await this.sendLocked(session.id, {
+                message: this.formatDailyWakeMessage(
+                  session.id,
+                  dailyWake.message,
+                  dailyWake.stopCondition,
+                ),
+              });
+              this.logEvent("session.wake.daily_sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent daily wake to ${session.id}`,
+                details: {
+                  nextDueAt: dailyWake.nextDueAt,
+                  dailyAt: dailyWake.dailyAt,
+                },
+              });
+            } catch (error) {
+              if (error instanceof SessionAdmissionDeniedError) {
+                // Same reasoning as the scheduled/interval branches above:
+                // this occurrence was already claimed (nextDueAt advanced and
+                // persisted) before the send attempt. Roll nextDueAt back to
+                // the occurrence that was just refused (CAS: only if nothing
+                // else re-armed it meanwhile) so the next poll tick retries it
+                // promptly instead of waiting until tomorrow.
+                const afterDenial = readSession(this.config.dataDir, session.id);
+                if (afterDenial && afterDenial.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
+                  writeSession(this.config.dataDir, {
+                    ...afterDenial,
+                    dailyWake: { ...dailyWake },
+                    updatedAt: nowIso(),
+                  });
+                }
+                this.logEvent("session.wake.daily_deferred", {
+                  level: "warn",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Deferred daily wake for ${session.id}: ${error.message}`,
+                  details: {
+                    nextDueAt: dailyWake.nextDueAt,
+                    dailyAt: dailyWake.dailyAt,
+                  },
+                });
+              } else {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.wake.daily_failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send daily wake to ${session.id}: ${message}`,
+                  details: {
+                    nextDueAt: dailyWake.nextDueAt,
+                    dailyAt: dailyWake.dailyAt,
+                  },
+                });
+              }
+            }
           }
-          const updated: SessionRecord = {
-            ...currentDailyWakeSession,
-            dailyWake: {
-              ...dailyWake,
-              nextDueAt: nextDueAt.toISOString(),
-            },
-            updatedAt: nowIso(),
-          };
-          writeSession(this.config.dataDir, updated);
-          try {
-            await this.send(session.id, {
-              message: this.formatDailyWakeMessage(
-                session.id,
-                dailyWake.message,
-                dailyWake.stopCondition,
-              ),
-            });
-            this.logEvent("session.wake.daily_sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent daily wake to ${session.id}`,
-              details: {
-                nextDueAt: dailyWake.nextDueAt,
-                dailyAt: dailyWake.dailyAt,
-              },
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.daily_failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send daily wake to ${session.id}: ${message}`,
-              details: {
-                nextDueAt: dailyWake.nextDueAt,
-                dailyAt: dailyWake.dailyAt,
-              },
-            });
-          }
-        }
+        });
       }
     } finally {
       this.scheduledWakeMonitorRunning = false;
@@ -4116,6 +4357,48 @@ export class SessionService {
     }
   }
 
+  private async withSessionLifecycleLock<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.sessionLifecycleLocks.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.sessionLifecycleLocks.set(sessionId, current);
+    await previous.catch(() => {});
+    try {
+      return await task();
+    } finally {
+      release();
+      if (this.sessionLifecycleLocks.get(sessionId) === current) {
+        this.sessionLifecycleLocks.delete(sessionId);
+      }
+    }
+  }
+
+  // Multi-record mutations always acquire ids in lexical order. Terminal
+  // transitions and project-sidecar operations touch both a desk member and
+  // its workspace owner, so sharing this order avoids anchor/member deadlocks.
+  private async withSessionLifecycleLocks<T>(
+    sessionIds: readonly string[],
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const [sessionId, ...remaining] = [...new Set(sessionIds)].sort();
+    if (!sessionId) {
+      return task();
+    }
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.withSessionLifecycleLocks(remaining, task),
+    );
+  }
+
+  private withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+    const session = readSession(this.config.dataDir, sessionId);
+    return this.withSessionLifecycleLocks(
+      session ? [session.id, workspaceIdOf(session)] : [sessionId],
+      task,
+    );
+  }
+
   private scheduleDeliveryRunner(sessionId: string): void {
     this.ensureDeliveryRunner(sessionId);
   }
@@ -4139,6 +4422,177 @@ export class SessionService {
       this.logEvent("session.attention_monitor.failed", {
         level: "warn",
         message: `Attention monitor failed: ${message}`,
+      });
+    }
+  }
+
+  // Per-project override then the instance default, matching every other
+  // project-vs-instance resolution in this file (resolveProjectForSession is
+  // the single source for the project side). 0 (instance or project) means
+  // "never park" — shouldParkForStale treats <= 0 as disabled.
+  private resolveStaleAfterMs(
+    session: Pick<SessionRecord, "id" | "project" | "worktreePath">,
+  ): number {
+    const project = this.resolveProjectForSession(session);
+    const minutes = project?.staleAfterMinutes ?? this.config.staleAfterMinutes;
+    return minutes * 60_000;
+  }
+
+  // Parks a running/waiting session that has been idle past staleAfterMinutes:
+  // kills the agent pane, tears down its sidecars (not cleanupSessionServices —
+  // service instances are out of scope here, matching reconcileUnexpectedStop),
+  // and writes status:"stopped"/stopReason:"stale_timeout" with the names of
+  // whatever sidecar was still tmux-alive at park time. Called only from the
+  // attention-monitor sweep, off a `view` that can be up to
+  // ATTENTION_POLL_INTERVAL_MS stale, so the record is re-read and
+  // re-asserted "running" before anything is torn down.
+  private async parkStaleSession(view: SessionView): Promise<void> {
+    return this.withWorkspaceLifecycleLocks(view.id, () => this.parkStaleSessionLocked(view));
+  }
+
+  private async parkStaleSessionLocked(view: SessionView): Promise<void> {
+    const candidate = readSession(this.config.dataDir, view.id);
+    if (!candidate) {
+      return;
+    }
+    const classified = await this.classifySessionRecord(candidate);
+    const latest = classified.session;
+    const parkActivityAt = resolveParkActivityAt(classified);
+    const deliveryPending: boolean = this.shouldRunDelivery(latest);
+    if (
+      latest.project === SHEPHERD_PROJECT_ID ||
+      this.spawnsInFlight.has(latest.id) ||
+      this.isInRestoreWarmup(latest.id) ||
+      deliveryPending ||
+      parkActivityAt === null ||
+      !shouldParkForStale(
+        {
+          status: latest.status,
+          state: classified.state,
+          lastActivityAt: parkActivityAt.toISOString(),
+        },
+        this.resolveStaleAfterMs(latest),
+      )
+    ) {
+      return;
+    }
+    // A delivery already touching this session's pane (a queued-message
+    // drain/flush already past its own queueDeliveryInFlight registration,
+    // or a pane write already landing) owns the pane right now — the
+    // destructive kill+teardown below must never start against it: today's
+    // post-teardown abandon check (further down) re-reads the record before
+    // writing "parked", but that is too late to undo a kill that already
+    // landed mid-delivery. Back off having touched nothing; the next sweep
+    // tick re-evaluates staleness from scratch once the delivery finishes.
+    if (this.queueDeliveryInFlight.has(latest.id) || this.paneWriteLocks.has(latest.tmuxSession)) {
+      this.logEvent("session.stale.park_skipped_delivery_in_flight", {
+        level: "info",
+        sessionId: latest.id,
+        projectId: latest.project,
+        message: `Skipped parking ${latest.id}: a delivery is already in flight`,
+      });
+      return;
+    }
+    {
+      const project = this.resolveProjectForSession(latest);
+      // Promise.all, matching the sidecar-liveness scan pattern elsewhere in
+      // this file (see the runningSidecarNames lookup): probing each pane's
+      // tmux liveness sequentially would serialize N round-trips before
+      // killAgentPaneAndConfirmExit even starts, stretching this sweep tick
+      // for every session queued behind it. Promise.all preserves the
+      // sidecarNames array order in its result regardless of resolution
+      // order, so staleSidecars stays deterministic.
+      const staleSidecars = (
+        await Promise.all(
+          sessionSidecarNames(latest, project).map(async (name) => {
+            const ownerId = this.sidecarOwnerIdForName(latest, project, name);
+            return (await sidecarTmuxAlive(ownerId, name)) ? name : null;
+          }),
+        )
+      ).filter((name): name is string => name !== null);
+      await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+      // A throw here must never abort the park: the agent pane is already
+      // dead (confirmed above), so leaving status "running" on disk would
+      // make reconcileUnexpectedStop mark it errored with error evidence on
+      // the next tick — an "error" derived state is a closed state, and
+      // triggers.ts's clearBatch drops the pending event that woke this sweep
+      // for a closed session. Finishing the park (best-effort teardown or
+      // not) keeps the derived state "stale", which stays open, so the event
+      // survives to be replayed on the next wake.
+      try {
+        await this.teardownSessionSidecars(latest);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.stale.teardown_failed", {
+          level: "error",
+          sessionId: latest.id,
+          projectId: latest.project,
+          message: `Sidecar teardown failed while parking ${latest.id}: ${message}`,
+        });
+      }
+      const idleMs = Date.now() - parkActivityAt.getTime();
+      const staleAfterMs = this.resolveStaleAfterMs(latest);
+      // killAgentPaneAndConfirmExit/teardownSessionSidecars each take
+      // multi-second REAP_CONFIRM_INTERVAL_MS/REAP_GRACE_MS waits and
+      // teardownSessionSidecars itself writes the record (slot unlink path).
+      // Anything a send/deliver/relaunch wrote to disk during that window
+      // would otherwise be silently clobbered by a park built from the
+      // pre-teardown `latest` snapshot — mirror the complete/pause re-read
+      // (see the `cleanedSession = readSession(...)` pattern above) and
+      // abandon the park rather than overwrite a record that moved.
+      const cleaned = readSession(this.config.dataDir, latest.id);
+      const abandonPark = (): void => {
+        this.logEvent("session.stale.park_aborted", {
+          level: "warn",
+          sessionId: latest.id,
+          projectId: latest.project,
+          message: `Abandoned parking ${latest.id}: record changed during teardown`,
+        });
+      };
+      const deliveryPending: boolean = cleaned ? this.shouldRunDelivery(cleaned) : false;
+      if (!cleaned || cleaned.status !== "running" || deliveryPending) {
+        abandonPark();
+        // deliveryPending means a message queued in mid-teardown, on a pane we
+        // just confirmed dead above — the record is left status:"running" with
+        // no live process. Left alone, that's a coin flip against the next
+        // reconcileUnexpectedStop tick: if reconcile wins it writes
+        // stopped/errored, shouldRunDelivery goes false, and the message is
+        // stranded for good — finishStaleWake only re-arms delivery for
+        // stopReason==="stale_timeout", never a plain stopped/errored record.
+        // Kick the delivery runner now, synchronously, so it (not reconcile)
+        // is the one racing for this session: ensureDeliveryRunner is a no-op
+        // if a loop is already running (deliveryRuns dedupe), and the loop's
+        // own tryDeliverQueuedMessage claims queueDeliveryInFlight before its
+        // first await, so this can never start a second concurrent recovery
+        // attempt against the same pane. Queue the runner after this locked
+        // method returns; its promise starts on a later microtask and chains
+        // behind the lifecycle lock held here.
+        if (cleaned && cleaned.status === "running" && deliveryPending) {
+          this.scheduleDeliveryRunner(cleaned.id);
+        }
+        return;
+      }
+      if (await isProcessRunningInTmux(cleaned.tmuxSession, sessionProcessMatchers(cleaned))) {
+        abandonPark();
+        return;
+      }
+      const parked: SessionRecord = {
+        ...this.sessionWithReleasedSidecarPorts(cleaned),
+        status: "stopped",
+        stopReason: "stale_timeout",
+        updatedAt: nowIso(),
+        ...(staleSidecars.length ? { staleSidecars } : {}),
+      };
+      delete parked.error;
+      writeSession(this.config.dataDir, parked);
+      this.stateCache.delete(latest.id);
+      await this.refreshDashboardCacheEntry(parked);
+      this.logEvent("session.stale.parked", {
+        level: "info",
+        sessionId: latest.id,
+        projectId: latest.project,
+        message: `Parked ${latest.id} after ${Math.round(idleMs / 60_000)}m idle`,
+        details: { idleMs, staleAfterMs, staleSidecars },
       });
     }
   }
@@ -4181,12 +4635,43 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
-          const view = await this.enrich(session, claudeAccounts, allSessions, sidecarProcSnapshot);
+          const { view, classified } = await this.enrichWithClassified(
+            session,
+            claudeAccounts,
+            allSessions,
+            sidecarProcSnapshot,
+          );
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
+          }
+          // Gated on genuine transcript activity (resolveParkActivityAt), not
+          // view.lastActivityAt: that value is the UI-facing max of agent
+          // activity AND every routine record write, so gating on it directly
+          // would reset the idle clock on writes that are not the agent doing
+          // anything (see resolveParkActivityAt's own comment). A null result
+          // means no transcript signal exists at all — fail safe and never
+          // park rather than fall back to the tmux attach clock.
+          const parkActivityAt = resolveParkActivityAt(classified);
+          if (
+            session.project !== SHEPHERD_PROJECT_ID &&
+            !this.spawnsInFlight.has(session.id) &&
+            !this.isInRestoreWarmup(session.id) &&
+            !this.shouldRunDelivery(session) &&
+            parkActivityAt !== null &&
+            shouldParkForStale(
+              {
+                status: view.status,
+                state: view.state,
+                lastActivityAt: parkActivityAt.toISOString(),
+              },
+              this.resolveStaleAfterMs(session),
+            )
+          ) {
+            await this.parkStaleSession(view);
+            continue;
           }
           const attention: AttentionState | null =
             view.state === "needs_input"
@@ -4270,6 +4755,11 @@ export class SessionService {
     for (const sessionId of this.agentSessionIdPersistBackoffUntil.keys()) {
       if (!liveIds.has(sessionId)) {
         this.agentSessionIdPersistBackoffUntil.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.wakeSuppressionNotified) {
+      if (!liveIds.has(sessionId)) {
+        this.wakeSuppressionNotified.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -4543,7 +5033,17 @@ export class SessionService {
     try {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) =>
-          REAPABLE_SESSION_STATUSES.has(session.status) && session.stopReason !== "manual_pause",
+          REAPABLE_SESSION_STATUSES.has(session.status) &&
+          // manual_pause's agent pane is deliberately left alive (pause never
+          // kills it) — unlike stale_timeout, whose pane parkStaleSession
+          // already confirmed dead before writing the record, so this loop's
+          // own dead-pane assumption holds for it exactly as it does for a
+          // plain stopped/killed/completed session. Excluding it here would
+          // leave a sidecar pane orphaned by a teardown that threw mid-park
+          // with no reaper: reapDeadSessionSidecars only picks up project
+          // sidecars on its idle-TTL policy pass (config-gated, sidecarGc.
+          // enabled), and this loop is the only unconditional safety net.
+          session.stopReason !== "manual_pause",
       );
       let reaped = 0;
       let liveUnderTerminal = 0;
@@ -4700,7 +5200,18 @@ export class SessionService {
       // by maxGroupsPerSweep, and only reclaim groups are measured.
       const report = await executeSessionGc(
         plan,
-        createGcDeps(this.config, (session) => this.isLiveSessionRecord(session)),
+        // A stale-parked session (isStaleParked) merely went idle — it is
+        // an in-progress task, not an abandoned one, and any incoming event
+        // wakes it silently (parkStaleSession/finishStaleWake). Reclaiming
+        // its worktree while parked would surface as "workspace is
+        // missing" on that wake, losing uncommitted work. isLiveSessionRecord
+        // itself stays narrow (running|spawning|restore-warmup) since it also
+        // drives admission control and headroom, where a parked session
+        // correctly does NOT hold a live slot.
+        createGcDeps(
+          this.config,
+          (session) => this.isLiveSessionRecord(session) || isStaleParked(session),
+        ),
         {
           dryRun: false,
           sizes: true,
@@ -5020,12 +5531,16 @@ export class SessionService {
       urgent: attention === "error",
     });
 
+    const paneTail =
+      attention !== "rate_limited"
+        ? await this.buildPaneTail(session.tmuxSession).catch(() => "")
+        : "";
     const text =
       attention === "needs_input"
-        ? `🔴 ${session.id} needs input${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+        ? `${telegramStatusEmoji("needs_input")} ${session.id} needs input${paneTail}`
         : attention === "error"
-          ? `⚫ ${session.id} error${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
-          : `🟠 ${session.id} rate limited`;
+          ? `${telegramStatusEmoji("error")} ${session.id} error${paneTail}`
+          : `${telegramStatusEmoji("rate_limited")} ${session.id} rate limited`;
     await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
   }
 
@@ -5088,10 +5603,14 @@ export class SessionService {
         target.lastReplyAt !== undefined &&
         (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
       if (alreadyReplied) return;
-      const paneTail = await this.buildPaneTail(view.tmuxSession).catch(() => "");
-      await this.pushTelegramNotice(view.id, view, `🟡 ${view.id} is waiting.${paneTail}`, {
-        updateTopicName: true,
-      });
+      await this.pushTelegramNotice(
+        view.id,
+        view,
+        `${telegramStatusEmoji("waiting")} ${view.id} is waiting.`,
+        {
+          updateTopicName: true,
+        },
+      );
       const { updatedAt: _updatedAt, ...rest } = target;
       writeTelegramReplyTarget(this.config.dataDir, {
         ...rest,
@@ -6615,6 +7134,78 @@ export class SessionService {
     return updatedRecord;
   }
 
+  // The single place both wake entry points (relaunchSessionInPlace, reached
+  // by send/deliver/tryDeliverQueuedMessage/switchAuth, and restore()) call
+  // to finish waking a stale-parked session: no-op for every non-parked
+  // record (stopReason !== "stale_timeout"), so it is safe to call
+  // unconditionally on every recovered/restored record. Must run only after
+  // the caller has confirmed the agent process is live in the new pane and
+  // before any message is sent — startSidecarInternal's own live-owner-pane
+  // short circuit means replaying a still-alive desk-shared sidecar here is
+  // always a no-op, never a double start. Sidecar failures are best-effort,
+  // same policy as startAutoStartSidecars: log and continue, never block or
+  // fail the wake.
+  private async finishStaleWake(
+    record: SessionRecord,
+    project: ProjectConfig,
+  ): Promise<SessionRecord> {
+    // Raw stopReason check, not isStaleParked: both callers pass a record
+    // already flipped to status:"running" by the relaunch/restore that
+    // preceded this call, so isStaleParked (which requires
+    // status==="stopped") would always return false here and silently
+    // disable the sidecar replay.
+    if (record.stopReason !== "stale_timeout") {
+      return record;
+    }
+    let updated = record;
+    for (const name of record.staleSidecars ?? []) {
+      try {
+        updated = await this.startSidecarWithDependencies({
+          session: updated,
+          project,
+          sidecarName: name,
+          sidecarDepth: ROOT_SIDECAR_DEPTH,
+          onStarted: (startedName, startedSidecar) => {
+            this.logEvent("session.sidecar.started", {
+              level: "info",
+              sessionId: record.id,
+              projectId: record.project,
+              message: `Replayed stale-parked sidecar ${startedName} for ${record.id}`,
+              details: {
+                sidecarName: startedName,
+                command: startedSidecar.command,
+                sidecarDepth: ROOT_SIDECAR_DEPTH,
+              },
+            });
+          },
+        });
+      } catch (sidecarError) {
+        const sidecarMessage =
+          sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+        this.logEvent("session.sidecar.stale_wake.failed", {
+          level: "warn",
+          sessionId: record.id,
+          projectId: record.project,
+          message: `Failed to replay stale sidecar ${name} for ${record.id}: ${sidecarMessage}`,
+        });
+        // startSidecarWithDependencies rejecting mid-DAG never reassigns
+        // `updated` above, even when a dependency of `name` started and
+        // persisted successfully before the throw (dependsOn runs its own
+        // sub-starts first, each of which writes the record on success). Pick
+        // up whatever landed on disk so the next name in this loop — and the
+        // final return below — never overwrite that dependency's reservation
+        // with this stale, pre-attempt in-memory copy.
+        const fresh = readSession(this.config.dataDir, record.id);
+        if (fresh) {
+          updated = fresh;
+        }
+      }
+    }
+    delete updated.stopReason;
+    delete updated.staleSidecars;
+    return updated;
+  }
+
   async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
     for (const [index, { id, project }] of drifted.entries()) {
       const projectConfig = this.config.projects[project];
@@ -6640,10 +7231,6 @@ export class SessionService {
       }
       try {
         await this.restore(id);
-        const record = readSession(this.config.dataDir, id);
-        if (record) {
-          await this.startAutoStartSidecars(record, projectConfig);
-        }
         if (memory !== null) {
           await sleep(RESTORE_SETTLE_MS);
         }
@@ -8619,6 +9206,15 @@ export class SessionService {
   }
 
   async scheduleWake(sessionId: string, request: ScheduleSessionWakeRequest): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.scheduleWakeLocked(sessionId, request),
+    );
+  }
+
+  private async scheduleWakeLocked(
+    sessionId: string,
+    request: ScheduleSessionWakeRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -8723,6 +9319,10 @@ export class SessionService {
   }
 
   async cancelWake(sessionId: string): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () => this.cancelWakeLocked(sessionId));
+  }
+
+  private async cancelWakeLocked(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -8820,6 +9420,10 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () => this.sendLocked(sessionId, request));
+  }
+
+  private async sendLocked(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -8832,7 +9436,7 @@ export class SessionService {
     }
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
-      return this.deliverPrepared(sessionId, finalMessage, {
+      return this.deliverPreparedLocked(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
         entryPoint: "send",
         hasAttachments: (request.attachments?.length ?? 0) > 0,
@@ -8891,7 +9495,7 @@ export class SessionService {
       });
     }
     if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
-      await this.tryDeliverQueuedMessage(sessionId);
+      await this.tryDeliverQueuedMessageLocked(sessionId);
     }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
@@ -9001,6 +9605,16 @@ export class SessionService {
   // for flush.
   async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
+    if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
+      throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
+    }
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.flushQueuedMessageLocked(sessionId, message),
+    );
+  }
+
+  private async flushQueuedMessageLocked(sessionId: string, message: string): Promise<SessionView> {
+    const session = this.readSessionWithQueuedMessage(sessionId, message);
     // Both probes are synchronous, before any await. The pane-lock probe
     // catches a drain already past its own queueDeliveryInFlight registration
     // and into the pane write; the marker probe catches a drain (or another
@@ -9011,7 +9625,7 @@ export class SessionService {
     }
     this.queueDeliveryInFlight.add(sessionId);
     try {
-      await this.deliverPrepared(sessionId, message, {
+      await this.deliverPreparedLocked(sessionId, message, {
         entryPoint: "flush",
         recoverOnLiveAckTimeout: true,
       });
@@ -9072,6 +9686,21 @@ export class SessionService {
       // still alive means the pane write landed, so the delivery is treated
       // as recovered instead of failed. Absent (deliver(), queue:false
       // send) keeps today's throw-and-log-failed semantics unchanged.
+      recoverOnLiveAckTimeout?: boolean;
+    },
+  ): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.deliverPreparedLocked(sessionId, message, options),
+    );
+  }
+
+  private async deliverPreparedLocked(
+    sessionId: string,
+    message: string,
+    options: {
+      interrupt?: boolean;
+      entryPoint: "send" | "deliver" | "flush";
+      hasAttachments?: boolean;
       recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
@@ -9141,7 +9770,7 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
-      if (error instanceof SessionRateLimitedError) {
+      if (error instanceof SessionRateLimitedError || error instanceof QueueDeliveryInFlightError) {
         throw error;
       }
       const failure = error instanceof Error ? error.message : String(error);
@@ -9343,7 +9972,9 @@ export class SessionService {
   }
 
   async pause(sessionId: string): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "stopped");
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.applyManualStatusLocked(sessionId, "stopped"),
+    );
   }
 
   private async sendAgentMessage(
@@ -9546,15 +10177,21 @@ export class SessionService {
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean },
   ): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed", request, options);
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.applyManualStatusLocked(sessionId, "completed", request, options),
+    );
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
-    return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
+    return this.withWorkspaceLifecycleLocks(sessionId, () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      return this.applyManualStatusLocked(sessionId, "completed", {
+        prAction: "leave_open",
+      });
+    });
   }
 
   async completeDesk(
@@ -9572,7 +10209,9 @@ export class SessionService {
       if (candidate.status === "completed") {
         continue;
       }
-      await this.applyManualStatus(candidate.id, "completed", request);
+      await this.withWorkspaceLifecycleLocks(candidate.id, () =>
+        this.applyManualStatusLocked(candidate.id, "completed", request),
+      );
       completedIds.push(candidate.id);
     }
 
@@ -9686,6 +10325,18 @@ export class SessionService {
       });
       throw new Error(message);
     }
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.startSidecarLocked(sessionId, sidecarName, request),
+    );
+  }
+
+  private async startSidecarLocked(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest,
+  ): Promise<SessionView> {
+    const caller = sidecarCallerContextFromRequest(request);
+    const sidecarDepth = nextSidecarDepth(caller);
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -9844,7 +10495,30 @@ export class SessionService {
     return outcome;
   }
 
+  private clearWorkspaceStaleSidecarReplay(session: SessionRecord, sidecarName: string): void {
+    const workspaceId = workspaceIdOf(session);
+    for (const candidate of listSessions(this.config.dataDir)) {
+      if (workspaceIdOf(candidate) !== workspaceId) continue;
+      const current = readSession(this.config.dataDir, candidate.id);
+      if (!current?.staleSidecars?.includes(sidecarName)) continue;
+      const remaining = current.staleSidecars.filter((name) => name !== sidecarName);
+      const updated: SessionRecord = { ...current };
+      if (remaining.length > 0) {
+        updated.staleSidecars = remaining;
+      } else {
+        delete updated.staleSidecars;
+      }
+      writeSession(this.config.dataDir, updated);
+    }
+  }
+
   async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.stopSidecarLocked(sessionId, sidecarName),
+    );
+  }
+
+  private async stopSidecarLocked(sessionId: string, sidecarName: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -9858,16 +10532,24 @@ export class SessionService {
       throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
     }
     const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
+    const sidecar = project?.sidecars[sidecarName];
+    const clearsWorkspaceReplay = sidecar !== undefined && !sidecar.mcp;
 
     // A dead pane or an absent tmux session with no recorded identity means
     // there is genuinely nothing left to reap.
     const owner = readSession(this.config.dataDir, ownerId);
     const alive = await sidecarTmuxAlive(ownerId, sidecarName);
     if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
+      if (clearsWorkspaceReplay) {
+        this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
+      }
       return this.enrich(session);
     }
 
     await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
+    if (clearsWorkspaceReplay) {
+      this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
+    }
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -10150,19 +10832,19 @@ export class SessionService {
     throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
-  private async applyManualStatus(
+  private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
     options: { retainInList?: boolean; skipEnrichment: true },
   ): Promise<void>;
-  private async applyManualStatus(
+  private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request?: CompleteSessionRequest,
     options?: { retainInList?: boolean; skipEnrichment?: false },
   ): Promise<SessionView>;
-  private async applyManualStatus(
+  private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
@@ -10306,6 +10988,10 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () => this.killLocked(sessionId, request));
+  }
+
+  private async killLocked(sessionId: string, request: KillSessionRequest): Promise<SessionView> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -10584,6 +11270,18 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
+    // A stale-parked session holds zero live slots (isLiveSessionRecord
+    // excludes it by design), so nothing gates how many of them a single
+    // poll cycle can wake at once without this. Gated to stale-parked only:
+    // an ordinary dead-pane recovery is relaunching a session that already
+    // held its slot, so it must not be re-denied here. Thrown before
+    // anything below touches the pane (killAgentPaneAndConfirmExit runs
+    // inside relaunchSessionInPlace, further down) so a refusal never kills
+    // a live process or does any destructive work.
+    if (isStaleParked(session)) {
+      this.assertAdmissible(session.project, "wake");
+    }
+
     const project = this.getProject(session.project);
     // Same restore-warmup protection as restore() above: relaunchSessionInPlace
     // starts the MCP sidecar before this session's status is guaranteed
@@ -10655,6 +11353,17 @@ export class SessionService {
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
+    // Carried the same leniency as restore()'s own resolution: an unmoded
+    // session, or one whose mode was renamed/removed out from under it,
+    // degrades to no-mode with a warning rather than blocking recovery.
+    const mode = resolveCarriedSessionMode(session.mode, project.modes, (message) =>
+      this.logEvent("session.mode.dropped", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message,
+      }),
+    );
     const planOptions = {
       ...withAgentModeOptions(
         withProjectAgentOptions(session.agent, project, {
@@ -10706,6 +11415,18 @@ export class SessionService {
       ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
     });
 
+    // True whenever this relaunch ends up starting a brand-new agent process
+    // with no native resume (no agentSessionId to resume from, or the resume
+    // attempt below throws and the catch falls back to a fresh launch). A
+    // fresh launch has zero conversation memory, so — unlike a successful
+    // native resume, which stays silent by design — it must be handed its
+    // task context back the same way restore() does, or the next message
+    // written to its pane becomes message #1 of a blank conversation. This is
+    // not stale-specific: relaunchSessionInPlace is the one recovery path
+    // shared by every dead-pane relaunch (stale wake and ordinary dead-pane
+    // recovery alike), so the fix applies uniformly here rather than forking
+    // behavior on why the pane died.
+    let usedFreshLaunch = !recoveryPlan;
     try {
       await createTmuxSession({
         sessionName: session.tmuxSession,
@@ -10752,6 +11473,7 @@ export class SessionService {
         },
       });
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
+      usedFreshLaunch = true;
       // Mint a fresh claude id for the fallback launch (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id) — the pinned id
       // may already own a transcript, and claude rejects --session-id on it.
@@ -10791,6 +11513,82 @@ export class SessionService {
       }
     }
 
+    if (usedFreshLaunch) {
+      // Pane confirmed alive by the checks above; deliver task context before
+      // returning so it lands before any caller (send/deliverPrepared/
+      // tryDeliverQueuedMessage/switchAuth) writes the triggering event to
+      // this same pane.
+      this.logEvent("session.recover.continuity_lost", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `${session.id} relaunched with a fresh agent process; no native resume was available, resending task context`,
+        details: {
+          agent: session.agent,
+          agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+        },
+      });
+      const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
+      const recoveryContextMessage = buildInitialMessage(
+        buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
+        recoverySidecarNames,
+        this.config.tags,
+        project.branchNaming?.regex,
+        session.selfDestruct,
+      );
+      const recoveryPaneTarget = {
+        id: session.id,
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: persistedLaunchCommand,
+        worktreePath: session.worktreePath,
+        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+      };
+      if (session.agent === "codex") {
+        // codex has no launch-send pacing (agentHasLaunchSubmitAck is false for
+        // it) and its rollout-based ack lags a fresh launch/resume enough that
+        // waiting on it here would reproduce the exact bug f79fb970f fixed for
+        // restore(): a healthy pane torn down because the ack scan, not the
+        // send, timed out. Bypass sendAgentMessage the same way restore() does
+        // for codex. A dead pane still surfaces: send-keys against a gone tmux
+        // session throws.
+        await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
+          agent: session.agent,
+        });
+      } else {
+        // freshLaunch:true mirrors restore()'s equivalent call: it selects the
+        // agent's launch-tuned ack pacing and — for agents with launch-send
+        // pacing of their own (claude) — lets an ack that never confirms on a
+        // live pane resolve as "submit_unconfirmed" instead of throwing and
+        // tearing down an otherwise-healthy relaunch.
+        const contextSendOutcome = await this.sendAgentMessage(
+          recoveryPaneTarget,
+          recoveryContextMessage,
+          { freshLaunch: true },
+        );
+        if (contextSendOutcome === "submit_unconfirmed") {
+          // The pane write itself landed (send already spent its Enter
+          // resends) but the ack scan never confirmed the agent consumed it.
+          // Surface it rather than swallow it, same as restore()'s handling
+          // of the same outcome — an operator can tell this session's context
+          // resend is unproven. Not treated as a failed wake: the write did
+          // reach the pane, and failing the wake here would risk losing a
+          // one-shot scheduled wake, which only re-arms on
+          // SessionAdmissionDeniedError.
+          this.logEvent("session.recover.context_unconfirmed", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `${session.id} relaunched but its resent task context was not confirmed`,
+            details: {
+              agent: session.agent,
+              agentSessionId: recoveredAgentSessionId ?? sessionWithAgentId.agentSessionId ?? null,
+            },
+          });
+        }
+      }
+    }
+
     this.stateCache.delete(session.id);
     if (recoveredAgentSessionId !== sessionWithAgentId.agentSessionId) {
       // The fallback minted a fresh claude id: any cached jsonl reader still
@@ -10799,21 +11597,37 @@ export class SessionService {
       this.claudeJsonlReaders.delete(session.id);
     }
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
-    return this.applyReservedSidecars(
-      {
-        ...recoveredBase,
-        planMode,
-        restrictWrites,
-        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-        launchCommand: persistedLaunchCommand,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      mcpSidecarUpdate,
+    // finishStaleWake runs after the agent process check above confirmed the
+    // new pane is live, and before any caller (send/deliverPrepared/
+    // tryDeliverQueuedMessage/switchAuth, all downstream of
+    // ensureSessionReadyForSend) injects a message into it.
+    return this.finishStaleWake(
+      this.applyReservedSidecars(
+        {
+          ...recoveredBase,
+          planMode,
+          restrictWrites,
+          ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+          launchCommand: persistedLaunchCommand,
+          status: "running",
+          updatedAt: nowIso(),
+        },
+        mcpSidecarUpdate,
+      ),
+      project,
     );
   }
 
   async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.restoreLocked(sessionId, request),
+    );
+  }
+
+  private async restoreLocked(
+    sessionId: string,
+    request: RestoreSessionRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -10918,8 +11732,17 @@ export class SessionService {
           message,
         }),
       );
+      // Raw stopReason checks, not isStaleParked: current.status here can
+      // already be "running" (isRestorableSession's running+state:"stopped"
+      // dead-pane case) with a residual stopReason left over from a prior
+      // park that nothing has cleared yet. isStaleParked requires
+      // status==="stopped" and would wrongly stop suppressing the restore
+      // prompt for that case. This also gates on manual_pause alongside
+      // stale_timeout, which isStaleParked does not cover.
       const shouldSendRestoreMessage =
-        current.status !== "paused" && current.stopReason !== "manual_pause";
+        current.status !== "paused" &&
+        current.stopReason !== "manual_pause" &&
+        current.stopReason !== "stale_timeout";
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
@@ -11119,6 +11942,9 @@ export class SessionService {
       this.restoreWarmupUntil.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
+        // No finishStaleWake here: this branch is only reachable through the
+        // submit-ack wait of restore()'s own message, which a stale-parked
+        // session never sends (shouldSendRestoreMessage is false for it).
         const recovered: SessionRecord = this.applyReservedSidecars(
           {
             ...recoveredBase,
@@ -11173,7 +11999,7 @@ export class SessionService {
     }
 
     const { error: _ignoredError, ...restoredBase } = current;
-    const restored: SessionRecord = this.applyReservedSidecars(
+    let restored: SessionRecord = this.applyReservedSidecars(
       {
         ...restoredBase,
         planMode: resolvePlanMode(current),
@@ -11184,6 +12010,7 @@ export class SessionService {
       },
       mcpSidecarUpdate,
     );
+    restored = await this.finishStaleWake(restored, this.getProject(current.project));
     delete restored.stopReason;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
@@ -11237,7 +12064,9 @@ export class SessionService {
     }
     this.reopensInFlight.add(sessionId);
     try {
-      return await this.reopenLocked(sessionId, request);
+      return await this.withWorkspaceLifecycleLocks(sessionId, () =>
+        this.reopenLocked(sessionId, request),
+      );
     } finally {
       this.reopensInFlight.delete(sessionId);
     }
@@ -11338,7 +12167,7 @@ export class SessionService {
     await this.refreshDashboardCacheEntry(record);
 
     try {
-      return await this.restore(sessionId, request);
+      return await this.restoreLocked(sessionId, request);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // The completed record's Telegram binding, artifacts, and work-item
@@ -11398,6 +12227,16 @@ export class SessionService {
   }
 
   async switchAuth(
+    sessionId: string,
+    accountId: string,
+    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+  ): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.switchAuthLocked(sessionId, accountId, opts),
+    );
+  }
+
+  private async switchAuthLocked(
     sessionId: string,
     accountId: string,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
@@ -11472,8 +12311,10 @@ export class SessionService {
     // survivor guard itself: by the time ensureSessionReadyForSend below
     // reaches relaunchSessionInPlace, the pane is already gone, so its own
     // pane-pid capture would find nothing to check.
-    await this.killAgentPaneAndConfirmExit(updated, { failOnSurvivors: true });
-    const relaunched = await this.ensureSessionReadyForSend(updated);
+    //
+    const recoveryTarget = readSession(this.config.dataDir, sessionId) ?? updated;
+    await this.killAgentPaneAndConfirmExit(recoveryTarget, { failOnSurvivors: true });
+    const relaunched = await this.ensureSessionReadyForSend(recoveryTarget);
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
@@ -11874,6 +12715,12 @@ export class SessionService {
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.tryDeliverQueuedMessageLocked(sessionId),
+    );
+  }
+
+  private async tryDeliverQueuedMessageLocked(sessionId: string): Promise<boolean> {
     // Synchronous, before any await: a flush already registered for this
     // session owns the next attempt. Stand down instead of queuing behind
     // the pane lock — the loop's own sleep-and-continue retry covers it, and
@@ -12590,7 +13437,7 @@ export class SessionService {
   // report-only warning when crossed so the condition stays visible.
   private assertAdmissible(
     projectId: string,
-    context: "spawn" | "restore",
+    context: "spawn" | "restore" | "wake",
     opts?: { replacingSessionId?: string; admissionReservation?: symbol },
   ): void {
     const admission = this.config.admission;
@@ -12608,8 +13455,11 @@ export class SessionService {
         legacyGuardDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
       }
 
+      // A wake reuses the restore floor: it relaunches an already-existing
+      // parked session in place, the same shape of memory pressure as a
+      // restore, not a brand-new spawn.
       const contextFloor =
-        context === "restore"
+        context === "restore" || context === "wake"
           ? admission.memoryGuard.restoreFloorBytes
           : admission.memoryGuard.admissionFloorBytes;
       if (memory.availableBytes < contextFloor) {
@@ -12802,6 +13652,7 @@ export class SessionService {
       if (
         nextState !== "needs_input" &&
         nextState !== "rate_limited" &&
+        nextState !== "stale" &&
         nextState !== "stopped" &&
         nextState !== "killed" &&
         nextState !== "error"
@@ -13145,6 +13996,7 @@ export class SessionService {
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
+      isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
       workspaceMissing ||
       !runtime.runtimeAlive ||
@@ -13161,6 +14013,7 @@ export class SessionService {
     if (
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
+      isStaleParked(latest) ||
       hasSessionErrorEvidence(latest)
     ) {
       return latest;
@@ -13613,6 +14466,24 @@ export class SessionService {
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<SessionView> {
+    return (
+      await this.enrichWithClassified(session, claudeAccounts, sessionBatch, sidecarProcSnapshot)
+    ).view;
+  }
+
+  // Same work as enrich(), plus the raw classified result — needed by the
+  // stale-park gate (pollAttentionStates), which must key park eligibility
+  // off genuine transcript activity (see resolveParkActivityAt), not off
+  // view.lastActivityAt (the UI-facing value, deliberately the max of
+  // agent activity AND every routine record write). A second call would
+  // mean a second classifySessionRecord pass (JSONL read) per session per
+  // sweep tick; this split keeps it to exactly one.
+  private async enrichWithClassified(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
+    sidecarProcSnapshot?: ProcSnapshot,
+  ): Promise<{ view: SessionView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
@@ -13686,7 +14557,7 @@ export class SessionService {
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
 
-    return {
+    const view: SessionView = {
       ...session,
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
@@ -13711,6 +14582,7 @@ export class SessionService {
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
+    return { view, classified };
   }
 
   private async classifySessionState(session: SessionRecord): Promise<SessionState> {

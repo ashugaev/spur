@@ -61,16 +61,20 @@ projects:
     sources:
       gh:
         type: github
+      gh-pr-review:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        emitExisting: true
+        query: "repo:ashugaev/spur"
+      tg:
+        type: telegram
+        token: ${TELEGRAM_BOT_TOKEN}
+        allowedUsers: [444269670, 6211305103]
       itest-schedule:
         type: cron
         schedule: "0 3 */3 * *"
         runOnStart: false
-      # PR-review fleet lives in the `sp-review` project (~/.spur/projects/sp-review).
-      # tg:
-      #   type: telegram
-      #   token: ${TELEGRAM_BOT_TOKEN}
-      #   allowedUsers: [] # required, non-empty: Telegram user ids allowed to /watch
-      #   allowedChats: [-1003768303388] # optional chat/group allowlist; literal ints only, no ${VAR}
     triggers:
       gh-changes-requested:
         source: gh
@@ -108,13 +112,13 @@ projects:
         event: github:ready_for_review
         send:
           prompt: "Run $manager and $github. Active PR is ready for review."
+      tg-message:
+        source: tg
+        event: telegram:message
+        send:
+          interrupt: false
       itest-run:
         source: itest-schedule
         event: cron:tick
         spawn:
           prompt: "/clean-install-test"
-      # tg-message:
-      #   source: tg
-      #   event: telegram:message
-      #   send:
-      #     interrupt: false
