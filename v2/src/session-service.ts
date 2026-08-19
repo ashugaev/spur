@@ -11144,10 +11144,7 @@ export class SessionService {
     // Claude and OpenCode sessions pin their native session id. Never overwrite
     // one with newest-session discovery, which could bind a sibling session
     // sharing the worktree. Legacy records without an id keep discovery below.
-    if (
-      (session.agent === "claude" || session.agent === "opencode") &&
-      session.agentSessionId
-    ) {
+    if ((session.agent === "claude" || session.agent === "opencode") && session.agentSessionId) {
       return session;
     }
 
@@ -11808,8 +11805,7 @@ export class SessionService {
         // Claude may fall back to a fresh launch with the same --session-id
         // when its transcript is gone. OpenCode must never replace its stored
         // ses_ id with newest-session discovery from a shared worktree.
-        ...((current.agent === "claude" || current.agent === "opencode") &&
-        current.agentSessionId
+        ...((current.agent === "claude" || current.agent === "opencode") && current.agentSessionId
           ? { agentSessionId: current.agentSessionId }
           : {}),
       };
@@ -11827,9 +11823,7 @@ export class SessionService {
       const pinnedClaudeId =
         current.agent === "claude" && current.agentSessionId ? current.agentSessionId : undefined;
       const pinnedOpenCodeId =
-        current.agent === "opencode" && current.agentSessionId
-          ? current.agentSessionId
-          : undefined;
+        current.agent === "opencode" && current.agentSessionId ? current.agentSessionId : undefined;
       let restoredAgentSessionId =
         current.agent === "cursor" ? current.agentSessionId : (pinnedClaudeId ?? pinnedOpenCodeId);
       if (launchPlan && !restoredAgentSessionId) {

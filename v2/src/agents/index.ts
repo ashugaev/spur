@@ -247,9 +247,7 @@ function openCodePlanOptions(options?: AgentPlanOptions): {
   return {
     ...(options?.model ? { model: options.model } : {}),
     ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
-    ...(options?.opencodeConfigContent
-      ? { configContent: options.opencodeConfigContent }
-      : {}),
+    ...(options?.opencodeConfigContent ? { configContent: options.opencodeConfigContent } : {}),
   };
 }
 

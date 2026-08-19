@@ -68,7 +68,10 @@ export function buildOpenCodePlan(prompt: string, options?: OpenCodePlanOptions)
 }
 
 export function isSupportedOpenCodeVersion(version: string): boolean {
-  const match = version.trim().replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
+  const match = version
+    .trim()
+    .replace(/^v/, "")
+    .match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return false;
   const actual = match.slice(1).map(Number);
   const minimum = MIN_OPENCODE_VERSION.split(".").map(Number);
@@ -197,7 +200,10 @@ export async function buildOpenCodeRestorePlan(
 ): Promise<AgentLaunchPlan | null> {
   const sessionId = options?.sessionId;
   if (!sessionId) return null;
-  return { ...buildOpenCodeResumePlan(sessionId, opencodeCommand(), options), initialMessage: prompt };
+  return {
+    ...buildOpenCodeResumePlan(sessionId, opencodeCommand(), options),
+    initialMessage: prompt,
+  };
 }
 
 function textFromParts(parts: unknown): string {
@@ -370,7 +376,9 @@ export async function readOpenCodeState(
   }
 }
 
-export async function readOpenCodeConversation(sessionId?: string): Promise<TranscriptEntry[] | null> {
+export async function readOpenCodeConversation(
+  sessionId?: string,
+): Promise<TranscriptEntry[] | null> {
   if (!sessionId) return null;
   try {
     return parseOpenCodeExport(await exportOpenCodeSession(sessionId));

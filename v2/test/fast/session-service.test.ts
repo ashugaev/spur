@@ -1748,14 +1748,12 @@ describe("SessionService", () => {
     createAgentSubmitAckBindingMock.mockResolvedValue({
       scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
     });
-    buildAgentLaunchPlanMock.mockImplementationOnce(
-      (agent: string, initialMessage: string) => ({
-        agent,
-        launchCommand: "opencode --auto",
-        initialMessage,
-        readyMarkers: ["OpenCode"],
-      }),
-    );
+    buildAgentLaunchPlanMock.mockImplementationOnce((agent: string, initialMessage: string) => ({
+      agent,
+      launchCommand: "opencode --auto",
+      initialMessage,
+      readyMarkers: ["OpenCode"],
+    }));
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -20859,13 +20857,11 @@ describe("SessionService", () => {
         readyMarkers: ["OpenCode"],
       }),
     );
-    buildAgentResumePlanMock.mockImplementation(
-      (agent: string, agentSessionId: string) => ({
-        agent,
-        launchCommand: `opencode --auto --session ${agentSessionId}`,
-        readyMarkers: ["OpenCode"],
-      }),
-    );
+    buildAgentResumePlanMock.mockImplementation((agent: string, agentSessionId: string) => ({
+      agent,
+      launchCommand: `opencode --auto --session ${agentSessionId}`,
+      readyMarkers: ["OpenCode"],
+    }));
     findAgentSessionIdMock.mockResolvedValue("ses_wrong_newest");
     mockExitedThenRestoredProcess();
 

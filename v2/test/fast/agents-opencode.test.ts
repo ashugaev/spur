@@ -40,10 +40,8 @@ describe("OpenCode adapter", () => {
   it("merges session MCP bindings with restrict-writes policy", () => {
     expect(
       JSON.parse(
-        buildOpenCodeConfig(
-          [{ server: "playwright", url: "http://127.0.0.1:5001/mcp" }],
-          true,
-        ) ?? "{}",
+        buildOpenCodeConfig([{ server: "playwright", url: "http://127.0.0.1:5001/mcp" }], true) ??
+          "{}",
       ),
     ).toEqual({
       mcp: {
@@ -73,10 +71,7 @@ describe("OpenCode adapter", () => {
     );
     expect(diffOpenCodeSessionIds(baseline, new Set(["ses_existing"]))).toBeNull();
     expect(() =>
-      diffOpenCodeSessionIds(
-        baseline,
-        new Set(["ses_existing", "ses_sibling_a", "ses_sibling_b"]),
-      ),
+      diffOpenCodeSessionIds(baseline, new Set(["ses_existing", "ses_sibling_a", "ses_sibling_b"])),
     ).toThrow("refusing ambiguous identity");
   });
 
@@ -106,7 +101,9 @@ describe("OpenCode adapter", () => {
       }),
     ).toEqual({ state: "waiting", reason: "assistant completed" });
     expect(
-      parseOpenCodeState({ messages: [{ info: { role: "assistant", error: { name: "ApiError" } } }] }),
+      parseOpenCodeState({
+        messages: [{ info: { role: "assistant", error: { name: "ApiError" } } }],
+      }),
     ).toEqual({ state: "error", reason: "assistant error" });
     expect(parseOpenCodeState({ messages: [{ info: { role: "assistant", time: {} } }] })).toEqual({
       state: "working",
