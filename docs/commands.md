@@ -80,7 +80,7 @@ The `agent-process-ownership` check reports live agent processes their session r
 ## spawn
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--mode <name>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
 ```
 
 Takes a task prompt, or starts an empty agent session. Optional `steps` are a pipeline skeleton around the task.
@@ -88,7 +88,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `[prompt...]` optional. Empty opens the session without an initial message and skips default `spawn.steps`.
 - `--step <label>` appends a manual pipeline phase; repeat for more.
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
-- `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under configured `models.codexHome`, or `cursor models`.
+- `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under configured `models.codexHome`, `cursor models`, or `opencode models`.
 - `--mode <name>` picks a session mode from `projects.<id>.modes`, overriding the project default. Unknown name fails the spawn. See [Modes](configuration.md#modes).
 - `--subscribe-to <sessionId>` arms one state subscription on the new session before spawn returns, watching `<sessionId>`; requires at least one `--subscribe-state`. `--subscribe-state <state>` is repeatable; `--subscribe-message <message>` sets the delivered text. See [`subscribe`](#subscribe) for state names and delivery semantics.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
@@ -100,7 +100,7 @@ spur spawn backend-api "Fix the flaky auth test" --step research --step test
 spur spawn backend-api
 ```
 
-Agents launch with full access: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`.
+Agents launch with full access: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, and `opencode --auto`. OpenCode requires v1.18.18 or newer. Spur resumes the exact native `ses_...` id with `opencode --session`; session state and conversation reads use `opencode export`. Permission and question replies stay in the terminal. OpenCode `restrictWrites` injects a session-only final config override that denies edit tools plus `git commit` and `git push`; host and project config still load.
 
 Preflight is opt-in. When `projects.<id>.preflight` is set and `spawn` gets no `--branch`, Spur asks the agent for exactly one line before worktree creation: a branch name or `NO_PROJECT_RULES`. Only the exact sentinel bypasses fallback `branchNaming` validation. Empty, malformed, failed, invalid, or checked-out results retry three times, then fail the spawn. Explicit `--branch` stays strict and rejects a conflict with the conflicting worktree path.
 
@@ -129,7 +129,7 @@ A recurring wake (`--every` or `--daily-at`) only fires while the session's stat
 
 TTY opens a live selector: `Enter` attach in place, `l` log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns to the selector. Non-TTY prints a one-shot summary.
 
-Hides `completed` and `killed` by default. Derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex signals. The log view combines key session events with a live tail of the main agent pane.
+Hides `completed` and `killed` by default. Derives live `state` and `lastActivityAt` from `tmux` plus native agent signals. OpenCode state uses the exact session export after process ownership succeeds. The log view combines key session events with a live tail of the main agent pane.
 
 A session with one or more sidecars whose age is resolvable shows a compact `sidecar <name> <age>` fact, naming only the oldest sidecar (`+N more` when others are running); a `!` suffix marks one already past `sidecarGc.maxAgeWarnMinutes` ([Sidecar reaping](configuration.md#sidecar-reaping)). A session with no sidecars, or none with a resolvable age, renders unchanged.
 
@@ -139,7 +139,7 @@ A session with one or more sidecars whose age is resolvable shows a compact `sid
 
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
 
-While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native Claude/Codex conversation, then falls back to a fresh launch.
+While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native agent conversation, then falls back to a fresh launch.
 
 ```bash
 spur queue <sessionId> list [--json]

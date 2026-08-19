@@ -154,7 +154,7 @@ describe("spur help", () => {
     expect(help).toContain("--subscribe-to <sessionId>");
     expect(help).toContain("--subscribe-state <state>");
     expect(help).toContain("--subscribe-message <message>");
-    expect(help).toContain("Agent to start: claude, codex, or cursor");
+    expect(help).toContain("Agent to start: claude, codex, cursor, or opencode");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");
     expect(help).toContain("adds a planning-only prompt");

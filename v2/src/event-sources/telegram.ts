@@ -100,7 +100,7 @@ interface TelegramRuntime {
   drainWrites(): Promise<void>;
 }
 
-type TelegramAgentName = "claude" | "codex" | "cursor";
+type TelegramAgentName = "claude" | "codex" | "cursor" | "opencode";
 
 interface TelegramPendingSpawn {
   agent: TelegramAgentName;
@@ -386,7 +386,7 @@ function buildSessionMenuKeyboard(
 }
 
 function isTelegramAgentName(value: string): value is TelegramAgentName {
-  return value === "claude" || value === "codex" || value === "cursor";
+  return value === "claude" || value === "codex" || value === "cursor" || value === "opencode";
 }
 
 async function sendWatchMenu(ctx: TelegramTextContext, runtime: TelegramRuntime): Promise<void> {
@@ -428,6 +428,7 @@ async function sendSpawnMenu(ctx: TelegramTextContext): Promise<void> {
           { text: "codex", callback_data: `${SPAWN_CALLBACK_PREFIX}codex` },
           { text: "claude", callback_data: `${SPAWN_CALLBACK_PREFIX}claude` },
           { text: "cursor", callback_data: `${SPAWN_CALLBACK_PREFIX}cursor` },
+          { text: "opencode", callback_data: `${SPAWN_CALLBACK_PREFIX}opencode` },
         ],
       ],
     },

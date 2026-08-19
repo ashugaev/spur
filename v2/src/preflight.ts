@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
+import { opencodeCommand } from "./agents/opencode.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
@@ -260,6 +261,14 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<string> 
   }
 }
 
+async function runOpenCodePreflight(prompt: string, cwd: string): Promise<string> {
+  return runPreflightExec("opencode", opencodeCommand(), ["run", "--agent", "build", prompt], {
+    cwd,
+    timeout: PREFLIGHT_TIMEOUT_MS,
+    maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+  });
+}
+
 export async function runSpawnPreflight(
   input: RunSpawnPreflightInput,
 ): Promise<SpawnPreflightResult> {
@@ -269,7 +278,9 @@ export async function runSpawnPreflight(
       ? await runClaudePreflight(prompt, input.project.path)
       : input.agent === "codex"
         ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
-        : await runCursorPreflight(prompt, input.project.path);
+        : input.agent === "cursor"
+          ? await runCursorPreflight(prompt, input.project.path)
+          : await runOpenCodePreflight(prompt, input.project.path);
   const result = parseSpawnPreflightResult(raw);
   if (result.branch && input.project.branchNaming) {
     const regex = input.project.branchNaming.regex;

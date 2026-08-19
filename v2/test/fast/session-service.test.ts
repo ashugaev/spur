@@ -27,6 +27,7 @@ import type * as eventLogModule from "../../src/event-log.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as claudeModule from "../../src/agents/claude.js";
+import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -81,6 +82,9 @@ const agentHasLaunchSubmitAckMock = vi.fn();
 const createAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
+const captureOpenCodeSessionBaselineMock = vi.fn();
+const resolveNewOpenCodeSessionIdMock = vi.fn();
+const readOpenCodeStateMock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
@@ -381,6 +385,16 @@ vi.mock("../../src/agents/claude.js", async (importOriginal) => {
     ...actual,
     findLatestSessionFile: findLatestClaudeSessionFileMock,
     DEFAULT_CLAUDE_MODEL: "opus",
+  };
+});
+
+vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof openCodeModule>();
+  return {
+    ...actual,
+    captureOpenCodeSessionBaseline: captureOpenCodeSessionBaselineMock,
+    resolveNewOpenCodeSessionId: resolveNewOpenCodeSessionIdMock,
+    readOpenCodeState: readOpenCodeStateMock,
   };
 });
 
@@ -1160,6 +1174,12 @@ describe("SessionService", () => {
       );
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
     readAgentConversationMock.mockReset().mockResolvedValue(null);
+    captureOpenCodeSessionBaselineMock.mockReset().mockImplementation(async (worktreePath) => ({
+      worktreePath,
+      sessionIds: new Set<string>(),
+    }));
+    resolveNewOpenCodeSessionIdMock.mockReset().mockResolvedValue("ses_owned");
+    readOpenCodeStateMock.mockReset().mockResolvedValue(null);
     agentProcessMatchersMock
       .mockReset()
       .mockImplementation((agent: string, launchCommand: string) => {
@@ -1721,6 +1741,44 @@ describe("SessionService", () => {
       "session.spawn.initial_prompt_sent",
       "session.spawn.completed",
     ]);
+  });
+
+  it("persists the exact fresh OpenCode session before sending the prompt", async () => {
+    agentWaitsForSubmitAckMock.mockReturnValue(true);
+    createAgentSubmitAckBindingMock.mockResolvedValue({
+      scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
+    });
+    buildAgentLaunchPlanMock.mockImplementationOnce(
+      (agent: string, initialMessage: string) => ({
+        agent,
+        launchCommand: "opencode --auto",
+        initialMessage,
+        readyMarkers: ["OpenCode"],
+      }),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello", agent: "opencode" });
+
+    expect(captureOpenCodeSessionBaselineMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+    );
+    expect(resolveNewOpenCodeSessionIdMock).toHaveBeenCalledOnce();
+    const identityWriteIndex = writeSessionMock.mock.calls.findIndex(
+      ([, record]) => record.agentSessionId === "ses_owned",
+    );
+    expect(writeSessionMock.mock.calls[identityWriteIndex]?.[1]).toEqual(
+      expect.objectContaining({ agentSessionId: "ses_owned" }),
+    );
+    expect(writeSessionMock.mock.invocationCallOrder[identityWriteIndex]).toBeLessThan(
+      sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+      "opencode",
+      expect.objectContaining({ agentSessionId: "ses_owned", freshLaunch: true }),
+    );
+    service.dispose();
   });
 
   describe("host.disk.low pre-spawn probe", () => {
@@ -20777,6 +20835,62 @@ describe("SessionService", () => {
       "session.restore.completed",
     );
     expect(inputLogEntries("api-1")).toEqual([]);
+  });
+
+  it("restores OpenCode from the stored native session id without newest-session discovery", async () => {
+    const nativeSessionId = "ses_exact_stored";
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "opencode",
+        agentSessionId: nativeSessionId,
+        launchCommand: "opencode --auto",
+      }),
+    );
+    buildAgentRestorePlanMock.mockImplementation(
+      async (
+        agent: string,
+        _worktreePath: string,
+        initialMessage: string,
+        options?: { agentSessionId?: string },
+      ) => ({
+        agent,
+        launchCommand: `opencode --auto --session ${options?.agentSessionId ?? "missing"}`,
+        initialMessage,
+        readyMarkers: ["OpenCode"],
+      }),
+    );
+    buildAgentResumePlanMock.mockImplementation(
+      (agent: string, agentSessionId: string) => ({
+        agent,
+        launchCommand: `opencode --auto --session ${agentSessionId}`,
+        readyMarkers: ["OpenCode"],
+      }),
+    );
+    findAgentSessionIdMock.mockResolvedValue("ses_wrong_newest");
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "opencode",
+      "/tmp/spur-worktrees/api/api-1",
+      expect.any(String),
+      expect.objectContaining({ agentSessionId: nativeSessionId }),
+    );
+    expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+      "opencode",
+      nativeSessionId,
+      `opencode --auto --session ${nativeSessionId}`,
+      expect.any(Object),
+    );
+    expect(findAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "opencode",
+        launchCommand: `opencode --auto --session ${nativeSessionId}`,
+      }),
+    );
   });
 
   it("holds Working through the restore warmup window before resuming real classification", async () => {

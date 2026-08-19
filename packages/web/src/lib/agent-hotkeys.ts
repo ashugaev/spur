@@ -77,10 +77,19 @@ const CURSOR_HOTKEYS: AgentHotkey[] = [
   shortcut("interrupt", "Interrupt / Exit", "Ctrl+C", ctrl("C"), "Stop the current run or exit"),
 ];
 
+const OPENCODE_HOTKEYS: AgentHotkey[] = [
+  shortcut("slash", "Slash", "/", "/", "Start a slash command"),
+  shortcut("interrupt", "Interrupt / Exit", "Ctrl+C", ctrl("C"), "Stop the current run or exit"),
+  command("compact", "/compact", "Summarize chat and free context"),
+  command("new", "/new", "Start a new OpenCode session"),
+  command("sessions", "/sessions", "Open the session picker"),
+];
+
 const HOTKEYS_BY_AGENT: Record<AgentName, AgentHotkey[]> = {
   claude: [...COMMON_HOTKEYS, TAB_HOTKEY, ...CLAUDE_HOTKEYS],
   codex: [...COMMON_HOTKEYS, ...CODEX_HOTKEYS],
   cursor: [...CURSOR_HOTKEYS, TAB_HOTKEY],
+  opencode: [...COMMON_HOTKEYS, TAB_HOTKEY, ...OPENCODE_HOTKEYS],
 };
 
 export function getAgentHotkeys(agent: AgentName): AgentHotkey[] {

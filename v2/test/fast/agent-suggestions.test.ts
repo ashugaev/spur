@@ -102,6 +102,14 @@ describe("agent suggestions", () => {
     );
   });
 
+  it("returns OpenCode built-in commands without Codex suggestions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-opencode-suggestions-"));
+    const result = await loadProjectSuggestions("opencode", root);
+    expect(result).toMatchObject({ agent: "opencode", skills: [], agents: [] });
+    expect(result.commands.map((entry) => entry.label)).toContain("/sessions");
+    expect(result.commands.map((entry) => entry.label)).not.toContain("/permissions");
+  });
+
   describe("cache retention", () => {
     afterEach(() => {
       vi.useRealTimers();

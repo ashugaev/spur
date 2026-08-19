@@ -2339,6 +2339,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("option", { name: "claude" })).toBeAttached();
     await expect(page.getByRole("option", { name: "codex" })).toBeAttached();
     await expect(page.getByRole("option", { name: "cursor" })).toBeAttached();
+    await expect(page.getByRole("option", { name: "opencode" })).toBeAttached();
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
     await expect(page.getByRole("checkbox", { name: "Plan" })).toBeVisible();

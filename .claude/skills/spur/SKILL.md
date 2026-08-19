@@ -1,6 +1,6 @@
 ---
 name: spur
-description: Spur orchestrates AI coding agents (claude/codex/cursor) in detached tmux sessions inside git worktrees, driven by CLI, a local HTTP daemon, a web UI, or Telegram. Use when spawning, messaging, or automating Spur sessions, or when reading or writing Spur config. Don't use for driving an agent's own CLI directly, or for plain git worktree work.
+description: Spur orchestrates AI coding agents (claude/codex/cursor/opencode) in detached tmux sessions inside git worktrees, driven by CLI, a local HTTP daemon, a web UI, or Telegram. Use when spawning, messaging, or automating Spur sessions, or when reading or writing Spur config. Don't use for driving an agent's own CLI directly, or for plain git worktree work.
 ---
 
 SPUR
@@ -10,7 +10,7 @@ SPUR
 WHAT SPUR IS
 
   CLI plus a local HTTP daemon, default `127.0.0.1:4310`, plus a web UI (default `5555`, no runtime logic of its own). "spawn an agent" means this, not the built-in Agent/Task tool.
-  Agents `claude`, `codex`, `cursor` launch full-access, each in a detached tmux pane inside a `git worktree`. Command reference: `docs/commands.md`. Config field reference: `docs/configuration.md` — both own the detail, link never restate.
+  Agents `claude`, `codex`, `cursor`, `opencode` launch full-access, each in a detached tmux pane inside a `git worktree`. Command reference: `docs/commands.md`. Config field reference: `docs/configuration.md` — both own the detail, link never restate.
   `POST /shepherd/spawn` can report whether it spawned or reused the Shepherd; response contract: `docs/commands.md#shepherd-wake`.
   Deploy-switch acceptance and durable status: `docs/commands.md#surface`.
 

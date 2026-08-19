@@ -2418,7 +2418,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
-    .option("--agent <name>", "Agent to start: claude, codex, or cursor")
+    .option("--agent <name>", "Agent to start: claude, codex, cursor, or opencode")
     .option(
       "--model <id>",
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
@@ -2957,7 +2957,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("handoff")
     .description("Hand off a session to another agent in the same workspace.")
     .argument("<sessionId>", "Session id")
-    .requiredOption("--agent <name>", "Target agent: claude, codex, or cursor")
+    .requiredOption("--agent <name>", "Target agent: claude, codex, cursor, or opencode")
     .option("--model <id>", "Model id for the target agent")
     .option("--notes <text>", "Optional handoff notes for the next agent")
     .option("--json", "Print raw JSON")

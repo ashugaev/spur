@@ -253,10 +253,10 @@ function asOptionalBoolean(value: unknown, label: string): boolean | undefined {
 
 function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   if (value === undefined) return undefined;
-  if (value === "claude" || value === "codex" || value === "cursor") {
+  if (value === "claude" || value === "codex" || value === "cursor" || value === "opencode") {
     return value;
   }
-  throw new Error(`${label} must be "claude", "codex", or "cursor"`);
+  throw new Error(`${label} must be "claude", "codex", "cursor", or "opencode"`);
 }
 
 function parseDefaultModels(
@@ -267,7 +267,7 @@ function parseDefaultModels(
   const raw = asObject(value, `${label}.defaultModels`);
   const models: Partial<Record<AgentName, string>> = {};
   for (const [key, entry] of Object.entries(raw)) {
-    if (key !== "claude" && key !== "codex" && key !== "cursor") {
+    if (key !== "claude" && key !== "codex" && key !== "cursor" && key !== "opencode") {
       throw new Error(`${label}.defaultModels has unknown agent "${key}"`);
     }
     models[key] = asString(entry, `${label}.defaultModels.${key}`);

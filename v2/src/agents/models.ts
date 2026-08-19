@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { listClaudeModels } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
+import { opencodeCommand } from "./opencode.js";
 import type { AgentName } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -180,6 +181,26 @@ async function listCursorModels(): Promise<AgentModel[]> {
   return request;
 }
 
+export function parseOpenCodeModelsOutput(stdout: string): AgentModel[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((id) => ({ id, label: id }));
+}
+
+async function listOpenCodeModels(): Promise<AgentModel[]> {
+  try {
+    const { stdout } = await execFileAsync(opencodeCommand(), ["models"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    return parseOpenCodeModelsOutput(stdout);
+  } catch {
+    return [];
+  }
+}
+
 export async function listAgentModels(
   agent: AgentName,
   opts?: { codexHomePath?: string },
@@ -191,5 +212,7 @@ export async function listAgentModels(
       return opts?.codexHomePath ? listCodexModels(opts.codexHomePath) : [];
     case "cursor":
       return listCursorModels();
+    case "opencode":
+      return listOpenCodeModels();
   }
 }

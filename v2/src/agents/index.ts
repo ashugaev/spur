@@ -33,6 +33,18 @@ import {
   findCursorSessionId,
 } from "./cursor.js";
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
+import {
+  buildOpenCodePlan,
+  buildOpenCodeConfig,
+  buildOpenCodeRestorePlan,
+  buildOpenCodeResumePlan,
+  assertOpenCodeCompatibility,
+  captureOpenCodeSubmitBaseline,
+  findOpenCodeSessionId,
+  opencodeCommand,
+  readOpenCodeConversation,
+  scanOpenCodeExportForMessage,
+} from "./opencode.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
@@ -57,6 +69,7 @@ interface AgentPlanOptions {
   restrictWrites?: boolean;
   startupImagePaths?: string[];
   model?: string;
+  opencodeConfigContent?: string;
   /** Pinned native session id (claude `--session-id <uuid>`). */
   agentSessionId?: string;
 }
@@ -71,7 +84,7 @@ interface AgentSessionConfig {
   planOptions?: AgentPlanOptions;
 }
 
-export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl";
+export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl" | "opencode";
 export type AgentSendMode = "default" | "bracketed_paste";
 
 // Submit-ack pacing. claude/codex submit reliably, so the ack window is long
@@ -147,6 +160,7 @@ interface AgentAdapter {
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
     codexHomePath?: string;
+    opencodeConfigContent?: string;
   }>;
   sessionConfig?(args: {
     dataDir: string;
@@ -222,6 +236,20 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+  };
+}
+
+function openCodePlanOptions(options?: AgentPlanOptions): {
+  model?: string;
+  sessionId?: string;
+  configContent?: string;
+} {
+  return {
+    ...(options?.model ? { model: options.model } : {}),
+    ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
+    ...(options?.opencodeConfigContent
+      ? { configContent: options.opencodeConfigContent }
+      : {}),
   };
 }
 
@@ -464,6 +492,44 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       };
     },
   },
+  opencode: {
+    command: opencodeCommand,
+    buildLaunchPlan: (prompt, options) => buildOpenCodePlan(prompt, openCodePlanOptions(options)),
+    buildRestorePlan: (worktreePath, prompt, options) =>
+      buildOpenCodeRestorePlan(worktreePath, prompt, openCodePlanOptions(options)),
+    buildResumePlan: (agentSessionId, binary, options) =>
+      buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
+    findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
+    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
+    setup: async ({ mcpBindings, restrictWrites }) => {
+      await assertOpenCodeCompatibility();
+      const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
+      return configContent ? { opencodeConfigContent: configContent } : {};
+    },
+    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, opencodeCommand()),
+    stateStrategy: "opencode",
+    sendMode: "bracketed_paste",
+    sendsInterruptKey: true,
+    waitsForSubmitAck: true,
+    submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
+    busyQueuedSendAwaitsPrompt: false,
+    queuedSendPromptGraceMs: 15_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+      if (!baseline) {
+        throw new Error("OpenCode submit acknowledgment requires a pinned native session");
+      }
+      return {
+        async scan(text) {
+          return {
+            found: await scanOpenCodeExportForMessage(baseline, text),
+            lastScannedFile: null,
+          };
+        },
+      };
+    },
+  },
 };
 
 function agentAdapter(agent: AgentName): AgentAdapter {
@@ -471,7 +537,7 @@ function agentAdapter(agent: AgentName): AgentAdapter {
 }
 
 export function parseAgentName(agent: string): AgentName {
-  if (agent === "claude" || agent === "codex" || agent === "cursor") {
+  if (agent === "claude" || agent === "codex" || agent === "cursor" || agent === "opencode") {
     return agent;
   }
 
@@ -556,6 +622,7 @@ export async function setupAgentHooks(args: {
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;
   codexHomePath?: string;
+  opencodeConfigContent?: string;
 }> {
   return agentAdapter(args.agent).setup(args);
 }

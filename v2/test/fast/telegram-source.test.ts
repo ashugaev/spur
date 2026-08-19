@@ -152,6 +152,7 @@ describe("parseTelegramCommand", () => {
     expect(parseTelegramCommand("/agents")).toEqual({ kind: "agents" });
     expect(parseTelegramCommand("/spawn")).toEqual({ kind: "spawn_menu" });
     expect(parseTelegramCommand("/spawn codex")).toEqual({ kind: "spawn", agent: "codex" });
+    expect(parseTelegramCommand("/spawn opencode")).toEqual({ kind: "spawn", agent: "opencode" });
     expect(parseTelegramCommand("/spawn codex fix bug")).toEqual({
       kind: "spawn",
       agent: "codex",
@@ -396,6 +397,7 @@ describe("telegramSourceModule", () => {
             { text: "codex", callback_data: "spur_spawn:codex" },
             { text: "claude", callback_data: "spur_spawn:claude" },
             { text: "cursor", callback_data: "spur_spawn:cursor" },
+            { text: "opencode", callback_data: "spur_spawn:opencode" },
           ],
         ],
       },

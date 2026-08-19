@@ -16,6 +16,7 @@ import {
   parseCursorModelsOutput,
   pickCursorNormalModelId,
   resolveCursorLaunchModel,
+  parseOpenCodeModelsOutput,
 } from "../../src/agents/models.js";
 
 beforeEach(() => {
@@ -230,5 +231,14 @@ describe("resolveCursorLaunchModel", () => {
 
   it("keeps an explicit fast model", async () => {
     await expect(resolveCursorLaunchModel("composer-2.5-fast")).resolves.toBe("composer-2.5-fast");
+  });
+});
+
+describe("parseOpenCodeModelsOutput", () => {
+  it("parses provider/model ids", () => {
+    expect(parseOpenCodeModelsOutput("openai/gpt-5\nanthropic/claude-sonnet-4\n")).toEqual([
+      { id: "openai/gpt-5", label: "openai/gpt-5" },
+      { id: "anthropic/claude-sonnet-4", label: "anthropic/claude-sonnet-4" },
+    ]);
   });
 });

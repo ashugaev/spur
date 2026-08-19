@@ -31,6 +31,12 @@ import {
   type SubmitAckBinding,
   type SubmitAckScanResult,
 } from "./agents/index.js";
+import {
+  captureOpenCodeSessionBaseline,
+  readOpenCodeState,
+  resolveNewOpenCodeSessionId,
+  type OpenCodeSessionBaseline,
+} from "./agents/opencode.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import {
   capturePaneAgentProcesses,
@@ -492,6 +498,19 @@ const STATE_HISTORY_LIMIT = 100;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
+
+async function waitForNewOpenCodeSessionId(
+  baseline: OpenCodeSessionBaseline,
+  timeoutMs = AGENT_SESSION_ID_INITIAL_WAIT_MS,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const sessionId = await resolveNewOpenCodeSessionId(baseline);
+    if (sessionId) return sessionId;
+    await sleep(100);
+  } while (Date.now() <= deadline);
+  throw new Error(`OpenCode did not create a session in ${baseline.worktreePath}`);
+}
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 // After a persist failure, stop retrying the write at delivery-loop cadence
@@ -1171,6 +1190,7 @@ function withAgentModeOptions(
     claudeSettingsPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
+    opencodeConfigContent?: string;
     codexArgs?: string[];
     reasoningEffort?: ProviderReasoningEffort;
   },
@@ -1179,6 +1199,7 @@ function withAgentModeOptions(
   claudeSettingsPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
+  opencodeConfigContent?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
   planMode?: boolean;
@@ -1203,16 +1224,19 @@ function withProjectAgentOptions(
     claudeMcpConfigPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
+    opencodeConfigContent?: string;
   },
 ): {
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
+  opencodeConfigContent?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
 } {
-  const reasoningEffort = agent === "cursor" ? undefined : project.reasoningEffort?.[agent];
+  const reasoningEffort =
+    agent === "claude" || agent === "codex" ? project.reasoningEffort?.[agent] : undefined;
   return {
     ...options,
     ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
@@ -7982,7 +8006,7 @@ export class SessionService {
             status: "running" as const,
           }
         : undefined;
-      const runningRecord: SessionRecord = {
+      let runningRecord: SessionRecord = {
         ...sessionForMcp,
         planMode,
         restrictWrites,
@@ -8002,6 +8026,9 @@ export class SessionService {
         ...(pipeline ? { pipeline } : {}),
         originalTaskPrompt,
       };
+
+      const openCodeSessionBaseline =
+        agent === "opencode" ? await captureOpenCodeSessionBaseline(workspacePath) : undefined;
 
       stage = "tmux.create";
       const sessionEnv = buildSessionEnv({
@@ -8040,6 +8067,12 @@ export class SessionService {
         projectId: request.project,
         message: `Agent prompt is ready for ${sessionId}`,
       });
+
+      if (openCodeSessionBaseline) {
+        const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
+        runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, runningRecord);
+      }
 
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
@@ -8951,7 +8984,7 @@ export class SessionService {
             status: "running" as const,
           }
         : undefined;
-      const runningRecord: SessionRecord = {
+      let runningRecord: SessionRecord = {
         ...sessionForMcp,
         planMode,
         restrictWrites,
@@ -8968,6 +9001,9 @@ export class SessionService {
           : {}),
         ...(pipeline ? { pipeline } : {}),
       };
+
+      const openCodeSessionBaseline =
+        agent === "opencode" ? await captureOpenCodeSessionBaseline(workspacePath) : undefined;
 
       stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
       const sessionEnv = buildSessionEnv({
@@ -9012,6 +9048,12 @@ export class SessionService {
         message: `Agent prompt is ready for ${sessionId}`,
         details: { attempt },
       });
+
+      if (openCodeSessionBaseline) {
+        const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
+        runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, runningRecord);
+      }
 
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
@@ -11099,11 +11141,13 @@ export class SessionService {
       return session;
     }
 
-    // Claude sessions pin their native session id at launch. Never overwrite a
-    // pinned id with a newest-mtime guess (which could bind a sibling session
-    // sharing the worktree). Legacy claude sessions with no pinned id and all
-    // other agents keep the mtime discovery path below.
-    if (session.agent === "claude" && session.agentSessionId) {
+    // Claude and OpenCode sessions pin their native session id. Never overwrite
+    // one with newest-session discovery, which could bind a sibling session
+    // sharing the worktree. Legacy records without an id keep discovery below.
+    if (
+      (session.agent === "claude" || session.agent === "opencode") &&
+      session.agentSessionId
+    ) {
       return session;
     }
 
@@ -11760,10 +11804,12 @@ export class SessionService {
       const launchPlanOptions = {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-        // Restore a pinned claude session by resuming its own transcript id;
-        // if that transcript is gone the restore plan is null and the fresh
-        // launch below reuses the same id via --session-id.
-        ...(current.agent === "claude" && current.agentSessionId
+        // Restore agents with pinned native identity from that exact session.
+        // Claude may fall back to a fresh launch with the same --session-id
+        // when its transcript is gone. OpenCode must never replace its stored
+        // ses_ id with newest-session discovery from a shared worktree.
+        ...((current.agent === "claude" || current.agent === "opencode") &&
+        current.agentSessionId
           ? { agentSessionId: current.agentSessionId }
           : {}),
       };
@@ -11780,9 +11826,13 @@ export class SessionService {
       let restoreReadyMarkers = effectivePlan.readyMarkers;
       const pinnedClaudeId =
         current.agent === "claude" && current.agentSessionId ? current.agentSessionId : undefined;
+      const pinnedOpenCodeId =
+        current.agent === "opencode" && current.agentSessionId
+          ? current.agentSessionId
+          : undefined;
       let restoredAgentSessionId =
-        current.agent === "cursor" ? current.agentSessionId : pinnedClaudeId;
-      if (launchPlan && !pinnedClaudeId) {
+        current.agent === "cursor" ? current.agentSessionId : (pinnedClaudeId ?? pinnedOpenCodeId);
+      if (launchPlan && !restoredAgentSessionId) {
         const codexSessionRootDir =
           current.agent === "codex"
             ? join(
@@ -14221,7 +14271,7 @@ export class SessionService {
         } else {
           classifiedDetail = `State: ${state} (no hook/jsonl)`;
         }
-      } else {
+      } else if (strategy === "cursor_jsonl") {
         const jsonlResult = await readCursorJsonlState(
           session.worktreePath,
           this.cursorJsonlReaders.get(session.id),
@@ -14239,6 +14289,13 @@ export class SessionService {
           state = "working";
           classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
+      } else {
+        const structuredState = await readOpenCodeState(session.agentSessionId);
+        state = structuredState?.state ?? "working";
+        stateSource = "jsonl";
+        classifiedDetail = structuredState
+          ? `State: ${state} (opencode export, ${structuredState.reason})`
+          : "State: working (opencode export unavailable)";
       }
 
       // Structured sources first; the generic tmux-banner scan only runs when they
@@ -14335,7 +14392,7 @@ export class SessionService {
           rateLimit = null;
           classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         }
-      } else if (scanPane && !rateLimit?.limited) {
+      } else if (scanPane && !rateLimit?.limited && strategy !== "opencode") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
