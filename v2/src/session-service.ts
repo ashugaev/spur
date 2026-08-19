@@ -94,7 +94,7 @@ import {
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
-import { resolveCursorLaunchModel } from "./agents/models.js";
+import { resolveCursorLaunchModel, validateOpenCodeModel } from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeCompacting,
@@ -1900,11 +1900,34 @@ export function resolveSpawnModel(args: {
 async function resolveAgentLaunchModel(
   agent: AgentName,
   model: string | undefined,
+  explicitModel?: string,
+  validatedExplicitModel?: string,
 ): Promise<string | undefined> {
-  if (agent !== "cursor") {
-    return model;
+  if (agent === "cursor") {
+    return resolveCursorLaunchModel(model);
   }
-  return resolveCursorLaunchModel(model);
+  if (
+    agent === "opencode" &&
+    explicitModel !== undefined &&
+    explicitModel !== validatedExplicitModel
+  ) {
+    return validateOpenCodeModel(explicitModel);
+  }
+  return model;
+}
+
+function resolveSpawnRequestLaunchModel(
+  request: SpawnSessionRequest,
+  project: ProjectConfig,
+  agent: AgentName,
+  validatedExplicitModel?: string,
+): Promise<string | undefined> {
+  return resolveAgentLaunchModel(
+    agent,
+    resolveSpawnModel({ requestModel: request.model, resolvedAgent: agent, project }),
+    request.model,
+    validatedExplicitModel,
+  );
 }
 
 function resolveSpawnDefaultBranch(args: {
@@ -7651,6 +7674,7 @@ export class SessionService {
       modeResolution?: "strict" | "carried";
       replacingSessionId?: string;
       admissionReservation?: symbol;
+      validatedExplicitModel?: string;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -7704,13 +7728,11 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = await resolveAgentLaunchModel(
+      resolvedModel = await resolveSpawnRequestLaunchModel(
+        request,
+        project,
         agent,
-        resolveSpawnModel({
-          requestModel: request.model,
-          resolvedAgent: agent,
-          project,
-        }),
+        options?.validatedExplicitModel,
       );
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
@@ -8585,14 +8607,7 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = await resolveAgentLaunchModel(
-        agent,
-        resolveSpawnModel({
-          requestModel: request.model,
-          resolvedAgent: agent,
-          project,
-        }),
-      );
+      resolvedModel = await resolveSpawnRequestLaunchModel(request, project, agent);
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -12598,6 +12613,10 @@ export class SessionService {
 
     try {
       const agent = parseAgentName(request.agent);
+      const validatedExplicitModel =
+        agent === "opencode" && request.model !== undefined
+          ? await resolveAgentLaunchModel(agent, request.model, request.model)
+          : undefined;
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const clonedAttachments = this.cloneStartupAttachments(
@@ -12670,7 +12689,12 @@ export class SessionService {
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
         }),
-        { replacingSessionId: session.id, admissionReservation, modeResolution: "carried" },
+        {
+          replacingSessionId: session.id,
+          admissionReservation,
+          modeResolution: "carried",
+          ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
+        },
       );
 
       const spawnedRecord = readSession(this.config.dataDir, spawned.id);

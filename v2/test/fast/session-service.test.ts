@@ -88,6 +88,7 @@ const readOpenCodeStateMock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
+const validateOpenCodeModelMock = vi.fn(async (model: string): Promise<string> => model);
 const deleteAgentHookStateMock = vi.fn();
 const readAgentHookStateMock = vi.fn();
 const loadConfigMock = vi.fn();
@@ -531,6 +532,7 @@ vi.mock("../../src/agents/codex.js", () => ({
 
 vi.mock("../../src/agents/models.js", () => ({
   resolveCursorLaunchModel: resolveCursorLaunchModelMock,
+  validateOpenCodeModel: validateOpenCodeModelMock,
 }));
 
 vi.mock("../../src/sidecars/builtins.js", () => ({
@@ -1304,6 +1306,7 @@ describe("SessionService", () => {
     resolveCursorLaunchModelMock
       .mockReset()
       .mockImplementation(async (model: string | undefined) => model);
+    validateOpenCodeModelMock.mockReset().mockImplementation(async (model: string) => model);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
     sweepLeakedPlaywrightMock.mockReset().mockResolvedValue(0);
@@ -2034,6 +2037,49 @@ describe("SessionService", () => {
       worktree: true,
     });
     expect(resolveCursorLaunchModelMock).toHaveBeenCalledWith("auto");
+    service.dispose();
+  });
+
+  it("rejects an unavailable explicit OpenCode model before creating a worktree", async () => {
+    validateOpenCodeModelMock.mockRejectedValueOnce(
+      new Error('OpenCode model "openai/missing" is not available'),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        agent: "opencode",
+        model: "openai/missing",
+        prompt: "hello",
+      }),
+    ).rejects.toThrow('OpenCode model "openai/missing" is not available');
+    expect(validateOpenCodeModelMock).toHaveBeenCalledWith("openai/missing");
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("rejects an unavailable explicit OpenCode model before preparing a background spawn", async () => {
+    validateOpenCodeModelMock.mockRejectedValueOnce(
+      new Error('OpenCode model "openai/missing" is not available'),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawnInBackground({
+        project: "api",
+        agent: "opencode",
+        model: "openai/missing",
+        prompt: "hello",
+      }),
+    ).rejects.toThrow('OpenCode model "openai/missing" is not available');
+    expect(validateOpenCodeModelMock).toHaveBeenCalledWith("openai/missing");
+    expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
     service.dispose();
   });
 
@@ -25684,6 +25730,38 @@ describe("SessionService", () => {
   });
 
   describe("handoff", () => {
+    it("preserves the source when an explicit OpenCode model is unavailable", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      validateOpenCodeModelMock.mockRejectedValueOnce(
+        new Error('OpenCode model "openai/missing" is not available'),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.handoff("api-1", { agent: "opencode", model: "openai/missing" }),
+      ).rejects.toThrow('OpenCode model "openai/missing" is not available');
+
+      expect(validateOpenCodeModelMock).toHaveBeenCalledWith("openai/missing");
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
     it("hands off a running session to another agent with a generated prompt", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();

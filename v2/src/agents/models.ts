@@ -185,20 +185,38 @@ export function parseOpenCodeModelsOutput(stdout: string): AgentModel[] {
   return stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter(Boolean)
+    .filter((id) => /^[^\s/]+\/\S+$/.test(id))
     .map((id) => ({ id, label: id }));
 }
 
+async function discoverOpenCodeModels(): Promise<AgentModel[]> {
+  const { stdout } = await execFileAsync(opencodeCommand(), ["models"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  return parseOpenCodeModelsOutput(stdout);
+}
+
 async function listOpenCodeModels(): Promise<AgentModel[]> {
+  return discoverOpenCodeModels().catch(() => []);
+}
+
+export async function validateOpenCodeModel(model: string): Promise<string> {
+  let models: AgentModel[];
   try {
-    const { stdout } = await execFileAsync(opencodeCommand(), ["models"], {
-      encoding: "utf8",
-      timeout: 5_000,
+    models = await discoverOpenCodeModels();
+  } catch (error) {
+    throw new Error(`Cannot validate OpenCode model "${model}": model list unavailable`, {
+      cause: error,
     });
-    return parseOpenCodeModelsOutput(stdout);
-  } catch {
-    return [];
   }
+  if (models.length === 0) {
+    throw new Error(`Cannot validate OpenCode model "${model}": model list is empty`);
+  }
+  if (!models.some((candidate) => candidate.id === model)) {
+    throw new Error(`OpenCode model "${model}" is not available`);
+  }
+  return model;
 }
 
 export async function listAgentModels(

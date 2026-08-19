@@ -407,6 +407,67 @@ describe("ModelSelect", () => {
       expect(onChange).not.toHaveBeenCalled();
     });
 
+    it("lets OpenCode spawn without a model when catalog discovery fails", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch,
+      );
+      const onResolvedChange = vi.fn();
+      render(
+        <ModelSelect
+          agent="opencode"
+          carry={null}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={SETTLED_NO_DEFAULT}
+          value={null}
+        />,
+      );
+
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true, "network down"));
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+        "Model list unavailable",
+      );
+    });
+
+    it("lets OpenCode spawn without a model when catalog discovery is empty", async () => {
+      vi.stubGlobal("fetch", mockModelsFetch({ opencode: [] }));
+      const onResolvedChange = vi.fn();
+      render(
+        <ModelSelect
+          agent="opencode"
+          carry={null}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={SETTLED_NO_DEFAULT}
+          value={null}
+        />,
+      );
+
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(true, null));
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("No models");
+    });
+
+    it("blocks an explicit OpenCode model when catalog discovery fails", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch,
+      );
+      const onResolvedChange = vi.fn();
+      render(
+        <ModelSelect
+          agent="opencode"
+          carry={null}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={SETTLED_NO_DEFAULT}
+          value="openai/gpt-5"
+        />,
+      );
+
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(false, "network down"));
+    });
+
     it("F2: a models fetch that never resolves on its own times out into the error state instead of disabling submit forever", async () => {
       vi.useFakeTimers();
       let capturedSignal: AbortSignal | undefined;
