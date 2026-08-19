@@ -468,6 +468,51 @@ describe("ModelSelect", () => {
       await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(false, "network down"));
     });
 
+    it("blocks a project-default OpenCode model when catalog discovery fails", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch,
+      );
+      const onResolvedChange = vi.fn();
+      render(
+        <ModelSelect
+          agent="opencode"
+          carry={null}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={{
+            model: "opencode/big-pickle",
+            worktree: true,
+            loading: false,
+            error: null,
+          }}
+          value={null}
+        />,
+      );
+
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(false, "network down"));
+    });
+
+    it("blocks a carried OpenCode model when catalog discovery fails", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch,
+      );
+      const onResolvedChange = vi.fn();
+      render(
+        <ModelSelect
+          agent="opencode"
+          carry={{ agent: "opencode", model: "opencode/big-pickle" }}
+          onChange={vi.fn()}
+          onResolvedChange={onResolvedChange}
+          spawnDefaults={SETTLED_NO_DEFAULT}
+          value={null}
+        />,
+      );
+
+      await waitFor(() => expect(onResolvedChange).toHaveBeenLastCalledWith(false, "network down"));
+    });
+
     it("F2: a models fetch that never resolves on its own times out into the error state instead of disabling submit forever", async () => {
       vi.useFakeTimers();
       let capturedSignal: AbortSignal | undefined;

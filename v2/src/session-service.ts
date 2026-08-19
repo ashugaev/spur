@@ -35,6 +35,8 @@ import {
   captureOpenCodeSessionBaseline,
   readOpenCodeState,
   resolveNewOpenCodeSessionId,
+  waitForOpenCodeLaunchMessage,
+  withOpenCodeLaunchIdentityLock,
   type OpenCodeSessionBaseline,
 } from "./agents/opencode.js";
 import { shellEscape } from "./agents/shell-escape.js";
@@ -8017,9 +8019,10 @@ export class SessionService {
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
       const promptDeliveredOnLaunch =
-        startupImagePaths.length > 0 &&
-        !launchPlan.initialMessage.trim() &&
-        spawnInitialMessage.trim().length > 0;
+        launchPlan.initialMessageDeliveredOnLaunch === true ||
+        (startupImagePaths.length > 0 &&
+          !launchPlan.initialMessage.trim() &&
+          spawnInitialMessage.trim().length > 0);
       const pipeline = steps
         ? {
             steps,
@@ -8049,10 +8052,6 @@ export class SessionService {
         originalTaskPrompt,
       };
 
-      const openCodeSessionBaseline =
-        agent === "opencode" ? await captureOpenCodeSessionBaseline(workspacePath) : undefined;
-
-      stage = "tmux.create";
       const sessionEnv = buildSessionEnv({
         agent,
         projectId: request.project,
@@ -8064,36 +8063,53 @@ export class SessionService {
         symlinks: project.symlinks,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
-      await createTmuxSession({
-        sessionName: tmuxSession,
-        cwd: workspacePath,
-        launchCommand: launchPlan.launchCommand,
-        agent,
-        env: sessionEnv,
-      });
-      this.logEvent("session.spawn.tmux_created", {
-        level: "info",
-        sessionId,
-        projectId: request.project,
-        message: `Created tmux session for ${sessionId}`,
-        details: {
-          tmuxSession,
-        },
-      });
+      const launchAgent = agent;
+      const launchSessionId = sessionId;
+      const launchAndBind = async (): Promise<void> => {
+        const openCodeSessionBaseline =
+          launchAgent === "opencode"
+            ? await captureOpenCodeSessionBaseline(workspacePath)
+            : undefined;
 
-      stage = "tmux.ready";
-      await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, { agent });
-      this.logEvent("session.spawn.ready", {
-        level: "info",
-        sessionId,
-        projectId: request.project,
-        message: `Agent prompt is ready for ${sessionId}`,
-      });
+        stage = "tmux.create";
+        await createTmuxSession({
+          sessionName: tmuxSession,
+          cwd: workspacePath,
+          launchCommand: launchPlan.launchCommand,
+          agent: launchAgent,
+          env: sessionEnv,
+        });
+        this.logEvent("session.spawn.tmux_created", {
+          level: "info",
+          sessionId: launchSessionId,
+          projectId: request.project,
+          message: `Created tmux session for ${launchSessionId}`,
+          details: {
+            tmuxSession,
+          },
+        });
 
-      if (openCodeSessionBaseline) {
-        const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
-        runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-        writeSession(this.config.dataDir, runningRecord);
+        stage = "tmux.ready";
+        await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, {
+          agent: launchAgent,
+        });
+        this.logEvent("session.spawn.ready", {
+          level: "info",
+          sessionId: launchSessionId,
+          projectId: request.project,
+          message: `Agent prompt is ready for ${launchSessionId}`,
+        });
+
+        if (openCodeSessionBaseline) {
+          const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
+          runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
+          writeSession(this.config.dataDir, runningRecord);
+        }
+      };
+      if (launchAgent === "opencode") {
+        await withOpenCodeLaunchIdentityLock(workspacePath, launchAndBind);
+      } else {
+        await launchAndBind();
       }
 
       let firstStepSubmitted = false;
@@ -8113,6 +8129,16 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
+        if (
+          agent === "opencode" &&
+          (!runningRecord.agentSessionId ||
+            !(await waitForOpenCodeLaunchMessage(
+              runningRecord.agentSessionId,
+              spawnInitialMessage,
+            )))
+        ) {
+          throw new Error("OpenCode did not persist the launch prompt");
+        }
         firstStepSubmitted = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -8988,9 +9014,10 @@ export class SessionService {
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
       const promptDeliveredOnLaunch =
-        startupImagePaths.length > 0 &&
-        !launchPlan.initialMessage.trim() &&
-        spawnInitialMessage.trim().length > 0;
+        launchPlan.initialMessageDeliveredOnLaunch === true ||
+        (startupImagePaths.length > 0 &&
+          !launchPlan.initialMessage.trim() &&
+          spawnInitialMessage.trim().length > 0);
       const pipeline = prepared.steps
         ? {
             steps: prepared.steps,
@@ -9017,10 +9044,6 @@ export class SessionService {
         ...(pipeline ? { pipeline } : {}),
       };
 
-      const openCodeSessionBaseline =
-        agent === "opencode" ? await captureOpenCodeSessionBaseline(workspacePath) : undefined;
-
-      stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
       const sessionEnv = buildSessionEnv({
         agent,
         projectId: request.project,
@@ -9031,43 +9054,58 @@ export class SessionService {
         repoPath: project.path,
         symlinks: project.symlinks,
       });
-      await createTmuxSession({
-        sessionName: sessionId,
-        cwd: workspacePath,
-        launchCommand: launchPlan.launchCommand,
-        agent,
-        env: sessionEnv,
-      });
-      this.logEvent("session.spawn.tmux_created", {
-        level: "info",
-        sessionId,
-        projectId: request.project,
-        message: `Created tmux session for ${sessionId}`,
-        details: {
-          tmuxSession: sessionId,
-          attempt,
-        },
-      });
+      const launchAgent = agent;
+      const launchSessionId = sessionId;
+      const launchAndBind = async (): Promise<void> => {
+        const openCodeSessionBaseline =
+          launchAgent === "opencode"
+            ? await captureOpenCodeSessionBaseline(workspacePath)
+            : undefined;
 
-      stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
-      await waitForTmuxReady(
-        sessionId,
-        launchPlan.readyMarkers,
-        attempt === 1 ? BACKGROUND_SPAWN_READY_TIMEOUT_MS : undefined,
-        { agent },
-      );
-      this.logEvent("session.spawn.ready", {
-        level: "info",
-        sessionId,
-        projectId: request.project,
-        message: `Agent prompt is ready for ${sessionId}`,
-        details: { attempt },
-      });
+        stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
+        await createTmuxSession({
+          sessionName: launchSessionId,
+          cwd: workspacePath,
+          launchCommand: launchPlan.launchCommand,
+          agent: launchAgent,
+          env: sessionEnv,
+        });
+        this.logEvent("session.spawn.tmux_created", {
+          level: "info",
+          sessionId: launchSessionId,
+          projectId: request.project,
+          message: `Created tmux session for ${launchSessionId}`,
+          details: {
+            tmuxSession: launchSessionId,
+            attempt,
+          },
+        });
 
-      if (openCodeSessionBaseline) {
-        const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
-        runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-        writeSession(this.config.dataDir, runningRecord);
+        stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
+        await waitForTmuxReady(
+          launchSessionId,
+          launchPlan.readyMarkers,
+          attempt === 1 ? BACKGROUND_SPAWN_READY_TIMEOUT_MS : undefined,
+          { agent: launchAgent },
+        );
+        this.logEvent("session.spawn.ready", {
+          level: "info",
+          sessionId: launchSessionId,
+          projectId: request.project,
+          message: `Agent prompt is ready for ${launchSessionId}`,
+          details: { attempt },
+        });
+
+        if (openCodeSessionBaseline) {
+          const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
+          runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
+          writeSession(this.config.dataDir, runningRecord);
+        }
+      };
+      if (launchAgent === "opencode") {
+        await withOpenCodeLaunchIdentityLock(workspacePath, launchAndBind);
+      } else {
+        await launchAndBind();
       }
 
       let firstStepSubmitted = false;
@@ -9089,6 +9127,16 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
+        if (
+          agent === "opencode" &&
+          (!runningRecord.agentSessionId ||
+            !(await waitForOpenCodeLaunchMessage(
+              runningRecord.agentSessionId,
+              spawnInitialMessage,
+            )))
+        ) {
+          throw new Error("OpenCode did not persist the launch prompt");
+        }
         initialPromptSent = true;
         firstStepSubmitted = true;
         this.logEvent("session.spawn.initial_prompt_sent", {

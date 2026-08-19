@@ -61,9 +61,14 @@ function launchCommand(binary: string, args: string, options?: OpenCodePlanOptio
 
 export function buildOpenCodePlan(prompt: string, options?: OpenCodePlanOptions): AgentLaunchPlan {
   return {
-    launchCommand: launchCommand(opencodeCommand(), "--auto", options),
-    initialMessage: prompt,
-    readyMarkers: ["OpenCode", "Ask anything"],
+    launchCommand: launchCommand(
+      opencodeCommand(),
+      `--auto --prompt ${shellEscape(prompt)}`,
+      options,
+    ),
+    initialMessage: "",
+    initialMessageDeliveredOnLaunch: true,
+    readyMarkers: ["commands"],
   };
 }
 
@@ -106,7 +111,7 @@ export function buildOpenCodeResumePlan(
 ): AgentResumePlan {
   return {
     launchCommand: launchCommand(binary, `--auto --session ${shellEscape(sessionId)}`, options),
-    readyMarkers: ["OpenCode", "Ask anything"],
+    readyMarkers: ["commands"],
   };
 }
 
@@ -119,6 +124,30 @@ interface OpenCodeSession {
 export interface OpenCodeSessionBaseline {
   worktreePath: string;
   sessionIds: Set<string>;
+}
+
+const launchIdentityTails = new Map<string, Promise<void>>();
+
+export async function withOpenCodeLaunchIdentityLock<T>(
+  worktreePath: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = launchIdentityTails.get(worktreePath) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  launchIdentityTails.set(worktreePath, tail);
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (launchIdentityTails.get(worktreePath) === tail) {
+      launchIdentityTails.delete(worktreePath);
+    }
+  }
 }
 
 function parseSessionList(value: unknown, worktreePath: string): string | null {
@@ -235,6 +264,10 @@ function messageInfo(message: Record<string, unknown>): Record<string, unknown> 
   return isRecord(info) ? info : null;
 }
 
+function isUserMessageWithText(message: Record<string, unknown>, text: string): boolean {
+  return messageInfo(message)?.["role"] === "user" && textFromParts(message["parts"]) === text;
+}
+
 export function parseOpenCodeExport(value: unknown): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
   for (const message of openCodeMessages(value)) {
@@ -249,17 +282,6 @@ export function parseOpenCodeExport(value: unknown): TranscriptEntry[] {
 export interface OpenCodeStructuredState {
   state: "working" | "waiting" | "needs_input" | "rate_limited" | "error";
   reason: string;
-}
-
-function hasPendingRequest(value: unknown, key: "permission" | "question"): boolean {
-  if (!isRecord(value)) return false;
-  const requests = value[key] ?? value[`${key}s`];
-  if (Array.isArray(requests) && requests.length > 0) return true;
-  return openCodeMessages(value).some((message) =>
-    (Array.isArray(message["parts"]) ? message["parts"] : []).some(
-      (part) => isRecord(part) && part["type"] === key,
-    ),
-  );
 }
 
 function errorText(value: unknown): string {
@@ -277,12 +299,6 @@ function isRateLimit(value: unknown): boolean {
 }
 
 export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | null {
-  if (hasPendingRequest(value, "permission")) {
-    return { state: "needs_input", reason: "permission pending" };
-  }
-  if (hasPendingRequest(value, "question")) {
-    return { state: "needs_input", reason: "question pending" };
-  }
   const messages = openCodeMessages(value);
   if (messages.length === 0) return null;
   const last = messages.at(-1);
@@ -297,13 +313,6 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
       return { state: "rate_limited", reason: "assistant rate limit" };
     }
     return { state: "error", reason: "assistant error" };
-  }
-  const parts = Array.isArray(last?.["parts"]) ? last["parts"] : [];
-  const retry = parts.find((part) => isRecord(part) && part["type"] === "retry");
-  if (retry) {
-    return isRateLimit(retry)
-      ? { state: "rate_limited", reason: "assistant retry rate limit" }
-      : { state: "working", reason: "assistant retry" };
   }
   const time = record["time"];
   if (
@@ -362,6 +371,25 @@ export async function scanOpenCodeExportForMessage(
   } catch {
     return false;
   }
+}
+
+export async function waitForOpenCodeLaunchMessage(
+  sessionId: string,
+  text: string,
+  timeoutMs = 10_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      const messages = openCodeMessages(await exportOpenCodeSession(sessionId));
+      if (messages.some((message) => isUserMessageWithText(message, text))) {
+        return true;
+      }
+    } catch {
+      // The export may lag session creation briefly.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() <= deadline);
   return false;
 }
 

@@ -8,15 +8,17 @@ import {
   OPENCODE_RESTRICT_WRITES_CONFIG,
   parseOpenCodeExport,
   parseOpenCodeState,
+  withOpenCodeLaunchIdentityLock,
 } from "../../src/agents/opencode.js";
 
 describe("OpenCode adapter", () => {
   it("launches with permission auto-approval and a selected model", () => {
     vi.stubEnv("SPUR_OPENCODE_BIN", "/opt/Open Code/opencode");
     expect(buildOpenCodePlan("work", { model: "openai/gpt-5" })).toEqual({
-      launchCommand: "'/opt/Open Code/opencode' --auto --model 'openai/gpt-5'",
-      initialMessage: "work",
-      readyMarkers: ["OpenCode", "Ask anything"],
+      launchCommand: "'/opt/Open Code/opencode' --auto --prompt 'work' --model 'openai/gpt-5'",
+      initialMessage: "",
+      initialMessageDeliveredOnLaunch: true,
+      readyMarkers: ["commands"],
     });
     vi.unstubAllEnvs();
   });
@@ -75,6 +77,36 @@ describe("OpenCode adapter", () => {
     ).toThrow("refusing ambiguous identity");
   });
 
+  it("serializes fresh identity binding for concurrent launches in one worktree", async () => {
+    const sessions = new Set(["ses_existing"]);
+    let releaseFirst: () => void = () => {};
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const entered: string[] = [];
+
+    const first = withOpenCodeLaunchIdentityLock("/repo", async () => {
+      entered.push("first");
+      const baseline = { worktreePath: "/repo", sessionIds: new Set(sessions) };
+      sessions.add("ses_first");
+      await firstMayFinish;
+      return diffOpenCodeSessionIds(baseline, sessions);
+    });
+    const second = withOpenCodeLaunchIdentityLock("/repo", async () => {
+      entered.push("second");
+      const baseline = { worktreePath: "/repo", sessionIds: new Set(sessions) };
+      sessions.add("ses_second");
+      return diffOpenCodeSessionIds(baseline, sessions);
+    });
+
+    await Promise.resolve();
+    expect(entered).toEqual(["first"]);
+    releaseFirst();
+    await expect(first).resolves.toBe("ses_first");
+    await expect(second).resolves.toBe("ses_second");
+    expect(entered).toEqual(["first", "second"]);
+  });
+
   it("reads user and assistant text from an exported session", () => {
     expect(
       parseOpenCodeExport({
@@ -111,30 +143,18 @@ describe("OpenCode adapter", () => {
     });
   });
 
-  it("classifies structured permission, question, retry, and rate-limit states", () => {
+  it("classifies real export shapes without inventing live-service state", () => {
     expect(
       parseOpenCodeState({
-        permission: [{ id: "per_1", sessionID: "ses_1" }],
-        messages: [{ info: { role: "assistant", time: {} } }],
-      }),
-    ).toEqual({ state: "needs_input", reason: "permission pending" });
-    expect(
-      parseOpenCodeState({
-        messages: [
-          { info: { role: "assistant", time: {} }, parts: [{ type: "question", id: "q_1" }] },
-        ],
-      }),
-    ).toEqual({ state: "needs_input", reason: "question pending" });
-    expect(
-      parseOpenCodeState({
+        info: { id: "ses_1" },
         messages: [
           {
             info: { role: "assistant", time: {} },
-            parts: [{ type: "retry", attempt: 2, error: { message: "server unavailable" } }],
+            parts: [{ type: "tool", tool: "question", state: { status: "running" } }],
           },
         ],
       }),
-    ).toEqual({ state: "working", reason: "assistant retry" });
+    ).toEqual({ state: "working", reason: "assistant incomplete" });
     expect(
       parseOpenCodeState({
         messages: [
