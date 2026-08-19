@@ -1,6 +1,6 @@
 # Spur
 
-Local daemon + CLI orchestrator for AI coding agents.
+Stop polling coding agents. Spur surfaces the Claude Code, Codex, and Cursor sessions that need your attention.
 
 - Spawns agents (`claude` / `codex` / `cursor`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
 - Watches sources (`cron`, `github`, `gitlab`, `sentry`, `service`, `telegram`) and routes events to triggers
