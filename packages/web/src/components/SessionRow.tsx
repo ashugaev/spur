@@ -310,8 +310,6 @@ export function SessionRow({
         {title}
       </Link>
 
-      <TagEditor session={session} variant="dots" />
-
       {trackerLink ? (
         <span className="hidden sm:inline-flex">
           <SessionLinkBadge link={trackerLink} />
@@ -323,6 +321,8 @@ export function SessionRow({
           <SessionLinkBadge link={prLink} prInfo={prInfo} />
         </span>
       ) : null}
+
+      <TagEditor session={session} variant="dots" />
 
       <span
         className={`hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline ${attentionTextOpacity}`}
