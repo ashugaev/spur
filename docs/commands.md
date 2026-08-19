@@ -8,7 +8,9 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
-`POST /deploy/switch` starts a detached install-and-restart helper and returns `202 { accepted: true, version }`. A second request while the helper is running returns `409 { error, inProgress: true, version }` for the active target, including after the daemon restarts. `GET /deploy/switch/status` returns the durable `running`, `succeeded`, or `failed` record; before any switch it returns `{ phase: "idle" }`.
+## Daemon HTTP API
+
+The web UI proxies runtime version selection through `POST /deploy/switch`. The daemon validates the requested published version. If it matches the daemon's reported version, the request returns `202` with `{ "accepted": true, "version": "<version>" }` and skips `install-and-restart.sh`. A different valid release starts the detached helper. Default user scope installs the package, runs `spur reinit`, reinstalls user units, restarts services, and health-checks them. Non-default `SYSTEMCTL` (for example `SYSTEMCTL="sudo systemctl"`) installs the package, then runs `$SYSTEMCTL restart spur-daemon.service spur-web.service`. A second request while the helper is running returns `409 { error, inProgress: true, version }` for the active target, including after the daemon restarts. `GET /deploy/switch/status` returns the durable `running`, `succeeded`, or `failed` record; before any switch it returns `{ phase: "idle" }`.
 
 ## doctor
 

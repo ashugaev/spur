@@ -726,48 +726,50 @@ export async function startServer(
           sendError(response, 400, "version not in registry");
           return;
         }
-        const helperPath = fileURLToPath(
-          new URL("../scripts/install-and-restart.sh", import.meta.url),
-        );
-        const child = spawn("bash", [helperPath, requestedVersion], {
-          detached: true,
-          stdio: "ignore",
-          env: { ...process.env, SPUR_INSTALL_STATUS_FILE: switchStatePath },
-        });
-        if (child.pid === undefined) {
-          sendError(response, 500, "failed to start deploy switch");
-          return;
-        }
-        const startedAt = new Date().toISOString();
-        const processStartTime = readProcessStartTime(child.pid);
-        if (!processStartTime) {
-          sendError(response, 500, "failed to identify deploy switch process");
-          return;
-        }
-        writeDeploySwitchState(switchStatePath, {
-          phase: "running",
-          version: requestedVersion,
-          pid: child.pid,
-          processStartTime,
-          startedAt,
-        });
-        // The helper writes its own terminal status, but only after it arms the
-        // trap: this covers a spawn error and the exits before that (bad
-        // version, lock timeout). Losing the race to the helper is harmless —
-        // both writes carry the same outcome.
-        const finishSwitch = (exitCode: number): void => {
-          writeDeploySwitchState(switchStatePath, {
-            phase: exitCode === 0 ? "succeeded" : "failed",
-            version: requestedVersion,
-            pid: child.pid ?? process.pid,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            exitCode,
+        if (requestedVersion !== getVersion()) {
+          const helperPath = fileURLToPath(
+            new URL("../scripts/install-and-restart.sh", import.meta.url),
+          );
+          const child = spawn("bash", [helperPath, requestedVersion], {
+            detached: true,
+            stdio: "ignore",
+            env: { ...process.env, SPUR_INSTALL_STATUS_FILE: switchStatePath },
           });
-        };
-        child.once("error", () => finishSwitch(-1));
-        child.once("exit", (code) => finishSwitch(code ?? -1));
-        child.unref();
+          if (child.pid === undefined) {
+            sendError(response, 500, "failed to start deploy switch");
+            return;
+          }
+          const startedAt = new Date().toISOString();
+          const processStartTime = readProcessStartTime(child.pid);
+          if (!processStartTime) {
+            sendError(response, 500, "failed to identify deploy switch process");
+            return;
+          }
+          writeDeploySwitchState(switchStatePath, {
+            phase: "running",
+            version: requestedVersion,
+            pid: child.pid,
+            processStartTime,
+            startedAt,
+          });
+          // The helper writes its own terminal status, but only after it arms the
+          // trap: this covers a spawn error and the exits before that (bad
+          // version, lock timeout). Losing the race to the helper is harmless —
+          // both writes carry the same outcome.
+          const finishSwitch = (exitCode: number): void => {
+            writeDeploySwitchState(switchStatePath, {
+              phase: exitCode === 0 ? "succeeded" : "failed",
+              version: requestedVersion,
+              pid: child.pid ?? process.pid,
+              startedAt,
+              finishedAt: new Date().toISOString(),
+              exitCode,
+            });
+          };
+          child.once("error", () => finishSwitch(-1));
+          child.once("exit", (code) => finishSwitch(code ?? -1));
+          child.unref();
+        }
         sendJson(response, 202, { accepted: true, version: requestedVersion });
         return;
       }
