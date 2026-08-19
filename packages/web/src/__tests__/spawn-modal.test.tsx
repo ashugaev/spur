@@ -111,6 +111,19 @@ describe("SpawnModal", () => {
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
   });
 
+  it("insets the fullscreen mobile panel on all sides by the display safe area", () => {
+    renderModal(spawnMode);
+    const panel = screen.getByRole("dialog").firstElementChild;
+    expect(panel).not.toBeNull();
+    const className = panel?.className ?? "";
+    expect(className).toContain("pt-[max(1rem,var(--safe-top))]");
+    expect(className).toContain("pb-[max(1rem,var(--safe-bottom))]");
+    expect(className).toContain("pl-[max(1rem,var(--safe-left))]");
+    expect(className).toContain("pr-[max(1rem,var(--safe-right))]");
+    expect(className).not.toMatch(/(^|\s)p-4(\s|$)/);
+    expect(className).toContain("sm:p-5");
+  });
+
   it("explains the disabled project select instead of showing a blank box when no projects are configured", () => {
     renderModal({
       ...spawnMode,

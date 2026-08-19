@@ -65,6 +65,13 @@
   --color-dot-bg-working: rgba(88, 166, 255, 0.1);
   --color-dot-bg-waiting: rgba(210, 153, 34, 0.14);
 
+  /* ── Display safe-area insets ─────────────────────────────────────── */
+  /* Browser-computed per device and orientation; 0px where no cutout. */
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+  --safe-right: env(safe-area-inset-right);
+
   /* ── Border radius ────────────────────────────────────────────────── */
   --radius-xs: 0px;
   --radius-sm: 0px;

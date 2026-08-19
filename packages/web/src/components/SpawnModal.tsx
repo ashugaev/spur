@@ -358,7 +358,7 @@ export function SpawnModal({
       }}
     >
       <div
-        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:h-auto sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
+        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] pb-[max(1rem,var(--safe-bottom))] pl-[max(1rem,var(--safe-left))] pr-[max(1rem,var(--safe-right))] pt-[max(1rem,var(--safe-top))] shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:h-auto sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
         onKeyDown={(event) => {
           if (isVoiceToggleHotkey(event)) {
             event.preventDefault();
