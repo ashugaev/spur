@@ -23,6 +23,7 @@ import {
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
 } from "../../src/event-log.js";
+import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -4514,5 +4515,38 @@ describe("loadInstanceConfigReadOnly", () => {
     if (result.status === "ok") {
       expect(result.config).toEqual(loadConfig(configPath));
     }
+  });
+});
+
+describe("spur.yaml.reference", () => {
+  it("parses via loadProjectConfig (the connect-time parse mode) and every declared key actually survives parsing", () => {
+    const config = loadProjectConfig(resolveBootstrapConfigReferencePath());
+    const project = config.projects["reference-project"];
+    expect(project).toBeDefined();
+    expect(Object.keys(project?.sidecars ?? {}).length).toBeGreaterThan(0);
+    expect(Object.keys(project?.sources ?? {}).length).toBeGreaterThan(0);
+    expect(Object.keys(project?.triggers ?? {}).length).toBeGreaterThan(0);
+    expect(Object.keys(project?.modes ?? {}).length).toBeGreaterThan(0);
+    expect(project?.branchNaming).toBeDefined();
+    expect(project?.symlinks.length).toBeGreaterThan(0);
+    expect(Object.keys(project?.sidecars ?? {})).not.toContain("playwright");
+
+    // workspaceAccess must survive parsing with its item intact, not silently
+    // drop to undefined because its template referenced an unresolved env var.
+    expect(project?.workspaceAccess?.items).toHaveLength(1);
+    expect(project?.workspaceAccess?.items[0]).toMatchObject({
+      kind: "link",
+      value: `https://vscode.example.dev/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+    });
+
+    // The "api" sidecar's port carries its own reserved-port env var; the
+    // sidecar-level env dict is dead weight for a value only known once a
+    // session allocates the port, so it must not appear on the parsed config.
+    expect(project?.sidecars["api"]).not.toHaveProperty("env");
+    expect(project?.sidecars["api"]?.ports?.["api"]).toMatchObject({
+      env: "SPUR_RESERVED_PORT_API",
+      start: 4400,
+      end: 4409,
+    });
   });
 });

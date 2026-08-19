@@ -20,6 +20,7 @@ import type {
   AgentTerminationOutcome,
   SessionAgentScan,
 } from "../../src/agent-processes.js";
+import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.js";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
@@ -29120,6 +29121,7 @@ describe("SessionService", () => {
       const initialMessage = buildAgentLaunchPlanMock.mock.calls[0]?.[1] as string;
       expect(initialMessage).toContain('You are configuring a new Spur project named "Boot".');
       expect(initialMessage).toContain("sessionPrefix: boot");
+      expect(initialMessage).toContain(resolveBootstrapConfigReferencePath());
       service.dispose();
     });
 

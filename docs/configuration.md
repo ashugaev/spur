@@ -43,6 +43,18 @@ projects:
 
 Use [spur.yaml.example](../v2/spur.yaml.example) as the copyable baseline. Add `symlinks`, `sources`, `triggers`, `sidecars`, or agent overrides only when the repo needs them.
 
+## Project bootstrap session
+
+Dashboard "+ New project" spawns an ordinary agent session against the new, still-unconfigured project. It
+writes a `spur.yaml` for the repo, connects it via `POST /projects/connect`, then asks a short batch of
+defaulted questions before optionally adding automation. Ignoring the questions is safe: the config connected
+before the questions were asked stands, and the agent never asks again.
+
+The session's exact steps, its question wording, and the connect call live in `v2/src/bootstrap-prompt.ts` —
+that file is the single source for them, not this doc. It points the agent at
+[spur.yaml.reference](../v2/spur.yaml.reference), a parse-checked (by `v2/test/fast/config.test.ts`) sample of
+many, but not all, `spur.yaml` keys — see that file for the current set.
+
 ## Full example
 
 ```yaml

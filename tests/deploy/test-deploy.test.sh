@@ -42,7 +42,7 @@ make_tarball() {
   echo "$tgz"
 }
 
-# a-large: all four required entries present at the START, followed by enough
+# a-large: all required entries present at the START, followed by enough
 # filler entries to exceed the 64 KiB pipe buffer (grep exits on the first
 # match, SIGPIPEs tar, pipefail makes the broken pipe appear as a failure).
 # The verifier MUST accept this tarball.
@@ -55,6 +55,7 @@ make_large_tarball() {
   touch "$pkg_dir/deploy/spur-web.npm.service"
   touch "$pkg_dir/dist/cli.js"
   touch "$pkg_dir/web/dist-server/web-server.js"
+  touch "$pkg_dir/spur.yaml.reference"
   local i=0
   while [ "$i" -lt 5000 ]; do
     printf '%0.s_%.0s' {1..100} >"$pkg_dir/filler/$i.txt"
@@ -117,12 +118,13 @@ else
   bad "a1b: output did not name web/dist-server/web-server.js (got: $out_a1b)"
 fi
 
-# a2: all four present -> exit 0
+# a2: all required entries present -> exit 0
 tgz_a2="$(make_tarball a2 \
   deploy/spur-daemon.npm.service \
   deploy/spur-web.npm.service \
   dist/cli.js \
-  web/dist-server/web-server.js)"
+  web/dist-server/web-server.js \
+  spur.yaml.reference)"
 
 set +e
 bash "$verify_script" "$tgz_a2" 2>&1

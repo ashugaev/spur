@@ -71,6 +71,10 @@ projects:
         type: telegram
         token: ${TELEGRAM_BOT_TOKEN}
         allowedUsers: [444269670, 6211305103]
+      itest-schedule:
+        type: cron
+        schedule: "0 3 */3 * *"
+        runOnStart: false
     triggers:
       gh-changes-requested:
         source: gh
@@ -113,3 +117,8 @@ projects:
         event: telegram:message
         send:
           interrupt: false
+      itest-run:
+        source: itest-schedule
+        event: cron:tick
+        spawn:
+          prompt: "/clean-install-test"

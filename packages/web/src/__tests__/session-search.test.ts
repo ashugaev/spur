@@ -124,6 +124,7 @@ Your terminal output is invisible to them. Reply when you need input and when th
       prefix: "pay",
       path: "/repo/payments",
       port: 3000,
+      referencePath: "/repo/payments/spur.yaml.reference",
     });
 
     expect(

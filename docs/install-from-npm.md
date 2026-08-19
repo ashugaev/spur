@@ -77,7 +77,7 @@ Skip too when another service holds 443 — never displace it. On failure report
 
 A few steps use your own accounts and each needs one interactive action — they can't be scripted, and a setup agent must not hack around them. Do everything else first, then hand the operator this list:
 
-- Log in an agent — `claude` (sign in) or `codex login`. At least one is required before Spur can spawn sessions.
+- Log in an agent — `claude` (sign in) or `codex login` — then run it once interactively to completion. A logged-in-but-never-run-interactively `claude` still breaks the first spawn: Spur's injected prompt lands in the unfinished first-run onboarding screen instead of the agent, surfacing as `OAuth error: Invalid code`. At least one agent, fully onboarded, is required before Spur can spawn sessions.
 - Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
 - Voice input only: enable MagicDNS and HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Nothing else needs them.
 
@@ -91,6 +91,8 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5555/           # 20
 ```
 
 Terminal rides `/ws` on the web port — no separate port or check.
+
+After a start/restart the units can take up to ~2 min to answer on a ~1 GB host — poll, don't fail on the first refusal.
 
 ## Connect a project
 
@@ -123,6 +125,7 @@ spur update
 | `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
 | web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
 | mic button dead on the tailnet URL                     | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
+| first spawn: `OAuth error: Invalid code`               | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
 
 ## System-wide units (advanced)
 

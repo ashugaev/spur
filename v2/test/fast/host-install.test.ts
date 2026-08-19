@@ -621,6 +621,98 @@ describe("collectHostInstallChecks", () => {
     });
   });
 
+  // `onboardingFilePath` (src/claude-accounts.ts) special-cases the host
+  // account: when `configDir === join(homedir(), ".claude")` it reads
+  // `~/.claude.json`, not `<configDir>/.claude.json`. `collectHostInstallChecks`
+  // passes `home` (a fixture dir here) as the check's own `home` param, but
+  // `homedir()` still resolves the real account — the two only agree once
+  // `$HOME` is pinned to the same fixture dir, so these fixtures are placed at
+  // `<tmpHome>/.claude.json` (the real host layout), not
+  // `<tmpHome>/.claude/.claude.json`.
+  describe("claude-onboarding check", () => {
+    let tmpHome: string;
+    const originalHome = process.env["HOME"];
+
+    beforeEach(async () => {
+      tmpHome = await mkdtemp(join(tmpdir(), "spur-host-install-claude-onboarding-"));
+      process.env["HOME"] = tmpHome;
+    });
+
+    afterEach(async () => {
+      if (originalHome === undefined) Reflect.deleteProperty(process.env, "HOME");
+      else process.env["HOME"] = originalHome;
+      await rm(tmpHome, { recursive: true, force: true });
+    });
+
+    it("is ok:true (info) when Claude Code was never authenticated on this host", async () => {
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "info",
+      });
+    });
+
+    it("is ok:true when hasCompletedOnboarding is true", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      await writeFile(
+        join(tmpHome, ".claude.json"),
+        JSON.stringify({ hasCompletedOnboarding: true }),
+        "utf8",
+      );
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "warn",
+      });
+    });
+
+    it("is ok:false with a fix when authenticated but hasCompletedOnboarding is unset", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      await writeFile(join(tmpHome, ".claude.json"), JSON.stringify({}), "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      const check = checks.find((c) => c.id === "claude-onboarding");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.fix).toContain("run `claude`");
+    });
+
+    it("is ok:false with a fix when hasCompletedOnboarding is explicitly false", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      await writeFile(
+        join(tmpHome, ".claude.json"),
+        JSON.stringify({ hasCompletedOnboarding: false }),
+        "utf8",
+      );
+      const checks = await collectHostInstallChecks(tmpHome);
+      const check = checks.find((c) => c.id === "claude-onboarding");
+      expect(check).toMatchObject({ ok: false, severity: "warn" });
+      expect(check?.fix).toContain("run `claude`");
+    });
+
+    it("is ok:true (info) when authenticated but the onboarding file is absent (never read/written)", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "info",
+      });
+    });
+
+    it("is ok:true (info) when the onboarding file exists but is not valid JSON", async () => {
+      await mkdir(join(tmpHome, ".claude"), { recursive: true });
+      await writeFile(join(tmpHome, ".claude", ".credentials.json"), "{}", "utf8");
+      await writeFile(join(tmpHome, ".claude.json"), "{not json", "utf8");
+      const checks = await collectHostInstallChecks(tmpHome);
+      expect(checks.find((check) => check.id === "claude-onboarding")).toMatchObject({
+        ok: true,
+        severity: "info",
+      });
+    });
+  });
+
   it("keeps a fresh, never-initialized host exit-safe (no error severity)", async () => {
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
     expect(hasErrorSeverity(checks)).toBe(false);

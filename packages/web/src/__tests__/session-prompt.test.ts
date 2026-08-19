@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { getDisplayTaskLine, parseSessionPromptView } from "@/lib/session-prompt";
+import {
+  getDisplayTaskLine,
+  isGeneratedBootstrapPrompt,
+  parseSessionPromptView,
+} from "@/lib/session-prompt";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 import type { DashboardSession } from "@/lib/types";
 import { renderBootstrapPrompt } from "../../../../v2/src/bootstrap-prompt.js";
@@ -148,9 +152,36 @@ Then update the docs.`;
       prefix: "api",
       path: "/repo/api",
       port: 3000,
+      referencePath: "/repo/api/spur.yaml.reference",
     });
 
     expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(prompt.trim());
+  });
+
+  it("recognizes the rendered bootstrap prompt as generated for a plain display name", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "api",
+      displayName: "API",
+      prefix: "api",
+      path: "/repo/api",
+      port: 3000,
+      referencePath: "/repo/api/spur.yaml.reference",
+    });
+
+    expect(isGeneratedBootstrapPrompt(prompt.trim())).toBe(true);
+  });
+
+  it("recognizes the rendered bootstrap prompt as generated for a quote-containing display name", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "api",
+      displayName: 'Bob’s "API"',
+      prefix: "api",
+      path: "/repo/api",
+      port: 3000,
+      referencePath: "/repo/api/spur.yaml.reference",
+    });
+
+    expect(isGeneratedBootstrapPrompt(prompt.trim())).toBe(true);
   });
 
   it("preserves user tasks that only resemble bootstrap prose", () => {

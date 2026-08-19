@@ -183,21 +183,21 @@ export function removeAccount(dataDir: string, id: string): void {
   }
 }
 
-export function isAccountAuthenticated(account: ClaudeAccount): boolean {
+export function isAccountAuthenticated(account: Pick<ClaudeAccount, "configDir">): boolean {
   return existsSync(join(account.configDir, ".credentials.json"));
 }
 
 // The host account uses ~/.claude as configDir but writes its onboarding
 // flag to ~/.claude.json, not ~/.claude/.claude.json. Isolated accounts
 // write to <configDir>/.claude.json.
-function onboardingFilePath(configDir: string): string {
+export function onboardingFilePath(configDir: string): string {
   if (configDir === join(homedir(), ".claude")) {
     return join(homedir(), ".claude.json");
   }
   return join(configDir, ".claude.json");
 }
 
-export function isAccountReady(account: ClaudeAccount): boolean {
+export function isAccountReady(account: Pick<ClaudeAccount, "configDir">): boolean {
   if (!isAccountAuthenticated(account)) return false;
   try {
     const parsed: unknown = JSON.parse(
