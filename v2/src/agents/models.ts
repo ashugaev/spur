@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { listClaudeModels } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
 import { opencodeCommand } from "./opencode.js";
+import { missingAgentExecutableMessage, resolveAgentExecutable } from "./executable.js";
 import type { AgentName } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -197,8 +198,19 @@ async function discoverOpenCodeModels(): Promise<AgentModel[]> {
   return parseOpenCodeModelsOutput(stdout);
 }
 
+function missingOpenCodeExecutableError(error: unknown): Error | null {
+  if (resolveAgentExecutable("opencode").path) return null;
+  return new Error(missingAgentExecutableMessage("opencode"), { cause: error });
+}
+
 async function listOpenCodeModels(): Promise<AgentModel[]> {
-  return discoverOpenCodeModels().catch(() => []);
+  try {
+    return await discoverOpenCodeModels();
+  } catch (error) {
+    const missingExecutable = missingOpenCodeExecutableError(error);
+    if (missingExecutable) throw missingExecutable;
+    throw new Error(`OpenCode model discovery failed using ${opencodeCommand()}`, { cause: error });
+  }
 }
 
 export async function validateOpenCodeModel(model: string): Promise<string> {
@@ -206,6 +218,8 @@ export async function validateOpenCodeModel(model: string): Promise<string> {
   try {
     models = await discoverOpenCodeModels();
   } catch (error) {
+    const missingExecutable = missingOpenCodeExecutableError(error);
+    if (missingExecutable) throw missingExecutable;
     throw new Error(`Cannot validate OpenCode model "${model}": model list unavailable`, {
       cause: error,
     });

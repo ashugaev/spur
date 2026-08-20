@@ -255,6 +255,7 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `defaultAgent`: optional, `claude|codex|cursor|opencode`, default `claude`.
 - `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
 - `models.codexHome`: optional, default `~/.codex`. Instance config only. Codex picker reads visible entries from `models_cache.json` here; each Codex session copies that cache into its isolated home. Missing, malformed, or empty visible cache returns no Codex models.
+- Agent executable overrides: `SPUR_CLAUDE_BIN`, `SPUR_CODEX_BIN`, `SPUR_CURSOR_BIN`, and `SPUR_OPENCODE_BIN`. Each optional process environment value replaces that agent's standard PATH command for preflight, model discovery, launch, restore, transcript reads, and process matching. Use an absolute executable path for daemon and sidecar restarts. A missing OpenCode executable makes model discovery and spawn fail with the command and override name; it never returns a false empty catalog.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.

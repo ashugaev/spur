@@ -3,6 +3,11 @@ import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { SidecarMcpBinding, TranscriptEntry } from "../types.js";
+import {
+  agentExecutableCommand,
+  missingAgentExecutableMessage,
+  resolveAgentExecutable,
+} from "./executable.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,7 +50,7 @@ export function buildOpenCodeConfig(
 }
 
 export function opencodeCommand(): string {
-  return process.env["SPUR_OPENCODE_BIN"] || "opencode";
+  return agentExecutableCommand("opencode");
 }
 
 function modelArg(model?: string): string {
@@ -88,6 +93,9 @@ export function isSupportedOpenCodeVersion(version: string): boolean {
 }
 
 export async function assertOpenCodeCompatibility(): Promise<void> {
+  if (!resolveAgentExecutable("opencode").path) {
+    throw new Error(missingAgentExecutableMessage("opencode"));
+  }
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync(opencodeCommand(), ["--version"], {

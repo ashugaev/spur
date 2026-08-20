@@ -18,6 +18,7 @@ V2_DIR="$REPO_ROOT/v2"
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
+RUNTIME_TMP_FILE="$RUNTIME_FILE.tmp.$$"
 PROJECT_CONFIG_RUNTIME_PATH="$CONFIG_DIR/project.yaml"
 CLI_PATH="$V2_DIR/dist/cli.js"
 WRITE_CONFIG_PATH="$V2_DIR/bin/write-isolated-project-config.mjs"
@@ -71,10 +72,11 @@ ensure_v2_build() {
 }
 
 cleanup() {
-  rm -f "$RUNTIME_FILE"
+  rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.*
   rm -rf "$CONFIG_DIR"
 }
 trap cleanup EXIT
+rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.*
 
 cat > "$CONFIG_DIR/config.yaml" <<YAML
 server:
@@ -85,16 +87,6 @@ worktreeDir: "$CONFIG_DIR/worktrees"
 tmux:
   socketName: "spur-$AGENT_PORT"
 YAML
-
-cat > "$RUNTIME_FILE" <<ENVFILE
-SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
-SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
-SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
-SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
-SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
-SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
-ENVFILE
-chmod 600 "$RUNTIME_FILE"
 
 cat > "$TOOL_DIR/spur" <<WRAPPER
 #!/usr/bin/env bash
@@ -114,6 +106,20 @@ WRAPPER
 chmod +x "$TOOL_DIR/spur"
 
 ensure_v2_build
+
+# isolated-ui waits for this file before replacing symlinked dependency trees.
+# Publish it only after tsc finishes, and atomically so readers never source a
+# partial environment.
+cat > "$RUNTIME_TMP_FILE" <<ENVFILE
+SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
+SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
+SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
+SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
+ENVFILE
+chmod 600 "$RUNTIME_TMP_FILE"
+mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
 
 "$NODE_BIN" "$WRITE_INSTANCE_CONFIG_PATH" \
   --user-config "$USER_CONFIG_PATH" \

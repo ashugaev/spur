@@ -2041,9 +2041,11 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("rejects an unavailable explicit OpenCode model before creating a worktree", async () => {
+  it("surfaces a missing OpenCode executable before creating a worktree", async () => {
     validateOpenCodeModelMock.mockRejectedValueOnce(
-      new Error('OpenCode model "openai/missing" is not available'),
+      new Error(
+        "opencode executable not found: /missing/opencode; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+      ),
     );
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2055,7 +2057,9 @@ describe("SessionService", () => {
         model: "openai/missing",
         prompt: "hello",
       }),
-    ).rejects.toThrow('OpenCode model "openai/missing" is not available');
+    ).rejects.toThrow(
+      "opencode executable not found: /missing/opencode; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+    );
     expect(validateOpenCodeModelMock).toHaveBeenCalledWith("openai/missing");
     expect(createWorktreeMock).not.toHaveBeenCalled();
     service.dispose();

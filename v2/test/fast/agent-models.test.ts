@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { execFileMock } = vi.hoisted(() => ({
   execFileMock: vi.fn(),
 }));
+const originalPath = process.env["PATH"];
 
 vi.mock("node:child_process", () => ({
   execFile: execFileMock,
@@ -27,6 +28,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env["SPUR_CURSOR_BIN"];
   delete process.env["SPUR_OPENCODE_BIN"];
+  process.env["PATH"] = originalPath;
 });
 
 describe("listAgentModels claude", () => {
@@ -254,11 +256,25 @@ describe("parseOpenCodeModelsOutput", () => {
     ]);
   });
 
-  it("rejects an explicit model when discovery is unavailable", async () => {
+  it("reports a missing executable while validating an explicit model", async () => {
     process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-missing";
+    process.env["PATH"] = "";
     execFileMock.mockImplementation(
       (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
         cb(new Error("ENOENT"));
+      },
+    );
+
+    await expect(validateOpenCodeModel("openai/gpt-5")).rejects.toThrow(
+      "opencode executable not found: opencode-model-test-missing; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+    );
+  });
+
+  it("keeps the validation-specific error when an available executable cannot list models", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = process.execPath;
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
+        cb(new Error("models failed"));
       },
     );
 
@@ -267,15 +283,18 @@ describe("parseOpenCodeModelsOutput", () => {
     );
   });
 
-  it("returns an empty optional catalog when discovery is unavailable", async () => {
+  it("reports the missing executable instead of returning an empty catalog", async () => {
     process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-missing";
+    process.env["PATH"] = "";
     execFileMock.mockImplementation(
       (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
         cb(new Error("ENOENT"));
       },
     );
 
-    await expect(listAgentModels("opencode")).resolves.toEqual([]);
+    await expect(listAgentModels("opencode")).rejects.toThrow(
+      "opencode executable not found: opencode-model-test-missing; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+    );
   });
 
   it("rejects an explicit model when discovery returns no models", async () => {

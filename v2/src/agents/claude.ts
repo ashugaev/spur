@@ -6,9 +6,10 @@ import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { AgentModel } from "./models.js";
 import type { ProviderReasoningEffort } from "../types.js";
+import { agentExecutableCommand } from "./executable.js";
 
 export function claudeCommand(): string {
-  return process.env["SPUR_CLAUDE_BIN"] || "claude";
+  return agentExecutableCommand("claude");
 }
 
 // Spur's default model for the Claude agent, applied when a spawn resolves to

@@ -55,6 +55,7 @@ import {
   type ServiceId,
 } from "./update-health.js";
 import { getVersion } from "./version.js";
+import { resolveAgentExecutable } from "./agents/executable.js";
 
 // C2: below this available-KB/free-inode floor, `data-dir-disk-space` reports
 // an error — deliberately low so a normal dev/CI host's disk is never flagged.
@@ -84,6 +85,23 @@ export interface HostInstallCheck {
   // the check object itself so callers (cli.ts) can surface it without a
   // second registry read or config re-parse.
   configRegistryPaths?: ConfigRegistryPathEntry[];
+}
+
+export function checkOpenCodeExecutable(): HostInstallCheck {
+  const resolution = resolveAgentExecutable("opencode");
+  return {
+    id: "opencode-executable",
+    ok: resolution.path !== null,
+    severity: "warn",
+    detail: resolution.path
+      ? `OpenCode executable resolved to ${resolution.path}`
+      : `OpenCode executable not found: ${resolution.command}`,
+    ...(resolution.path
+      ? {}
+      : {
+          fix: "npm install -g --prefix ~/.local opencode-ai, or set SPUR_OPENCODE_BIN to an executable path",
+        }),
+  };
 }
 
 export interface ConfigRegistryPathEntry {
@@ -1311,6 +1329,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkGitInstalled());
   checks.push(checkNodeVersion());
   checks.push(checkClaudeOnboarding(home));
+  checks.push(checkOpenCodeExecutable());
 
   const warnFreeGb =
     instanceConfig.status === "ok"

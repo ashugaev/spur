@@ -18,6 +18,7 @@ import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
+import { agentExecutableCommand } from "./executable.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -43,7 +44,7 @@ interface SessionIndexCache {
 let sessionIndexCache: SessionIndexCache | null = null;
 
 export function codexCommand(): string {
-  return process.env["SPUR_CODEX_BIN"] || "codex";
+  return agentExecutableCommand("codex");
 }
 
 interface CodexSessionLine {

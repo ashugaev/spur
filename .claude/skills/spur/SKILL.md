@@ -28,6 +28,7 @@ CONFIG FOOTGUNS
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
   Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
+  Agent executable PATH resolution and environment overrides: `docs/configuration.md`; implementation `v2/src/agents/executable.ts`.
   Spawn preflight returns one strict line. Only explicit no-project-rules sentinel bypasses fallback `branchNaming`; malformed or failed results exhaust preflight retries then fail spawn. Contract: `docs/commands.md`.
   Session modes: contract and carry-forward `docs/configuration.md#modes`; implementation `v2/src/session-mode.ts`, `v2/src/config.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.

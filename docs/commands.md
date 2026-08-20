@@ -20,6 +20,8 @@ Two checks are `warn`/`info` only, so a low-disk host never flips the exit code:
 
 `claude-onboarding` (`warn`) flags a host Claude Code that is authenticated (`~/.claude/.credentials.json` present) but has never completed its interactive first-run onboarding (`hasCompletedOnboarding` missing or `false` in `~/.claude.json`) — that state passes `claude -p` but walks the first `spur spawn` into Claude's first-run OAuth/login screen, where Spur's injected session prompt lands in the login-code field and produces a misleading `OAuth error: Invalid code`. `fix` names the one remedy: run `claude` once interactively and complete onboarding. Read-only — it never writes `~/.claude.json`; not authenticated at all, the file missing, or unparseable JSON all read as inert (`info`, `ok: true`), not a failure.
 
+`opencode-executable` checks the `spur doctor` process PATH or `SPUR_OPENCODE_BIN`. Missing OpenCode reports `warn`, keeps `doctor` exit-zero when no other error exists, and names both fixes: install `opencode-ai` under `~/.local`, or set the [executable override](configuration.md#field-reference) to an absolute executable path.
+
 ## gc
 
 ```bash
@@ -101,6 +103,8 @@ spur spawn backend-api
 ```
 
 Agents launch with full access: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, and `opencode --auto`. OpenCode requires v1.18.18 or newer. Spur resumes the exact native `ses_...` id with `opencode --session`; session state and conversation reads use `opencode export`. Permission and question replies stay in the terminal. OpenCode `restrictWrites` injects a session-only final config override that denies edit tools plus `git commit` and `git push`; host and project config still load.
+
+Spur resolves agent executables from the daemon PATH. Absolute environment overrides and missing-OpenCode behavior: [configuration.md](configuration.md#field-reference).
 
 Preflight is opt-in. When `projects.<id>.preflight` is set and `spawn` gets no `--branch`, Spur asks the agent for exactly one line before worktree creation: a branch name or `NO_PROJECT_RULES`. Only the exact sentinel bypasses fallback `branchNaming` validation. Empty, malformed, failed, invalid, or checked-out results retry three times, then fail the spawn. Explicit `--branch` stays strict and rejects a conflict with the conflicting worktree path.
 
