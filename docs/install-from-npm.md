@@ -36,14 +36,21 @@ Units installed:
 
 Daemon unit bounds the shared fleet cgroup with `MemoryHigh=75%`, `MemoryMax=85%`, and `MemorySwapMax=2G`. On a 62 GiB host, reclaim starts near 46.5 GiB and the hard cap lands near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB for the host. The daemon shares this cgroup, so sustained pressure can throttle its guard; the gap preserves control-path room. Set `MemorySwapMax=0` in a systemd drop-in for no fleet swap. Package templates have no live effect until `spur init` or `spur update` reinstalls units.
 
-Spur drives Claude Code and Codex. Install whichever the host doesn't already have; keep any that are present:
+Spur drives Claude Code, Codex, and OpenCode. Install whichever the host doesn't already have; keep any that are present:
 
 ```bash
 command -v claude >/dev/null || npm install -g --prefix ~/.local @anthropic-ai/claude-code
 command -v codex  >/dev/null || npm install -g --prefix ~/.local @openai/codex
+command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
 ```
 
-Each still needs a login under your own account (`claude`, or `codex login`) before it can spawn sessions — interactive, not scriptable. A setup agent or unattended install can't log you in, so it leaves every login to the operator TODO below.
+Authenticate OpenCode once before spawning it:
+
+```bash
+opencode auth login
+```
+
+Claude and Codex still need a login under your own account (`claude`, or `codex login`) before they can spawn sessions — interactive, not scriptable. A setup agent or unattended install can't log you in, so it leaves every login to the operator TODO below.
 
 `spur doctor` diagnoses host setup and points at what's missing.
 

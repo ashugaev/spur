@@ -27,6 +27,7 @@ import type * as eventLogModule from "../../src/event-log.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as claudeModule from "../../src/agents/claude.js";
+import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -81,9 +82,13 @@ const agentHasLaunchSubmitAckMock = vi.fn();
 const createAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
+const captureOpenCodeSessionBaselineMock = vi.fn();
+const resolveNewOpenCodeSessionIdMock = vi.fn();
+const readOpenCodeStateMock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
+const validateOpenCodeModelMock = vi.fn(async (model: string): Promise<string> => model);
 const deleteAgentHookStateMock = vi.fn();
 const readAgentHookStateMock = vi.fn();
 const loadConfigMock = vi.fn();
@@ -384,6 +389,16 @@ vi.mock("../../src/agents/claude.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof openCodeModule>();
+  return {
+    ...actual,
+    captureOpenCodeSessionBaseline: captureOpenCodeSessionBaselineMock,
+    resolveNewOpenCodeSessionId: resolveNewOpenCodeSessionIdMock,
+    readOpenCodeState: readOpenCodeStateMock,
+  };
+});
+
 const PINNED_CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
 vi.mock("node:crypto", async (importOriginal) => {
   const actual = await importOriginal<typeof cryptoModule>();
@@ -517,6 +532,7 @@ vi.mock("../../src/agents/codex.js", () => ({
 
 vi.mock("../../src/agents/models.js", () => ({
   resolveCursorLaunchModel: resolveCursorLaunchModelMock,
+  validateOpenCodeModel: validateOpenCodeModelMock,
 }));
 
 vi.mock("../../src/sidecars/builtins.js", () => ({
@@ -1160,6 +1176,12 @@ describe("SessionService", () => {
       );
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
     readAgentConversationMock.mockReset().mockResolvedValue(null);
+    captureOpenCodeSessionBaselineMock.mockReset().mockImplementation(async (worktreePath) => ({
+      worktreePath,
+      sessionIds: new Set<string>(),
+    }));
+    resolveNewOpenCodeSessionIdMock.mockReset().mockResolvedValue("ses_owned");
+    readOpenCodeStateMock.mockReset().mockResolvedValue(null);
     agentProcessMatchersMock
       .mockReset()
       .mockImplementation((agent: string, launchCommand: string) => {
@@ -1284,6 +1306,7 @@ describe("SessionService", () => {
     resolveCursorLaunchModelMock
       .mockReset()
       .mockImplementation(async (model: string | undefined) => model);
+    validateOpenCodeModelMock.mockReset().mockImplementation(async (model: string) => model);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
     sweepLeakedPlaywrightMock.mockReset().mockResolvedValue(0);
@@ -1723,6 +1746,43 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("persists the exact fresh OpenCode session before sending the prompt", async () => {
+    agentWaitsForSubmitAckMock.mockReturnValue(true);
+    createAgentSubmitAckBindingMock.mockResolvedValue({
+      scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
+    });
+    buildAgentLaunchPlanMock.mockImplementationOnce((agent: string, initialMessage: string) => ({
+      agent,
+      launchCommand: "opencode --auto",
+      initialMessage,
+      readyMarkers: ["OpenCode"],
+    }));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello", agent: "opencode" });
+
+    expect(captureOpenCodeSessionBaselineMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+    );
+    expect(resolveNewOpenCodeSessionIdMock).toHaveBeenCalledOnce();
+    const identityWriteIndex = writeSessionMock.mock.calls.findIndex(
+      ([, record]) => record.agentSessionId === "ses_owned",
+    );
+    expect(writeSessionMock.mock.calls[identityWriteIndex]?.[1]).toEqual(
+      expect.objectContaining({ agentSessionId: "ses_owned" }),
+    );
+    expect(writeSessionMock.mock.invocationCallOrder[identityWriteIndex]).toBeLessThan(
+      sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+      "opencode",
+      expect.objectContaining({ agentSessionId: "ses_owned", freshLaunch: true }),
+    );
+    expect(validateOpenCodeModelMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
   describe("host.disk.low pre-spawn probe", () => {
     it("emits host.disk.low at level warn when readFreeKb is below the diskRetention.warnFreeGb threshold", async () => {
       mockClaudeJsonlState("waiting");
@@ -1978,6 +2038,72 @@ describe("SessionService", () => {
       worktree: true,
     });
     expect(resolveCursorLaunchModelMock).toHaveBeenCalledWith("auto");
+    service.dispose();
+  });
+
+  it("surfaces a missing OpenCode executable before creating a worktree", async () => {
+    validateOpenCodeModelMock.mockRejectedValueOnce(
+      new Error(
+        "opencode executable not found: /missing/opencode; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+      ),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        agent: "opencode",
+        model: "openai/missing",
+        prompt: "hello",
+      }),
+    ).rejects.toThrow(
+      "opencode executable not found: /missing/opencode; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+    );
+    expect(validateOpenCodeModelMock).toHaveBeenCalledWith("openai/missing");
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("rejects an unavailable explicit OpenCode model before preparing a background spawn", async () => {
+    validateOpenCodeModelMock.mockRejectedValueOnce(
+      new Error('OpenCode model "openai/missing" is not available'),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawnInBackground({
+        project: "api",
+        agent: "opencode",
+        model: "openai/missing",
+        prompt: "hello",
+      }),
+    ).rejects.toThrow('OpenCode model "openai/missing" is not available');
+    expect(validateOpenCodeModelMock).toHaveBeenCalledWith("openai/missing");
+    expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("prepares a no-model OpenCode background spawn without model discovery", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawnInBackground({ project: "api", agent: "opencode", prompt: "hello" });
+
+    expect(validateOpenCodeModelMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(writeSessionMock.mock.calls.some(([, session]) => session.status === "running")).toBe(
+        true,
+      );
+    });
     service.dispose();
   });
 
@@ -20779,6 +20905,60 @@ describe("SessionService", () => {
     expect(inputLogEntries("api-1")).toEqual([]);
   });
 
+  it("restores OpenCode from the stored native session id without newest-session discovery", async () => {
+    const nativeSessionId = "ses_exact_stored";
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "opencode",
+        agentSessionId: nativeSessionId,
+        launchCommand: "opencode --auto",
+      }),
+    );
+    buildAgentRestorePlanMock.mockImplementation(
+      async (
+        agent: string,
+        _worktreePath: string,
+        initialMessage: string,
+        options?: { agentSessionId?: string },
+      ) => ({
+        agent,
+        launchCommand: `opencode --auto --session ${options?.agentSessionId ?? "missing"}`,
+        initialMessage,
+        readyMarkers: ["OpenCode"],
+      }),
+    );
+    buildAgentResumePlanMock.mockImplementation((agent: string, agentSessionId: string) => ({
+      agent,
+      launchCommand: `opencode --auto --session ${agentSessionId}`,
+      readyMarkers: ["OpenCode"],
+    }));
+    findAgentSessionIdMock.mockResolvedValue("ses_wrong_newest");
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "opencode",
+      "/tmp/spur-worktrees/api/api-1",
+      expect.any(String),
+      expect.objectContaining({ agentSessionId: nativeSessionId }),
+    );
+    expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+      "opencode",
+      nativeSessionId,
+      `opencode --auto --session ${nativeSessionId}`,
+      expect.any(Object),
+    );
+    expect(findAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "opencode",
+        launchCommand: `opencode --auto --session ${nativeSessionId}`,
+      }),
+    );
+  });
+
   it("holds Working through the restore warmup window before resuming real classification", async () => {
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
     readSessionMock.mockReturnValue({
@@ -25574,6 +25754,68 @@ describe("SessionService", () => {
   });
 
   describe("handoff", () => {
+    it("preserves the source when an explicit OpenCode model is unavailable", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      validateOpenCodeModelMock.mockRejectedValueOnce(
+        new Error('OpenCode model "openai/missing" is not available'),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.handoff("api-1", { agent: "opencode", model: "openai/missing" }),
+      ).rejects.toThrow('OpenCode model "openai/missing" is not available');
+
+      expect(validateOpenCodeModelMock).toHaveBeenCalledWith("openai/missing");
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("validates a successful explicit OpenCode handoff exactly once before source teardown", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.handoff("api-1", {
+        agent: "opencode",
+        model: "opencode/deepseek-v4-flash-free",
+      });
+
+      expect(validateOpenCodeModelMock).toHaveBeenCalledTimes(1);
+      expect(validateOpenCodeModelMock).toHaveBeenCalledWith("opencode/deepseek-v4-flash-free");
+      expect(validateOpenCodeModelMock.mock.invocationCallOrder[0]).toBeLessThan(
+        killTmuxSessionMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+      service.dispose();
+    });
+
     it("hands off a running session to another agent with a generated prompt", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();

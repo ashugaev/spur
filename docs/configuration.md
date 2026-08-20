@@ -252,9 +252,10 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `dataDir`: optional, default `~/.spur` — refused equally whether set explicitly or left to inherit this default, so a non-default config almost always needs an explicit override (see `daemon` link above).
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `projectsRoot`: optional, default `<dataDir>/projects`. Base for projects created without an explicit `path`; the dashboard/API derives `<projectsRoot>/<project-id>` and creates it.
-- `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
+- `defaultAgent`: optional, `claude|codex|cursor|opencode`, default `claude`.
 - `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
 - `models.codexHome`: optional, default `~/.codex`. Instance config only. Codex picker reads visible entries from `models_cache.json` here; each Codex session copies that cache into its isolated home. Missing, malformed, or empty visible cache returns no Codex models.
+- Agent executable overrides: `SPUR_CLAUDE_BIN`, `SPUR_CODEX_BIN`, `SPUR_CURSOR_BIN`, and `SPUR_OPENCODE_BIN`. Each optional process environment value replaces that agent's standard PATH command for preflight, model discovery, launch, restore, transcript reads, and process matching. Use an absolute executable path for daemon and sidecar restarts. A missing OpenCode executable makes model discovery and spawn fail with the command and override name; it never returns a false empty catalog.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
@@ -273,7 +274,7 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `projects.<id>.spawn.steps`: optional default phase list; overridden by request or trigger `steps`.
 - `projects.<id>.preflight`: optional object; enables strict branch preflight before worktree creation. The agent returns one branch name or `NO_PROJECT_RULES` only.
 - `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in branch-or-no-rules prompt.
-- `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`; falls back to top-level.
+- `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor|opencode`; falls back to top-level.
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model. The web spawn/respawn/handoff modal always resolves and sends a concrete model — carried session model (same agent only), then first favorite, then this map, then the agent's first catalog entry — so a `codex` spawn with no `defaultModels.codex` set no longer defers to codex's own `config.toml` default when launched from the web UI; it launches whichever model the picker preselected. For `cursor`, the preselected/sent model is always the one that actually launches: with no `defaultModels.cursor` set, the picker does not show or send cursor's own `auto` placeholder — it preselects the same concrete model `cursor`'s own auto-select would land on (falling back to `auto` only when cursor's own catalog offers nothing else). `GET /projects/:id/spawn-defaults?agent=<name>` is what the picker calls to compute this: it returns `{model, worktree}`, the same values a spawn with no `model`/`overrides.worktree` sent would resolve to, model already passed through the same per-agent launch-model rewrite (e.g. cursor's `auto` rewrite) the real spawn path applies. The web UI's Next.js layer caps its own call to this route (and to `/models`) at 8s — a direct daemon client gets no such bound. `cursor models` itself is capped at 5s and, on a timeout, degrades to the built-in `auto` fallback catalog with a normal 200 response, the same as when `cursor` is not installed — it does not surface as an error.
 - `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
 - `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins.
@@ -300,7 +301,7 @@ Both `eventLog` and `userActionLog` are instance config only — a project-confi
 - `projects.<id>.triggers.<triggerId>.spawn` | `send`: exactly one required; `spawn` accepts object form or a flat block array.
 - `spawn.prompt` / `spawn[].prompt`: required task prompt.
 - `spawn.steps` / `spawn[].steps`: optional ordered phase list.
-- `spawn.agent` / `spawn[].agent`: optional `claude|codex|cursor`.
+- `spawn.agent` / `spawn[].agent`: optional `claude|codex|cursor|opencode`.
 - `spawn.mode` / `spawn[].mode`: optional mode name from `projects.<id>.modes`.
 - `spawn.selfDestruct` / `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
 - `spawn.branch` / `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.

@@ -1,6 +1,6 @@
 ---
 name: spur
-description: Spur orchestrates AI coding agents (claude/codex/cursor) in detached tmux sessions inside git worktrees, driven by CLI, a local HTTP daemon, a web UI, or Telegram. Use when spawning, messaging, or automating Spur sessions, or when reading or writing Spur config. Don't use for driving an agent's own CLI directly, or for plain git worktree work.
+description: Spur orchestrates AI coding agents (claude/codex/cursor/opencode) in detached tmux sessions inside git worktrees, driven by CLI, a local HTTP daemon, a web UI, or Telegram. Use when spawning, messaging, or automating Spur sessions, or when reading or writing Spur config. Don't use for driving an agent's own CLI directly, or for plain git worktree work.
 ---
 
 SPUR
@@ -10,7 +10,7 @@ SPUR
 WHAT SPUR IS
 
   CLI plus a local HTTP daemon, default `127.0.0.1:4310`, plus a web UI (default `5555`, no runtime logic of its own). "spawn an agent" means this, not the built-in Agent/Task tool.
-  Agents `claude`, `codex`, `cursor` launch full-access, each in a detached tmux pane inside a `git worktree`. Command reference: `docs/commands.md`. Config field reference: `docs/configuration.md` — both own the detail, link never restate.
+  Agents `claude`, `codex`, `cursor`, `opencode` launch full-access, each in a detached tmux pane inside a `git worktree`. Command reference: `docs/commands.md`. Config field reference: `docs/configuration.md` — both own the detail, link never restate.
   `POST /shepherd/spawn` can report whether it spawned or reused the Shepherd; response contract: `docs/commands.md#shepherd-wake`.
   Deploy-switch acceptance and durable status: `docs/commands.md#surface`.
 
@@ -29,6 +29,7 @@ CONFIG FOOTGUNS
   Restrict project `spur.yaml` to project definitions. Put global fields in `~/.spur/config.yaml`; project files ignore global fields before semantic parsing.
   Codex model cache lookup and session staging: `docs/configuration.md`, `v2/src/agents/models.ts`, `v2/src/agents/codex.ts`.
   Provider reasoning effort policy and launch wiring: `docs/configuration.md`, `v2/src/agents/`, `v2/src/session-service.ts`.
+  Agent executable PATH resolution and environment overrides: `docs/configuration.md`; implementation `v2/src/agents/executable.ts`.
   Spawn preflight returns one strict line. Only explicit no-project-rules sentinel bypasses fallback `branchNaming`; malformed or failed results exhaust preflight retries then fail spawn. Contract: `docs/commands.md`.
   Session modes: contract and carry-forward `docs/configuration.md#modes`; implementation `v2/src/session-mode.ts`, `v2/src/config.ts`.
   Admission cap: resolution contract `docs/configuration.md#admission-control`; implementation `v2/src/config.ts`.

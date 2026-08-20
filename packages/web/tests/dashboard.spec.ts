@@ -2339,10 +2339,20 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("option", { name: "claude" })).toBeAttached();
     await expect(page.getByRole("option", { name: "codex" })).toBeAttached();
     await expect(page.getByRole("option", { name: "cursor" })).toBeAttached();
+    await expect(page.getByRole("option", { name: "opencode" })).toBeAttached();
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
     await expect(page.getByRole("checkbox", { name: "Plan" })).toBeVisible();
     await expect(page.getByRole("checkbox", { name: "Self-destruct" })).toBeVisible();
+  });
+
+  test("OpenCode selection exposes its discovered models", async ({ page }) => {
+    await openSpawnModal(page);
+
+    await page.getByRole("combobox", { name: "Spawn agent" }).selectOption("opencode");
+    await expect(page.getByRole("button", { name: "Spawn model" })).toContainText("OpenAI GPT-5");
+    await page.getByRole("button", { name: "Spawn model" }).click();
+    await expect(page.getByRole("menuitem", { name: /OpenAI GPT-5.*openai\/gpt-5/ })).toBeVisible();
   });
 
   test("plan toggle stays hint-free for codex", async ({ page }) => {

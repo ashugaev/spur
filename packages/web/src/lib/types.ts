@@ -370,7 +370,7 @@ export interface AgentSuggestionEntry {
 }
 
 export interface AgentSuggestionsResponse {
-  agent: "claude" | "codex";
+  agent: AgentName;
   commands: AgentSuggestionEntry[];
   skills: AgentSuggestionEntry[];
   agents: AgentSuggestionEntry[];

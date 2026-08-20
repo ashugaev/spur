@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { execFileMock } = vi.hoisted(() => ({
   execFileMock: vi.fn(),
 }));
+const originalPath = process.env["PATH"];
 
 vi.mock("node:child_process", () => ({
   execFile: execFileMock,
@@ -16,6 +17,8 @@ import {
   parseCursorModelsOutput,
   pickCursorNormalModelId,
   resolveCursorLaunchModel,
+  parseOpenCodeModelsOutput,
+  validateOpenCodeModel,
 } from "../../src/agents/models.js";
 
 beforeEach(() => {
@@ -24,6 +27,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env["SPUR_CURSOR_BIN"];
+  delete process.env["SPUR_OPENCODE_BIN"];
+  process.env["PATH"] = originalPath;
 });
 
 describe("listAgentModels claude", () => {
@@ -230,5 +235,111 @@ describe("resolveCursorLaunchModel", () => {
 
   it("keeps an explicit fast model", async () => {
     await expect(resolveCursorLaunchModel("composer-2.5-fast")).resolves.toBe("composer-2.5-fast");
+  });
+});
+
+describe("parseOpenCodeModelsOutput", () => {
+  it("parses the pinned CLI's newline-delimited provider/model output", () => {
+    const stdout = [
+      "opencode/big-pickle",
+      "digitalocean/fal-ai/flux/schnell",
+      "anthropic/claude-sonnet-4",
+      "",
+    ].join("\n");
+    expect(parseOpenCodeModelsOutput(stdout)).toEqual([
+      { id: "opencode/big-pickle", label: "opencode/big-pickle" },
+      {
+        id: "digitalocean/fal-ai/flux/schnell",
+        label: "digitalocean/fal-ai/flux/schnell",
+      },
+      { id: "anthropic/claude-sonnet-4", label: "anthropic/claude-sonnet-4" },
+    ]);
+  });
+
+  it("reports a missing executable while validating an explicit model", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-missing";
+    process.env["PATH"] = "";
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
+        cb(new Error("ENOENT"));
+      },
+    );
+
+    await expect(validateOpenCodeModel("openai/gpt-5")).rejects.toThrow(
+      "opencode executable not found: opencode-model-test-missing; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+    );
+  });
+
+  it("keeps the validation-specific error when an available executable cannot list models", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = process.execPath;
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
+        cb(new Error("models failed"));
+      },
+    );
+
+    await expect(validateOpenCodeModel("openai/gpt-5")).rejects.toThrow(
+      'Cannot validate OpenCode model "openai/gpt-5": model list unavailable',
+    );
+  });
+
+  it("reports the missing executable instead of returning an empty catalog", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-missing";
+    process.env["PATH"] = "";
+    execFileMock.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
+        cb(new Error("ENOENT"));
+      },
+    );
+
+    await expect(listAgentModels("opencode")).rejects.toThrow(
+      "opencode executable not found: opencode-model-test-missing; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
+    );
+  });
+
+  it("rejects an explicit model when discovery returns no models", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-empty";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => cb(null, { stdout: "" }),
+    );
+
+    await expect(validateOpenCodeModel("openai/gpt-5")).rejects.toThrow(
+      'Cannot validate OpenCode model "openai/gpt-5": model list is empty',
+    );
+  });
+
+  it("rejects an explicit model absent from the discovered catalog", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => cb(null, { stdout: "openai/gpt-5\n" }),
+    );
+
+    await expect(validateOpenCodeModel("openai/missing")).rejects.toThrow(
+      'OpenCode model "openai/missing" is not available',
+    );
+  });
+
+  it("accepts an explicit model present in the discovered catalog", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => cb(null, { stdout: "openai/gpt-5\n" }),
+    );
+
+    await expect(validateOpenCodeModel("openai/gpt-5")).resolves.toBe("openai/gpt-5");
   });
 });

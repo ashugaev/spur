@@ -133,9 +133,16 @@ export function ModelSelect({
   // would let a model that has since left the catalog stay selected and
   // submittable ahead of the fetch that would have caught it. A model-fetch
   // error is treated like an unresolved workspace-mode default, not like a
-  // genuinely empty catalog: it keeps blocking submit instead of settling
-  // into "enabled, model omitted".
-  const resolved = settled && error === null;
+  // genuinely empty catalog. OpenCode is the exception when no rung names a
+  // model: its provider can select the default, so catalog discovery is
+  // optional. Named overrides still require a catalog and stay blocked when
+  // discovery cannot validate them.
+  const hasRequestedModel =
+    value !== null ||
+    spawnDefaults.model !== null ||
+    (carry?.agent === agent && carry.model !== undefined);
+  const canOmitUnavailableCatalog = agent === "opencode" && !hasRequestedModel;
+  const resolved = settled && (error === null || canOmitUnavailableCatalog);
 
   useEffect(() => {
     onResolvedChangeRef.current(resolved, error);

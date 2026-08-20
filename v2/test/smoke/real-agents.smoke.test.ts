@@ -22,6 +22,7 @@ const tmuxOk = await isTmuxAvailable();
 const CLAUDE_BIN = await binaryPath("claude");
 const CODEX_BIN = await binaryPath("codex");
 const CURSOR_BIN = await binaryPath("agent");
+const OPENCODE_BIN = await binaryPath("opencode");
 
 interface AuthStatus {
   available: boolean;
@@ -216,9 +217,23 @@ async function cursorStatus(): Promise<AuthStatus> {
   }
 }
 
+async function opencodeStatus(): Promise<AuthStatus> {
+  if (!tmuxOk) return { available: false, skipReason: "tmux unavailable" };
+  if (!OPENCODE_BIN) return { available: false, skipReason: "opencode unavailable" };
+  try {
+    const { stdout } = await execFileAsync(OPENCODE_BIN, ["models"], { timeout: 20_000 });
+    return stdout.split("\n").some((line) => line.trim() === "opencode/deepseek-v4-flash-free")
+      ? { available: true }
+      : { available: false, skipReason: "OpenCode free smoke model unavailable" };
+  } catch (error) {
+    return { available: false, error: `Failed to list OpenCode models: ${errorText(error)}` };
+  }
+}
+
 const claudeAuth = await claudeStatus();
 const codexAuth = await codexStatus();
 const cursorAuth = await cursorStatus();
+const opencodeAuth = await opencodeStatus();
 
 const cleanupItems: CleanupItem[] = [];
 
@@ -260,6 +275,7 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
     SPUR_CURSOR_BIN: process.env.SPUR_CURSOR_BIN,
+    SPUR_OPENCODE_BIN: process.env.SPUR_OPENCODE_BIN,
   };
   if (CLAUDE_BIN) {
     process.env.SPUR_CLAUDE_BIN = CLAUDE_BIN;
@@ -269,6 +285,9 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
   }
   if (CURSOR_BIN) {
     process.env.SPUR_CURSOR_BIN = CURSOR_BIN;
+  }
+  if (OPENCODE_BIN) {
+    process.env.SPUR_OPENCODE_BIN = OPENCODE_BIN;
   }
 
   try {
@@ -288,6 +307,11 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
       delete process.env.SPUR_CURSOR_BIN;
     } else {
       process.env.SPUR_CURSOR_BIN = saved.SPUR_CURSOR_BIN;
+    }
+    if (saved.SPUR_OPENCODE_BIN === undefined) {
+      delete process.env.SPUR_OPENCODE_BIN;
+    } else {
+      process.env.SPUR_OPENCODE_BIN = saved.SPUR_OPENCODE_BIN;
     }
   }
 }
@@ -429,6 +453,79 @@ After the file and the session metadata are set, wait for more instructions.`,
   });
 }
 
+async function runOpenCodeSmoke(): Promise<void> {
+  const agent = "opencode" as const;
+  const rootDir = await createTempDir("spur-smoke-opencode-");
+  const port = await findFreePort();
+  const dataDir = join(rootDir, "data");
+  const worktreeDir = join(rootDir, "worktrees");
+  const sessionPrefix = `smoke-opencode-${port}`;
+  const tmuxSocketName = `spur-${port}`;
+  const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
+  cleanupItems.push(cleanupItem);
+
+  setActiveTmuxSocketName(tmuxSocketName);
+  await syncTmuxEnvironment({});
+  const configPath = join(rootDir, "spur.yaml");
+  await writeFile(
+    configPath,
+    smokeConfig({
+      port,
+      dataDir,
+      worktreeDir,
+      repoDir: SMOKE_REPO_DIR,
+      baseRef: SMOKE_BASE_REF,
+      sessionPrefix,
+      agent,
+    }),
+    "utf8",
+  );
+
+  await withPinnedAgentBinaries(async () => {
+    const service = await startServer(configPath, {});
+    try {
+      const session = await service.spawn({
+        project: "api",
+        agent,
+        model: "opencode/deepseek-v4-flash-free",
+        prompt: "Reply with exactly SPUR_OPENCODE_SMOKE_ONE",
+      });
+      cleanupItem.branch = session.branch;
+      cleanupItem.worktreePath = session.worktreePath;
+      expect(session.agentSessionId).toMatch(/^ses_/);
+      const nativeSessionId = session.agentSessionId;
+
+      await pollUntil(() => service.getConversation(session.id), {
+        timeoutMs: 120_000,
+        accept: (conversation) =>
+          conversation.messages.some(
+            (message) =>
+              message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_ONE",
+          ),
+      });
+
+      await service.pause(session.id);
+      const restored = await service.restore(session.id);
+      expect(restored.agentSessionId).toBe(nativeSessionId);
+      await service.send(session.id, { message: "Reply with exactly SPUR_OPENCODE_SMOKE_TWO" });
+      await pollUntil(() => service.getConversation(session.id), {
+        timeoutMs: 120_000,
+        accept: (conversation) =>
+          conversation.messages.some(
+            (message) =>
+              message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_TWO",
+          ),
+      });
+
+      const killed = await service.kill(session.id, { force: true });
+      expect(killed.status).toBe("killed");
+      expect(existsSync(session.worktreePath)).toBe(false);
+    } finally {
+      await service.stop();
+    }
+  });
+}
+
 afterEach(async () => {
   while (cleanupItems.length > 0) {
     const item = popCleanupItem();
@@ -516,6 +613,20 @@ if (cursorAuth.error) {
 
     it("uses cursor spawn preflight before the normal session launch", async () => {
       await runSmoke("cursor", { expectedPreflightBranch: "smoke-cursor-preflight" });
+    });
+  });
+}
+
+if (opencodeAuth.error) {
+  describe("Spur real-agent smoke (opencode)", () => {
+    it("passes the model preflight", () => {
+      throw new Error(opencodeAuth.error);
+    });
+  });
+} else {
+  describe.skipIf(!opencodeAuth.available)("Spur real-agent smoke (opencode)", () => {
+    it("launches OpenCode, restores the exact native session, and accepts a follow-up", async () => {
+      await runOpenCodeSmoke();
     });
   });
 }

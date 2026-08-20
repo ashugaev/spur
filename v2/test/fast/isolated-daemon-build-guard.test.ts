@@ -2,8 +2,10 @@ import { execFile } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -83,6 +85,9 @@ if [[ -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
   runtime_state=present
 fi
 echo "build SPUR_DISABLE_AUTOSTART=\${SPUR_DISABLE_AUTOSTART:-} runtime=$runtime_state" >> "$SPUR_TEST_LOG"
+if [[ "\${SPUR_TEST_BUILD_FAIL:-}" == "1" ]]; then
+  exit 84
+fi
 mkdir -p "$SPUR_TEST_REPO/v2/dist"
 for file_name in ${DIST_FILE_NAMES}; do
   printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/$file_name"
@@ -100,6 +105,10 @@ for file_name in ${DIST_FILE_NAMES}; do
     exit 81
   fi
 done
+if [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
+  echo "node-before-runtime $1" >> "$SPUR_TEST_LOG"
+  exit 83
+fi
 case "$1" in
   "$SPUR_TEST_REPO/v2/bin/write-isolated-instance-config.mjs")
     echo "instance-helper" >> "$SPUR_TEST_LOG"
@@ -126,7 +135,7 @@ esac
   };
 }
 
-function testEnv(worktree: FakeWorktree): NodeJS.ProcessEnv {
+function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     HOME: join(worktree.repoDir, "home"),
     PATH: `${worktree.pathDir}:${process.env["PATH"] ?? ""}`,
@@ -135,12 +144,16 @@ function testEnv(worktree: FakeWorktree): NodeJS.ProcessEnv {
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_TEST_LOG: worktree.logPath,
     SPUR_TEST_REPO: worktree.repoDir,
+    ...extraEnv,
   };
 }
 
-async function runIsolatedDaemon(worktree: FakeWorktree): Promise<string[]> {
+async function runIsolatedDaemon(
+  worktree: FakeWorktree,
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<string[]> {
   await execFileAsync("bash", [join(worktree.repoDir, "scripts", "spur-isolated-daemon.sh")], {
-    env: testEnv(worktree),
+    env: testEnv(worktree, extraEnv),
   });
   return readFileSync(worktree.logPath, "utf8").trim().split("\n");
 }
@@ -152,15 +165,47 @@ afterEach(() => {
 });
 
 describe("spur-isolated-daemon build guard", () => {
-  it("builds v2 before invoking isolated daemon helpers when dist is missing", async () => {
+  it("keeps the shared runtime unpublished until a missing v2 build finishes", async () => {
     const worktree = createFakeWorktree();
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build SPUR_DISABLE_AUTOSTART=1 runtime=present",
+      "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
     ]);
+  });
+
+  it("removes a stale shared runtime before rebuilding on restart", async () => {
+    const worktree = createFakeWorktree();
+    const runtimePath = join(worktree.toolDir, "isolated-env.sh");
+    writeFileSync(runtimePath, "STALE_RUNTIME=1\n", "utf8");
+
+    await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
+      "instance-helper",
+      "project-helper",
+      "daemon-start",
+    ]);
+    expect(readFileSync(runtimePath, "utf8")).toContain(
+      'SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4789"',
+    );
+    expect(readFileSync(runtimePath, "utf8")).not.toContain("STALE_RUNTIME");
+  });
+
+  it("leaves no runtime marker when the v2 build fails", async () => {
+    const worktree = createFakeWorktree();
+    const runtimePath = join(worktree.toolDir, "isolated-env.sh");
+    writeFileSync(runtimePath, "STALE_RUNTIME=1\n", "utf8");
+    writeFileSync(join(worktree.toolDir, "isolated-env.sh.tmp.stale"), "STALE_TEMP=1\n", "utf8");
+
+    await expect(runIsolatedDaemon(worktree, { SPUR_TEST_BUILD_FAIL: "1" })).rejects.toMatchObject({
+      code: 84,
+    });
+    expect(existsSync(runtimePath)).toBe(false);
+    expect(
+      readdirSync(worktree.toolDir).filter((name) => name.startsWith("isolated-env.sh.tmp.")),
+    ).toEqual([]);
   });
 
   it("uses existing build outputs without rebuilding", async () => {
@@ -187,7 +232,7 @@ describe("spur-isolated-daemon build guard", () => {
     utimesSync(sourcePath, newTime, newTime);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build SPUR_DISABLE_AUTOSTART=1 runtime=present",
+      "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",

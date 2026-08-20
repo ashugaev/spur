@@ -159,6 +159,24 @@ projects:
     expect(config.projects["backend"]?.defaultAgent).toBe("cursor");
   });
 
+  it("accepts opencode as an instance and project default agent", async () => {
+    const configPath = await writeConfig(`
+defaultAgent: opencode
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultAgent: opencode
+    defaultModels:
+      opencode: openai/gpt-5
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.defaultAgent).toBe("opencode");
+    expect(config.projects["backend"]?.defaultAgent).toBe("opencode");
+    expect(config.projects["backend"]?.defaultModels?.opencode).toBe("openai/gpt-5");
+  });
+
   it("resolves projectsRoot relative to the config directory when set", async () => {
     const configPath = await writeConfig(`
 projectsRoot: ./custom-root

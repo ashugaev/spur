@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import { agentExecutableCommand } from "./executable.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
 export const DEFAULT_CURSOR_MODEL = "auto";
@@ -227,7 +228,7 @@ interface CursorSessionFile {
 }
 
 export function cursorCommand(): string {
-  return process.env["SPUR_CURSOR_BIN"] || "agent";
+  return agentExecutableCommand("cursor");
 }
 
 export function cursorConfigDir(): string {

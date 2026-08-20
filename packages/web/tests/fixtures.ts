@@ -29,6 +29,7 @@ const DEFAULT_AGENT_MODELS: Record<string, AgentModelFixture[]> = {
     { id: "auto", label: "Auto", isDefault: true },
     { id: "composer-2.5", label: "Composer 2.5" },
   ],
+  opencode: [{ id: "openai/gpt-5", label: "OpenAI GPT-5", isDefault: true }],
 };
 
 const DEFAULT_GITHUB_STATUS = {

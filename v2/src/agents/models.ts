@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { listClaudeModels } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
+import { opencodeCommand } from "./opencode.js";
+import { missingAgentExecutableMessage, resolveAgentExecutable } from "./executable.js";
 import type { AgentName } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -180,6 +182,57 @@ async function listCursorModels(): Promise<AgentModel[]> {
   return request;
 }
 
+export function parseOpenCodeModelsOutput(stdout: string): AgentModel[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((id) => /^[^\s/]+\/\S+$/.test(id))
+    .map((id) => ({ id, label: id }));
+}
+
+async function discoverOpenCodeModels(): Promise<AgentModel[]> {
+  const { stdout } = await execFileAsync(opencodeCommand(), ["models"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  return parseOpenCodeModelsOutput(stdout);
+}
+
+function missingOpenCodeExecutableError(error: unknown): Error | null {
+  if (resolveAgentExecutable("opencode").path) return null;
+  return new Error(missingAgentExecutableMessage("opencode"), { cause: error });
+}
+
+async function listOpenCodeModels(): Promise<AgentModel[]> {
+  try {
+    return await discoverOpenCodeModels();
+  } catch (error) {
+    const missingExecutable = missingOpenCodeExecutableError(error);
+    if (missingExecutable) throw missingExecutable;
+    throw new Error(`OpenCode model discovery failed using ${opencodeCommand()}`, { cause: error });
+  }
+}
+
+export async function validateOpenCodeModel(model: string): Promise<string> {
+  let models: AgentModel[];
+  try {
+    models = await discoverOpenCodeModels();
+  } catch (error) {
+    const missingExecutable = missingOpenCodeExecutableError(error);
+    if (missingExecutable) throw missingExecutable;
+    throw new Error(`Cannot validate OpenCode model "${model}": model list unavailable`, {
+      cause: error,
+    });
+  }
+  if (models.length === 0) {
+    throw new Error(`Cannot validate OpenCode model "${model}": model list is empty`);
+  }
+  if (!models.some((candidate) => candidate.id === model)) {
+    throw new Error(`OpenCode model "${model}" is not available`);
+  }
+  return model;
+}
+
 export async function listAgentModels(
   agent: AgentName,
   opts?: { codexHomePath?: string },
@@ -191,5 +244,7 @@ export async function listAgentModels(
       return opts?.codexHomePath ? listCodexModels(opts.codexHomePath) : [];
     case "cursor":
       return listCursorModels();
+    case "opencode":
+      return listOpenCodeModels();
   }
 }
