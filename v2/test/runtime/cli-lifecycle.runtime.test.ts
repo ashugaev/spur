@@ -459,18 +459,18 @@ async function reserveConsecutivePorts(): Promise<{
   freePortGuard: ReturnType<typeof createServer>;
 }> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const start = await findFreePort();
-    if (start >= 65_535) {
-      continue;
-    }
-
     const occupiedServer = createServer((_request, response) => {
       response.writeHead(204);
       response.end();
     });
     const freePortGuard = createServer();
     try {
-      await listenOnAllInterfaces(occupiedServer, start);
+      await listenOnAllInterfaces(occupiedServer, 0);
+      const address = occupiedServer.address();
+      if (!address || typeof address === "string" || address.port >= 65_535) {
+        throw new Error("Failed to reserve a valid test port");
+      }
+      const start = address.port;
       await listenOnAllInterfaces(freePortGuard, start + 1);
       return { start, end: start + 1, occupiedServer, freePortGuard };
     } catch {
