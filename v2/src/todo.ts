@@ -274,7 +274,27 @@ export function ensureTodoLedger(
   const path = ledgerPath(dataDir, session.id, session.project);
   if (session.todoLedgerVersion === 1) return replayTodo(dataDir, session.id);
   if (existsSync(path)) {
-    const projection = replayTodo(dataDir, session.id);
+    let projection = replayTodo(dataDir, session.id);
+    if (session.status === "completed" || session.status === "killed") {
+      const actor: TodoActor = { kind: "system", source: "legacy_migration" };
+      for (const item of projection.items) {
+        if (item.status !== "open" && item.status !== "held") continue;
+        appendEvent(
+          dataDir,
+          {
+            ...eventBase(session.id, actor),
+            type: session.status === "completed" ? "item_completed" : "item_cancelled",
+            itemId: item.id,
+            reason:
+              session.status === "completed"
+                ? "Session completed before Spur ToDo tracking"
+                : "Session killed before Spur ToDo tracking",
+          },
+          session.project,
+        );
+      }
+      projection = replayTodo(dataDir, session.id);
+    }
     writeSession(dataDir, { ...session, todoLedgerVersion: 1 });
     return projection;
   }

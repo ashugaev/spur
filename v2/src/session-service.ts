@@ -433,7 +433,6 @@ import {
   mutateTodo as applyTodoMutation,
   recordTodoFinishOverride,
   TodoOpenWorkError,
-  TodoTransitionConflictError,
   unfinishedTodo,
 } from "./todo.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -1335,17 +1334,19 @@ function buildInitialMessage(
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
 ): string {
-  if (!initialMessage.trim()) return "";
-  let base = withSelfDestructInstructions(
-    withSharedMemoryInstructions(
-      withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
-    ),
-    selfDestruct,
-  );
+  let base = initialMessage.trim()
+    ? withSelfDestructInstructions(
+        withSharedMemoryInstructions(
+          withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+        ),
+        selfDestruct,
+      )
+    : "";
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
-  base = `${base}\n\nSpur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The initial task already exists. Run \`"$SPUR_TODO_COMMAND" list\` first.\n- Add new requested work with \`"$SPUR_TODO_COMMAND" add --text <text> --reason <reason>\`.\n- Complete, cancel, or hold items with a reason. Human holds must name the required action. Resume held work before continuing.\n- Do not finish or self-destruct with open or held work.`;
+  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The initial task already exists. Run \`"$SPUR_TODO_COMMAND" list\` first.\n- Add new requested work with \`"$SPUR_TODO_COMMAND" add --text <text> --reason <reason>\`.\n- Complete, cancel, or hold items with a reason. Human holds must name the required action. Resume held work before continuing.\n- Do not finish or self-destruct with open or held work.`;
+  base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
@@ -2365,7 +2366,6 @@ export class SessionService {
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
   private readonly reopensInFlight = new Set<string>();
-  private readonly handoffsInFlight = new Set<string>();
   // Serializes lifecycle mutations that can kill, relaunch, write to, or
   // snapshot one session's agent and sidecar panes. Distinct from the pane
   // write lock: callers acquire lifecycle first, then pane-write. Helpers
@@ -10374,13 +10374,6 @@ export class SessionService {
     return this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new TodoTransitionConflictError(
-          sessionId,
-          "",
-          "Session handoff is already in progress",
-        );
-      }
       return applyTodoMutation(this.config.dataDir, session, request, actor);
     });
   }
@@ -10412,8 +10405,8 @@ export class SessionService {
       candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
       async () => {
         const blocked = candidates.flatMap((candidate) => {
-          if (candidate.status === "completed") return [];
           const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
+          if (isTerminalSessionStatus(current.status)) return [];
           const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, current));
           return unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0
             ? [{ sessionId: candidate.id, ...unfinished }]
@@ -10429,7 +10422,8 @@ export class SessionService {
         }
         const completedIds: string[] = [];
         for (const candidate of candidates) {
-          if (candidate.status === "completed") continue;
+          const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
+          if (isTerminalSessionStatus(current.status)) continue;
           await this.applyManualStatusLocked(candidate.id, "completed", request, {
             ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
           });
@@ -12765,6 +12759,15 @@ export class SessionService {
   }
 
   async handoff(sessionId: string, request: HandoffSessionRequest): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.handoffLocked(sessionId, request),
+    );
+  }
+
+  private async handoffLocked(
+    sessionId: string,
+    request: HandoffSessionRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -12782,29 +12785,18 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-    await this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const lockedSession = readSession(this.config.dataDir, sessionId);
-      if (!lockedSession) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, lockedSession));
-      if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
-        throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
-      }
-      this.handoffsInFlight.add(sessionId);
-    });
+    const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, session));
+    if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
+      throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
+    }
     // Gate before any teardown below. The source session is still on-disk as
     // running/spawning here, so a denial leaves it fully untouched — no kill,
     // no status flip. The successor replaces the source rather than adding to
     // the fleet, so exclude it from the live count: a handoff at exactly the
     // cap is net-neutral (stop one, start one) and must be allowed.
-    let admissionReservation: symbol;
-    try {
-      admissionReservation = this.reserveAdmission(session.project, "spawn", {
-        replacingSessionId: session.id,
-      });
-    } catch (error) {
-      this.handoffsInFlight.delete(sessionId);
-      throw error;
-    }
+    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
+      replacingSessionId: session.id,
+    });
 
     try {
       const agent = parseAgentName(request.agent);
@@ -12922,26 +12914,16 @@ export class SessionService {
         }
       }
 
-      try {
-        await this.complete(
-          session.id,
-          { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-          { retainInList: true },
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logEvent("session.handoff.source_complete_failed", {
-          level: "warn",
-          sessionId,
-          projectId: session.project,
-          message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
-        });
-      }
+      await this.applyManualStatusLocked(
+        session.id,
+        "completed",
+        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+        { retainInList: true },
+      );
 
       return spawned;
     } finally {
       this.admissionReservations.delete(admissionReservation);
-      this.handoffsInFlight.delete(sessionId);
     }
   }
 

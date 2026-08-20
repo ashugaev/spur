@@ -562,6 +562,7 @@ test.describe("S1: Session detail header", () => {
 
 test.describe("Spur ToDo audit", () => {
   test("renders delayed loading then a resolved expandable projection", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
     const session = makeCompletedSession({ id: "detail-todo-resolved" });
     await mockSessionDetail(page, session);
     let releaseTodo: (() => void) | undefined;
@@ -626,8 +627,11 @@ test.describe("Spur ToDo audit", () => {
     await page.screenshot({ path: join(screenshotDir, "todo-loading.png"), fullPage: true });
     releaseTodo?.();
     await expect(page.getByLabel("1 of 1 ToDo items resolved")).toBeVisible();
-    await expect(page.getByText("0 open")).toBeVisible();
-    await expect(page.getByText("0 held")).toBeVisible();
+    await expect(page.getByText("0 open")).toHaveCount(0);
+    await expect(page.getByText("0 held")).toHaveCount(0);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
     const toggle = page.getByRole("button", { name: /Implement native ToDo/ });
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.click();

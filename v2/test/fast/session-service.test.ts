@@ -642,6 +642,7 @@ vi.mock("../../src/session-slots.js", () => ({
   AGENT_STATE_TOOL_NAME: "spur-agent-state",
   SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
   SLOT_TOOL_NAME: "spur-slots",
+  TODO_TOOL_NAME: "spur-todo",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
   normalizeSlotsUpdate: vi.fn(
@@ -1106,6 +1107,7 @@ type SessionServiceInternals = {
   deliveryRuns: Map<string, Promise<void>>;
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
+  maybeNudgeTodo(session: SessionRecord): Promise<void>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -1124,6 +1126,16 @@ async function createDisposedSessionService() {
   return service;
 }
 
+async function useRealTodoLedger(): Promise<void> {
+  const mocked = await import("../../src/todo.js");
+  const actual = await vi.importActual<typeof todoModule>("../../src/todo.js");
+  vi.mocked(mocked.ensureTodoLedger).mockImplementation(actual.ensureTodoLedger);
+  let nextUuid = 1;
+  vi.mocked(randomUUID).mockImplementation(
+    () => `00000000-0000-4000-8000-${String(nextUuid++).padStart(12, "0")}`,
+  );
+}
+
 describe("SessionService", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -1132,6 +1144,17 @@ describe("SessionService", () => {
     // launch-command assertions. Same reason agents-claude.test.ts clears it.
     delete process.env["SPUR_CLAUDE_BIN"];
     TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "spur-session-service-"));
+    vi.mocked(randomUUID).mockReset().mockReturnValue(PINNED_CLAUDE_SESSION_ID);
+    const todo = await import("../../src/todo.js");
+    vi.mocked(todo.ensureTodoLedger)
+      .mockReset()
+      .mockReturnValue({
+        revision: "fixture-resolved",
+        status: "resolved",
+        counts: { total: 1, open: 0, held: 0, completed: 1, cancelled: 0 },
+        items: [],
+        finishOverrides: [],
+      });
     const timersPromises =
       await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
     timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
@@ -1770,6 +1793,125 @@ describe("SessionService", () => {
       "session.spawn.initial_prompt_sent",
       "session.spawn.completed",
     ]);
+  });
+
+  describe("Spur ToDo lifecycle", () => {
+    it("initializes the spawn ledger before returning the session", async () => {
+      createSessionStore();
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.spawn({ project: "api", prompt: "Ship native ToDo" });
+      const projection = await service.readTodo(spawned.id);
+
+      expect(readSessionMock(TEST_DATA_DIR, spawned.id)?.todoLedgerVersion).toBe(1);
+      expect(projection.items).toHaveLength(1);
+      expect(projection.items[0]).toMatchObject({ text: "Ship native ToDo", status: "open" });
+      service.dispose();
+    });
+
+    it("blocks completion, then records a human override before completing", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
+      await service.complete(
+        "api-1",
+        { todoOverrideReason: "Operator accepts unfinished work", skipPrCheck: true },
+        { todoActor: { kind: "human", origin: "ui" } },
+      );
+
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      const projection = await service.readTodo("api-1");
+      expect(projection.items[0]?.status).toBe("open");
+      expect(projection.finishOverrides).toHaveLength(1);
+      expect(projection.finishOverrides[0]).toMatchObject({
+        type: "finish_override_recorded",
+        reason: "Operator accepts unfinished work",
+      });
+      service.dispose();
+    });
+
+    it("preflights every current desk member before completing any", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.completeDesk("api-1")).rejects.toMatchObject({
+        code: "todo_open_work",
+        sessions: expect.arrayContaining([
+          expect.objectContaining({ sessionId: "api-1" }),
+          expect.objectContaining({ sessionId: "api-2" }),
+        ]),
+      });
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(sessions.get("api-2")?.status).toBe("running");
+      service.dispose();
+    });
+
+    it("preserves ledger history when a session pauses", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const before = await service.readTodo("api-1");
+
+      await service.pause("api-1");
+
+      expect((await service.readTodo("api-1")).revision).toBe(before.revision);
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+      service.dispose();
+    });
+
+    it("retries failed level-triggered nudges and throttles successful delivery", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValueOnce(new Error("pane unavailable"))
+        .mockResolvedValue(SUBMITTED);
+
+      await internals.maybeNudgeTodo(session);
+      await internals.maybeNudgeTodo(session);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1]?.[1]).toContain("Spur ToDo still has open work");
+
+      vi.setSystemTime(new Date("2026-03-18T10:06:01.000Z"));
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(3);
+
+      const itemId = (await service.readTodo(session.id)).items[0]?.id;
+      if (!itemId) throw new Error("Expected initial ToDo item");
+      await service.mutateTodo(
+        session.id,
+        {
+          action: "hold",
+          itemId,
+          reason: "Need operator input",
+          blocker: "human",
+          requiredHumanAction: "Choose the release window",
+        },
+        { kind: "agent", agent: "claude", sessionId: session.id },
+      );
+      vi.setSystemTime(new Date("2026-03-18T10:07:02.000Z"));
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send.mock.calls.at(-1)?.[1]).toContain("Choose the release window");
+      service.dispose();
+    });
   });
 
   it("persists the exact fresh OpenCode session before sending the prompt", async () => {
@@ -2785,6 +2927,16 @@ describe("SessionService", () => {
       `slot-instructions\nMode: manager. Load the \`manager\` skill and follow it as your behavior contract for this session.\n\n${TODO_PROMPT}`,
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "manager" });
+  });
+
+  it("delivers the Spur ToDo contract when no prompt or mode is supplied", async () => {
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "" });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(TODO_PROMPT);
   });
 
   it("lets an explicit --mode override the project default mode", async () => {
@@ -4419,7 +4571,7 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain("[Spur step");
   });
 
-  it("allows spawn without a prompt and skips default steps and the initial send", async () => {
+  it("allows spawn without a prompt, skips default steps, and sends the ToDo contract", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -4444,17 +4596,19 @@ describe("SessionService", () => {
 
     expect(result.prompt).toBe("");
     expect(result.pipeline).toBeUndefined();
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", TODO_PROMPT, {
       model: "opus",
       agentSessionId: PINNED_CLAUDE_SESSION_ID,
     });
-    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", TODO_PROMPT, {
+      agent: "claude",
+    });
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
     expect(
       logSpurEventMock.mock.calls
         .map(([, entry]) => entry.event)
         .filter((e) => e !== "session.state.classified"),
-    ).not.toContain("session.spawn.initial_prompt_sent");
+    ).toContain("session.spawn.initial_prompt_sent");
   });
 
   it("resumes an unfinished pipeline into a cooldown before the next auto-step", async () => {
@@ -26127,16 +26281,18 @@ describe("SessionService", () => {
       );
       workspaceExistsMock.mockReturnValue(true);
       reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as { attentionMonitorRunning: boolean };
+      await vi.waitFor(() => expect(internals.attentionMonitorRunning).toBe(false));
       let releaseCapture: ((value: string) => void) | undefined;
+      captureTmuxPaneMock.mockClear();
       captureTmuxPaneMock.mockImplementationOnce(
         () =>
           new Promise<string>((resolve) => {
             releaseCapture = resolve;
           }),
       );
-
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       const handoff = service.handoff("api-1", { agent: "cursor" });
       await vi.waitFor(() => expect(captureTmuxPaneMock).toHaveBeenCalled());
@@ -26146,6 +26302,91 @@ describe("SessionService", () => {
 
       releaseCapture?.("");
       await expect(handoff).resolves.toMatchObject({ id: "api-2" });
+    });
+
+    it("serializes add-first against handoff before side effects", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const initialId = (await service.readTodo(source.id)).items[0]?.id;
+      if (!initialId) throw new Error("Expected initial ToDo item");
+      await service.mutateTodo(
+        source.id,
+        { action: "complete", itemId: initialId, reason: "Initial work done" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
+      );
+      await service.mutateTodo(
+        source.id,
+        { action: "add", text: "Late requested work", reason: "User added scope" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
+      );
+
+      await expect(service.handoff(source.id, { agent: "cursor" })).rejects.toMatchObject({
+        code: "todo_open_work",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("serializes handoff-first against a late add without lock re-entry", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as { attentionMonitorRunning: boolean };
+      await vi.waitFor(() => expect(internals.attentionMonitorRunning).toBe(false));
+      const initialId = (await service.readTodo(source.id)).items[0]?.id;
+      if (!initialId) throw new Error("Expected initial ToDo item");
+      await service.mutateTodo(
+        source.id,
+        { action: "complete", itemId: initialId, reason: "Ready for handoff" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
+      );
+      let releaseCapture: ((value: string) => void) | undefined;
+      captureTmuxPaneMock.mockClear();
+      captureTmuxPaneMock.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseCapture = resolve;
+          }),
+      );
+
+      const handoff = service.handoff(source.id, { agent: "cursor" });
+      await vi.waitFor(() => expect(captureTmuxPaneMock).toHaveBeenCalled());
+      const lateAdd = service.mutateTodo(
+        source.id,
+        { action: "add", text: "Too late", reason: "Raced handoff" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
+      );
+      const lateAddResult = expect(lateAdd).rejects.toMatchObject({
+        code: "todo_transition_conflict",
+      });
+      releaseCapture?.("");
+
+      await vi.waitFor(() => expect(sessions.get(source.id)?.status).toBe("completed"));
+      await expect(handoff).resolves.toMatchObject({ id: "api-2" });
+      await lateAddResult;
+      expect(sessions.get(source.id)?.status).toBe("completed");
+      service.dispose();
     });
 
     it("does not forward pipeline steps when the source pipeline already finished", async () => {
@@ -26429,7 +26670,7 @@ describe("SessionService", () => {
       expect(result.id).toBe("api-2");
     });
 
-    it("still returns the spawned session when source completion fails", async () => {
+    it("rejects handoff when already-locked source completion fails", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       sessions.set(
@@ -26449,14 +26690,18 @@ describe("SessionService", () => {
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      vi.spyOn(service, "complete").mockRejectedValueOnce(new Error("complete failed"));
-
-      const result = await service.handoff("api-1", { agent: "cursor" });
-
-      expect(result.id).toBe("api-2");
-      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
-        "session.handoff.source_complete_failed",
+      const internals = service as unknown as {
+        applyManualStatusLocked(): Promise<SessionView>;
+      };
+      vi.spyOn(internals, "applyManualStatusLocked").mockRejectedValueOnce(
+        new Error("complete failed"),
       );
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+        "complete failed",
+      );
+
+      expect(sessions.get("api-1")?.status).not.toBe("completed");
     });
 
     it("leaves the source stopped when spawn fails after teardown", async () => {

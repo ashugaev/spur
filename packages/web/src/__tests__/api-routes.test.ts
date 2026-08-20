@@ -298,6 +298,21 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201/todo");
   });
 
+  it("GET /api/sessions/:id/todo rejects malformed successful daemon payloads", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ status: "resolved", items: [] }), { status: 200 }),
+    );
+
+    const response = await getSessionTodo(new Request("http://localhost"), {
+      params: Promise.resolve({ id: "api-1" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "Invalid ToDo response from Spur daemon",
+    });
+  });
+
   // ── GET /api/sessions/:id/artifacts/:artifactId ────────────────────────
 
   it("GET /api/sessions/:id/artifacts/:artifactId keeps the daemon sandbox on html artifacts", async () => {

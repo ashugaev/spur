@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { SpurTodoActor, SpurTodoProjection } from "@/lib/types";
+import { isSpurTodoProjection, type SpurTodoActor, type SpurTodoProjection } from "@/lib/types";
 
 function actorLabel(actor: SpurTodoActor): string {
   if (actor.kind === "agent") return `${actor.agent} · ${actor.sessionId}`;
@@ -40,8 +40,9 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
               : "Failed to read Spur ToDo";
           throw new Error(message);
         }
+        if (!isSpurTodoProjection(payload)) throw new Error("Invalid ToDo response from Spur");
         if (active) {
-          setProjection(payload as SpurTodoProjection);
+          setProjection(payload);
           setError(null);
         }
       } catch (loadError) {
@@ -92,8 +93,8 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
               {resolved}/{projection.counts.total}
             </div>
             <div className="flex flex-wrap gap-3 uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
-              <span>{projection.counts.open} open</span>
-              <span>{projection.counts.held} held</span>
+              {projection.counts.open > 0 ? <span>{projection.counts.open} open</span> : null}
+              {projection.counts.held > 0 ? <span>{projection.counts.held} held</span> : null}
               <span>{resolved} resolved</span>
             </div>
           </div>

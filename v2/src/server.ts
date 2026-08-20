@@ -57,6 +57,7 @@ import { getVersion } from "./version.js";
 import {
   SESSION_STATES,
   isSessionState,
+  type AgentName,
   type CompleteSessionRequest,
   type ConnectProjectConfigRequest,
   type CreateProjectRequest,
@@ -114,6 +115,26 @@ function readParsedBody(request: IncomingMessage): unknown {
 function parseOrigin(value: string | string[] | undefined): UserActionOrigin {
   if (value === "cli" || value === "ui") return value;
   return "unknown";
+}
+
+export async function resolveTodoMutationActor(args: {
+  origin: UserActionOrigin;
+  callerHeader: string | string[] | undefined;
+  targetSessionId: string;
+  lookup: (sessionId: string) => Promise<{ id: string; agent: AgentName }>;
+}): Promise<TodoActor> {
+  const { origin, callerHeader, targetSessionId, lookup } = args;
+  if (Array.isArray(callerHeader))
+    throw new InvalidTodoRequestError("Caller session header is invalid");
+  if (callerHeader) {
+    if (origin !== "cli") throw new InvalidTodoRequestError("Caller session requires CLI origin");
+    if (callerHeader !== targetSessionId)
+      throw new InvalidTodoRequestError("Caller session does not match ToDo owner");
+    const caller = await lookup(callerHeader);
+    return { kind: "agent", agent: caller.agent, sessionId: caller.id };
+  }
+  if (origin === "cli" || origin === "ui") return { kind: "human", origin };
+  throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
 export type StartedServer = SessionService & {
@@ -1455,18 +1476,12 @@ export async function startServer(
       if (method === "POST" && todoSessionId) {
         const targetSessionId = decodeURIComponent(todoSessionId);
         const callerHeader = request.headers["x-spur-caller-session"];
-        const callerSessionId = Array.isArray(callerHeader) ? undefined : callerHeader;
-        let actor: TodoActor;
-        if (callerSessionId) {
-          if (callerSessionId !== targetSessionId)
-            throw new InvalidTodoRequestError("Caller session does not match ToDo owner");
-          const caller = await service.get(callerSessionId);
-          actor = { kind: "agent", agent: caller.agent, sessionId: caller.id };
-        } else if (origin === "cli" || origin === "ui") {
-          actor = { kind: "human", origin };
-        } else {
-          throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
-        }
+        const actor = await resolveTodoMutationActor({
+          origin,
+          callerHeader,
+          targetSessionId,
+          lookup: (callerSessionId) => service.get(callerSessionId),
+        });
         let body: TodoMutationRequest;
         try {
           body = parseTodoMutationRequest(await readJsonBody<unknown>(request));

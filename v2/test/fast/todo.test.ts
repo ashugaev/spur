@@ -149,6 +149,33 @@ describe("Spur ToDo ledger", () => {
     expect(projection.items[0]?.status).toBe("completed");
   });
 
+  it("repairs a terminal migration interrupted after the initial add", async () => {
+    const { dataDir, session } = await fixture("completed");
+    const ledgerDir = join(dataDir, "sessions", session.id);
+    mkdirSync(ledgerDir, { recursive: true });
+    writeFileSync(
+      join(ledgerDir, "todo.jsonl"),
+      `${JSON.stringify({
+        version: 1,
+        eventId: "interrupted-add",
+        sessionId: session.id,
+        at: "2026-08-20T00:01:00.000Z",
+        actor: { kind: "system", source: "legacy_migration" },
+        type: "item_added",
+        itemId: "legacy-item",
+        text: session.prompt,
+        reason: "Imported from the session objective when Spur ToDo was enabled",
+      })}\n`,
+      "utf8",
+    );
+
+    const projection = ensureTodoLedger(dataDir, session);
+
+    expect(projection.items[0]?.status).toBe("completed");
+    expect(readSession(dataDir, session.id)?.todoLedgerVersion).toBe(1);
+    expect(readFileSync(join(ledgerDir, "todo.jsonl"), "utf8").split("\n")).toHaveLength(3);
+  });
+
   it("replays unchanged history after the session shard is archived", async () => {
     const { dataDir, session } = await fixture();
     const before = ensureTodoLedger(dataDir, session, "spawn");

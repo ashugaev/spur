@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurRequest } from "@/lib/spur-daemon";
+import { isSpurTodoProjection } from "@/lib/types";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -14,6 +15,12 @@ export async function GET(_: Request, context: RouteContext) {
     try {
       payload = text ? (JSON.parse(text) as unknown) : {};
     } catch {
+      return NextResponse.json(
+        { error: "Invalid ToDo response from Spur daemon" },
+        { status: 502 },
+      );
+    }
+    if (response.ok && !isSpurTodoProjection(payload)) {
       return NextResponse.json(
         { error: "Invalid ToDo response from Spur daemon" },
         { status: 502 },
