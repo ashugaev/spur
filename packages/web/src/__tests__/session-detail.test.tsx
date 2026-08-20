@@ -5318,6 +5318,87 @@ describe("SessionDetail links", () => {
   });
 });
 
+describe("SessionDetail ToDo override", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("reopens the modal when an override races new work and retries with a new reason", async () => {
+    const completeBodies: unknown[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/todo") {
+        return new Response(
+          JSON.stringify({
+            revision: "todo-1",
+            status: "active",
+            counts: { total: 1, open: 1, held: 0, completed: 0, cancelled: 0 },
+            items: [],
+            finishOverrides: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/complete" && init?.method === "POST") {
+        const body = init.body ? JSON.parse(String(init.body)) : {};
+        completeBodies.push(body);
+        if (completeBodies.length < 3) {
+          return new Response(
+            JSON.stringify({
+              code: "todo_open_work",
+              sessions: [{ sessionId: "api-a1", openItemIds: ["one"], heldItemIds: ["two"] }],
+            }),
+            { status: 409 },
+          );
+        }
+        return new Response(JSON.stringify({ ...sessionFixture(), status: "completed" }), {
+          status: 200,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Complete" }));
+    expect(await screen.findByRole("dialog", { name: "Unfinished ToDo" })).toHaveTextContent(
+      "1 open and 1 held",
+    );
+    fireEvent.change(screen.getByLabelText("Override reason"), {
+      target: { value: "First reason" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Complete anyway" }));
+
+    expect(await screen.findByRole("dialog", { name: "Unfinished ToDo" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Override reason"), {
+      target: { value: "Retry reason" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Complete anyway" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Unfinished ToDo" })).not.toBeInTheDocument(),
+    );
+    expect(completeBodies).toEqual([
+      {},
+      { todoOverrideReason: "First reason" },
+      { todoOverrideReason: "Retry reason" },
+    ]);
+  });
+});
+
 describe("SessionDetail GitHub PR check unavailable", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

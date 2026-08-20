@@ -128,6 +128,8 @@ import {
   type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
   type HandoffSessionRequest,
+  type TodoMutationRequest,
+  type TodoProjection,
 } from "./types.js";
 import { getVersion } from "./version.js";
 import {
@@ -660,7 +662,19 @@ type CompleteCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
+  todoOverrideReason?: string;
 };
+
+function renderTodoProjection(projection: TodoProjection): string {
+  const rows = projection.items.map((item) => {
+    const reason = item.latestTransition?.reason ?? item.added.reason;
+    return `${item.id}\t${item.status}\t${item.text}\t${reason}`;
+  });
+  return [
+    `${projection.counts.completed + projection.counts.cancelled}/${projection.counts.total} resolved`,
+    ...rows,
+  ].join("\n");
+}
 
 type KillCommandOptions = {
   force?: boolean;
@@ -2853,15 +2867,22 @@ export function createProgram(cliEntrypoint: string): Command {
       parsePrActionOption,
     )
     .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
+    .option("--todo-override-reason <reason>", "Record a manual override for unfinished ToDo items")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body: { prAction?: OpenPrAction; skipPrCheck?: true } = {};
+      const body: { prAction?: OpenPrAction; skipPrCheck?: true; todoOverrideReason?: string } = {};
       if (options.prAction) {
         body.prAction = options.prAction;
       }
       if (options.skipPrCheck) {
         body.skipPrCheck = true;
+      }
+      if (options.todoOverrideReason) {
+        if (process.env["SPUR_SESSION"] === sessionId) {
+          throw new Error("A session cannot override its own unfinished ToDo items");
+        }
+        body.todoOverrideReason = options.todoOverrideReason;
       }
       await outputResult({
         json: Boolean(options.json),
@@ -2869,6 +2890,107 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
         success: (session) => `Completed ${session.id}.`,
         render: renderSessionCard,
+      });
+    });
+
+  const todoCommand = program
+    .command("todo")
+    .description("Read or mutate a session's Spur ToDo ledger.");
+  const runTodo = async (args: {
+    session: string;
+    json?: boolean;
+    request?: TodoMutationRequest;
+    configPath?: string;
+  }): Promise<void> => {
+    const projection = args.request
+      ? await postJson<TodoProjection>(
+          cliEntrypoint,
+          `/sessions/${encodeURIComponent(args.session)}/todo`,
+          args.request,
+          args.configPath,
+        )
+      : await getJson<TodoProjection>(
+          cliEntrypoint,
+          `/sessions/${encodeURIComponent(args.session)}/todo`,
+          args.configPath,
+        );
+    if (args.json) printJson(projection);
+    else writeStdout(renderTodoProjection(projection));
+  };
+  todoCommand
+    .command("list")
+    .requiredOption("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      await runTodo({
+        session: options.session as string,
+        json: Boolean(options.json),
+        configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
+      });
+    });
+  todoCommand
+    .command("add")
+    .requiredOption("--session <id>", "Session id")
+    .requiredOption("--text <text>", "Item text")
+    .requiredOption("--reason <reason>", "Reason for adding the item")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      await runTodo({
+        session: options.session as string,
+        json: Boolean(options.json),
+        request: { action: "add", text: options.text as string, reason: options.reason as string },
+        configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
+      });
+    });
+  for (const action of ["complete", "cancel"] as const) {
+    todoCommand
+      .command(action)
+      .argument("<itemId>", "Item id")
+      .requiredOption("--session <id>", "Session id")
+      .requiredOption("--reason <reason>", "Resolution reason")
+      .option("--json", "Print raw JSON")
+      .action(async (itemId: string, options, command) => {
+        await runTodo({
+          session: options.session as string,
+          json: Boolean(options.json),
+          request: { action, itemId, reason: options.reason as string },
+          configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
+        });
+      });
+  }
+  todoCommand
+    .command("hold")
+    .argument("<itemId>", "Item id")
+    .requiredOption("--session <id>", "Session id")
+    .requiredOption("--reason <reason>", "Hold reason")
+    .option("--human-action <action>", "Required human action")
+    .option("--json", "Print raw JSON")
+    .action(async (itemId: string, options, command) => {
+      const humanAction = options.humanAction as string | undefined;
+      await runTodo({
+        session: options.session as string,
+        json: Boolean(options.json),
+        request: {
+          action: "hold",
+          itemId,
+          reason: options.reason as string,
+          blocker: humanAction ? "human" : "external",
+          ...(humanAction ? { requiredHumanAction: humanAction } : {}),
+        },
+        configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
+      });
+    });
+  todoCommand
+    .command("resume")
+    .argument("<itemId>", "Item id")
+    .requiredOption("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (itemId: string, options, command) => {
+      await runTodo({
+        session: options.session as string,
+        json: Boolean(options.json),
+        request: { action: "resume", itemId },
+        configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
       });
     });
 

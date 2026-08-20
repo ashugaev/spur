@@ -1181,9 +1181,13 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           project: "api",
           agent,
           branch: "feature-runtime-merge-conflict-restore",
-          prompt: "",
+          prompt: "Monitor merge conflicts",
         });
 
+        await pollUntil(async () => context.readAgentLog(session.id), {
+          timeoutMs: 15_000,
+          accept: (value) => value.includes("Spur ToDo:"),
+        });
         await pollUntil(async () => service.get(session.id), {
           timeoutMs: 15_000,
           accept: (value) => value.state === "waiting",
@@ -1246,6 +1250,9 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             timeoutMs: 5_000,
             accept: (events) => events.includes("trigger.send.delivered"),
           });
+          const deliveriesBeforeRestore = readEventLog(context.dataDir).filter(
+            (entry) => entry.event === "trigger.send.delivered",
+          ).length;
 
           await service.pause(session.id);
 
@@ -1260,10 +1267,18 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           const restoredLog = await pollUntil(async () => context.readAgentLog(session.id), {
             timeoutMs: 20_000,
             accept: (value) =>
-              value.includes("startup:resume") &&
-              countOccurrences(value, conflictMarker) === 2 &&
-              value.lastIndexOf(conflictMarker) > value.lastIndexOf("startup:resume"),
+              value.includes("startup:resume") && countOccurrences(value, conflictMarker) === 2,
           });
+          await pollUntil(
+            async () =>
+              readEventLog(context.dataDir).filter(
+                (entry) => entry.event === "trigger.send.delivered",
+              ).length,
+            {
+              timeoutMs: 5_000,
+              accept: (count) => count === deliveriesBeforeRestore + 1,
+            },
+          );
           expect(restoredLog).not.toContain("This session was restored after the agent exited.");
           expect(restoredLog).toContain("Merge conflicts are blocking this PR.");
         } finally {

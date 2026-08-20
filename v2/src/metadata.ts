@@ -734,6 +734,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
+    ...(normalizedSession.todoLedgerVersion === 1 ? { todoLedgerVersion: 1 as const } : {}),
   };
 }
 

@@ -313,6 +313,154 @@ export interface SpurSessionView {
   };
 }
 
+export type SpurTodoActor =
+  | { kind: "agent"; agent: AgentName; sessionId: string }
+  | { kind: "human"; origin: "cli" | "ui" }
+  | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
+
+export interface SpurTodoHistoryEvent {
+  eventId: string;
+  type: "item_added" | "item_completed" | "item_cancelled" | "item_held" | "item_resumed";
+  at: string;
+  actor: SpurTodoActor;
+  reason?: string;
+  blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
+}
+
+export interface SpurTodoProjection {
+  revision: string;
+  status: "active" | "held" | "resolved";
+  counts: { total: number; open: number; held: number; completed: number; cancelled: number };
+  items: Array<{
+    id: string;
+    text: string;
+    status: "open" | "held" | "completed" | "cancelled";
+    added: { reason: string; actor: SpurTodoActor; at: string };
+    latestTransition?: {
+      type: "completed" | "cancelled" | "held" | "resumed";
+      reason?: string;
+      blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
+      actor: SpurTodoActor;
+      at: string;
+    };
+    history: SpurTodoHistoryEvent[];
+  }>;
+  finishOverrides: Array<{
+    eventId: string;
+    type: "finish_override_recorded";
+    reason: string;
+    unfinishedItemIds: string[];
+    actor: SpurTodoActor;
+    at: string;
+  }>;
+}
+
+function todoRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function todoActor(value: unknown): value is SpurTodoActor {
+  if (!todoRecord(value)) return false;
+  if (value.kind === "agent") {
+    return (
+      (value.agent === "claude" ||
+        value.agent === "codex" ||
+        value.agent === "cursor" ||
+        value.agent === "opencode") &&
+      typeof value.sessionId === "string"
+    );
+  }
+  if (value.kind === "human") return value.origin === "cli" || value.origin === "ui";
+  return (
+    value.kind === "system" &&
+    (value.source === "spawn" || value.source === "legacy_migration" || value.source === "handoff")
+  );
+}
+
+function todoBlocker(value: unknown): boolean {
+  if (!todoRecord(value)) return false;
+  return (
+    value.kind === "external" ||
+    (value.kind === "human" && typeof value.requiredAction === "string")
+  );
+}
+
+function todoOptionalTransition(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    todoRecord(value) &&
+    (value.type === "completed" ||
+      value.type === "cancelled" ||
+      value.type === "held" ||
+      value.type === "resumed") &&
+    (value.reason === undefined || typeof value.reason === "string") &&
+    (value.blocker === undefined || todoBlocker(value.blocker)) &&
+    todoActor(value.actor) &&
+    typeof value.at === "string"
+  );
+}
+
+export function isSpurTodoProjection(value: unknown): value is SpurTodoProjection {
+  if (!todoRecord(value) || !todoRecord(value.counts)) return false;
+  const counts = value.counts;
+  const countKeys = ["total", "open", "held", "completed", "cancelled"] as const;
+  if (countKeys.some((key) => !Number.isInteger(counts[key]) || Number(counts[key]) < 0)) {
+    return false;
+  }
+  if (
+    typeof value.revision !== "string" ||
+    (value.status !== "active" && value.status !== "held" && value.status !== "resolved") ||
+    !Array.isArray(value.items) ||
+    !Array.isArray(value.finishOverrides)
+  ) {
+    return false;
+  }
+  const itemsValid = value.items.every(
+    (item) =>
+      todoRecord(item) &&
+      typeof item.id === "string" &&
+      typeof item.text === "string" &&
+      (item.status === "open" ||
+        item.status === "held" ||
+        item.status === "completed" ||
+        item.status === "cancelled") &&
+      todoRecord(item.added) &&
+      typeof item.added.reason === "string" &&
+      typeof item.added.at === "string" &&
+      todoActor(item.added.actor) &&
+      todoOptionalTransition(item.latestTransition) &&
+      Array.isArray(item.history) &&
+      item.history.every(
+        (event) =>
+          todoRecord(event) &&
+          typeof event.eventId === "string" &&
+          (event.type === "item_added" ||
+            event.type === "item_completed" ||
+            event.type === "item_cancelled" ||
+            event.type === "item_held" ||
+            event.type === "item_resumed") &&
+          typeof event.at === "string" &&
+          (event.reason === undefined || typeof event.reason === "string") &&
+          (event.blocker === undefined || todoBlocker(event.blocker)) &&
+          todoActor(event.actor),
+      ),
+  );
+  return (
+    itemsValid &&
+    value.finishOverrides.every(
+      (event) =>
+        todoRecord(event) &&
+        typeof event.eventId === "string" &&
+        event.type === "finish_override_recorded" &&
+        typeof event.reason === "string" &&
+        Array.isArray(event.unfinishedItemIds) &&
+        event.unfinishedItemIds.every((itemId) => typeof itemId === "string") &&
+        typeof event.at === "string" &&
+        todoActor(event.actor),
+    )
+  );
+}
+
 export interface SessionModeInfo {
   skill: string;
   default?: boolean;
