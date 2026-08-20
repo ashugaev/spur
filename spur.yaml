@@ -34,7 +34,6 @@ projects:
     sidecars:
       isolated-daemon:
         command: ./scripts/spur-isolated-daemon.sh
-        autoStart: true
         ports:
           daemon:
             env: SPUR_RESERVED_PORT_DAEMON
@@ -42,7 +41,6 @@ projects:
             end: 4399
       isolated-ui:
         command: ./scripts/spur-isolated-ui.sh
-        autoStart: true
         dependsOn:
           - isolated-daemon
         ports:
