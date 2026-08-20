@@ -8,6 +8,12 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
+## Session tools and environment
+
+Each agent receives `$SPUR_SESSION_TOOL_DIR` on `PATH`. It contains the session-bound `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, and `spur-todo` wrappers. A configured `branchNaming.regex` also adds `spur-branch` and a `git` wrapper that checks pushes. Hook-state agents also receive `spur-agent-state`. Call a wrapper by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path after a login shell rebuilds `PATH`.
+
+Session identity and paths: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, and `$SPUR_REAL_HOME`. Command paths: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`, and, for hook-state agents, `$SPUR_AGENT_STATE_COMMAND` plus `$SPUR_AGENT_STATE_FILE`.
+
 ## Daemon HTTP API
 
 The web UI proxies runtime version selection through `POST /deploy/switch`. The daemon validates the requested published version. If it matches the daemon's reported version, the request returns `202` with `{ "accepted": true, "version": "<version>" }` and skips `install-and-restart.sh`. A different valid release starts the detached helper. Default user scope installs the package, runs `spur reinit`, reinstalls user units, restarts services, and health-checks them. Non-default `SYSTEMCTL` (for example `SYSTEMCTL="sudo systemctl"`) installs the package, then runs `$SYSTEMCTL restart spur-daemon.service spur-web.service`. A second request while the helper is running returns `409 { error, inProgress: true, version }` for the active target, including after the daemon restarts. `GET /deploy/switch/status` returns the durable `running`, `succeeded`, or `failed` record; before any switch it returns `{ phase: "idle" }`.
@@ -150,7 +156,8 @@ A session with one or more sidecars whose age is resolvable shows a compact `sid
 ```bash
 spur todo list --session <id> [--json]
 spur todo add --session <id> --text <text> --reason <reason> [--json]
-spur todo complete|cancel --session <id> <itemId> --reason <reason> [--json]
+spur todo complete --session <id> <itemId> --reason <reason> [--json]
+spur todo cancel --session <id> <itemId> --reason <reason> [--json]
 spur todo hold --session <id> <itemId> --reason <reason> [--human-action <action>] [--json]
 spur todo resume --session <id> <itemId> [--json]
 spur complete <sessionId> --todo-override-reason <reason>
@@ -160,7 +167,7 @@ Every session owns one append-only daemon ToDo ledger. `add`, `complete`, `cance
 
 `$SPUR_TODO_COMMAND` points to a session-bound `spur-todo` wrapper. It accepts the same actions without `--session` and cannot target another ledger. `$SPUR_SESSION_TOOL_DIR/spur-todo` is the explicit path when a login shell drops the tool directory from `PATH`.
 
-Daemon routes: `GET /sessions/:id/todo` reads the projection; `POST /sessions/:id/todo` accepts one `add`, `complete`, `cancel`, `hold`, or `resume` request. `todo_open_work` returns 409 with open/held ids. Invalid transitions return `todo_transition_conflict` (409); strict-ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy or DELETE route exists.
+Daemon routes: `GET /sessions/:id/todo` reads the projection. `POST /sessions/:id/todo` accepts `{ action: "add", text, reason }`, `{ action: "complete" | "cancel", itemId, reason }`, `{ action: "hold", itemId, reason, blocker, requiredHumanAction? }`, or `{ action: "resume", itemId }`. `blocker` is `external` or `human`; a human blocker requires `requiredHumanAction`, while an external blocker rejects it. Unknown fields and invalid bodies return `invalid_todo_request` (400). `todo_open_work` returns 409 with open/held ids. Invalid transitions return `todo_transition_conflict` (409); strict-ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy or DELETE route exists.
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native agent conversation, then falls back to a fresh launch.
 
