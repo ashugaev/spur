@@ -172,6 +172,11 @@ function parseSessionList(value: unknown, worktreePath: string): string | null {
   return typeof sessions[0]?.id === "string" ? sessions[0].id : null;
 }
 
+export function parseOpenCodeSessionListOutput(stdout: string): unknown {
+  const trimmed = stdout.trim();
+  return trimmed ? (JSON.parse(trimmed) as unknown) : [];
+}
+
 export async function findOpenCodeSessionId(worktreePath: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -179,7 +184,7 @@ export async function findOpenCodeSessionId(worktreePath: string): Promise<strin
       ["session", "list", "--format", "json"],
       { cwd: worktreePath, encoding: "utf8", timeout: 5_000 },
     );
-    return parseSessionList(JSON.parse(stdout) as unknown, worktreePath);
+    return parseSessionList(parseOpenCodeSessionListOutput(stdout), worktreePath);
   } catch {
     return null;
   }
@@ -191,7 +196,7 @@ async function listOpenCodeSessionIds(worktreePath: string): Promise<Set<string>
     ["session", "list", "--format", "json"],
     { cwd: worktreePath, encoding: "utf8", timeout: 5_000 },
   );
-  const value = JSON.parse(stdout) as unknown;
+  const value = parseOpenCodeSessionListOutput(stdout);
   if (!Array.isArray(value)) throw new Error("OpenCode returned an invalid session list");
   const sessionIds = new Set<string>();
   for (const entry of value) {

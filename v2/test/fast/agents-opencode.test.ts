@@ -7,6 +7,7 @@ import {
   isSupportedOpenCodeVersion,
   OPENCODE_RESTRICT_WRITES_CONFIG,
   parseOpenCodeExport,
+  parseOpenCodeSessionListOutput,
   parseOpenCodeState,
   withOpenCodeLaunchIdentityLock,
 } from "../../src/agents/opencode.js";
@@ -75,6 +76,11 @@ describe("OpenCode adapter", () => {
     expect(() =>
       diffOpenCodeSessionIds(baseline, new Set(["ses_existing", "ses_sibling_a", "ses_sibling_b"])),
     ).toThrow("refusing ambiguous identity");
+  });
+
+  it("treats OpenCode's blank empty-session list as an empty baseline", () => {
+    expect(parseOpenCodeSessionListOutput("\n")).toEqual([]);
+    expect(() => parseOpenCodeSessionListOutput("not json")).toThrow();
   });
 
   it("serializes fresh identity binding for concurrent launches in one worktree", async () => {
