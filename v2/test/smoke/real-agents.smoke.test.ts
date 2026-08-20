@@ -444,7 +444,7 @@ After the file and the session metadata are set, wait for more instructions.`,
       });
       expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
 
-      const killed = await service.kill(session.id, { force: true });
+      const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
       expect(existsSync(session.worktreePath)).toBe(false);
     } finally {
@@ -517,7 +517,7 @@ async function runOpenCodeSmoke(): Promise<void> {
           ),
       });
 
-      const killed = await service.kill(session.id, { force: true });
+      const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
       expect(existsSync(session.worktreePath)).toBe(false);
     } finally {
