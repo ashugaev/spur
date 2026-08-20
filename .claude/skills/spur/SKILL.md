@@ -19,8 +19,8 @@ INTERFACES
   CLI: `spur --help`, then `spur <command> --help`. Never hard-code a command list — `docs/commands.md` Surface section is the closest static list and can drift.
   Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
   Deploy switch restart behavior: `docs/commands.md#daemon-http-api`.
-  `$SPUR_SESSION_TOOL_DIR` holds `spur` (bound to this session's config), `spur-slots`, `spur-todo`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set. Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path; a login shell rebuilds `PATH` and drops the tool dir. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
-  Spur ToDo is daemon-authoritative and always on. Resolve or cancel open work before completion; hold blockers with a reason. Command and override contract: `docs/commands.md#todo`.
+  Session tool and environment contract: `docs/commands.md`; implementation `v2/src/session-service.ts`. Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path; login shells rebuild `PATH` and drop the tool directory.
+  Spur ToDo: daemon-authoritative, always on. Complete or cancel all items before session completion. Hold blockers with a reason. Command and override contract: `docs/commands.md#todo`.
   Session title write contract: `docs/commands.md`; implementation `v2/src/session-service.ts`.
 
 CONFIG FOOTGUNS
