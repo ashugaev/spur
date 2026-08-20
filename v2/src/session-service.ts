@@ -245,6 +245,7 @@ import {
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
+  TODO_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
@@ -1559,7 +1560,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
-    SPUR_TODO_COMMAND: join(args.sessionToolDir, "spur-todo"),
+    SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.

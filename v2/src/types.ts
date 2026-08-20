@@ -1107,58 +1107,41 @@ export type TodoActor =
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
 
+interface TodoEventBase {
+  version: 1;
+  eventId: string;
+  sessionId: string;
+  at: string;
+  actor: TodoActor;
+}
+
 export type TodoEvent =
-  | {
-      version: 1;
-      eventId: string;
-      sessionId: string;
-      at: string;
-      actor: TodoActor;
+  | (TodoEventBase & {
       type: "item_added";
       itemId: string;
       text: string;
       reason: string;
-    }
-  | {
-      version: 1;
-      eventId: string;
-      sessionId: string;
-      at: string;
-      actor: TodoActor;
+    })
+  | (TodoEventBase & {
       type: "item_completed" | "item_cancelled";
       itemId: string;
       reason: string;
-    }
-  | {
-      version: 1;
-      eventId: string;
-      sessionId: string;
-      at: string;
-      actor: TodoActor;
+    })
+  | (TodoEventBase & {
       type: "item_held";
       itemId: string;
       reason: string;
       blocker: TodoBlocker;
-    }
-  | {
-      version: 1;
-      eventId: string;
-      sessionId: string;
-      at: string;
-      actor: TodoActor;
+    })
+  | (TodoEventBase & {
       type: "item_resumed";
       itemId: string;
-    }
-  | {
-      version: 1;
-      eventId: string;
-      sessionId: string;
-      at: string;
-      actor: TodoActor;
+    })
+  | (TodoEventBase & {
       type: "finish_override_recorded";
       reason: string;
       unfinishedItemIds: string[];
-    };
+    });
 
 export interface TodoItemProjection {
   id: string;

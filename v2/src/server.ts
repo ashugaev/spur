@@ -1492,28 +1492,18 @@ export async function startServer(
           );
           return;
         }
+        const todoOptions =
+          body.todoOverrideReason &&
+          !request.headers["x-spur-caller-session"] &&
+          (origin === "cli" || origin === "ui")
+            ? { todoActor: { kind: "human" as const, origin } }
+            : undefined;
         sendJson(
           response,
           200,
           body.scope === "desk"
-            ? await service.completeDesk(
-                completeSessionId,
-                body,
-                body.todoOverrideReason &&
-                  !request.headers["x-spur-caller-session"] &&
-                  (origin === "cli" || origin === "ui")
-                  ? { todoActor: { kind: "human", origin } }
-                  : undefined,
-              )
-            : await service.complete(
-                completeSessionId,
-                body,
-                body.todoOverrideReason &&
-                  !request.headers["x-spur-caller-session"] &&
-                  (origin === "cli" || origin === "ui")
-                  ? { todoActor: { kind: "human", origin } }
-                  : undefined,
-              ),
+            ? await service.completeDesk(completeSessionId, body, todoOptions)
+            : await service.complete(completeSessionId, body, todoOptions),
         );
         return;
       }

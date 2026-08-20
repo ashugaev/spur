@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import type { SpurTodoActor, SpurTodoProjection } from "@/lib/types";
-import { TodoProgress } from "@/components/TodoProgress";
 
 function actorLabel(actor: SpurTodoActor): string {
   if (actor.kind === "agent") return `${actor.agent} · ${actor.sessionId}`;
@@ -85,7 +84,13 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
       {projection ? (
         <div className="space-y-2">
           <div className="flex items-center gap-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2">
-            <TodoProgress resolved={resolved} total={projection.counts.total} />
+            <div
+              aria-label={`${resolved} of ${projection.counts.total} ToDo items resolved`}
+              className="grid h-8 w-8 shrink-0 place-items-center border border-[var(--color-border-default)] font-bold text-[var(--color-text-primary)]"
+              title={`${projection.counts.total === 0 ? 0 : Math.round((resolved / projection.counts.total) * 100)}% resolved`}
+            >
+              {resolved}/{projection.counts.total}
+            </div>
             <div className="flex flex-wrap gap-3 uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
               <span>{projection.counts.open} open</span>
               <span>{projection.counts.held} held</span>
