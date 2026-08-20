@@ -11,17 +11,18 @@ CLOSE-OUT GATE, mandatory after any code change
 
   1  Branch main/master/empty -> SKIPPED.
   2  Uncommitted files -> route to developer for commit. Never auto-commit here.
-  3  git push -u origin "$(git branch --show-current)"
-  4  gh pr view succeeds -> comment new HEAD SHA. Fails -> CREATE DRAFT PR below.
-  5  Return PR url.
+  3  Implementation diff from branch base empty -> SKIPPED.
+  4  git push -u origin "$(git branch --show-current)"
+  5  gh pr view succeeds -> comment new HEAD SHA. Fails -> CREATE OPEN PR below.
+  6  Return PR url.
 
 PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
-CREATE DRAFT PR
+CREATE OPEN PR
 
   git push -u origin HEAD
 
-  gh pr create --draft \
+  gh pr create \
     --title "<type>: <description>" \
     --body "$(cat <<'EOF'
 ## Summary
