@@ -1,0 +1,78 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionTodo } from "@/components/SessionTodo.js";
+import type { SpurTodoProjection } from "@/lib/types.js";
+
+const projection: SpurTodoProjection = {
+  revision: "event-2",
+  status: "held",
+  counts: { total: 1, open: 0, held: 1, completed: 0, cancelled: 0 },
+  items: [
+    {
+      id: "item-12345678",
+      text: "Choose the public command",
+      status: "held",
+      added: {
+        reason: "Required by the task",
+        actor: { kind: "system", source: "spawn" },
+        at: "2026-08-20T10:00:00.000Z",
+      },
+      latestTransition: {
+        type: "held",
+        reason: "Need product input",
+        blocker: { kind: "human", requiredAction: "Choose command name" },
+        actor: { kind: "agent", agent: "codex", sessionId: "api-1" },
+        at: "2026-08-20T10:01:00.000Z",
+      },
+      history: [
+        {
+          eventId: "event-1",
+          type: "item_added",
+          reason: "Required by the task",
+          actor: { kind: "system", source: "spawn" },
+          at: "2026-08-20T10:00:00.000Z",
+        },
+        {
+          eventId: "event-2",
+          type: "item_held",
+          reason: "Need product input",
+          blocker: { kind: "human", requiredAction: "Choose command name" },
+          actor: { kind: "agent", agent: "codex", sessionId: "api-1" },
+          at: "2026-08-20T10:01:00.000Z",
+        },
+      ],
+    },
+  ],
+  finishOverrides: [],
+};
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("SessionTodo", () => {
+  it("shows compact human action and expands immutable audit detail", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(projection), { status: 200 }),
+    );
+    render(<SessionTodo sessionId="api-1" />);
+
+    expect(screen.getByLabelText("Loading ToDo")).toBeInTheDocument();
+    expect(await screen.findByText("Human action: Choose command name")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /Choose the public command/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Need product input")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /delete|complete|cancel|resume/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the last good projection when polling fails", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify(projection), { status: 200 }))
+      .mockRejectedValue(new Error("transport failed"));
+    render(<SessionTodo sessionId="api-1" />);
+    expect(await screen.findByText("Choose the public command")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Choose the public command")).toBeInTheDocument());
+  });
+});

@@ -313,6 +313,48 @@ export interface SpurSessionView {
   };
 }
 
+export type SpurTodoActor =
+  | { kind: "agent"; agent: AgentName; sessionId: string }
+  | { kind: "human"; origin: "cli" | "ui" }
+  | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
+
+export interface SpurTodoHistoryEvent {
+  eventId: string;
+  type: "item_added" | "item_completed" | "item_cancelled" | "item_held" | "item_resumed";
+  at: string;
+  actor: SpurTodoActor;
+  reason?: string;
+  blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
+}
+
+export interface SpurTodoProjection {
+  revision: string;
+  status: "active" | "held" | "resolved";
+  counts: { total: number; open: number; held: number; completed: number; cancelled: number };
+  items: Array<{
+    id: string;
+    text: string;
+    status: "open" | "held" | "completed" | "cancelled";
+    added: { reason: string; actor: SpurTodoActor; at: string };
+    latestTransition?: {
+      type: "completed" | "cancelled" | "held" | "resumed";
+      reason?: string;
+      blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
+      actor: SpurTodoActor;
+      at: string;
+    };
+    history: SpurTodoHistoryEvent[];
+  }>;
+  finishOverrides: Array<{
+    eventId: string;
+    type: "finish_override_recorded";
+    reason: string;
+    unfinishedItemIds: string[];
+    actor: SpurTodoActor;
+    at: string;
+  }>;
+}
+
 export interface SessionModeInfo {
   skill: string;
   default?: boolean;

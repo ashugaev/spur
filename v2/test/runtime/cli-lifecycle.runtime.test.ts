@@ -4071,7 +4071,7 @@ projects:
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("Claude Code"),
+      accept: (value) => value.includes("Ctrl+G back"),
     });
 
     await sendKeysToTmux(controllerSessionName, "C-g");

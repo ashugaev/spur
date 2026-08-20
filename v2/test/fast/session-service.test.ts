@@ -32,6 +32,7 @@ import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type * as sharedMemoryModule from "../../src/shared-memory.js";
+import type * as todoModule from "../../src/todo.js";
 import type * as reapModule from "../../src/sidecars/reap.js";
 import type * as runtimeTmuxModule from "../../src/runtime-tmux.js";
 import type { ProcSnapshot } from "../../src/sidecars/reap.js";
@@ -55,6 +56,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
+const TODO_PROMPT = `Spur ToDo:
+- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.
+- The initial task already exists. Run \`"$SPUR_TODO_COMMAND" list\` first.
+- Add new requested work with \`"$SPUR_TODO_COMMAND" add --text <text> --reason <reason>\`.
+- Complete, cancel, or hold items with a reason. Human holds must name the required action. Resume held work before continuing.
+- Do not finish or self-destruct with open or held work.`;
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 type HasEstablishedConnections = (port: number) => Promise<"established" | "none" | "unknown">;
@@ -516,6 +523,20 @@ vi.mock("../../src/metadata.js", () => ({
   writeServiceInstance: writeServiceInstanceMock,
   writeSession: writeSessionMock,
 }));
+
+vi.mock("../../src/todo.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof todoModule>();
+  return {
+    ...actual,
+    ensureTodoLedger: vi.fn(() => ({
+      revision: "fixture-resolved",
+      status: "resolved",
+      counts: { total: 1, open: 0, held: 0, completed: 1, cancelled: 0 },
+      items: [],
+      finishOverrides: [],
+    })),
+  };
+});
 
 vi.mock("../../src/agent-hook-state.js", () => ({
   deleteAgentHookState: deleteAgentHookStateMock,
@@ -1682,6 +1703,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -1690,10 +1712,14 @@ describe("SessionService", () => {
         npm_config_globalconfig: npmPinConfigPath(),
       },
     });
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
-      model: "opus",
-      agentSessionId: PINNED_CLAUDE_SESSION_ID,
-    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "claude",
+      expect.stringMatching(/^slot-instructions\nhello\n\nSpur ToDo:/),
+      {
+        model: "opus",
+        agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      },
+    );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("slot-instructions\nhello"),
@@ -2742,7 +2768,7 @@ describe("SessionService", () => {
     await service.spawn({ project: "api", prompt: "hello" });
 
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
-      "slot-instructions\nhello\n\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+      `slot-instructions\nhello\n\nMode: manager. Load the \`manager\` skill and follow it as your behavior contract for this session.\n\n${TODO_PROMPT}`,
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "manager" });
   });
@@ -2756,7 +2782,7 @@ describe("SessionService", () => {
     await service.spawn({ project: "api", prompt: "" });
 
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
-      "slot-instructions\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+      `slot-instructions\nMode: manager. Load the \`manager\` skill and follow it as your behavior contract for this session.\n\n${TODO_PROMPT}`,
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "manager" });
   });
@@ -2770,7 +2796,7 @@ describe("SessionService", () => {
     await service.spawn({ project: "api", prompt: "hello", mode: "council" });
 
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
-      "slot-instructions\nhello\n\nMode: council. Load the `council` skill and follow it as your behavior contract for this session.",
+      `slot-instructions\nhello\n\nMode: council. Load the \`council\` skill and follow it as your behavior contract for this session.\n\n${TODO_PROMPT}`,
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({ mode: "council" });
   });
@@ -2785,7 +2811,9 @@ describe("SessionService", () => {
 
     await service.spawn({ project: "api", prompt: "hello" });
 
-    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe("slot-instructions\nhello");
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+      `slot-instructions\nhello\n\n${TODO_PROMPT}`,
+    );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("mode");
   });
 
@@ -3032,7 +3060,7 @@ describe("SessionService", () => {
     await service.spawn({ project: "api", prompt: "hello", planMode: true });
 
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
-      "slot-instructions\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.\n\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+      `slot-instructions\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.\n\nMode: manager. Load the \`manager\` skill and follow it as your behavior contract for this session.\n\n${TODO_PROMPT}`,
     );
   });
 
@@ -3044,7 +3072,7 @@ describe("SessionService", () => {
     await service.spawn({ project: "api", prompt: "hello", restrictWrites: true });
 
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
-      "slot-instructions\nhello\n\nRestricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.\n\nMode: manager. Load the `manager` skill and follow it as your behavior contract for this session.",
+      `slot-instructions\nhello\n\nRestricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via \`gh\` and call any MCP tool. Use these to communicate review feedback.\n\nMode: manager. Load the \`manager\` skill and follow it as your behavior contract for this session.\n\n${TODO_PROMPT}`,
     );
   });
 
@@ -4095,9 +4123,11 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "slot-instructions\nhello", {
-      reasoningEffort: "high",
-    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "codex",
+      `slot-instructions\nhello\n\n${TODO_PROMPT}`,
+      { reasoningEffort: "high" },
+    );
     expect(writeSessionMock.mock.calls[0]?.[1]).not.toHaveProperty("reasoningEffort");
   });
 
@@ -4122,7 +4152,7 @@ describe("SessionService", () => {
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "codex",
-      "slot-instructions\ndescribe this image",
+      `slot-instructions\ndescribe this image\n\n${TODO_PROMPT}`,
       {
         startupImagePaths: [`${artifactDirForSession("api-1")}/1773828300000-shot.png`],
       },
@@ -4501,6 +4531,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -16416,6 +16447,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -20879,6 +20911,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -21187,6 +21220,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -22034,6 +22068,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_TODO_COMMAND: "/tmp/spur-tools/api-1/spur-todo",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
@@ -25189,7 +25224,7 @@ describe("SessionService", () => {
       expect(createTmuxSessionMock).toHaveBeenCalled();
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
         "claude",
-        "slot-instructions\nfix the bug",
+        `slot-instructions\nfix the bug\n\n${TODO_PROMPT}`,
         {
           model: "opus",
           agentSessionId: PINNED_CLAUDE_SESSION_ID,
@@ -25615,6 +25650,8 @@ describe("SessionService", () => {
           "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-source.png]",
           "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-new.png]",
           "edited prompt",
+          "",
+          TODO_PROMPT,
         ].join("\n"),
         {
           model: "opus",

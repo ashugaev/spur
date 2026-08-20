@@ -4,7 +4,7 @@ CLI reference. Config fields live in [configuration.md](configuration.md).
 
 ## Surface
 
-`init`, `update`, `doctor`, `gc`, `cache`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
+`init`, `update`, `doctor`, `gc`, `cache`, `spawn`, `shepherd`, `list` (`ls`), `connect`, `disconnect`, `wake`, `send`, `queue`, `pause`, `complete`, `todo`, `kill`, `respawn`, `reopen`, `handoff`, `session-memory`, `memory`, `actions`, `service`, `source`, `agent-issue`, `comment-seen`, `subscribe`. Internal and hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
 Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
@@ -144,6 +144,23 @@ A session with one or more sidecars whose age is resolvable shows a compact `sid
 `restore` and `reopen` refuse to launch over a live agent process still carrying that session id: a foreign process outside the pane, or the pane's own process surviving the SIGHUP, SIGTERM, SIGKILL escalation (2s grace per signal). They also refuse when the process table could not be read at all, since "no survivors" would then be a guess; a teardown with no relaunch behind it (`pause`, `complete`, `kill`) proceeds instead of refusing. A first `r` surfaces the refusal; a second `r` on the same session retries with force, which bypasses the foreign-process refusal only — a SIGKILL survivor and an unreadable process table refuse either way. `spur reopen <sessionId> --force` is the CLI equivalent. The foreign-process scan reads `/proc/<pid>/environ`, so off Linux it is skipped, not failed, and it is also skipped when the pane's own pid is unreadable, because the scan cannot then tell the session's own agent from a foreign one.
 
 `reopen <sessionId>` restarts a `completed` session in place — same id, same worktree path, native conversation resumed, original prompt not resent; it refuses when the branch is gone (use `respawn`), when the stored worktree path isn't the session's own (e.g. a desk anchor's) or the rebuild fails, or when a reopen for that session is already running; does not bring back the Telegram binding or session artifacts; MCP sidecars restart through the restore path.
+
+## todo
+
+```bash
+spur todo list --session <id> [--json]
+spur todo add --session <id> --text <text> --reason <reason> [--json]
+spur todo complete|cancel --session <id> <itemId> --reason <reason> [--json]
+spur todo hold --session <id> <itemId> --reason <reason> [--human-action <action>] [--json]
+spur todo resume --session <id> <itemId> [--json]
+spur complete <sessionId> --todo-override-reason <reason>
+```
+
+Every session owns one append-only daemon ToDo ledger. `add`, `complete`, `cancel`, and `hold` require a reason. `--human-action` records a human blocker; `resume` reopens held work. No delete action exists. Open or held work blocks completion, self-destruct, handoff, trigger completion, and desk completion. A host CLI or session-detail user can complete anyway with a fresh reason; item states stay unchanged and the override enters audit history. A target session cannot override itself.
+
+`$SPUR_TODO_COMMAND` points to a session-bound `spur-todo` wrapper. It accepts the same actions without `--session` and cannot target another ledger. `$SPUR_SESSION_TOOL_DIR/spur-todo` is the explicit path when a login shell drops the tool directory from `PATH`.
+
+Daemon routes: `GET /sessions/:id/todo` reads the projection; `POST /sessions/:id/todo` accepts one `add`, `complete`, `cancel`, `hold`, or `resume` request. `todo_open_work` returns 409 with open/held ids. Invalid transitions return `todo_transition_conflict` (409); strict-ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy or DELETE route exists.
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native agent conversation, then falls back to a fresh launch.
 
