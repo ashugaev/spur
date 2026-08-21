@@ -247,7 +247,7 @@ That env reaches the sidecar process only: the agent pane's env freezes before t
 
 A non-MCP sidecar is desk-shared: one tmux pane and port set for the whole [desk group](configuration.md#desk-groups), started and stopped from any member.
 
-Commands run through `sh -lc` with no `exec`, so login-shell init still applies and a sidecar command may start with `VAR=value ...`. `/bin/sh` is `dash` on Debian/Ubuntu, so `source` and nvm's own bashisms are unavailable inline — invoke `bash` explicitly for anything that needs nvm, e.g. a `bash`-shebang script or `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home.
+Commands run through `sh -lc` with no `exec`, so login-shell init still applies and a sidecar command may start with `VAR=value ...`. `/bin/sh` (dash) does not exec-optimize even a single command, so a long-lived server should start its own command with `exec` — otherwise the pane pid is a shell above the real process, which hides the process from pid/args-based reaping and leaves the shell holding unexpanded `$PORT` env. `/bin/sh` is `dash` on Debian/Ubuntu, so `source` and nvm's own bashisms are unavailable inline — invoke `bash` explicitly for anything that needs nvm, e.g. a `bash`-shebang script or `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. If the launching agent's sandbox remaps `$HOME` to a scratch dir, the sidecar inherits it — use `$SPUR_REAL_HOME` (resolved from `/etc/passwd`) to reach the real home.
 
 Sidecars, project services, and the Claude OAuth login pane do NOT inherit the agent session's npm prefix pin (`NPM_CONFIG_PREFIX`/`npm_config_prefix`/`NPM_CONFIG_GLOBALCONFIG`/`npm_config_globalconfig`/`PREFIX` are all stripped) so they can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards. A sidecar's own `npm run`/`npx` invocations still re-export `npm_config_prefix` to their children regardless (vanilla npm behavior), which can trip nvm one level down inside those children.
 
@@ -276,11 +276,35 @@ per-session toggle, no `spur playwright` command.
 
 Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
 with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated
-config survive — the merge reads `~/.claude.json` user-scope servers, `~/.claude.json`
-`projects["<worktree path>"]`, and `<worktree>/.mcp.json`. A fresh worktree has no
+config survive — the merge reads `~/.claude.json` user-scope servers, `<worktree>/.mcp.json`, and
+`~/.claude.json` `projects["<worktree path>"]` (later wins). A fresh worktree has no
 `projects["<worktree path>"]` entry yet, so local-scope servers approved against the main repo path
 are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
-is silently replaced by Spur's own.
+is silently replaced by Spur's own. `~/.claude/settings.json` is not a source: claude ignores an
+`mcpServers` block there, so merging it would start servers the session would otherwise not have.
+
+### Suppressing a host MCP server
+
+A globally-configured MCP server is spawned per session by the agent, whether or not the session
+uses it. `projects.<id>.mcp.exclude` drops named servers from what Spur hands the agent, so a
+project pays no RAM for tooling it does not need:
+
+```yaml
+projects:
+  api:
+    mcp:
+      exclude: [playwright, digitalocean]
+```
+
+Applies to claude (dropped from the generated `mcp-config.json`, which is then launched with
+`--strict-mcp-config`) and codex (the inherited `[mcp_servers.<name>]` table is stripped from the
+session `config.toml`). Cursor has no suppression path. Excluding a name that a sidecar also binds
+is safe: the sidecar wins, so `exclude: [playwright]` plus `sidecars.playwright.autoStart: true`
+gives the session Spur's managed server and not the host's.
+
+For claude, any non-empty `exclude` makes the generated config authoritative for the session, the
+same as enabling an MCP sidecar — the caveats above apply. With no `exclude` and no MCP sidecar,
+Spur passes no MCP flags and claude resolves servers itself.
 
 ## build
 

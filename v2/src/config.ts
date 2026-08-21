@@ -23,6 +23,7 @@ import {
   type JiraSourceConfig,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
+  type ProjectMcpConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
   type ReviewProviderId,
@@ -1021,6 +1022,18 @@ function parseDevServer(projectId: string, value: unknown): DevServerConfig | un
   };
 }
 
+function parseProjectMcp(projectId: string, value: unknown): ProjectMcpConfig | undefined {
+  if (value === undefined) return undefined;
+  const label = `projects.${projectId}.mcp`;
+  const raw = asObject(value, label);
+  const extraKeys = Object.keys(raw).filter((key) => key !== "exclude");
+  if (extraKeys.length > 0) {
+    throw new Error(`${label} only supports "exclude" (got: ${extraKeys.join(", ")})`);
+  }
+  const exclude = asOptionalStringArray(raw["exclude"], `${label}.exclude`) ?? [];
+  return { exclude };
+}
+
 function parseSidecars(
   projectId: string,
   value: unknown,
@@ -1417,6 +1430,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     : devServer
       ? parseDevServerAsSidecar(devServer)
       : {};
+  const mcp = parseProjectMcp(projectId, raw["mcp"]);
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
   const defaultModels = parseDefaultModels(raw["defaultModels"], label);
   const maxLiveSessions = asOptionalPositiveInteger(
@@ -1517,6 +1531,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(branchNaming !== undefined ? { branchNaming } : {}),
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
+    ...(mcp !== undefined ? { mcp } : {}),
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     ...(defaultModels !== undefined ? { defaultModels } : {}),
     ...(modes !== undefined ? { modes } : {}),

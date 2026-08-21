@@ -844,6 +844,42 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     expect(content).toContain('[mcp_servers.playwright]\ncommand = "npx"');
     expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
   });
+
+  it("strips an inherited table for an excluded server and preserves unrelated servers", async () => {
+    setUserConfig(
+      '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
+    );
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpExclude: ["playwright"],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).not.toContain("[mcp_servers.playwright]");
+    expect(content).not.toContain('args = ["@playwright/mcp"]');
+    expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
+  });
+
+  it("keeps the sidecar binding when the same server name is also excluded", async () => {
+    setUserConfig('[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+      mcpExclude: ["playwright"],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
+    expect(count).toBe(1);
+    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://localhost:8742/mcp"');
+    expect(content).not.toContain('args = ["@playwright/mcp"]');
+  });
 });
 
 describe("findCodexSessionId", () => {
