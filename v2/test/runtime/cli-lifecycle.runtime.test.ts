@@ -452,6 +452,35 @@ async function findConsecutiveFreePorts(): Promise<{ start: number; end: number 
   throw new Error("Failed to find consecutive free TCP ports for runtime test");
 }
 
+async function reserveConsecutivePorts(): Promise<{
+  start: number;
+  end: number;
+  occupiedServer: ReturnType<typeof createServer>;
+  freePortGuard: ReturnType<typeof createServer>;
+}> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const occupiedServer = createServer((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+    const freePortGuard = createServer();
+    try {
+      await listenOnAllInterfaces(occupiedServer, 0);
+      const address = occupiedServer.address();
+      if (!address || typeof address === "string" || address.port >= 65_535) {
+        throw new Error("Failed to reserve a valid test port");
+      }
+      const start = address.port;
+      await listenOnAllInterfaces(freePortGuard, start + 1);
+      return { start, end: start + 1, occupiedServer, freePortGuard };
+    } catch {
+      await closeServer(freePortGuard);
+      await closeServer(occupiedServer);
+    }
+  }
+  throw new Error("Failed to reserve consecutive TCP ports for runtime test");
+}
+
 async function listenOnAllInterfaces(
   server: ReturnType<typeof createServer>,
   port: number,
@@ -5432,19 +5461,8 @@ projects:
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
     const port = await findFreePort();
-    const reservedRange = await findConsecutiveFreePorts();
-    const occupiedServer = createServer((_request, response) => {
-      response.writeHead(204);
-      response.end();
-    });
-    const freePortGuard = createServer();
-    await listenOnAllInterfaces(occupiedServer, reservedRange.start);
-    try {
-      await listenOnAllInterfaces(freePortGuard, reservedRange.end);
-    } catch (error) {
-      await closeServer(occupiedServer);
-      throw error;
-    }
+    const { start, end, occupiedServer, freePortGuard } = await reserveConsecutivePorts();
+    const reservedRange = { start, end };
 
     try {
       const context = await createRuntimeTestContext(port);
