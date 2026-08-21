@@ -54,7 +54,13 @@ async function fetchJson(
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   const withOrigin: RequestInit = {
     ...init,
-    headers: { ...(init?.headers ?? {}), "x-spur-origin": "cli" },
+    headers: {
+      ...(init?.headers ?? {}),
+      "x-spur-origin": "cli",
+      ...(process.env["SPUR_SESSION"]
+        ? { "x-spur-caller-session": process.env["SPUR_SESSION"] }
+        : {}),
+    },
   };
   const { response, payload } = await fetchJson(baseUrl, path, withOrigin);
   if (!response.ok) {
