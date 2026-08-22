@@ -52,6 +52,7 @@ interface MockResponses {
   autoUpdate?: { status?: number; payload: unknown };
   onAutoUpdate?: (record: AutoUpdateCallRecord) => void;
   onVersionsFetch?: () => void;
+  autoUpdateDelay?: Promise<void>;
 }
 
 function mockFetch(responses: MockResponses) {
@@ -97,6 +98,7 @@ function mockFetch(responses: MockResponses) {
         }
       }
       responses.onAutoUpdate?.({ body: parsedBody });
+      if (responses.autoUpdateDelay) await responses.autoUpdateDelay;
       const autoUpdateResponse = responses.autoUpdate ?? { payload: { autoUpdate: true } };
       return new Response(JSON.stringify(autoUpdateResponse.payload), {
         status: autoUpdateResponse.status ?? 200,
@@ -542,6 +544,39 @@ describe("VersionMenu", () => {
       expect(checkbox).toBeChecked();
     });
     expect(autoUpdateCalls).toEqual([{ body: { enabled: true } }]);
+  });
+
+  it("dims the whole Auto control together while the toggle request is in flight", async () => {
+    let releaseAutoUpdate: (() => void) | undefined;
+    const autoUpdateDelay = new Promise<void>((resolve) => {
+      releaseAutoUpdate = resolve;
+    });
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [], autoUpdate: false } },
+      autoUpdate: { payload: { autoUpdate: true } },
+      autoUpdateDelay,
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      expect(checkbox).toBeDisabled();
+    });
+    const label = checkbox.closest("label");
+    expect(label?.className).toContain("cursor-not-allowed");
+    expect(label?.className).toContain("opacity-50");
+    expect(label?.className).not.toContain("cursor-pointer");
+
+    releaseAutoUpdate?.();
+    await waitFor(() => {
+      expect(checkbox).not.toBeDisabled();
+    });
+    expect(label?.className).toContain("cursor-pointer");
+    expect(label?.className).not.toContain("opacity-50");
   });
 
   it("leaves the box at the previous server value on a failed toggle", async () => {

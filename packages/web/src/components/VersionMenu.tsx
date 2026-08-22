@@ -286,13 +286,15 @@ export function VersionMenu() {
               </span>
             </div>
             <label
-              className="flex cursor-pointer items-center gap-1.5"
+              className={`flex items-center gap-1.5 ${
+                autoUpdateMutation.isPending ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+              }`}
               title="Update automatically as soon as a new version is detected"
             >
               <input
                 aria-label="Auto update"
                 checked={autoUpdateOn}
-                className="accent-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="accent-[var(--color-accent)] disabled:cursor-not-allowed"
                 disabled={autoUpdateMutation.isPending}
                 type="checkbox"
                 onChange={(event) => autoUpdateMutation.mutate(event.target.checked)}
