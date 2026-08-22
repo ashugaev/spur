@@ -102,6 +102,7 @@ const findProjectConfigPathInDirectoryMock = vi.fn();
 const loadInstanceConfigReadOnlyMock = vi.fn();
 const startDeploySwitchMock = vi.fn();
 const getReleasesMock = vi.fn();
+const getVersionMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
 const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
@@ -474,6 +475,16 @@ vi.mock("../../src/releases-cache.js", async (importOriginal) => {
   const actual = await importOriginal<typeof releasesCacheModule>();
   return { ...actual, getReleases: getReleasesMock };
 });
+
+// Only exercised by the auto-update wiring tests (issue #754): the real
+// getVersion() resolves through git-describe / package.json state that
+// differs between a local worktree and a CI checkout (shallow clone with no
+// tags, the managed-placeholder package.json version, etc.) — an ambient,
+// non-deterministic input the "strictly newer" comparison must not depend
+// on for a test that has to prove one specific outcome.
+vi.mock("../../src/version.js", () => ({
+  getVersion: getVersionMock,
+}));
 
 vi.mock("../../src/event-log.js", async (importOriginal) => {
   const actual = await importOriginal<typeof eventLogModule>();
@@ -35110,6 +35121,13 @@ describe("SessionService", () => {
       loadInstanceConfigReadOnlyMock.mockReset();
       startDeploySwitchMock.mockReset();
       getReleasesMock.mockReset();
+      // A real release string, deterministic regardless of this host's git
+      // history/tags or package.json state — the "strictly newer" decision
+      // must never depend on the ambient getVersion() the daemon itself
+      // would resolve (git-describe locally vs. a CI checkout's shallow
+      // clone / managed-placeholder package.json can both give a different
+      // answer to "is 999.0.0 newer than the running version").
+      getVersionMock.mockReset().mockReturnValue("1.0.0");
     });
 
     it("reads autoUpdate from disk on every reaper tick, decoupled from the in-memory config snapshot, and adds no new timer", async () => {
