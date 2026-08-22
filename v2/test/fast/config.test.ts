@@ -4456,6 +4456,70 @@ projects:
   });
 });
 
+describe("autoUpdate", () => {
+  it("defaults to false when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.autoUpdate).toBe(false);
+  });
+
+  it("parses autoUpdate: true in instance mode", async () => {
+    const configPath = await writeConfig(`
+autoUpdate: true
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.autoUpdate).toBe(true);
+  });
+
+  it("parses autoUpdate: false in instance mode", async () => {
+    const configPath = await writeConfig(`
+autoUpdate: false
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.autoUpdate).toBe(false);
+  });
+
+  it("throws on a non-boolean value", async () => {
+    const configPath = await writeConfig(`
+autoUpdate: "yes"
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow("autoUpdate must be a boolean");
+  });
+
+  it("ignores a project-level autoUpdate key", async () => {
+    const configPath = await writeConfig(`
+autoUpdate: true
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.autoUpdate).toBe(false);
+  });
+});
+
 describe("derive memory floors", () => {
   it("derives ordered defaults for the measured 62.789 GiB host", () => {
     const totalBytes = 67_418_697_728;

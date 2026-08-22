@@ -1704,6 +1704,10 @@ function parseSidecarGc(value: unknown): AppConfig["sidecarGc"] {
   };
 }
 
+// Opt-in only: this key can make the daemon self-update. Default must stay
+// false so an untouched host never switches versions on its own.
+const DEFAULT_AUTO_UPDATE = false;
+
 // Estimated from an agent, Playwright MCP sidecar, and isolated daemon:
 // 1.5 GiB per session leaves room above the 1.21 GiB design estimate.
 const DEFAULT_ADMISSION_MAX_LIVE_SESSIONS = 100;
@@ -2097,6 +2101,10 @@ function parseConfigFile(
         ? (asNonNegativeNumber(root["staleAfterMinutes"], "staleAfterMinutes") ??
           DEFAULT_STALE_AFTER_MINUTES)
         : DEFAULT_STALE_AFTER_MINUTES,
+    autoUpdate:
+      mode === "instance"
+        ? (asOptionalBoolean(root["autoUpdate"], "autoUpdate") ?? DEFAULT_AUTO_UPDATE)
+        : DEFAULT_AUTO_UPDATE,
     projects: normalizedProjects,
     tags,
   };
