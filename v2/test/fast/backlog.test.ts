@@ -87,6 +87,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       },
     },
     staleAfterMinutes: 60,
+    autoUpdate: false,
     tags: [],
     projects: {
       api: {

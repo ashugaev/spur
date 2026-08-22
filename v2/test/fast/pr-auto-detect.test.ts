@@ -263,6 +263,7 @@ function baseConfig(): AppConfig {
       },
     },
     staleAfterMinutes: 60,
+    autoUpdate: false,
     projects: {
       api: {
         path: "/repo/api",
