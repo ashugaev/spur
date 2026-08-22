@@ -1,6 +1,6 @@
 import type * as FsModule from "node:fs";
 import { lstat, readFile, readdir, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigModule from "../../src/config.js";
 import { createTempDir } from "../helpers/common.js";
@@ -174,6 +174,45 @@ describe("writeAutoUpdateFlag", () => {
     expect(targetText).toContain("autoUpdate: true");
     const linkStat = await lstat(linkPath);
     expect(linkStat.isSymbolicLink()).toBe(true);
+  });
+
+  describe("temp file placement", () => {
+    afterEach(async () => {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    });
+
+    it("writes the temp file beside the resolved config, not in a different directory", async () => {
+      // Asserts the PATH passed to writeFileSync directly, not the write's
+      // outcome: every fixture in this file already lives under the OS temp
+      // dir, so a regression that puts the temp file in os.tmpdir() instead
+      // of dirname(resolved) would still succeed on this filesystem and
+      // leave every outcome-based assertion green. Only inspecting the
+      // captured path catches it.
+      const path = await tempConfig("projects: {}\n");
+      const capturedPaths: string[] = [];
+
+      vi.resetModules();
+      vi.doMock("node:fs", async () => {
+        const actual = await vi.importActual<typeof FsModule>("node:fs");
+        return {
+          ...actual,
+          writeFileSync: (target: unknown, ...rest: unknown[]) => {
+            if (typeof target === "string") capturedPaths.push(target);
+            return (actual.writeFileSync as (...args: unknown[]) => void)(target, ...rest);
+          },
+        };
+      });
+
+      const { writeAutoUpdateFlag: mockedWrite } = await import("../../src/auto-update-config.js");
+      const result = mockedWrite(path, true);
+
+      expect(result).toEqual({ ok: true, autoUpdate: true });
+      expect(capturedPaths).toHaveLength(1);
+      const [tempPath] = capturedPaths;
+      expect(tempPath).toBeDefined();
+      expect(dirname(tempPath ?? "")).toBe(dirname(path));
+    });
   });
 
   describe("conflict detection", () => {

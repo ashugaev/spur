@@ -7,6 +7,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { dirname } from "node:path";
 import { isMap, parseDocument } from "yaml";
 import { loadInstanceConfigReadOnly } from "./config.js";
 
@@ -95,6 +96,14 @@ export function writeAutoUpdateFlag(configPath: string, enabled: boolean): Write
     const next = doc.toString();
 
     tempPath = `${resolved}.tmp.${process.pid}.${Date.now()}`;
+    // Enforced, not just implied by the template above: a temp file outside
+    // `dirname(resolved)` makes the final `renameSync` cross a filesystem
+    // boundary on a host where the config and the OS temp dir sit on
+    // different devices, turning a routine disarm into an uncaught `EXDEV`
+    // instead of the declared `io` result.
+    if (dirname(tempPath) !== dirname(resolved)) {
+      throw new Error("temp file must be created in the same directory as the resolved config");
+    }
     writeFileSync(tempPath, next, "utf8");
 
     // Validate the produced text before it can ever land: a write that
