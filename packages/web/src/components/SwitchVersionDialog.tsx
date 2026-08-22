@@ -8,6 +8,7 @@ interface SwitchVersionDialogProps {
   pending: string;
   status: "idle" | "pending" | "error";
   errorMessage: string | null;
+  autoUpdate: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -20,6 +21,7 @@ export function SwitchVersionDialog({
   pending,
   status,
   errorMessage,
+  autoUpdate,
   onConfirm,
   onCancel,
 }: SwitchVersionDialogProps) {
@@ -93,6 +95,7 @@ export function SwitchVersionDialog({
           Switch from <span className="text-[var(--color-text-primary)]">{current || "?"}</span> to{" "}
           <span className="text-[var(--color-text-primary)]">{pending}</span>? The Spur daemon will
           restart. Refresh this page in about 10 seconds.
+          {autoUpdate ? " Auto update will be turned off." : null}
         </p>
         {status === "error" && errorMessage ? (
           <p

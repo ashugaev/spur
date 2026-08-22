@@ -337,6 +337,12 @@ describe("buildUserActionRecord decoder", () => {
     expect(build({ path: "/sessions/demo-1/session-memory/k" })?.action).toBe("session.memory_set");
   });
 
+  it("decodes deploy.auto_update", () => {
+    expect(build({ path: "/deploy/auto-update" })).toMatchObject({
+      action: "deploy.auto_update",
+    });
+  });
+
   it("decodes queue remove/flush with sessionId, never falling through to unknown", () => {
     expect(build({ path: "/sessions/demo-1/queue/remove" })).toMatchObject({
       action: "session.queue_remove",

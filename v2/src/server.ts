@@ -1,17 +1,13 @@
-import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { fileURLToPath, URL } from "node:url";
+import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
+import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { deploySwitchStatePath, reconcileDeploySwitchState } from "./deploy-switch-state.js";
+import { startDeploySwitch } from "./deploy-switch.js";
 import { EventBus } from "./event-bus.js";
-import {
-  deploySwitchStatePath,
-  readProcessStartTime,
-  reconcileDeploySwitchState,
-  writeDeploySwitchState,
-} from "./deploy-switch-state.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
   flushEventLogCollapse,
@@ -34,7 +30,7 @@ import { initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
-import { getReleases, isReleaseVersion } from "./releases-cache.js";
+import { getReleases } from "./releases-cache.js";
 import {
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
@@ -678,9 +674,17 @@ export async function startServer(
 
       if (method === "GET" && path === "/deploy/versions") {
         const releases = await getReleases();
+        const autoUpdateFlag = readAutoUpdateFlag(service.config.configPath);
+        if (autoUpdateFlag.error) {
+          logEvent("daemon.auto_update.config_invalid", {
+            level: "warn",
+            message: autoUpdateFlag.error,
+          });
+        }
         sendJson(response, 200, {
           current: getVersion(),
           available: releases.entries,
+          autoUpdate: autoUpdateFlag.autoUpdate,
           ...(releases.stale ? { stale: true } : {}),
           ...(releases.error ? { registryError: releases.error } : {}),
         });
@@ -695,83 +699,89 @@ export async function startServer(
       if (method === "POST" && path === "/deploy/switch") {
         const body = await readJsonBody<{ version?: unknown }>(request);
         const requestedVersion = typeof body.version === "string" ? body.version : "";
-        if (!isReleaseVersion(requestedVersion)) {
-          sendError(response, 400, "invalid version");
-          return;
-        }
-        const activeSwitch = reconcileDeploySwitchState(switchStatePath);
-        if (activeSwitch?.phase === "running") {
-          sendJson(response, 409, {
-            error: `deploy switch already in progress for ${activeSwitch.version}`,
-            inProgress: true,
-            version: activeSwitch.version,
-          });
-          return;
-        }
-        // Guard: refuse to run when the daemon is executing from a source
-        // checkout (e.g. `tsx`/`node v2/dist/cli.js` outside `node_modules`).
-        // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
-        const here = fileURLToPath(new URL(".", import.meta.url));
-        const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
-        if (!forceSwitch && !here.includes("/node_modules/@shugaev/spur/")) {
-          sendError(response, 409, "running from source checkout");
-          return;
-        }
-        const releases = await getReleases();
-        if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
-          if (releases.entries.length === 0 && releases.error) {
+        const result = await startDeploySwitch({
+          version: requestedVersion,
+          statePath: switchStatePath,
+        });
+        switch (result.status) {
+          case "invalid_version":
+            sendError(response, 400, "invalid version");
+            return;
+          case "in_progress":
+            sendJson(response, 409, {
+              error: `deploy switch already in progress for ${result.version}`,
+              inProgress: true,
+              version: result.version,
+            });
+            return;
+          case "source_checkout":
+            sendError(response, 409, "running from source checkout");
+            return;
+          case "registry_unreachable":
             sendError(response, 503, "npm registry unreachable");
             return;
+          case "not_in_registry":
+            sendError(response, 400, "version not in registry");
+            return;
+          case "spawn_failed":
+            sendError(response, 500, result.message);
+            return;
+          case "accepted":
+          case "already_current": {
+            // Disarm on every accepted switch, spawned or already-current:
+            // the issue requires auto-update not to re-arm once a pinned
+            // version becomes current again. This never lives in
+            // `startDeploySwitch` — the auto path must not be able to
+            // disarm itself.
+            const disarmResult = writeAutoUpdateFlag(service.config.configPath, false);
+            if (!disarmResult.ok) {
+              logEvent("daemon.auto_update.disarm_failed", {
+                level: "warn",
+                details: { reason: disarmResult.reason, message: disarmResult.message },
+              });
+            }
+            const autoUpdateAfterDisarm = disarmResult.ok
+              ? disarmResult.autoUpdate
+              : readAutoUpdateFlag(service.config.configPath).autoUpdate;
+            sendJson(response, 202, {
+              accepted: true,
+              version: result.version,
+              autoUpdate: autoUpdateAfterDisarm,
+            });
+            return;
           }
-          sendError(response, 400, "version not in registry");
+        }
+      }
+
+      if (method === "POST" && path === "/deploy/auto-update") {
+        const body = await readJsonBody<{ enabled?: unknown }>(request);
+        if (typeof body.enabled !== "boolean") {
+          sendError(response, 400, "enabled must be a boolean");
           return;
         }
-        if (requestedVersion !== getVersion()) {
-          const helperPath = fileURLToPath(
-            new URL("../scripts/install-and-restart.sh", import.meta.url),
-          );
-          const child = spawn("bash", [helperPath, requestedVersion], {
-            detached: true,
-            stdio: "ignore",
-            env: { ...process.env, SPUR_INSTALL_STATUS_FILE: switchStatePath },
-          });
-          if (child.pid === undefined) {
-            sendError(response, 500, "failed to start deploy switch");
-            return;
-          }
-          const startedAt = new Date().toISOString();
-          const processStartTime = readProcessStartTime(child.pid);
-          if (!processStartTime) {
-            sendError(response, 500, "failed to identify deploy switch process");
-            return;
-          }
-          writeDeploySwitchState(switchStatePath, {
-            phase: "running",
-            version: requestedVersion,
-            pid: child.pid,
-            processStartTime,
-            startedAt,
-          });
-          // The helper writes its own terminal status, but only after it arms the
-          // trap: this covers a spawn error and the exits before that (bad
-          // version, lock timeout). Losing the race to the helper is harmless —
-          // both writes carry the same outcome.
-          const finishSwitch = (exitCode: number): void => {
-            writeDeploySwitchState(switchStatePath, {
-              phase: exitCode === 0 ? "succeeded" : "failed",
-              version: requestedVersion,
-              pid: child.pid ?? process.pid,
-              startedAt,
-              finishedAt: new Date().toISOString(),
-              exitCode,
-            });
-          };
-          child.once("error", () => finishSwitch(-1));
-          child.once("exit", (code) => finishSwitch(code ?? -1));
-          child.unref();
+        const writeResult = writeAutoUpdateFlag(service.config.configPath, body.enabled);
+        if (writeResult.ok) {
+          sendJson(response, 200, { autoUpdate: writeResult.autoUpdate });
+          return;
         }
-        sendJson(response, 202, { accepted: true, version: requestedVersion });
-        return;
+        switch (writeResult.reason) {
+          case "conflict":
+            sendError(response, 409, "config changed on disk");
+            return;
+          case "config_invalid":
+            sendError(response, 409, writeResult.message);
+            return;
+          case "not_mapping":
+            sendError(response, 409, "config is not a YAML mapping");
+            return;
+          case "missing":
+            sendError(response, 409, "config not found");
+            return;
+          case "invalid_output":
+          case "io":
+            sendError(response, 500, writeResult.message);
+            return;
+        }
       }
 
       if (method === "GET" && path === "/claude-accounts") {
