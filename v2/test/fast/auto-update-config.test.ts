@@ -1,5 +1,5 @@
 import type * as FsModule from "node:fs";
-import { lstat, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigModule from "../../src/config.js";
@@ -211,7 +211,11 @@ describe("writeAutoUpdateFlag", () => {
       expect(capturedPaths).toHaveLength(1);
       const [tempPath] = capturedPaths;
       expect(tempPath).toBeDefined();
-      expect(dirname(tempPath ?? "")).toBe(dirname(path));
+      // Compare against the realpath'd config, not the raw fixture path: on
+      // a host where the OS temp dir is itself a symlink (macOS /var ->
+      // /private/var), the two dirnames legitimately differ.
+      const resolvedPath = await realpath(path);
+      expect(dirname(tempPath ?? "")).toBe(dirname(resolvedPath));
     });
   });
 
