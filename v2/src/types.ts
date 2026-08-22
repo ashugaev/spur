@@ -723,11 +723,8 @@ export interface AppConfig {
   };
   admission: AdmissionConfig;
   staleAfterMinutes: number;
-  // Disk is the source of truth for this key. `readAutoUpdateFlag` in
-  // `auto-update-config.ts` is the only reader; no runtime code may decide
-  // anything off a long-lived `service.config.autoUpdate` because a hand
-  // edit to the config file never reaches a running daemon except through
-  // `applyConfig`, which this field never triggers.
+  // Never decide off this snapshot: `readAutoUpdateFlag` in
+  // `auto-update-config.ts` re-reads the key from disk, and says why.
   autoUpdate: boolean;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];

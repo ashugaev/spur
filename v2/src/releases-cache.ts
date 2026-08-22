@@ -19,11 +19,8 @@ function isDeprecated(meta: unknown): boolean {
   return typeof deprecated === "string" && deprecated !== "";
 }
 
-// Exported for auto-update.ts: reused as the "strictly newer" test rather
-// than writing a second semver comparator. Non-release strings (e.g. a
-// git-describe version from a source checkout) parse every component to
-// NaN via Number.parseInt, and every NaN comparison is false — the "strictly
-// newer" test then fails closed, which is intended, not accidental.
+// Exported for auto-update.ts's "strictly newer" test — one comparator, not
+// two. Non-release strings compare as NaN there by design; see that call site.
 export function compareSemverDesc(a: string, b: string): number {
   const parse = (s: string): [number, number, number] => {
     const parts = s.split(".").map((n) => Number.parseInt(n, 10));

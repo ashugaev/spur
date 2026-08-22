@@ -16,11 +16,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const enabled = body.enabled;
   try {
     const daemonResponse = await spurRequest(
       "/deploy/auto-update",
-      spurJsonInit("POST", { enabled }),
+      spurJsonInit("POST", { enabled: body.enabled }),
     );
     const text = await daemonResponse.text();
     const payload: unknown = text ? JSON.parse(text) : {};

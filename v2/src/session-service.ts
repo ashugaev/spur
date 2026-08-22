@@ -2539,10 +2539,8 @@ export class SessionService {
   }
 
   // Folds the auto-update check into the existing reaper tick — no new
-  // timer. Reads the `autoUpdate` flag from disk on every call
-  // (`readAutoUpdateFlag`), never from `this.config.autoUpdate`: a hand
-  // edit to the config file never reaches a running daemon through
-  // `applyConfig`, so disk must be the single source of truth here.
+  // timer. `readAutoUpdateFlag` re-reads the flag from disk on every call,
+  // never `this.config.autoUpdate` (rationale in auto-update-config.ts).
   private async runAutoUpdateTick(): Promise<void> {
     try {
       await runAutoUpdateTick({

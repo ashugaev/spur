@@ -77,16 +77,13 @@ export function writeAutoUpdateFlag(configPath: string, enabled: boolean): Write
     // root, not a broken `autoUpdate` field, so skip the validity/no-op
     // check below entirely when there is nothing yet to validate.
     if (doc.contents !== null) {
+      // `absent` cannot happen here — `existsSync`/`realpathSync` above
+      // already confirmed the file — so only `invalid` is mapped.
       const readResult = loadInstanceConfigReadOnly(resolved);
-      if (readResult.status === "absent") {
-        // Unreachable in practice: `existsSync`/`realpathSync` above already
-        // confirmed the file is there. Kept for exhaustive narrowing.
-        return { ok: false, reason: "missing", message: `config not found at ${resolved}` };
-      }
       if (readResult.status === "invalid") {
         return { ok: false, reason: "config_invalid", message: readResult.error };
       }
-      if (readResult.config.autoUpdate === enabled) {
+      if (readResult.status === "ok" && readResult.config.autoUpdate === enabled) {
         // No churn on the user's file: the effective value (default-applied)
         // already matches. Comparing the effective value rather than the
         // raw scalar means disarming an already-off host writes nothing.

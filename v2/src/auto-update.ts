@@ -1,4 +1,5 @@
 import { compareSemverDesc, type ReleasesResult } from "./releases-cache.js";
+import type { ReadAutoUpdateFlagResult } from "./auto-update-config.js";
 import type { DeploySwitchResult } from "./deploy-switch.js";
 import type { DeploySwitchState } from "./deploy-switch-state.js";
 import type { SpurLogEntry } from "./event-log.js";
@@ -13,7 +14,7 @@ export interface RunAutoUpdateTickDeps {
   configPath: string;
   statePath: string;
   currentVersion: string;
-  readFlag: (path: string) => { autoUpdate: boolean; error: string | null };
+  readFlag: (path: string) => ReadAutoUpdateFlagResult;
   readState: (path: string) => DeploySwitchState | null;
   getReleases: () => Promise<ReleasesResult>;
   start: (version: string) => Promise<DeploySwitchResult>;
@@ -47,10 +48,8 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
   // all returns a bare abbreviated SHA (no dots); Number.parseInt on its
   // leading non-digit character yields NaN, and every NaN comparison is
   // false, so this test fails closed rather than treating an untagged
-  // source checkout as always-behind. (A git-describe string built on top
-  // of a real tag instead inherits that tag's own numeric components and
-  // compares like an ordinary release rooted at that tag — this guard is
-  // specifically about the no-tags-at-all case.)
+  // source checkout as always-behind. A describe string rooted at a real
+  // tag inherits that tag's numbers and compares like an ordinary release.
   if (!(compareSemverDesc(candidate.tag, currentVersion) < 0)) return;
 
   // Retry suppression: any terminal record naming this exact candidate

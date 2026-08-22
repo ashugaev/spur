@@ -106,51 +106,19 @@ describe("POST /deploy/auto-update", () => {
       vi.resetModules();
     });
 
-    it("returns 409 on a stamp conflict", async () => {
-      vi.resetModules();
-      vi.doMock("../../src/auto-update-config.js", async () => {
-        const actual = await vi.importActual<typeof AutoUpdateConfigModule>(
-          "../../src/auto-update-config.js",
-        );
-        return {
-          ...actual,
-          writeAutoUpdateFlag: () =>
-            ({
-              ok: false,
-              reason: "conflict",
-              message: "spur.yaml changed on disk",
-            }) as const,
-        };
-      });
-
-      const { startServer: mockedStartServer } = await import("../../src/server.js");
-      const port = await findFreePort();
-      const configPath = await setupConfig(port);
-      const server = await mockedStartServer(configPath, {
-        info: () => undefined,
-        warn: () => undefined,
-      });
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/deploy/auto-update`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ enabled: true }),
-        });
-        expect(response.status).toBe(409);
-        const body: unknown = await response.json();
-        expect(body).toEqual({ error: "config changed on disk" });
-      } finally {
-        await server.stop();
-      }
-    });
-
-    it("maps config_invalid, not_mapping, and missing to 409, and invalid_output/io to 500", async () => {
+    it("maps conflict, config_invalid, not_mapping, and missing to 409, and invalid_output/io to 500", async () => {
       const cases: Array<{
-        reason: "config_invalid" | "not_mapping" | "missing" | "invalid_output" | "io";
+        reason: "conflict" | "config_invalid" | "not_mapping" | "missing" | "invalid_output" | "io";
         message: string;
         expectedStatus: number;
         expectedError: string;
       }> = [
+        {
+          reason: "conflict",
+          message: "spur.yaml changed on disk",
+          expectedStatus: 409,
+          expectedError: "config changed on disk",
+        },
         {
           reason: "config_invalid",
           message: "autoUpdate must be a boolean",
