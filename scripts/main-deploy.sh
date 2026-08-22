@@ -14,7 +14,8 @@ LOCKFILE="${SPUR_DEPLOY_LOCKFILE:-$HOME/.spur/main-deploy.lock}"
 # Default matches deploy/spur-web.service: ExecStart runs `pnpm ui:start`,
 # which is `pnpm --dir packages/web start` -> serves $deploy_root/packages/web/.next.
 # A host hand-switched to the npm-package units serves a different .next; do
-# not repoint this default to accommodate that (out of scope, see spec).
+# not repoint this default to accommodate that — it targets a different
+# deploy path (see docs/install-from-source.md), not this systemd-unit one.
 web_next_dir="${SPUR_DEPLOY_WEB_NEXT_DIR:-$deploy_root/packages/web/.next}"
 daemon_env_file="${MAIN_DEPLOY_DAEMON_ENV_FILE:-/etc/spur/daemon.env}"
 systemd_unit_dir="${MAIN_DEPLOY_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -218,7 +219,7 @@ verify_and_heal() {
     exit 1
   fi
 
-  local attempt
+  local attempt unverified_streak=0
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if web_chunks_consistent && [[ "$web_chunks_verified" == true ]]; then
       return 0
@@ -229,12 +230,25 @@ verify_and_heal() {
       systemctl_cmd stop spur-web.service
       sleep 2
       systemctl_cmd start spur-web.service
-    elif [[ "$web_chunks_verified" != true ]] || ! web_is_serving; then
+    elif [[ "$web_chunks_verified" != true ]]; then
       # Unverified (body fetch failed) is treated the same as not-serving: keep
       # polling on the cheap single-shot curl rather than adding a dedicated
       # wait here — the only pause between the heal start above and the first
       # re-check is `sleep 2`, so a normal prod heal can still be unverified on
-      # attempt 2 without that being a hard failure.
+      # attempt 2 without that being a hard failure. But two quick unverified
+      # attempts in a row mean the cheap curl alone isn't catching a spur-web
+      # that is merely slow to come up, not broken: fall through once to
+      # web_is_serving's own 10s-per-attempt poll so a slow heal still gets
+      # real patience, then go back to the cheap cadence so a spur-web that
+      # never comes up (never verified) doesn't pay that cost every attempt.
+      unverified_streak=$((unverified_streak + 1))
+      if [[ "$unverified_streak" == 2 ]]; then
+        web_is_serving || true
+      else
+        sleep 1
+      fi
+      continue
+    elif ! web_is_serving; then
       sleep 1
       continue
     else

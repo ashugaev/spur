@@ -142,7 +142,7 @@ For a private-bound deploy, also probe `http://<private-ip>:5555` from another d
 
 ## Release + auto-deploy
 
-Release: merge to `main`, SSH in, `pnpm main:deploy`, re-verify. A failed deploy doesn't advance the SHA stamp — the next run retries the same commit; don't delete the stamp to force it. A failed deploy also leaves `spur-web.service` running (the script restores it on exit if the run had stopped it), so the previous build keeps serving until the retry succeeds.
+Release: merge to `main`, SSH in, `pnpm main:deploy`, re-verify. A failed deploy doesn't advance the SHA stamp — the next run retries the same commit; don't delete the stamp to force it. A failed deploy also leaves `spur-web.service` running (the script restores it on exit if the run had stopped it) instead of down. That restarted `spur-web` can still be serving a half-written build if the failure was mid-build (`next build` writes into `.next` in place) — the next run's chunk-consistency check catches that before advancing the stamp.
 
 Optional hourly auto-release from the managed clone:
 
