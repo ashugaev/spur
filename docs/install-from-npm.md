@@ -117,18 +117,12 @@ spur update
 
 `spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and makes up to 60 daemon and web readiness polls. A failed reinit exits the command; after a successful reinit, the detached health monitor owns auto-rollback. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). Deploy switch route behavior lives in [commands.md](commands.md#daemon-http-api).
 
-With [`autoUpdate: true`](configuration.md#auto-update) the daemon self-updates once a newer version publishes, through the same deploy-switch path. To pin a version by hand while auto-update is on, disable it first, then switch — in this order:
+With [`autoUpdate: true`](configuration.md#auto-update) the daemon self-updates once a newer version publishes, through the same deploy-switch path. Pin a version by hand in this order:
 
-```bash
-# 1. disable auto-update
-# edit ~/.spur/config.yaml: autoUpdate: false
-# 2. then pin the version
-spur update <version>
-# or, superseding a live monitor / unhealthy preflight:
-spur update --force <version>
-```
+1. Set `autoUpdate: false` in `~/.spur/config.yaml`. No daemon restart needed.
+2. Then `spur update <version>` — add `--force` if it refuses.
 
-Reversed order re-arms the daemon before the pin lands, and the next 5-minute tick can move the host off the version you just pinned. `spur update <version>` does not itself write a durable deploy-switch status record — only the daemon-driven `POST /deploy/switch` path does — so a completed CLI pin does not, on its own, suppress a later auto-update retry at that same version.
+Pin first and the flag is still armed: within the next 5-minute tick the daemon sees a newer published version and moves the host straight off the pin. A CLI pin writes no deploy-switch status record, so it suppresses nothing on its own — clearing the flag is what stops the daemon.
 
 ## Security
 

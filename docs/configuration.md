@@ -445,22 +445,17 @@ Unit files in this repository are templates only. Source deployments apply them 
 
 ## Auto update
 
-`autoUpdate` (instance config only, default `false`) lets the daemon self-update: once the npm registry publishes a version strictly newer than the running one, the daemon starts the same switch a human `Switch` press starts, through the same executor, guards, and durable status record — see [Daemon HTTP API](commands.md#daemon-http-api).
+`autoUpdate` (instance config only, default `false`) lets the daemon self-update: once the npm registry publishes a version strictly newer than the running one, the daemon runs the same switch a `Switch` press runs, through the same executor, guards, and durable status record — see [Daemon HTTP API](commands.md#daemon-http-api).
 
-No new timer: the check folds into the existing 5-minute reaper tick. The daemon re-reads the flag from disk on every tick, never from its in-memory config, so a hand edit to `~/.spur/config.yaml` takes effect on the next tick without a daemon restart — the same 5-minute tick, no reload required.
+Toggle it from the `Auto` checkbox in the web UI version popover, or by hand: set `autoUpdate: true` (or `false`) in `~/.spur/config.yaml`. The daemon re-reads the key from disk every tick, so a hand edit lands on the next tick with no restart.
 
-Detection latency is up to ~15 minutes worst case from publish: one 5-minute reaper tick plus the registry cache's 10-minute TTL. Not immediate.
+The check rides the existing 5-minute reaper tick, and the registry listing caches for 10 minutes, so detection lags a publish by up to ~15 minutes. Not immediate.
 
-Any `Switch` press — from the popover or the tick itself finishing a spawn — writes `autoUpdate: false` back to the config file, so the flag never re-arms once a pinned version becomes current again. A switch to a given version that failed once is not retried automatically: the daemon skips a candidate that already has a terminal (`succeeded` or `failed`) record in its own durable status file, whether or not the daemon itself ended up running that version.
+An accepted `POST /deploy/switch` — what the `Switch` button sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not, so a self-updated host stays armed for the next release. A candidate that already holds a terminal (`succeeded` or `failed`) record in the deploy-switch status file is never retried automatically. Events: `daemon.auto_update.started`, `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`.
 
-The deploy-switch path rolls back on a package-validation failure and on a failed `spur reinit`/health gate ([install-from-npm.md#upgrade](install-from-npm.md#upgrade)). Neither this path nor `spur update`'s own monitor covers a failure that first appears minutes after an otherwise healthy restart — auto-update inherits that same limitation, not a new one.
+Rollback reaches only the failures the switch helper itself detects ([commands.md](commands.md#daemon-http-api)). A failure that first surfaces minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor, which stops watching as soon as the services answer healthy. Auto-update inherits that gap; it does not widen it.
 
-Escape hatch, in this order:
-
-1. Set `autoUpdate: false` in `~/.spur/config.yaml`.
-2. Then run `spur update <version>` or `spur update --force <version>`.
-
-Reversed order re-arms the daemon: a `Switch`/auto-update disarm can fire again once the pinned version stops being newest, moving the host off the version you just pinned.
+Pinning a version by hand needs `autoUpdate` off first — [install-from-npm.md#upgrade](install-from-npm.md#upgrade) carries the order and the reason.
 
 ## Restore after reboot
 
