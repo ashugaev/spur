@@ -413,6 +413,186 @@ test_stale_chunks_loud_fail() {
     bad "stale-fail: missing FATAL chunk message"
     printf '%s\n' "$out"
   fi
+  if grep -q 're-run main:deploy to retry the same commit' <<<"$out"; then
+    ok "stale-fail: retry-path line printed"
+  else
+    bad "stale-fail: missing retry-path line"
+    printf '%s\n' "$out"
+  fi
+}
+
+# --- Case (l): RSC-escaped chunk refs are not reported missing -------------
+# Prod's Next 15 flight payload double-escapes quotes, so an escaped ref emits
+# a `\`-suffixed twin alongside (or instead of) the clean one. The extractor
+# must exclude a trailing backslash so the escaped ref resolves to the same
+# on-disk file as the clean one.
+test_escaped_chunk_refs_not_reported_missing() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  local head
+  head="$(git -C "$MAIN_DEPLOY_ROOT" rev-parse HEAD)"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  local ref="/_next/static/css/esc-test.css"
+  mkdir -p "$SPUR_DEPLOY_WEB_NEXT_DIR/static/css"
+  : >"$SPUR_DEPLOY_WEB_NEXT_DIR/${ref#/_next/}"
+  export SPUR_DEPLOY_HTML_ESCAPED_CHUNKS="$ref"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    ok "escaped-refs: deploy exits 0"
+  else
+    bad "escaped-refs: deploy exited $rc"
+    printf '%s\n' "$out"
+  fi
+  if grep -q 'references missing chunk' <<<"$out"; then
+    bad "escaped-refs: reported missing chunk"
+    printf '%s\n' "$out"
+  else
+    ok "escaped-refs: no missing-chunk report"
+  fi
+  if grep -q 'FATAL: spur-web serving stale chunks' <<<"$out"; then
+    bad "escaped-refs: unexpected stale-chunk FATAL"
+    printf '%s\n' "$out"
+  else
+    ok "escaped-refs: no stale-chunk FATAL"
+  fi
+}
+
+# --- Case (m): a mid-deploy build abort leaves spur-web active -------------
+# The pre-build stop must be undone by the EXIT trap when the build itself
+# aborts (pnpm build exits non-zero) before install_service_files/restart ever
+# runs.
+test_build_abort_leaves_web_active() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  # No stamp file -> deployed_head != remote_head -> build path.
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  local pnpm_stub="$work/sudobin/pnpm"
+  cat >"$pnpm_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+verb=""
+for a in "$@"; do
+  case "$a" in install|build) verb="$a";; esac
+done
+if [[ "$verb" == build ]]; then
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$pnpm_stub"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]]; then
+    ok "build-abort: non-zero exit ($rc)"
+  else
+    bad "build-abort: exited 0"
+  fi
+  if grep -qx 'stop spur-web.service' "$SPUR_DEPLOY_STATE"; then
+    ok "build-abort: pre-build stop recorded"
+  else
+    bad "build-abort: no pre-build stop recorded"
+    cat "$SPUR_DEPLOY_STATE"
+  fi
+  local last_web
+  last_web=$(grep -E ' spur-web\.service$' "$SPUR_DEPLOY_STATE" | tail -n1 | cut -d' ' -f1)
+  if [[ "$last_web" == "start" ]]; then
+    ok "build-abort: final spur-web active via start"
+  else
+    bad "build-abort: final spur-web verb $last_web"
+    cat "$SPUR_DEPLOY_STATE"
+  fi
+  if grep -q 'with spur-web inactive — starting' <<<"$out"; then
+    ok "build-abort: exit trap logged restore"
+  else
+    bad "build-abort: exit trap did not log restore"
+    printf '%s\n' "$out"
+  fi
+}
+
+# --- Case (n): a failed heal start leaves spur-web active, deploy fails loud -
+# The heal loop's stop/start never brings spur-web back up (systemctl wrapper
+# swallows the first post-heal start). The body fetch then fails every attempt
+# (curl exit 7), so consistency is never verified; the deploy must fail loudly
+# with a distinct message (not the stale-chunk FATAL, since that path is never
+# reached) and the EXIT trap must still restore spur-web.
+test_failed_heal_start_leaves_web_active() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  local head
+  head="$(git -C "$MAIN_DEPLOY_ROOT" rev-parse HEAD)"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  # Served HTML references a chunk that never lands on disk, so the initial
+  # chunk check (while still serving from the restart) is inconsistent and the
+  # heal fires. A counter file makes only the FIRST post-heal
+  # `start spur-web.service` a no-op recorded as `stop` — web never comes back
+  # up, so every later body fetch fails (curl sees "not serving" -> exit 7).
+  export SPUR_DEPLOY_HTML_CHUNKS="/_next/static/chunks/main-missing.js"
+  local dead_start_sc="$work/systemctl-deadstart"
+  local start_count="$work/web-start-count-n"
+  : >"$start_count"
+  cat >"$dead_start_sc" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\$1" == start && "\$2" == spur-web.service && ! -s "$start_count" ]]; then
+  printf 'x' >>"$start_count"
+  printf 'stop spur-web.service\n' >>"\$SPUR_DEPLOY_STATE"
+  exit 0
+fi
+exec "$stub_dir/systemctl" "\$@"
+EOF
+  chmod +x "$dead_start_sc"
+  export SYSTEMCTL="$dead_start_sc"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if grep -q 'with spur-web inactive — starting' <<<"$out"; then
+    ok "failed-heal: exit trap logged restore"
+  else
+    bad "failed-heal: exit trap did not log restore"
+    printf '%s\n' "$out"
+  fi
+  local last_web
+  last_web=$(grep -E ' spur-web\.service$' "$SPUR_DEPLOY_STATE" | tail -n1 | cut -d' ' -f1)
+  if [[ "$last_web" == "start" ]]; then
+    ok "failed-heal: final spur-web active via start"
+  else
+    bad "failed-heal: final spur-web verb $last_web"
+    cat "$SPUR_DEPLOY_STATE"
+  fi
+  if grep -q 'FATAL: spur-web not serving after chunk heal — consistency unverified' <<<"$out"; then
+    ok "failed-heal: unverified FATAL printed"
+  else
+    bad "failed-heal: missing unverified FATAL"
+    printf '%s\n' "$out"
+  fi
+  if grep -q 'FATAL: spur-web serving stale chunks' <<<"$out"; then
+    bad "failed-heal: unexpected stale-chunk FATAL (that path was not reached)"
+    printf '%s\n' "$out"
+  else
+    ok "failed-heal: stale-chunk FATAL not printed"
+  fi
+  if [[ "$rc" != 0 ]]; then
+    ok "failed-heal: non-zero exit ($rc)"
+  else
+    bad "failed-heal: exited 0"
+  fi
 }
 
 # --- Case (g): missing .next at matching sha -> rebuild, not "Already deployed" -
@@ -644,6 +824,9 @@ test_stale_daemon_listener_killed_when_not_main_pid
 test_active_daemon_main_pid_preserved
 test_healthy_rebind_after_kill_is_success
 test_foreign_new_listener_is_fatal
+test_escaped_chunk_refs_not_reported_missing
+test_build_abort_leaves_web_active
+test_failed_heal_start_leaves_web_active
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" == 0 ]]

@@ -11,6 +11,10 @@ service_home="${MAIN_DEPLOY_SERVICE_HOME:-$HOME}"
 CURL="${SPUR_DEPLOY_CURL:-curl}"
 SS="${SPUR_DEPLOY_SS:-sudo ss}"
 LOCKFILE="${SPUR_DEPLOY_LOCKFILE:-$HOME/.spur/main-deploy.lock}"
+# Default matches deploy/spur-web.service: ExecStart runs `pnpm ui:start`,
+# which is `pnpm --dir packages/web start` -> serves $deploy_root/packages/web/.next.
+# A host hand-switched to the npm-package units serves a different .next; do
+# not repoint this default to accommodate that (out of scope, see spec).
 web_next_dir="${SPUR_DEPLOY_WEB_NEXT_DIR:-$deploy_root/packages/web/.next}"
 daemon_env_file="${MAIN_DEPLOY_DAEMON_ENV_FILE:-/etc/spur/daemon.env}"
 systemd_unit_dir="${MAIN_DEPLOY_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -32,6 +36,34 @@ systemctl_cmd() {
   local cmd=(${SYSTEMCTL:-sudo systemctl})
   "${cmd[@]}" "$@"
 }
+
+# Confines the exit-time restore to stops THIS run issued. An unconditional
+# handler would also fire on e.g. a flock-timeout exit, where another run may
+# hold the lock mid-build with web deliberately stopped — starting it there
+# would serve a half-written .next.
+web_restore_armed=false
+arm_web_restore() { web_restore_armed=true; }
+
+# Set by web_chunks_consistent; false means the body fetch failed so
+# consistency was never actually checked (see verify_and_heal).
+web_chunks_verified=true
+
+# Runs on every exit once armed (script exits, or INT/TERM below re-mapped to
+# an exit). Starts spur-web only if this run left it inactive; a failed start
+# warns instead of masking the original exit code under `set -e`.
+restore_web_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$web_restore_armed" == true ]] && ! systemctl_cmd is-active --quiet spur-web.service; then
+    echo "main:deploy exiting rc=$rc with spur-web inactive — starting" >&2
+    systemctl_cmd start spur-web.service \
+      || echo "main:deploy WARNING: could not start spur-web on exit" >&2
+  fi
+  exit "$rc"
+}
+trap restore_web_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 listener_pid_on_daemon_port() {
   local port=4310
@@ -135,13 +167,21 @@ web_is_serving() {
 # until spur-web restarts onto the fresh .next, served HTML points at deleted
 # chunks and the browser shows "Application error" (nginx still returns 200).
 # Returns 0 when every referenced /_next/static asset is present (or the HTML
-# references none), 1 on the first missing asset.
+# references none), 1 on the first missing asset. Sets web_chunks_verified to
+# false when the body fetch itself failed (so "consistent" via the `|| return
+# 0` swallow below can be told apart from an actual verified-consistent page);
+# true otherwise. web_is_healthy's fast-path use is unaffected — it only reads
+# the return code, never the flag.
 web_chunks_consistent() {
   local html refs ref
-  html=$($CURL -fsS --max-time 3 "http://127.0.0.1:3012/" 2>/dev/null) || return 0
+  web_chunks_verified=true
+  html=$($CURL -fsS --max-time 3 "http://127.0.0.1:3012/" 2>/dev/null) || { web_chunks_verified=false; return 0; }
   # `grep` exits 1 with no matches; under `set -e`/pipefail that would abort the
   # script, so `|| true` turns "no refs" into an empty list (treated consistent).
-  refs=$(printf '%s' "$html" | grep -oE '/_next/static/[^"'"'"' )]+' | sort -u) || true
+  # The bracket also excludes a trailing backslash: Next's RSC flight payload
+  # double-escapes quotes (`\"href\":\"...\"`), so without it every escaped ref
+  # yields a `\`-suffixed twin that no file on disk can ever satisfy.
+  refs=$(printf '%s' "$html" | grep -oE '/_next/static/[^"'"'"' )\\]+' | sort -u) || true
   [[ -z "$refs" ]] && return 0
   while IFS= read -r ref; do
     [[ -z "$ref" ]] && continue
@@ -180,15 +220,21 @@ verify_and_heal() {
 
   local attempt
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if web_chunks_consistent; then
+    if web_chunks_consistent && [[ "$web_chunks_verified" == true ]]; then
       return 0
     fi
     if [[ "$attempt" == 1 ]]; then
       echo "main:deploy spur-web serving stale chunks — restarting" >&2
+      arm_web_restore
       systemctl_cmd stop spur-web.service
       sleep 2
       systemctl_cmd start spur-web.service
-    elif ! web_is_serving; then
+    elif [[ "$web_chunks_verified" != true ]] || ! web_is_serving; then
+      # Unverified (body fetch failed) is treated the same as not-serving: keep
+      # polling on the cheap single-shot curl rather than adding a dedicated
+      # wait here — the only pause between the heal start above and the first
+      # re-check is `sleep 2`, so a normal prod heal can still be unverified on
+      # attempt 2 without that being a hard failure.
       sleep 1
       continue
     else
@@ -196,7 +242,13 @@ verify_and_heal() {
     fi
   done
 
+  if [[ "$web_chunks_verified" != true ]]; then
+    echo "main:deploy FATAL: spur-web not serving after chunk heal — consistency unverified" >&2
+    exit 1
+  fi
+
   echo "main:deploy FATAL: spur-web serving stale chunks" >&2
+  echo "main:deploy sha stamp not advanced ($remote_head); re-run main:deploy to retry the same commit" >&2
   exit 1
 }
 
@@ -356,6 +408,7 @@ fi
 export CI=1
 if systemctl_cmd is-active --quiet spur-web.service; then
   echo "main:deploy stopping spur-web before build" >&2
+  arm_web_restore
   systemctl_cmd stop spur-web.service
 fi
 pnpm -C "$deploy_root" install --frozen-lockfile

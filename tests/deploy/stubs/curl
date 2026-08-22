@@ -13,6 +13,10 @@
 #   -> prints an HTML body. When $SPUR_DEPLOY_HTML_CHUNKS is set, the body
 #      embeds one <script src="<ref>"> per whitespace-separated ref so the
 #      script's grep finds /_next/static refs; otherwise a body with no refs.
+#      When $SPUR_DEPLOY_HTML_ESCAPED_CHUNKS is set (independent of the above),
+#      the body also embeds each ref in the prod RSC flight escape shape
+#      (`\"href\":\"<ref>\",\"precedence\"`), reproducing the double-escaped
+#      quotes that a real Next 15 payload emits.
 set -euo pipefail
 
 state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
@@ -47,6 +51,12 @@ printf '<!doctype html><html><body>'
 if [[ -n "${SPUR_DEPLOY_HTML_CHUNKS:-}" ]]; then
   for ref in ${SPUR_DEPLOY_HTML_CHUNKS}; do
     printf '<script src="%s"></script>' "$ref"
+  done
+fi
+if [[ -n "${SPUR_DEPLOY_HTML_ESCAPED_CHUNKS:-}" ]]; then
+  for ref in ${SPUR_DEPLOY_HTML_ESCAPED_CHUNKS}; do
+    printf '<script>self.__next_f.push([1,"HL[\\"%s\\",\\"font\\",{\\"cross...' "$ref"
+    printf '\\"href\\":\\"%s\\",\\"precedence\\":\\"next\\"..."])</script>' "$ref"
   done
 fi
 printf '</body></html>'
