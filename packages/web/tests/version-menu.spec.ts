@@ -63,8 +63,9 @@ test.describe("Version menu Auto checkbox", () => {
     await page.goto("/");
     await page.getByRole("button", { name: /Show Spur version information/ }).click();
 
-    const nameGroup = page.getByText("Spur", { exact: true }).locator("..");
     const autoLabel = page.getByRole("checkbox", { name: "Auto update" }).locator("..");
+    const headerRow = autoLabel.locator("..");
+    const nameGroup = headerRow.getByText("Spur", { exact: true }).locator("..");
     const [nameBox, autoBox] = await Promise.all([
       nameGroup.boundingBox(),
       autoLabel.boundingBox(),
