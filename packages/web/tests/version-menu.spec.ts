@@ -259,9 +259,9 @@ test.describe("Version menu Auto checkbox", () => {
     // Confirmation poll runs every 3s; the daemon reports the new version on
     // the very next poll, which reloads the page.
     await page.clock.fastForward(3_100);
-    await expect(
-      page.getByRole("button", { name: /Show Spur version information/ }),
-    ).toContainText("1.5.0");
+    await expect(page.getByRole("button", { name: /Show Spur version information/ })).toContainText(
+      "1.5.0",
+    );
 
     await page.getByRole("button", { name: /Show Spur version information/ }).click();
     const checkbox = page.getByRole("checkbox", { name: "Auto update" });

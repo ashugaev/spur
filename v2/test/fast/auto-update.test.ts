@@ -10,8 +10,14 @@ function baseDeps(overrides: Partial<RunAutoUpdateTickDeps> = {}): RunAutoUpdate
     currentVersion: "1.0.0",
     readFlag: () => ({ autoUpdate: true, error: null }),
     readState: () => null,
-    getReleases: async () => ({ entries: [{ tag: "1.1.0", publishedAt: "2026-01-01T00:00:00Z" }], stale: false, error: null }),
-    start: vi.fn(async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version })),
+    getReleases: async () => ({
+      entries: [{ tag: "1.1.0", publishedAt: "2026-01-01T00:00:00Z" }],
+      stale: false,
+      error: null,
+    }),
+    start: vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    ),
     log: vi.fn(),
     ...overrides,
   };
