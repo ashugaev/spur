@@ -443,6 +443,25 @@ Trigger pending batches persist under `dataDir` (`pending-send-batches.json`) an
 
 Unit files in this repository are templates only. Source deployments apply them through [install-from-source.md#deploy](install-from-source.md#deploy); npm user units refresh through [install-from-npm.md#upgrade](install-from-npm.md#upgrade). System-unit operators adapt and reload them in their own maintenance window.
 
+## Auto update
+
+`autoUpdate` (instance config only, default `false`) lets the daemon self-update: once the npm registry publishes a version strictly newer than the running one, the daemon starts the same switch a human `Switch` press starts, through the same executor, guards, and durable status record — see [Daemon HTTP API](commands.md#daemon-http-api).
+
+No new timer: the check folds into the existing 5-minute reaper tick. The daemon re-reads the flag from disk on every tick, never from its in-memory config, so a hand edit to `~/.spur/config.yaml` takes effect on the next tick without a daemon restart — the same 5-minute tick, no reload required.
+
+Detection latency is up to ~15 minutes worst case from publish: one 5-minute reaper tick plus the registry cache's 10-minute TTL. Not immediate.
+
+Any `Switch` press — from the popover or the tick itself finishing a spawn — writes `autoUpdate: false` back to the config file, so the flag never re-arms once a pinned version becomes current again. A switch to a given version that failed once is not retried automatically: the daemon skips a candidate that already has a terminal (`succeeded` or `failed`) record in its own durable status file, whether or not the daemon itself ended up running that version.
+
+The deploy-switch path rolls back on a package-validation failure and on a failed `spur reinit`/health gate ([install-from-npm.md#upgrade](install-from-npm.md#upgrade)). Neither this path nor `spur update`'s own monitor covers a failure that first appears minutes after an otherwise healthy restart — auto-update inherits that same limitation, not a new one.
+
+Escape hatch, in this order:
+
+1. Set `autoUpdate: false` in `~/.spur/config.yaml`.
+2. Then run `spur update <version>` or `spur update --force <version>`.
+
+Reversed order re-arms the daemon: a `Switch`/auto-update disarm can fire again once the pinned version stops being newest, moving the host off the version you just pinned.
+
 ## Restore after reboot
 
 `projects.<id>.restoreAfterReboot` (default `false`) opts a project into automatic restore of sessions and their `autoStart` sidecars that a host reboot killed. On boot the daemon restores only reboot-interrupted sessions (panes gone) — never intentional `pause`/`kill`/`complete`, never `errored` sessions whose pane survived but whose agent died. Only `autoStart` sidecars return; manual ones are not tracked. A mass restore stays interruptible: `Ctrl-C`/`SIGTERM` mid-restore shuts down gracefully. Each restore passes through the [admission gate](#admission-control): cap refusal leaves that session stopped and logs `session.reboot.restore.failed`; restore-floor refusal stops the remaining batch and logs `session.reboot.restore.aborted`.

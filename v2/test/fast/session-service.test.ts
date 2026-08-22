@@ -30,6 +30,7 @@ import type * as claudeModule from "../../src/agents/claude.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
+import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type * as sharedMemoryModule from "../../src/shared-memory.js";
 import type * as reapModule from "../../src/sidecars/reap.js";
@@ -94,6 +95,13 @@ const readAgentHookStateMock = vi.fn();
 const loadConfigMock = vi.fn();
 const loadProjectConfigMock = vi.fn();
 const findProjectConfigPathInDirectoryMock = vi.fn();
+// Only reached by the auto-update wiring tests (issue #754): every other
+// test's fake-timer advances never reach REAP_INTERVAL_MS, so these mocks
+// are never invoked by them (see session-service.test.ts's own timer-advance
+// ceiling of 1_000ms elsewhere in this file).
+const loadInstanceConfigReadOnlyMock = vi.fn();
+const startDeploySwitchMock = vi.fn();
+const getReleasesMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
 const archiveSessionsMock = vi.fn(() => ({ archivedIds: [], archiveDir: "/tmp/sessions-archive" }));
@@ -435,6 +443,7 @@ vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
+  loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
   PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
   DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
@@ -452,6 +461,19 @@ vi.mock("../../src/preflight.js", () => ({
   PreflightBranchValidationError: MockPreflightBranchValidationError,
   runSpawnPreflight: runSpawnPreflightMock,
 }));
+
+// Only exercised by the auto-update wiring tests (issue #754): keeps the
+// real `startDeploySwitch` (which would spawn a real bash helper) and the
+// real `getReleases` (which would hit the npm registry) out of every other
+// test in this file.
+vi.mock("../../src/deploy-switch.js", () => ({
+  startDeploySwitch: startDeploySwitchMock,
+}));
+
+vi.mock("../../src/releases-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof releasesCacheModule>();
+  return { ...actual, getReleases: getReleasesMock };
+});
 
 vi.mock("../../src/event-log.js", async (importOriginal) => {
   const actual = await importOriginal<typeof eventLogModule>();
@@ -35076,6 +35098,72 @@ describe("SessionService", () => {
         const second = await service.get("api-1");
         expect(second.state).toBe("stale");
       });
+    });
+  });
+
+  describe("auto-update wiring (issue #754)", () => {
+    // Mirrors session-service.ts's own private REAP_INTERVAL_MS — the
+    // reaper is the ONLY timer this tick rides; no new interval is created.
+    const REAP_INTERVAL_MS = 5 * 60 * 1000;
+
+    beforeEach(() => {
+      loadInstanceConfigReadOnlyMock.mockReset();
+      startDeploySwitchMock.mockReset();
+      getReleasesMock.mockReset();
+    });
+
+    it("reads autoUpdate from disk on every reaper tick, decoupled from the in-memory config snapshot, and adds no new timer", async () => {
+      createSessionStore();
+      loadConfigMock.mockReturnValue({ ...baseConfig(), autoUpdate: false });
+      loadInstanceConfigReadOnlyMock.mockReturnValue({
+        status: "ok",
+        config: { autoUpdate: false },
+      });
+      getReleasesMock.mockResolvedValue({
+        entries: [{ tag: "999.0.0", publishedAt: "2026-01-01T00:00:00.000Z" }],
+        stale: false,
+        error: null,
+      });
+      startDeploySwitchMock.mockResolvedValue({ status: "accepted", version: "999.0.0" });
+
+      const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      service.startBackgroundLoops();
+
+      // AC10: `startBackgroundLoops` registers exactly the seven pre-existing
+      // loops (attention, scheduled wake, sidecar reaper, memory shed,
+      // dashboard cache, reaper, session gc) — no eighth timer for this
+      // feature. Not asserted by filtering on REAP_INTERVAL_MS's value alone:
+      // SESSION_GC_TICK_MS coincidentally shares the same 5-minute period, so
+      // two calls legitimately carry that same ms argument already.
+      expect(setIntervalSpy).toHaveBeenCalledTimes(7);
+      const reaperIntervalCalls = setIntervalSpy.mock.calls.filter(
+        (call) => call[1] === REAP_INTERVAL_MS,
+      );
+      expect(reaperIntervalCalls.length).toBeGreaterThanOrEqual(1);
+
+      await vi.advanceTimersByTimeAsync(REAP_INTERVAL_MS);
+      expect(startDeploySwitchMock).not.toHaveBeenCalled();
+
+      // A hand edit lands on disk; `service.config.autoUpdate` is provably
+      // stale at this exact moment — proof the next decision cannot be
+      // coming from memory.
+      loadInstanceConfigReadOnlyMock.mockReturnValue({
+        status: "ok",
+        config: { autoUpdate: true },
+      });
+      expect(service.config.autoUpdate).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(REAP_INTERVAL_MS);
+
+      expect(startDeploySwitchMock).toHaveBeenCalledTimes(1);
+      expect(startDeploySwitchMock).toHaveBeenCalledWith(
+        expect.objectContaining({ version: "999.0.0" }),
+      );
+      expect(service.config.autoUpdate).toBe(false);
     });
   });
 });
