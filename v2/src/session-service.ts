@@ -2254,6 +2254,14 @@ export class SessionService {
   // registry warnings to one per canonical path for this daemon process.
   private readonly registryScanner = new ConfigRegistryScanner();
   private readonly deliveryRuns = new Map<string, Promise<void>>();
+  // Set by dispose(). The delivery loop is the one owned worker that is not a
+  // timer: it parks on its own `sleep` between polls, so clearInterval cannot
+  // reach it and a disposed service would keep re-reading records and typing
+  // into panes for as long as a queue stayed non-empty. The loop and both of
+  // its waits re-check this flag on every pass, so each retires at its first
+  // wake after dispose. A direct request (send/deliver/flush) is the caller's
+  // own call and still runs; only the autonomous poll stops.
+  private deliveryStopped = false;
   // Symmetric marker, checked and set synchronously (before any await) by
   // every writer that drains or flushes the queue: tryDeliverQueuedMessage
   // stands down (returns false) while a flush holds it, and flushQueuedMessage
@@ -2485,6 +2493,7 @@ export class SessionService {
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
+    this.deliveryStopped = true;
     if (this.attentionMonitorTimer) {
       clearInterval(this.attentionMonitorTimer);
       this.attentionMonitorTimer = null;
@@ -13034,6 +13043,9 @@ export class SessionService {
   private async runDeliveryLoop(sessionId: string): Promise<void> {
     try {
       for (;;) {
+        if (this.deliveryStopped) {
+          return;
+        }
         const session = readSession(this.config.dataDir, sessionId);
         if (!this.shouldRunDelivery(session)) {
           return;
@@ -13269,6 +13281,9 @@ export class SessionService {
     const deadline = Date.now() + PIPELINE_STEP_TIMEOUT_MS;
 
     while (Date.now() < deadline) {
+      if (this.deliveryStopped) {
+        return "stopped";
+      }
       const session = readSession(this.config.dataDir, sessionId);
       if (
         !session?.pipeline ||
@@ -13308,6 +13323,9 @@ export class SessionService {
 
   private async waitForQueuedMessage(sessionId: string): Promise<PipelineWaitOutcome> {
     for (;;) {
+      if (this.deliveryStopped) {
+        return "stopped";
+      }
       const session = readSession(this.config.dataDir, sessionId);
       if (!session || session.status !== "running") {
         return "stopped";

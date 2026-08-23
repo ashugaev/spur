@@ -5784,6 +5784,149 @@ describe("SessionService", () => {
     }
   });
 
+  it("retires a delivery loop parked between drain polls when the service is disposed", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: false,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    // Agent activity fresher than the idle wait: the first drain attempt
+    // stands down without delivering, so the loop parks on its poll sleep.
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:55.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+    expect(run).toBeDefined();
+    service.dispose();
+
+    const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+    const outcome = await Promise.race([
+      run?.then(() => "retired"),
+      realTimers.setTimeout(3_000, "parked"),
+    ]);
+
+    expect(outcome).toBe("retired");
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued follow up"]);
+    expect(sessionServiceInternals(service).deliveryRuns.has("api-1")).toBe(false);
+  });
+
+  it("retires a delivery loop parked on the awaiting-prompt gate when the service is disposed", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      // Fresh against the 10:05 clock, so the awaiting-prompt gate parks on
+      // its poll sleep instead of resolving on the first pass.
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: true,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+    expect(run).toBeDefined();
+    service.dispose();
+
+    // Real poll sleeps (the beforeEach default): the loop wakes from its 1s
+    // park and must exit. A loop that ignored dispose would poll forever —
+    // in the daemon it keeps typing into panes after shutdown, and in this
+    // suite it wakes inside a LATER test and drains that test's queue.
+    const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+    const outcome = await Promise.race([
+      run?.then(() => "retired"),
+      realTimers.setTimeout(3_000, "parked"),
+    ]);
+
+    expect(outcome).toBe("retired");
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages).toEqual({
+      messages: ["queued follow up"],
+      awaitingPrompt: true,
+    });
+  });
+
+  it("retires a delivery loop parked on the pipeline-step gate when the service is disposed", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      // Inside MESSAGE_READY_GRACE_MS of the 10:05 clock, so the step gate
+      // parks on its poll sleep instead of advancing the pipeline.
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      pipeline: {
+        steps: ["research", "test"],
+        nextStepIndex: 1,
+        status: "running",
+        awaitingStepIndex: 0,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+    expect(run).toBeDefined();
+    service.dispose();
+
+    const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+    const outcome = await Promise.race([
+      run?.then(() => "retired"),
+      realTimers.setTimeout(3_000, "parked"),
+    ]);
+
+    expect(outcome).toBe("retired");
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.pipeline).toEqual({
+      steps: ["research", "test"],
+      nextStepIndex: 1,
+      status: "running",
+      awaitingStepIndex: 0,
+    });
+  });
+
   it("delivers a queued message immediately while the session is a live server-error wedge, instead of waiting up to 30 minutes for the reactivation nudge", async () => {
     mockClaudeSessionStatus("waiting", "idle");
     readClaudeJsonlStateMock.mockResolvedValue({
@@ -6176,7 +6319,10 @@ describe("SessionService", () => {
     mockClaudeJsonlState("waiting");
     mockExitedThenRestoredProcess();
     mockTimerPromisesSleepWithFakeTimers();
-    const service = await createDisposedSessionService();
+    // Live, not createDisposedSessionService(): dispose() stops delivery, so a
+    // disposed service can never drain the queue this test watches drain.
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
