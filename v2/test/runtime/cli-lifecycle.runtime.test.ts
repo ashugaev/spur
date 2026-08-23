@@ -2405,7 +2405,10 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("todo.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "todo.yaml",
+      baseConfig(context, sessionPrefix, "    todo:\n      enabled: true"),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
     const humanCli = { env: { SPUR_SESSION: "" } };
