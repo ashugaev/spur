@@ -11058,6 +11058,28 @@ export class SessionService {
       this.abortSidecarUrlProbe(ownerId, scName);
       try {
         const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
+        if (pending.panePid === null) {
+          const owner = readSession(this.config.dataDir, ownerId);
+          const identity = owner?.sidecarProcs?.[scName];
+          if (owner && identity) {
+            const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+            this.logSidecarReapSurvivors(ownerId, scName, outcome);
+            if (!outcome) {
+              failures.push(
+                new Error(`Could not confirm sidecar ${scName} on ${ownerId} was reaped`),
+              );
+              continue;
+            }
+            if (outcome.survivors.length > 0) {
+              failures.push(
+                new Error(
+                  `Sidecar ${scName} on ${ownerId} left process(es) ${outcome.survivors.join(", ")} alive`,
+                ),
+              );
+              continue;
+            }
+          }
+        }
         pendingBySidecar.push({ ownerId, scName, pending });
       } catch (error) {
         failures.push(error);
@@ -11215,8 +11237,8 @@ export class SessionService {
     if (sessionId !== anchorId) {
       collectFailure(() => removeSessionSlotTool(this.config.dataDir, sessionId));
     }
-    let liveDeskSibling: boolean | null = null;
-    collectFailure(() => {
+    let liveDeskSibling: boolean;
+    try {
       liveDeskSibling = listSessions(this.config.dataDir).some(
         (candidate) =>
           candidate.id !== sessionId &&
@@ -11224,11 +11246,13 @@ export class SessionService {
           workspaceIdOf(candidate) === anchorId &&
           !isTerminalSessionStatus(candidate.status),
       );
-    });
-    if (liveDeskSibling !== false) {
-      if (failures.length > 0) {
-        throw new AggregateError(failures, `Incomplete tool cleanup for ${sessionId}`);
-      }
+    } catch (error) {
+      failures.push(error);
+      throw new AggregateError(failures, `Incomplete tool cleanup for ${sessionId}`, {
+        cause: error,
+      });
+    }
+    if (liveDeskSibling) {
       return;
     }
     collectFailure(() => removeSessionSlotTool(this.config.dataDir, anchorId));

@@ -303,6 +303,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     tmuxSession: "api-a1b2",
     launchCommand: "claude",
     status: "running",
+    todoEnabled: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides,

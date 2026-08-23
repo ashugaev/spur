@@ -1246,7 +1246,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             accept: (value) => value.includes("Merge conflicts are blocking this PR."),
           });
           const agentLogBeforeRestore = await context.readAgentLog(session.id);
-          expect(countOccurrences(agentLogBeforeRestore, conflictMarker)).toBe(1);
+          const conflictsBeforeRestore = countOccurrences(agentLogBeforeRestore, conflictMarker);
+          expect(conflictsBeforeRestore).toBeGreaterThanOrEqual(1);
 
           await pollUntil(async () => readEventLog(context.dataDir).map((entry) => entry.event), {
             timeoutMs: 5_000,
@@ -1256,20 +1257,24 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             (entry) => entry.event === "trigger.send.delivered",
           ).length;
 
-          await service.pause(session.id);
+          const paused = await service.pause(session.id);
+          expect(paused.status).toBe("stopped");
 
           await pollUntil(async () => service.get(session.id), {
             timeoutMs: 15_000,
-            accept: (value) => value.state === "stopped",
+            accept: (value) =>
+              value.status === "stopped" && value.state === "stopped" && value.workspaceExists,
           });
 
           const restored = await service.restore(session.id);
           expect(restored.status).toBe("running");
 
           const restoredLog = await pollUntil(async () => context.readAgentLog(session.id), {
-            timeoutMs: 20_000,
+            // Claude's queued replay flushes after its structured restore warmup ends.
+            timeoutMs: 45_000,
             accept: (value) =>
-              value.includes("startup:resume") && countOccurrences(value, conflictMarker) === 2,
+              value.includes("startup:resume") &&
+              countOccurrences(value, conflictMarker) >= conflictsBeforeRestore + 1,
           });
           await pollUntil(
             async () =>

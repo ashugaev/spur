@@ -27641,6 +27641,80 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("AC15 retains missing-pane tracking when a detached recorded process cannot be confirmed", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { worker: { command: "sleep 30", autoStart: false } },
+          },
+        },
+      });
+      const child = spawnChildProcess("sleep", ["30"], { detached: true, stdio: "ignore" });
+      const pid = child.pid;
+      if (pid === undefined) throw new Error("expected detached child pid");
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        sidecarNames: ["worker"],
+        sidecarProcs: { worker: { pid, pgid: pid, starttime: -1 } },
+        slots: { links: [{ label: "worker", url: "http://127.0.0.1:3001" }] },
+      });
+      sessions.set(successor.id, successor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await expect(
+          sessionServiceInternals(service).teardownSessionSidecars(successor, {
+            failOnSurvivors: true,
+          }),
+        ).rejects.toThrow("Incomplete sidecar teardown");
+
+        expect(process.kill(pid, 0)).toBe(true);
+        expect(sessions.get(successor.id)?.sidecarProcs?.worker).toBeDefined();
+        expect(applySlotsUpdateMock).not.toHaveBeenCalled();
+      } finally {
+        process.kill(-pid, "SIGKILL");
+        service.dispose();
+      }
+    });
+
+    it("AC15 clears missing-pane tracking when the recorded process is absent", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { worker: { command: "sleep 30", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        sidecarNames: ["worker"],
+        sidecarProcs: {
+          worker: { pid: 999_999_999, pgid: 999_999_999, starttime: 1 },
+        },
+        slots: { links: [{ label: "worker", url: "http://127.0.0.1:3001" }] },
+      });
+      sessions.set(successor.id, successor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await sessionServiceInternals(service).teardownSessionSidecars(successor, {
+        failOnSurvivors: true,
+      });
+
+      expect(sessions.get(successor.id)?.sidecarProcs?.worker).toBeUndefined();
+      expect(applySlotsUpdateMock).toHaveBeenCalledWith(expect.anything(), {
+        unlinkLabels: ["worker"],
+      });
+      service.dispose();
+    });
+
     it("AC15 handoff compensation attempts anchor-tool and workspace cleanup after member-tool failure", async () => {
       const sessions = createSessionStore();
       const successor = sessionRecord({ id: "api-2", workspaceId: "api-1" });

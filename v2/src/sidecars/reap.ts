@@ -522,7 +522,11 @@ async function reapLeaderlessGroup(
   }
   const members = snapshot.byPgid.get(identity.pgid) ?? [];
   if (members.length === 0) {
-    return null;
+    return {
+      sessionName: `sidecar-identity:${identity.pid}`,
+      panePid: null,
+      survivors: [],
+    };
   }
   const proven: number[] = [];
   let allContained = true;
