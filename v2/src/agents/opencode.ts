@@ -1,4 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -10,6 +13,50 @@ import {
 } from "./executable.js";
 
 const execFileAsync = promisify(execFile);
+
+const OPENCODE_SESSION_LIST_TIMEOUT_MS = 20_000;
+const OPENCODE_EXPORT_TIMEOUT_MS = 30_000;
+
+// `opencode` truncates its own stdout at 128 KB when stdout is a pipe: it exits
+// before the pipe drains, so a piped `export` of any session with real history
+// yields invalid JSON. Capturing into a file is the only shape that returns the
+// whole document, so every JSON read of the CLI goes through here.
+export async function readOpenCodeJson(
+  args: string[],
+  options: { cwd?: string; timeoutMs: number },
+): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "spur-opencode-"));
+  const outputPath = join(directory, "out.json");
+  try {
+    const handle = await open(outputPath, "w");
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(opencodeCommand(), args, {
+          ...(options.cwd ? { cwd: options.cwd } : {}),
+          stdio: ["ignore", handle.fd, "ignore"],
+        });
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`opencode ${args.join(" ")} timed out after ${options.timeoutMs}ms`));
+        }, options.timeoutMs);
+        child.once("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.once("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0) resolve();
+          else reject(new Error(`opencode ${args.join(" ")} exited with code ${code}`));
+        });
+      });
+    } finally {
+      await handle.close();
+    }
+    return await readFile(outputPath, "utf8");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 interface OpenCodePlanOptions {
   model?: string;
@@ -126,7 +173,16 @@ export function buildOpenCodeResumePlan(
 interface OpenCodeSession {
   id?: unknown;
   directory?: unknown;
+  updated?: unknown;
   time?: { updated?: unknown };
+}
+
+// `session list --format json` reports `updated` at the top level; `export`
+// nests it under `time`. Accept both so the newest session wins either way.
+function sessionUpdatedAt(session: OpenCodeSession): number {
+  const raw = session.time?.updated ?? session.updated;
+  const value = Number(raw ?? 0);
+  return Number.isFinite(value) ? value : 0;
 }
 
 export interface OpenCodeSessionBaseline {
@@ -168,7 +224,7 @@ function parseSessionList(value: unknown, worktreePath: string): string | null {
         entry.id.startsWith("ses_") &&
         entry.directory === worktreePath,
     )
-    .sort((left, right) => Number(right.time?.updated ?? 0) - Number(left.time?.updated ?? 0));
+    .sort((left, right) => sessionUpdatedAt(right) - sessionUpdatedAt(left));
   return typeof sessions[0]?.id === "string" ? sessions[0].id : null;
 }
 
@@ -179,11 +235,10 @@ export function parseOpenCodeSessionListOutput(stdout: string): unknown {
 
 export async function findOpenCodeSessionId(worktreePath: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(
-      opencodeCommand(),
-      ["session", "list", "--format", "json"],
-      { cwd: worktreePath, encoding: "utf8", timeout: 5_000 },
-    );
+    const stdout = await readOpenCodeJson(["session", "list", "--format", "json"], {
+      cwd: worktreePath,
+      timeoutMs: OPENCODE_SESSION_LIST_TIMEOUT_MS,
+    });
     return parseSessionList(parseOpenCodeSessionListOutput(stdout), worktreePath);
   } catch {
     return null;
@@ -191,11 +246,10 @@ export async function findOpenCodeSessionId(worktreePath: string): Promise<strin
 }
 
 async function listOpenCodeSessionIds(worktreePath: string): Promise<Set<string>> {
-  const { stdout } = await execFileAsync(
-    opencodeCommand(),
-    ["session", "list", "--format", "json"],
-    { cwd: worktreePath, encoding: "utf8", timeout: 5_000 },
-  );
+  const stdout = await readOpenCodeJson(["session", "list", "--format", "json"], {
+    cwd: worktreePath,
+    timeoutMs: OPENCODE_SESSION_LIST_TIMEOUT_MS,
+  });
   const value = parseOpenCodeSessionListOutput(stdout);
   if (!Array.isArray(value)) throw new Error("OpenCode returned an invalid session list");
   const sessionIds = new Set<string>();
@@ -339,9 +393,8 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
 }
 
 async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
-  const { stdout } = await execFileAsync(opencodeCommand(), ["export", sessionId], {
-    encoding: "utf8",
-    timeout: 10_000,
+  const stdout = await readOpenCodeJson(["export", sessionId], {
+    timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
   });
   return JSON.parse(stdout) as unknown;
 }

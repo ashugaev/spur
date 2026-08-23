@@ -500,10 +500,13 @@ const STATE_HISTORY_LIMIT = 100;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
+// `opencode session list` costs 2-4s per call on a loaded host, so a 5s budget
+// buys a single probe and loses the race against session creation.
+const OPENCODE_SESSION_ID_WAIT_MS = 60_000;
 
 async function waitForNewOpenCodeSessionId(
   baseline: OpenCodeSessionBaseline,
-  timeoutMs = AGENT_SESSION_ID_INITIAL_WAIT_MS,
+  timeoutMs = OPENCODE_SESSION_ID_WAIT_MS,
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   do {
