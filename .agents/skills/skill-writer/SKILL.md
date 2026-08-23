@@ -71,6 +71,19 @@ Grep before returning:
   grep -niE 'because|in order to|note that|keep in mind|it is important|might|may |could |generally|typically|usually|simply|just |very |really' <file>
 
 
+COMPRESSION PASS, MANDATORY
+
+Write once, then cut. Second pass targets 30% fewer words, zero facts lost.
+
+  One fact per line. No line carries two rules.
+  Paragraph over 3 lines: split to labeled lines or a `-` list.
+  Two sentences sharing a subject merge into one.
+  Mechanism narration is the largest water source. State the rule and the
+  observable outcome, never the call chain producing it.
+  Example over explanation. Command over example.
+  Rewrite that grows the file needs a matching cut elsewhere.
+
+
 PRINCIPLES
 
   Token cost    every sentence justifies itself. Delete what the agent
@@ -133,6 +146,7 @@ ANTI-PATTERNS
 CHECKLIST
 
   Every sentence survives the deletion test
+  Compression pass done, word count down or justified
   Verb first, no banned word from CAVEMAN, HARD
   Consistent terminology
   Output is a concrete template, not a description
