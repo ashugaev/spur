@@ -123,7 +123,7 @@ Per agent: single-shot or not, each service check pass/fail, duration, friction 
 
 SOURCE-INSTALL DEPLOY MODE
 
-Second use of the same box: run `scripts/main-deploy.sh` end to end against real systemd. The merge-gate scope and the pass definition are owned by the CLAUDE.md always-on rules — read them there, they are not restated here. Planted agents play no part: skip steps 3-5, keep steps 2 and 6.
+Second use of the same box: run `scripts/main-deploy.sh` end to end against real systemd. The hermetic `tests/deploy` suite stubs `systemctl`, `curl`, `ss`, and `pnpm` — it proves nothing about real systemd, real startup timing, or a real Next build. Verified means the positive and the negative case below both pass. Planted agents play no part: skip steps 3-5, keep steps 2 and 6.
 
   1  Reset in place (step 2). A box carrying the previous run's units and `.next` proves nothing.
   2  Install node 22 and pnpm on the tested PATH. Create `/etc/spur/daemon.env` — main-deploy exits 1 without it. Passwordless sudo required; the script installs units with `sudo tee`.
