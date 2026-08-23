@@ -308,7 +308,7 @@ function stampTodoPath(path: string): TodoLedgerStamp {
   };
 }
 
-function sameTodoStamp(left: TodoLedgerStamp, right: TodoLedgerStamp): boolean {
+export function sameTodoLedgerStamp(left: TodoLedgerStamp, right: TodoLedgerStamp): boolean {
   return (
     left.path === right.path &&
     left.ino === right.ino &&
@@ -373,12 +373,12 @@ export function readStampedTodoProjection(
     try {
       const projection = replayTodoPath(path, session.id);
       const after = stampTodoPath(path);
-      if (sameTodoStamp(before, after)) return { stamp: after, projection };
+      if (sameTodoLedgerStamp(before, after)) return { stamp: after, projection };
     } catch (error) {
       if (error instanceof TodoLedgerCorruptError) {
         try {
           const after = stampTodoPath(path);
-          if (sameTodoStamp(before, after)) {
+          if (sameTodoLedgerStamp(before, after)) {
             throw new TodoLedgerCorruptError(error.sessionId, error.message, error.line, after);
           }
         } catch (afterError) {

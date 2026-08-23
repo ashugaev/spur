@@ -436,6 +436,7 @@ import {
   readStampedTodoProjection,
   readTodoLedgerStamp,
   recordTodoFinishOverride,
+  sameTodoLedgerStamp,
   TodoDisabledError,
   TodoLedgerCorruptError,
   TodoOpenWorkError,
@@ -1352,9 +1353,9 @@ function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
   tags: TagDefinition[],
+  todoEnabled: boolean,
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
-  todoEnabled = true,
 ): string {
   let base = initialMessage.trim()
     ? withSelfDestructInstructions(
@@ -8223,9 +8224,9 @@ export class SessionService {
             composedInitialMessage,
             sidecarNames,
             this.config.tags,
+            placeholder.todoEnabled === true,
             project.branchNaming?.regex,
             selfDestruct,
-            placeholder.todoEnabled,
           );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...placeholder, worktreePath: workspacePath },
@@ -9265,9 +9266,9 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
         this.config.tags,
+        spawnPlaceholder.todoEnabled === true,
         project.branchNaming?.regex,
         selfDestruct,
-        spawnPlaceholder.todoEnabled === true,
       );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...spawnPlaceholder, worktreePath: workspacePath },
@@ -12023,9 +12024,9 @@ export class SessionService {
         buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
         recoverySidecarNames,
         this.config.tags,
+        session.todoEnabled === true,
         project.branchNaming?.regex,
         session.selfDestruct,
-        session.todoEnabled === true,
       );
       const recoveryPaneTarget = {
         id: session.id,
@@ -12399,9 +12400,9 @@ export class SessionService {
           effectivePlan.initialMessage,
           restoreSidecarNames,
           this.config.tags,
+          current.todoEnabled === true,
           restoreProject?.branchNaming?.regex,
           current.selfDestruct,
-          current.todoEnabled === true,
         );
         if (current.agent === "codex") {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
@@ -13216,19 +13217,20 @@ export class SessionService {
     const successor = readSession(this.config.dataDir, sessionId);
     if (!successor) return;
     const failures: unknown[] = [];
-    try {
-      await this.killAgentPaneAndConfirmExit(successor, { failOnSurvivors: true });
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      await this.teardownSessionSidecars(successor);
-    } catch (error) {
-      failures.push(error);
-    }
-    let serviceCleanupFailed = false;
-    for (const service of listServiceInstancesForSession(this.config.dataDir, successor.id)) {
+    const collectFailure = async (action: () => void | Promise<void>): Promise<void> => {
       try {
+        await action();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    await collectFailure(() =>
+      this.killAgentPaneAndConfirmExit(successor, { failOnSurvivors: true }),
+    );
+    await collectFailure(() => this.teardownSessionSidecars(successor));
+    const serviceFailureStart = failures.length;
+    for (const service of listServiceInstancesForSession(this.config.dataDir, successor.id)) {
+      await collectFailure(async () => {
         await killTmuxSession(service.tmuxSession);
         deleteServiceSourceStatesForService(
           this.config.dataDir,
@@ -13237,24 +13239,15 @@ export class SessionService {
           service.serviceId,
         );
         deleteServiceInstance(this.config.dataDir, successor.id, service.serviceId);
-      } catch (error) {
-        serviceCleanupFailed = true;
-        failures.push(error);
-      }
+      });
     }
-    if (!serviceCleanupFailed) {
-      try {
+    if (failures.length === serviceFailureStart) {
+      await collectFailure(() => {
         deleteServiceSourceStatesForSession(this.config.dataDir, successor.project, successor.id);
         deleteServiceInstancesForSession(this.config.dataDir, successor.id);
-      } catch (error) {
-        failures.push(error);
-      }
+      });
     }
-    try {
-      this.removeSessionArtifacts(successor);
-    } catch (error) {
-      failures.push(error);
-    }
+    await collectFailure(() => this.removeSessionArtifacts(successor));
     if (failures.length > 0) {
       throw new AggregateError(failures, `Incomplete handoff compensation for ${sessionId}`);
     }
@@ -15210,14 +15203,7 @@ export class SessionService {
     try {
       const stamp = readTodoLedgerStamp(this.config.dataDir, session, true);
       const cached = this.dashboardTodoCache.get(session.id);
-      if (
-        cached &&
-        cached.stamp.path === stamp.path &&
-        cached.stamp.ino === stamp.ino &&
-        cached.stamp.size === stamp.size &&
-        cached.stamp.mtimeMs === stamp.mtimeMs &&
-        cached.stamp.ctimeMs === stamp.ctimeMs
-      ) {
+      if (cached && sameTodoLedgerStamp(cached.stamp, stamp)) {
         return cached.state;
       }
       const result = readStampedTodoProjection(this.config.dataDir, session);
