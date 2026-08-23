@@ -324,6 +324,38 @@ describe("telegramSourceModule", () => {
     });
   });
 
+  it("shows the session title in the picker label", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([
+        { id: "s-1", project: "proj", agent: "claude", state: "working", title: "Fix telegram" },
+      ]);
+    const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_project:proj",
+        message: { message_thread_id: 22, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText,
+    });
+
+    expect(editMessageText).toHaveBeenCalledWith("Select a Spur session in proj:", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🟢 s-1 working — Fix telegram", callback_data: "spur_watch:s-1" }],
+          [{ text: "« Back to projects", callback_data: "spur_projects" }],
+        ],
+      },
+    });
+  });
+
   it("handles empty sessions and formats all state emojis", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);

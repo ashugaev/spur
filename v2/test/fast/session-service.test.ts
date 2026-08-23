@@ -12974,11 +12974,12 @@ describe("SessionService", () => {
     return { config, telegramSource };
   }
 
-  function seedClaudeAttentionSession() {
+  function seedClaudeAttentionSession(slots?: { title?: string; links: [] }) {
     const sessions = createSessionStore();
     sessions.set(
       "api-1",
       clone({
+        ...(slots ? { slots } : {}),
         id: "api-1",
         project: "api",
         agent: "claude",
@@ -13032,6 +13033,45 @@ describe("SessionService", () => {
       -1001,
       22,
       expect.any(String),
+    );
+    service.dispose();
+  });
+
+  it("shows the agent title in the Telegram notice text and topic name", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    seedClaudeAttentionSession({ title: "Fix telegram notices", links: [] });
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue("Please confirm before I proceed.");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    mockClaudeJsonlState("needs_input");
+    await advanceSeconds(5);
+
+    const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
+    expect(text).toMatch(/^🔴 api-1 — Fix telegram notices needs input/);
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({ topicName: "🔴 api-1 claude — Fix telegram notices" }),
+    );
+    expect(editTelegramTopicMock).toHaveBeenCalledWith(
+      telegramSource,
+      -1001,
+      22,
+      "🔴 api-1 claude — Fix telegram notices",
     );
     service.dispose();
   });
