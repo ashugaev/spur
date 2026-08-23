@@ -1776,6 +1776,8 @@ export async function startServer(
         // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
         // poll, sidecar reaper, session reaper, 2s dashboard tick — before the first
         // await, so no tick can re-enter teardown or hold the loop open behind it.
+        // It also retires the per-session delivery loops, which park on their own
+        // poll sleep and would otherwise keep typing into panes after shutdown.
         service.dispose();
         const closePromise = closeServer();
         const sourceController = sources;
