@@ -8126,11 +8126,11 @@ export class SessionService {
         todoEnabled,
       };
       writeSession(this.config.dataDir, placeholder);
+      placeholderWritten = true;
       if (placeholder.todoEnabled) {
         ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
         placeholder.todoLedgerVersion = 1;
       }
-      placeholderWritten = true;
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
       workspacePath = placeholder.worktreePath;
@@ -8958,11 +8958,11 @@ export class SessionService {
         todoEnabled,
       };
       writeSession(this.config.dataDir, placeholder);
+      placeholderWritten = true;
       if (placeholder.todoEnabled) {
         ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
         placeholder.todoLedgerVersion = 1;
       }
-      placeholderWritten = true;
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
 
@@ -11031,7 +11031,10 @@ export class SessionService {
   // Signals every torn-down sidecar's pane first, then confirms the whole
   // batch through ONE shared grace window — not one sleep per sidecar (that
   // would multiply teardown latency by sidecar count).
-  private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
+  private async teardownSessionSidecars(
+    session: SessionRecord,
+    options?: { failOnSurvivors?: boolean },
+  ): Promise<void> {
     const project = this.resolveProjectForSession(session);
     // Resolved once for the whole teardown: re-reading it per sidecar would
     // both cost a listSessions each time and let a sibling transitioning
@@ -11067,9 +11070,22 @@ export class SessionService {
       pendingBySidecar.push({ ownerId, scName, pending });
     }
     const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
+    const survivorFailures: Error[] = [];
     for (const [index, entry] of pendingBySidecar.entries()) {
-      this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcomes[index] ?? null);
+      const outcome = outcomes[index] ?? null;
+      this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcome);
+      if (options?.failOnSurvivors && outcome && outcome.survivors.length > 0) {
+        survivorFailures.push(
+          new Error(
+            `Sidecar ${entry.scName} on ${entry.ownerId} left process(es) ${outcome.survivors.join(", ")} alive`,
+          ),
+        );
+        continue;
+      }
       this.clearSidecarProcEntry(entry.ownerId, entry.scName);
+    }
+    if (survivorFailures.length > 0) {
+      throw new AggregateError(survivorFailures, `Incomplete sidecar teardown for ${session.id}`);
     }
   }
 
@@ -11124,23 +11140,22 @@ export class SessionService {
     >,
     options?: { preserveStartup?: boolean },
   ): void {
+    this.removeSessionArtifactData(session, options);
+    this.removeSessionToolsAndWorkspaceState(session);
+  }
+
+  private removeSessionArtifactData(
+    session: Pick<
+      SessionRecord,
+      "id" | "project" | "workspaceId" | "deskId" | "startupAttachmentIds"
+    >,
+    options?: { preserveStartup?: boolean },
+  ): void {
     const sessionId = session.id;
-    // Per-session cleanup: unconditional, regardless of desk membership.
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     deleteSessionUserActions(this.config.dataDir, sessionId);
     const anchorId = workspaceIdOf(session);
-    // A desk sibling's own session-tools dir is per-session, so it goes now.
-    // The anchor's doubles as the tool dir of the desk's shared sidecars, so
-    // it is treated as shared state below.
-    if (sessionId !== anchorId) {
-      removeSessionSlotTool(this.config.dataDir, sessionId);
-    }
-    // Shared-desk cleanup: the anchor's artifacts dir and session-tools dir
-    // are still in use by any other live desk member (an anchor-owned
-    // project sidecar runs with the anchor's SPUR_SESSION_TOOL_DIR), so only
-    // the last member's teardown may remove them. One snapshot serves both the
-    // guard and the keep-list below.
     const deskMembers = listSessions(this.config.dataDir).filter(
       (s) => s.id !== sessionId && s.project === session.project && workspaceIdOf(s) === anchorId,
     );
@@ -11163,9 +11178,27 @@ export class SessionService {
     } else {
       deleteSessionArtifactsDir(this.config.dataDir, anchorId);
     }
+  }
+
+  private removeSessionToolsAndWorkspaceState(
+    session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
+  ): void {
+    const sessionId = session.id;
+    const anchorId = workspaceIdOf(session);
+    if (sessionId !== anchorId) {
+      removeSessionSlotTool(this.config.dataDir, sessionId);
+    }
+    const liveDeskSibling = listSessions(this.config.dataDir).some(
+      (candidate) =>
+        candidate.id !== sessionId &&
+        candidate.project === session.project &&
+        workspaceIdOf(candidate) === anchorId &&
+        !isTerminalSessionStatus(candidate.status),
+    );
+    if (liveDeskSibling) {
+      return;
+    }
     removeSessionSlotTool(this.config.dataDir, anchorId);
-    // Last member's teardown: the workspace's shared slots/pr state goes
-    // with the rest of its shared state.
     deleteWorkspaceState(this.config.dataDir, anchorId);
   }
 
@@ -13227,7 +13260,7 @@ export class SessionService {
     await collectFailure(() =>
       this.killAgentPaneAndConfirmExit(successor, { failOnSurvivors: true }),
     );
-    await collectFailure(() => this.teardownSessionSidecars(successor));
+    await collectFailure(() => this.teardownSessionSidecars(successor, { failOnSurvivors: true }));
     const serviceFailureStart = failures.length;
     for (const service of listServiceInstancesForSession(this.config.dataDir, successor.id)) {
       await collectFailure(async () => {
@@ -13247,7 +13280,21 @@ export class SessionService {
         deleteServiceInstancesForSession(this.config.dataDir, successor.id);
       });
     }
-    await collectFailure(() => this.removeSessionArtifacts(successor));
+    await collectFailure(() => this.removeSessionArtifactData(successor));
+    await collectFailure(() => this.removeSessionToolsAndWorkspaceState(successor));
+    if (
+      successor.worktree &&
+      successor.worktreePath &&
+      workspaceIdOf(successor) === successor.id &&
+      !this.hasActiveWorkspaceMembers(successor) &&
+      !this.hasActiveWorktreePathPeers(successor)
+    ) {
+      await collectFailure(async () => {
+        const cleanup = await this.resolveCleanupContext(successor);
+        await removeWorktree(cleanup.repoPath, successor.worktreePath);
+        this.unregisterWorktreeConfig(successor.worktreePath);
+      });
+    }
     if (failures.length > 0) {
       throw new AggregateError(failures, `Incomplete handoff compensation for ${sessionId}`);
     }

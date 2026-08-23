@@ -253,7 +253,9 @@ describe("SessionRow", () => {
       />,
     );
 
-    const trigger = screen.getByRole("button", { name: "2 of 5 ToDo items resolved" });
+    const trigger = screen.getByRole("button", {
+      name: "Spur ToDo: 2 of 5 resolved, 2 open, 1 held",
+    });
     expect(trigger).toHaveClass("h-5", "w-5");
     const progress = trigger.querySelector('circle[transform="rotate(-90 10 10)"]');
     expect(progress).toHaveAttribute("cx", "10");
@@ -302,7 +304,11 @@ describe("SessionRow", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "0 of 1 ToDo items resolved" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Spur ToDo: 0 of 1 resolved, 0 open, 1 held",
+      }),
+    );
     expect(screen.getByText("ToDo Progress")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Wake scheduled" }));
     expect(screen.queryByText("ToDo Progress")).not.toBeInTheDocument();

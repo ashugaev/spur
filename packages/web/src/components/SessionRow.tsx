@@ -57,7 +57,7 @@ function TodoIndicator({
     ? todo.code === "todo_ledger_corrupt"
       ? "ToDo ledger corrupt"
       : "ToDo unavailable"
-    : `${resolved} of ${total} ToDo items resolved`;
+    : `Spur ToDo: ${resolved} of ${total} resolved, ${todo.counts.open} open, ${todo.counts.held} held`;
   const color = error ? TODO_STATUS_COLOR.error : TODO_STATUS_COLOR[todo.status];
 
   return (

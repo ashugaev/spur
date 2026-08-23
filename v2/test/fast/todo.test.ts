@@ -143,7 +143,7 @@ describe("Spur ToDo ledger", () => {
     ).toThrow(InvalidTodoRequestError);
   });
 
-  it("migrates terminal legacy records with a terminal item", async () => {
+  it("AC5 ledger migration pins terminal legacy records with a terminal item", async () => {
     const { dataDir, session } = await fixture("completed");
     const projection = ensureTodoLedger(dataDir, session);
     expect(projection.status).toBe("resolved");
@@ -186,7 +186,7 @@ describe("Spur ToDo ledger", () => {
     expect(replayTodo(dataDir, session.id)).toEqual(before);
   });
 
-  it("returns a stable exact-path stamp and follows archive movement", async () => {
+  it("AC7 exact-path ledger stamp follows archive movement", async () => {
     const { dataDir, session } = await fixture();
     ensureTodoLedger(dataDir, session, "spawn");
     const marked = requiredSession(dataDir, session.id);
@@ -202,7 +202,7 @@ describe("Spur ToDo ledger", () => {
     expect(archived.projection).toEqual(live.projection);
   });
 
-  it("attaches the stable stamp to content corruption", async () => {
+  it("AC7 exact-path ledger corruption keeps its stable stamp", async () => {
     const { dataDir, session } = await fixture();
     ensureTodoLedger(dataDir, session, "spawn");
     const marked = requiredSession(dataDir, session.id);

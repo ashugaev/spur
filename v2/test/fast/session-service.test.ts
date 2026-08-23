@@ -226,6 +226,7 @@ const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const removeSessionTodoToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
+const deleteSessionArtifactsDirMock = vi.fn();
 const deleteSessionArtifactsExceptMock = vi.fn();
 const listSessionArtifactsMock = vi.fn();
 const readSessionArtifactMock = vi.fn();
@@ -714,9 +715,7 @@ vi.mock("../../src/session-artifacts.js", () => ({
     return dir;
   }),
   deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
-  deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
-    rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
-  }),
+  deleteSessionArtifactsDir: deleteSessionArtifactsDirMock,
   listSessionArtifacts: listSessionArtifactsMock,
   readSessionArtifact: readSessionArtifactMock,
   setSessionArtifactOrigin: setSessionArtifactOriginMock,
@@ -1477,6 +1476,11 @@ describe("SessionService", () => {
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionTodoToolMock.mockReset();
     removeSessionSlotToolMock.mockReset();
+    deleteSessionArtifactsDirMock
+      .mockReset()
+      .mockImplementation((_dataDir: string, sessionId: string) => {
+        rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
+      });
     deleteSessionArtifactsExceptMock.mockReset();
     listSessionArtifactsMock.mockReset().mockReturnValue([]);
     readSessionArtifactMock.mockReset().mockReturnValue(null);
@@ -1849,7 +1853,7 @@ describe("SessionService", () => {
     ]);
   });
 
-  describe("Spur ToDo lifecycle", () => {
+  describe("AC2-AC9 Spur ToDo policy dashboard cache and ledger matrices", () => {
     it("pins project ToDo overrides above the instance fallback in both directions", async () => {
       const sessions = createSessionStore();
       await useRealTodoLedger();
@@ -1942,6 +1946,48 @@ describe("SessionService", () => {
       expect(readSessionMock(TEST_DATA_DIR, spawned.id)?.todoLedgerVersion).toBe(1);
       expect(projection.items).toHaveLength(1);
       expect(projection.items[0]).toMatchObject({ text: "Ship native ToDo", status: "open" });
+      service.dispose();
+    });
+
+    it("AC2 spawn pin init failure leaves the foreground placeholder errored", async () => {
+      const sessions = createSessionStore();
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
+        throw new Error("ledger init failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "Pinned foreground" })).rejects.toThrow(
+        "Failed to spawn api-1: ledger init failed",
+      );
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        todoEnabled: true,
+        error: "ledger init failed",
+      });
+      service.dispose();
+    });
+
+    it("AC2 spawn pin init failure leaves the background placeholder errored", async () => {
+      const sessions = createSessionStore();
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
+        throw new Error("ledger init failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawnInBackground({ project: "api", prompt: "Pinned background" }),
+      ).rejects.toThrow("ledger init failed");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        todoEnabled: true,
+        error: "ledger init failed",
+      });
       service.dispose();
     });
 
@@ -27433,6 +27479,165 @@ describe("SessionService", () => {
           sessionId: "api-2",
         }),
       );
+    });
+
+    it.each(["process", "service", "sidecar", "artifact", "tool", "workspace"] as const)(
+      "AC15 handoff compensation retains tracking and caches on %s cleanup failure",
+      async (failureStage) => {
+        const sessions = createSessionStore();
+        const successor = sessionRecord({
+          id: "api-2",
+          workspaceId: "api-2",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-2",
+        });
+        sessions.set(successor.id, successor);
+        if (failureStage === "process") {
+          terminateAgentProcessesMock.mockResolvedValueOnce({
+            status: "survivors",
+            pids: [4242],
+          });
+        }
+        if (failureStage === "service") {
+          listServiceInstancesForSessionMock.mockReturnValue([
+            {
+              sessionId: successor.id,
+              project: successor.project,
+              serviceId: "web",
+              command: "pnpm dev",
+              cwd: successor.worktreePath,
+              tmuxSession: `${successor.id}--svc--web`,
+              status: "running",
+              createdAt: successor.createdAt,
+              updatedAt: successor.updatedAt,
+            },
+          ]);
+          killTmuxSessionMock.mockImplementation(async (name: string) => {
+            if (name.endsWith("--svc--web")) throw new Error("service survived");
+          });
+        }
+        if (failureStage === "artifact") {
+          deleteSessionArtifactsDirMock.mockImplementationOnce(() => {
+            throw new Error("artifact cleanup failed");
+          });
+        }
+        if (failureStage === "tool") {
+          removeSessionSlotToolMock.mockImplementationOnce(() => {
+            throw new Error("tool cleanup failed");
+          });
+        }
+        if (failureStage === "workspace") {
+          removeWorktreeMock.mockRejectedValueOnce(new Error("workspace cleanup failed"));
+        }
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.settleBackgroundSpawns();
+        service.dispose();
+        if (failureStage === "sidecar") {
+          vi.spyOn(
+            sessionServiceInternals(service),
+            "teardownSessionSidecars",
+          ).mockRejectedValueOnce(new Error("sidecar survived"));
+        }
+        const caches = service as unknown as {
+          stateCache: Map<string, unknown>;
+          dashboardCache: Map<string, unknown>;
+          dashboardTodoCache: Map<string, unknown>;
+          dashboardEnrichedRecords: Map<string, unknown>;
+        };
+        for (const cache of [
+          caches.stateCache,
+          caches.dashboardCache,
+          caches.dashboardTodoCache,
+          caches.dashboardEnrichedRecords,
+        ]) {
+          cache.set(successor.id, {});
+        }
+
+        await expect(
+          (
+            service as unknown as {
+              compensateFailedHandoffSuccessor(id: string): Promise<void>;
+            }
+          ).compensateFailedHandoffSuccessor(successor.id),
+        ).rejects.toThrow("Incomplete handoff compensation");
+
+        expect(sessions.has(successor.id)).toBe(true);
+        expect(deleteSessionMock).not.toHaveBeenCalled();
+        expect({
+          state: caches.stateCache.has(successor.id),
+          dashboard: caches.dashboardCache.has(successor.id),
+          todo: caches.dashboardTodoCache.has(successor.id),
+          enriched: caches.dashboardEnrichedRecords.has(successor.id),
+        }).toEqual({ state: true, dashboard: true, todo: true, enriched: true });
+      },
+    );
+
+    it("AC15 handoff compensation removes tracking only after every cleanup stage succeeds", async () => {
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        workspaceId: "api-2",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-2",
+      });
+      sessions.set(successor.id, successor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await (
+        service as unknown as {
+          compensateFailedHandoffSuccessor(id: string): Promise<void>;
+        }
+      ).compensateFailedHandoffSuccessor(successor.id);
+
+      expect(terminateAgentProcessesMock).toHaveBeenCalled();
+      expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", successor.worktreePath);
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, successor.id);
+      expect(deleteSessionMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ id: successor.id }),
+      );
+      expect(sessions.has(successor.id)).toBe(false);
+      service.dispose();
+    });
+
+    it("AC16 shared anchor tools keep the anchor and remove the member tool", async () => {
+      const sessions = createSessionStore();
+      const anchor = sessionRecord({ id: "api-1", workspaceId: "api-1" });
+      const member = sessionRecord({ id: "api-2", workspaceId: "api-1" });
+      sessions.set(anchor.id, anchor);
+      sessions.set(member.id, member);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      (
+        service as unknown as {
+          removeSessionToolsAndWorkspaceState(session: SessionRecord): void;
+        }
+      ).removeSessionToolsAndWorkspaceState(member);
+
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, member.id);
+      expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, anchor.id);
+      service.dispose();
+    });
+
+    it("AC16 shared anchor tools remove the anchor after the final live member", async () => {
+      const sessions = createSessionStore();
+      const anchor = sessionRecord({ id: "api-1", workspaceId: "api-1" });
+      sessions.set(anchor.id, anchor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      (
+        service as unknown as {
+          removeSessionToolsAndWorkspaceState(session: SessionRecord): void;
+        }
+      ).removeSessionToolsAndWorkspaceState(anchor);
+
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, anchor.id);
+      service.dispose();
     });
 
     it("leaves the source stopped when spawn fails after teardown", async () => {
