@@ -204,7 +204,7 @@ describe("session slots", () => {
     expect(todoWrapper).not.toContain("delete");
   });
 
-  it("removes the fixed-session ToDo wrapper when ToDo is disabled", async () => {
+  it("AC2 ToDo disabled todo tool removes the fixed-session wrapper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
     const args = { dataDir, sessionId: "api-1", configPath: "/tmp/spur.yaml" };

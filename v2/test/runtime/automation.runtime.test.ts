@@ -1146,7 +1146,9 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         automationConfig(
           context,
           sessionPrefix,
-          `    sources:
+          `    todo:
+      enabled: true
+    sources:
       pr-watch:
         type: github
         intervalMs: 1000

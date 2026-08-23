@@ -785,7 +785,7 @@ function baseConfig() {
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
     models: { codexHome: "/tmp/codex" },
-    todo: { enabled: true },
+    todo: { enabled: false },
     rateLimitReactivation: { afterHours: 0 },
     authRotation: {
       autoRotateOnRateLimit: false,
@@ -841,6 +841,10 @@ function baseConfig() {
   };
 }
 
+function todoEnabledConfig() {
+  return { ...baseConfig(), todo: { enabled: true } };
+}
+
 async function loadSessionServiceModule() {
   vi.resetModules();
   const module = await import("../../src/session-service.js");
@@ -880,6 +884,7 @@ function sessionRecord(
     tmuxSession: id,
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: false,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
     ...rest,
@@ -939,6 +944,7 @@ function seedShepherdSession(overrides: Partial<SessionRecord> = {}) {
     tmuxSession: "shp-1",
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: true,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:00:00.000Z",
     ...overrides,
@@ -961,6 +967,7 @@ function seedQueuedSendSession(state: string) {
     tmuxSession: "api-1",
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: true,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
     queuedMessages: {
@@ -1110,6 +1117,7 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     tmuxSession: id,
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: true,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
     ...overrides,
@@ -1158,7 +1166,10 @@ type SessionServiceInternals = {
   reconcileTaskCompleted(session: SessionRecord): Promise<void>;
   sendLocked(sessionId: string, request: { message: string }): Promise<SessionView>;
   cleanupSessionServices(session: SessionRecord): Promise<void>;
-  teardownSessionSidecars(session: SessionRecord): Promise<void>;
+  teardownSessionSidecars(
+    session: SessionRecord,
+    options?: { failOnSurvivors?: boolean },
+  ): Promise<void>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -1754,6 +1765,7 @@ describe("SessionService", () => {
   });
 
   it("spawns a session through one clear path and returns the enriched view", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -1853,7 +1865,10 @@ describe("SessionService", () => {
     ]);
   });
 
-  describe("AC2-AC9 Spur ToDo policy dashboard cache and ledger matrices", () => {
+  describe("ToDo pin and dashboard ToDo policy matrices", () => {
+    beforeEach(() => {
+      loadConfigMock.mockReturnValue(todoEnabledConfig());
+    });
     it("pins project ToDo overrides above the instance fallback in both directions", async () => {
       const sessions = createSessionStore();
       await useRealTodoLedger();
@@ -2404,6 +2419,7 @@ describe("SessionService", () => {
   });
 
   it("persists the exact fresh OpenCode session before sending the prompt", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     agentWaitsForSubmitAckMock.mockReturnValue(true);
     createAgentSubmitAckBindingMock.mockResolvedValue({
       scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
@@ -3072,6 +3088,7 @@ describe("SessionService", () => {
   });
 
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     mockClaudeJsonlState("waiting");
     createSessionStore();
     tmuxSessionExistsMock.mockResolvedValue(false);
@@ -3374,7 +3391,7 @@ describe("SessionService", () => {
   });
 
   function configWithModes() {
-    const base = baseConfig();
+    const base = todoEnabledConfig();
     return {
       ...base,
       projects: {
@@ -3419,6 +3436,7 @@ describe("SessionService", () => {
   });
 
   it("delivers the Spur ToDo contract when no prompt or mode is supplied", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -3444,6 +3462,7 @@ describe("SessionService", () => {
 
   it("produces a byte-identical prompt for a project without a modes registry", async () => {
     mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     // baseConfig() has no modes key on the "api" project; this is the
     // regression guard that D5 ("no modes: -> today's behavior exactly")
     // holds.
@@ -5062,7 +5081,7 @@ describe("SessionService", () => {
 
   it("allows spawn without a prompt, skips default steps, and sends the ToDo contract", async () => {
     loadConfigMock.mockReturnValue({
-      ...baseConfig(),
+      ...todoEnabledConfig(),
       projects: {
         api: {
           ...baseConfig().projects.api,
@@ -5142,6 +5161,7 @@ describe("SessionService", () => {
   });
 
   it("spawns against the shared project path when worktree is disabled", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -5194,6 +5214,7 @@ describe("SessionService", () => {
   });
 
   it("generates shared session helpers with the custom parent config path", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     const customConfig = "/tmp/custom-spur.yaml";
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -27574,6 +27595,80 @@ describe("SessionService", () => {
       },
     );
 
+    it("AC15 handoff compensation attempts every sidecar after one signal fails", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              first: { command: "pnpm first", autoStart: false },
+              second: { command: "pnpm second", autoStart: false },
+            },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        sidecarNames: ["first", "second"],
+        slots: {
+          links: [
+            { label: "first", url: "http://127.0.0.1:3001" },
+            { label: "second", url: "http://127.0.0.1:3002" },
+          ],
+        },
+      });
+      sessions.set(successor.id, successor);
+      killTmuxSessionMock.mockImplementation(async (name: string) => {
+        if (name.endsWith("--first")) throw new Error("first signal failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        sessionServiceInternals(service).teardownSessionSidecars(successor, {
+          failOnSurvivors: true,
+        }),
+      ).rejects.toThrow("Incomplete sidecar teardown");
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-2--first");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-2--second");
+      expect(applySlotsUpdateMock).toHaveBeenCalledWith(expect.anything(), {
+        unlinkLabels: ["second"],
+      });
+      expect(applySlotsUpdateMock).not.toHaveBeenCalledWith(expect.anything(), {
+        unlinkLabels: ["first"],
+      });
+      service.dispose();
+    });
+
+    it("AC15 handoff compensation attempts anchor-tool and workspace cleanup after member-tool failure", async () => {
+      const sessions = createSessionStore();
+      const successor = sessionRecord({ id: "api-2", workspaceId: "api-1" });
+      sessions.set(successor.id, successor);
+      removeSessionSlotToolMock.mockImplementationOnce(() => {
+        throw new Error("member tool cleanup failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const { readWorkspaceState, writeWorkspaceState } = await loadWorkspaceStoreModule();
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", { slots: { title: "Shared", links: [] } });
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() =>
+        (
+          service as unknown as {
+            removeSessionToolsAndWorkspaceState(session: SessionRecord): void;
+          }
+        ).removeSessionToolsAndWorkspaceState(successor),
+      ).toThrow("Incomplete tool cleanup");
+
+      expect(removeSessionSlotToolMock).toHaveBeenNthCalledWith(1, TEST_DATA_DIR, "api-2");
+      expect(removeSessionSlotToolMock).toHaveBeenNthCalledWith(2, TEST_DATA_DIR, "api-1");
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")).toBeNull();
+      service.dispose();
+    });
+
     it("AC15 handoff compensation removes tracking only after every cleanup stage succeeds", async () => {
       const sessions = createSessionStore();
       const successor = sessionRecord({
@@ -27637,6 +27732,40 @@ describe("SessionService", () => {
       ).removeSessionToolsAndWorkspaceState(anchor);
 
       expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, anchor.id);
+      service.dispose();
+    });
+
+    it("AC16 ToDo tool reconciliation prepares every nonterminal status and skips terminal status", async () => {
+      const sessions = createSessionStore();
+      const statuses: SessionRecord["status"][] = [
+        "running",
+        "spawning",
+        "paused",
+        "stopped",
+        "errored",
+        "completed",
+        "killed",
+      ];
+      for (const status of statuses) {
+        sessions.set(
+          `api-${status}`,
+          sessionRecord({ id: `api-${status}`, status, todoEnabled: true }),
+        );
+      }
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      ensureSessionSlotToolMock.mockClear();
+
+      service.applyConfig(todoEnabledConfig() as unknown as AppConfig, ["/tmp/spur.yaml"]);
+
+      const preparedIds = ensureSessionSlotToolMock.mock.calls.map(
+        ([request]) => (request as { sessionId: string }).sessionId,
+      );
+      expect(preparedIds.sort()).toEqual(
+        ["errored", "paused", "running", "spawning", "stopped"].map((status) => `api-${status}`),
+      );
+      expect(preparedIds).not.toContain("api-completed");
+      expect(preparedIds).not.toContain("api-killed");
       service.dispose();
     });
 

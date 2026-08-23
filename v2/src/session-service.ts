@@ -11041,6 +11041,7 @@ export class SessionService {
     // mid-loop leave the desk's sidecars half torn down.
     const deskSiblingsRunning = this.hasRunningWorkspaceMembers(session);
     const pendingBySidecar: Array<{ ownerId: string; scName: string; pending: PendingReap }> = [];
+    const failures: unknown[] = [];
     for (const scName of sessionSidecarNames(session, project)) {
       const sidecar = project?.sidecars[scName];
       // Non-mcp project sidecars are desk-shared: while another desk member's
@@ -11055,37 +11056,55 @@ export class SessionService {
       }
       const ownerId = this.sidecarOwnerIdForName(session, project, scName);
       this.abortSidecarUrlProbe(ownerId, scName);
-      const record = readSession(this.config.dataDir, ownerId);
-      if (record) {
-        const resolved = resolveWorkspaceState(this.config.dataDir, record);
-        const next = applySlotsUpdate(resolved.slots, { unlinkLabels: [scName] });
-        if (next !== resolved.slots) {
-          this.writeWorkspaceStateWithLegacyMirror(record, {
-            ...(next ? { slots: next } : {}),
-            ...(resolved.pr ? { pr: resolved.pr } : {}),
-          });
-        }
+      try {
+        const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
+        pendingBySidecar.push({ ownerId, scName, pending });
+      } catch (error) {
+        failures.push(error);
       }
-      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
-      pendingBySidecar.push({ ownerId, scName, pending });
     }
-    const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
-    const survivorFailures: Error[] = [];
+    let outcomes: Awaited<ReturnType<typeof confirmReaps>> = [];
+    try {
+      outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
+    } catch (error) {
+      failures.push(error);
+    }
     for (const [index, entry] of pendingBySidecar.entries()) {
       const outcome = outcomes[index] ?? null;
       this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcome);
-      if (options?.failOnSurvivors && outcome && outcome.survivors.length > 0) {
-        survivorFailures.push(
-          new Error(
-            `Sidecar ${entry.scName} on ${entry.ownerId} left process(es) ${outcome.survivors.join(", ")} alive`,
-          ),
-        );
+      if (outcome && outcome.survivors.length > 0) {
+        if (options?.failOnSurvivors) {
+          failures.push(
+            new Error(
+              `Sidecar ${entry.scName} on ${entry.ownerId} left process(es) ${outcome.survivors.join(", ")} alive`,
+            ),
+          );
+        }
         continue;
+      }
+      if (!outcome) {
+        continue;
+      }
+      const record = readSession(this.config.dataDir, entry.ownerId);
+      if (record) {
+        try {
+          const resolved = resolveWorkspaceState(this.config.dataDir, record);
+          const next = applySlotsUpdate(resolved.slots, { unlinkLabels: [entry.scName] });
+          if (next !== resolved.slots) {
+            this.writeWorkspaceStateWithLegacyMirror(record, {
+              ...(next ? { slots: next } : {}),
+              ...(resolved.pr ? { pr: resolved.pr } : {}),
+            });
+          }
+        } catch (error) {
+          failures.push(error);
+          continue;
+        }
       }
       this.clearSidecarProcEntry(entry.ownerId, entry.scName);
     }
-    if (survivorFailures.length > 0) {
-      throw new AggregateError(survivorFailures, `Incomplete sidecar teardown for ${session.id}`);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `Incomplete sidecar teardown for ${session.id}`);
     }
   }
 
@@ -11185,21 +11204,38 @@ export class SessionService {
   ): void {
     const sessionId = session.id;
     const anchorId = workspaceIdOf(session);
+    const failures: unknown[] = [];
+    const collectFailure = (action: () => void): void => {
+      try {
+        action();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
     if (sessionId !== anchorId) {
-      removeSessionSlotTool(this.config.dataDir, sessionId);
+      collectFailure(() => removeSessionSlotTool(this.config.dataDir, sessionId));
     }
-    const liveDeskSibling = listSessions(this.config.dataDir).some(
-      (candidate) =>
-        candidate.id !== sessionId &&
-        candidate.project === session.project &&
-        workspaceIdOf(candidate) === anchorId &&
-        !isTerminalSessionStatus(candidate.status),
-    );
-    if (liveDeskSibling) {
+    let liveDeskSibling: boolean | null = null;
+    collectFailure(() => {
+      liveDeskSibling = listSessions(this.config.dataDir).some(
+        (candidate) =>
+          candidate.id !== sessionId &&
+          candidate.project === session.project &&
+          workspaceIdOf(candidate) === anchorId &&
+          !isTerminalSessionStatus(candidate.status),
+      );
+    });
+    if (liveDeskSibling !== false) {
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `Incomplete tool cleanup for ${sessionId}`);
+      }
       return;
     }
-    removeSessionSlotTool(this.config.dataDir, anchorId);
-    deleteWorkspaceState(this.config.dataDir, anchorId);
+    collectFailure(() => removeSessionSlotTool(this.config.dataDir, anchorId));
+    collectFailure(() => deleteWorkspaceState(this.config.dataDir, anchorId));
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `Incomplete tool cleanup for ${sessionId}`);
+    }
   }
 
   // The single path for killing an agent pane. relaunchSessionInPlace,

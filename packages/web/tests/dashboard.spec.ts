@@ -1791,7 +1791,7 @@ test.describe("Spur ToDo dashboard indicator", () => {
       }),
       makeWorkingSession({
         id: "todo-unavailable",
-        todo: { kind: "error", code: "todo_ledger_unavailable" },
+        todo: { kind: "error", code: "todo_unavailable" },
       }),
     ]);
     await page.goto("/");
@@ -1819,7 +1819,7 @@ test.describe("Spur ToDo dashboard indicator", () => {
           counts: { total: 1, open: 0, held: 1, completed: 0, cancelled: 0 },
         },
         scheduledWake: { dueAt: new Date(Date.now() + 60_000).toISOString(), message: "Wake" },
-        runningSidecars: [{ name: "web" }],
+        runningSidecarNames: ["web"],
       }),
     ]);
     await page.goto("/");
@@ -1837,6 +1837,11 @@ test.describe("Spur ToDo dashboard indicator", () => {
     await page.getByRole("button", { name: "Wake scheduled" }).click();
     await expect(page.getByText("ToDo Progress")).toHaveCount(0);
     await todo.click();
+    await page.getByLabel("Running sidecars for todo-keyboard").click();
+    await expect(page.getByText("ToDo Progress")).toHaveCount(0);
+    await expect(page.locator("#sidecars-todo-keyboard")).toBeVisible();
+    await todo.click();
+    await expect(page.locator("#sidecars-todo-keyboard")).toHaveCount(0);
     await page.locator("body").click({ position: { x: 2, y: 2 } });
     await expect(page.getByText("ToDo Progress")).toHaveCount(0);
   });
@@ -1863,13 +1868,42 @@ test.describe("Spur ToDo dashboard indicator", () => {
     const popover = page.getByRole("status");
     const box = await popover.boundingBox();
     if (!box) throw new Error("Expected visible ToDo popover");
-    expect(box.x).toBeGreaterThanOrEqual(0);
-    expect(box.x + box.width).toBeLessThanOrEqual(390);
+    expect(box.x).toBeGreaterThanOrEqual(8);
+    expect(box.x + box.width).toBeLessThanOrEqual(382);
 
-    await page.evaluate(() => document.documentElement.classList.add("dark"));
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "dark";
+    });
     await expect(todo).toHaveAttribute("style", /--color-status-ready/);
-    await page.evaluate(() => document.documentElement.classList.remove("dark"));
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "light";
+    });
     await expect(todo).toHaveAttribute("style", /--color-status-ready/);
+  });
+
+  test("replaces a live summary with an unavailable error without stale counts", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    let todo: SpurSessionView["todo"] = {
+      kind: "summary",
+      revision: "rev-1",
+      status: "active",
+      counts: { total: 2, open: 1, held: 0, completed: 1, cancelled: 0 },
+    };
+    await mockSessions(page, () => [makeWorkingSession({ id: "todo-live-update", todo })]);
+    await page.goto("/");
+    await expect(
+      page.getByRole("button", {
+        name: "Spur ToDo: 1 of 2 resolved, 1 open, 0 held",
+      }),
+    ).toBeVisible();
+
+    todo = { kind: "error", code: "todo_unavailable" };
+    await page.clock.fastForward(DASHBOARD_POLL_WAIT_MS);
+
+    await expect(page.getByRole("button", { name: "ToDo unavailable" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Spur ToDo:/ })).toHaveCount(0);
   });
 });
 

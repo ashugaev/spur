@@ -798,11 +798,15 @@ export function deleteSessionTracking(
 ): void {
   const path = sessionFilePath(dataDir, session.project, session.id);
   const stagedPath = `${path}.deleting`;
-  renameSync(path, stagedPath);
+  const shardPath = sessionShardDir(dataDir, session.id);
+  const stagedShardPath = `${shardPath}.deleting`;
+  const hasShard = existsSync(shardPath);
+  if (hasShard) renameSync(shardPath, stagedShardPath);
   try {
-    rmSync(sessionShardDir(dataDir, session.id), { recursive: true, force: true });
+    renameSync(path, stagedPath);
     deleteSessionIndexEntry(dataDir, session.id);
     rmSync(stagedPath);
+    if (hasShard) rmSync(stagedShardPath, { recursive: true, force: true });
     sessionFileCache.delete(path);
   } catch (error) {
     const rollbackErrors: unknown[] = [];
@@ -812,16 +816,19 @@ export function deleteSessionTracking(
       rollbackErrors.push(rollbackError);
     }
     try {
+      if (hasShard && existsSync(stagedShardPath)) renameSync(stagedShardPath, shardPath);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    try {
       if (existsSync(path)) writeSessionIndexEntry(dataDir, session.id, path);
     } catch (rollbackError) {
       rollbackErrors.push(rollbackError);
     }
     if (rollbackErrors.length > 0) {
-      throw new AggregateError(
-        rollbackErrors,
-        `Failed to delete ${session.id} tracking`,
-        { cause: error },
-      );
+      throw new AggregateError(rollbackErrors, `Failed to delete ${session.id} tracking`, {
+        cause: error,
+      });
     }
     throw error;
   }

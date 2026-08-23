@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveSessions,
+  deleteSessionTracking,
   deletePendingSendBatch,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
@@ -39,6 +40,81 @@ async function newDataDir(): Promise<string> {
   tempDirs.push(dir);
   return dir;
 }
+
+describe("AC15 tracking-last deletion", () => {
+  function trackedSession(): SessionRecord {
+    return {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+  }
+
+  it("stages the shard first and removes record, index, and shard on commit", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+
+    deleteSessionTracking(dataDir, session);
+
+    expect(readSession(dataDir, session.id)).toBeNull();
+    expect(existsSync(shardPath)).toBe(false);
+  });
+
+  it("keeps record, index, and shard when shard staging fails", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    const stagedShardPath = `${shardPath}.deleting`;
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    mkdirSync(stagedShardPath, { recursive: true });
+    writeFileSync(join(stagedShardPath, "owned"), "collision\n");
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow();
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+  });
+});
+
+describe("ToDo pin persistence", () => {
+  it("AC2 ToDo pin survives session normalization", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-todo-pin",
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-todo-pin",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-todo-pin",
+      launchCommand: "claude",
+      status: "running",
+      todoEnabled: true,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, session.id)?.todoEnabled).toBe(true);
+  });
+});
 
 describe("work-item registry", () => {
   it("round-trips recorded ids", async () => {
