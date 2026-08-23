@@ -24,6 +24,7 @@ export interface SourceSessionListItem {
   project: string;
   agent: string;
   state: string;
+  title?: string;
 }
 
 export interface SourceSpawnSessionRequest {

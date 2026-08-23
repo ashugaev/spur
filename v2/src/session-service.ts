@@ -2224,8 +2224,27 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
   );
 }
 
-function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state">): string {
-  return `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
+const TELEGRAM_TOPIC_NAME_MAX = 128;
+
+function sessionTitle(session: Pick<SessionView, "slots">): string | undefined {
+  const title = session.slots?.title?.trim();
+  return title ? title : undefined;
+}
+
+// Session label for Telegram text: id plus the agent title when the session has one.
+function telegramSessionLabel(session: Pick<SessionView, "id" | "slots">): string {
+  const title = sessionTitle(session);
+  return title ? `${session.id} — ${title}` : session.id;
+}
+
+function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
+  const head = `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
+  const title = sessionTitle(session);
+  if (!title) return head;
+  const name = `${head} — ${title}`;
+  return name.length > TELEGRAM_TOPIC_NAME_MAX
+    ? `${name.slice(0, TELEGRAM_TOPIC_NAME_MAX - 1).trimEnd()}…`
+    : name;
 }
 
 export class SessionService {
@@ -5618,12 +5637,13 @@ export class SessionService {
       attention !== "rate_limited"
         ? await this.buildPaneTail(session.tmuxSession).catch(() => "")
         : "";
+    const label = telegramSessionLabel(session);
     const text =
       attention === "needs_input"
-        ? `${telegramStatusEmoji("needs_input")} ${session.id} needs input${paneTail}`
+        ? `${telegramStatusEmoji("needs_input")} ${label} needs input${paneTail}`
         : attention === "error"
-          ? `${telegramStatusEmoji("error")} ${session.id} error${paneTail}`
-          : `${telegramStatusEmoji("rate_limited")} ${session.id} rate limited`;
+          ? `${telegramStatusEmoji("error")} ${label} error${paneTail}`
+          : `${telegramStatusEmoji("rate_limited")} ${label} rate limited`;
     await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
   }
 
@@ -5646,7 +5666,7 @@ export class SessionService {
 
   private async pushTelegramNotice(
     sessionId: string,
-    topicSession: Pick<SessionView, "id" | "agent" | "state">,
+    topicSession: Pick<SessionView, "id" | "agent" | "state" | "slots">,
     text: string,
     options: { updateTopicName?: boolean; closeTopic?: boolean } = {},
   ): Promise<void> {
@@ -5689,7 +5709,7 @@ export class SessionService {
       await this.pushTelegramNotice(
         view.id,
         view,
-        `${telegramStatusEmoji("waiting")} ${view.id} is waiting.`,
+        `${telegramStatusEmoji("waiting")} ${telegramSessionLabel(view)} is waiting.`,
         {
           updateTopicName: true,
         },
@@ -11050,8 +11070,13 @@ export class SessionService {
         this.removeSessionArtifacts(session);
         await this.pushTelegramNotice(
           sessionId,
-          { id: session.id, agent: session.agent, state: "stopped" },
-          `Session ${sessionId} finished (${targetStatus}). This chat is unbound.`,
+          {
+            id: session.id,
+            agent: session.agent,
+            state: "stopped",
+            ...(session.slots ? { slots: session.slots } : {}),
+          },
+          `Session ${telegramSessionLabel(session)} finished (${targetStatus}). This chat is unbound.`,
           { closeTopic: true },
         );
         deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
@@ -11160,8 +11185,13 @@ export class SessionService {
       this.removeSessionArtifacts(session, { preserveStartup: true });
       await this.pushTelegramNotice(
         sessionId,
-        { id: session.id, agent: session.agent, state: "killed" },
-        `Session ${sessionId} finished (killed). This chat is unbound.`,
+        {
+          id: session.id,
+          agent: session.agent,
+          state: "killed",
+          ...(session.slots ? { slots: session.slots } : {}),
+        },
+        `Session ${telegramSessionLabel(session)} finished (killed). This chat is unbound.`,
         { closeTopic: true },
       );
       deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
