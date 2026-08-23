@@ -70,6 +70,11 @@ EOF
   export SPUR_DEPLOY_CURL="$stub_dir/curl"
   export SPUR_DEPLOY_LOCKFILE="$work/main-deploy.lock"
   export SPUR_DEPLOY_STATE="$work/state.log"
+  # web_is_serving's own retry cadence, not the heal loop's — 0 keeps every
+  # test hermetic-fast regardless of how many of its 30 iterations a scenario
+  # needs; real deploys use the 1s production default.
+  export SPUR_DEPLOY_WEB_POLL_INTERVAL=0
+  unset SPUR_DEPLOY_COLD_START_POLLS
   # Temp stand-in for packages/web/.next. web_chunks_consistent resolves served
   # /_next/static refs against this dir. Tests seed/remove files to drive the
   # consistent / stale paths.
@@ -251,6 +256,43 @@ EOF
   else
     bad "loud-failure: missing FATAL message"
     printf '%s\n' "$out"
+  fi
+}
+
+# --- Case (p): a slow cold `next start` does not FATAL a healthy deploy -----
+# Regression for the itest VM finding: systemd reports spur-web active
+# immediately on restart, but the socket doesn't bind for several polls (cold
+# `next start` measured 13-20s on the box). verify_and_heal's pre-check gate
+# must give web_is_serving enough budget to see it come up rather than FATAL a
+# box that goes on to serve healthily seconds later.
+test_slow_cold_start_does_not_fatal() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  local head
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  # spur-web reports systemd-active immediately (verb-based is-active) but the
+  # ss/curl stubs only report it actually serving from the 15th poll onward —
+  # inside the current 30x1s budget, but past the old 10x1s one.
+  export SPUR_DEPLOY_COLD_START_POLLS=15
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    ok "slow-cold-start: deploy exits 0 despite the slow bind"
+  else
+    bad "slow-cold-start: exited $rc"
+    printf '%s\n' "$out"
+  fi
+  if grep -q 'FATAL: spur-web not serving' <<<"$out"; then
+    bad "slow-cold-start: unexpected FATAL on a healthy-but-slow web"
+    printf '%s\n' "$out"
+  else
+    ok "slow-cold-start: no FATAL printed"
   fi
 }
 
@@ -592,6 +634,58 @@ EOF
   fi
 }
 
+# --- Case (o2): build abort after `rm -rf .next` warns about the crash-loop -
+# The failed build removed BUILD_ID before aborting. The EXIT trap must still
+# restore (a stopped unit is worse), but it must say plainly that the restored
+# unit will crash-loop until the next successful deploy.
+test_build_abort_warns_incomplete_build() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  # No stamp file -> deployed_head != remote_head -> build path.
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  local pnpm_stub="$work/sudobin/pnpm"
+  cat >"$pnpm_stub" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+verb=""
+for a in "\$@"; do
+  case "\$a" in install|build) verb="\$a";; esac
+done
+if [[ "\$verb" == build ]]; then
+  rm -rf "$SPUR_DEPLOY_WEB_NEXT_DIR"
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$pnpm_stub"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]]; then
+    ok "build-abort-incomplete: non-zero exit ($rc)"
+  else
+    bad "build-abort-incomplete: exited 0"
+  fi
+  local last_web
+  last_web=$(grep -E ' spur-web\.service$' "$SPUR_DEPLOY_STATE" | tail -n1 | cut -d' ' -f1)
+  if [[ "$last_web" == "start" ]]; then
+    ok "build-abort-incomplete: still restores spur-web via start"
+  else
+    bad "build-abort-incomplete: final spur-web verb $last_web"
+    cat "$SPUR_DEPLOY_STATE"
+  fi
+  if grep -q 'WARNING:.*crash-loop' <<<"$out"; then
+    ok "build-abort-incomplete: warns about the crash-loop"
+  else
+    bad "build-abort-incomplete: missing crash-loop warning"
+    printf '%s\n' "$out"
+  fi
+}
+
 # --- Case (n): a failed heal start leaves spur-web active, deploy fails loud -
 # The heal loop's stop/start never brings spur-web back up (systemctl wrapper
 # swallows the first post-heal start). The body fetch then fails every attempt
@@ -887,6 +981,7 @@ test_foreign_new_listener_is_fatal() {
 test_concurrency
 test_heal
 test_loud_failure
+test_slow_cold_start_does_not_fatal
 test_build_hook_no_abort
 test_stale_chunks_heal
 test_stale_chunks_loud_fail
@@ -899,6 +994,7 @@ test_healthy_rebind_after_kill_is_success
 test_foreign_new_listener_is_fatal
 test_escaped_chunk_refs_not_reported_missing
 test_build_abort_leaves_web_active
+test_build_abort_warns_incomplete_build
 test_failed_heal_start_leaves_web_active
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

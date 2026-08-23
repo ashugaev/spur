@@ -29,7 +29,14 @@ web_serving() {
   if [[ -f "$state" ]]; then
     last=$(grep -E ' spur-web\.service$' "$state" | tail -n1 | cut -d' ' -f1) || true
   fi
-  [[ "$last" == "start" || "$last" == "restart" ]]
+  [[ "$last" == "start" || "$last" == "restart" ]] || return 1
+  if [[ -n "${SPUR_DEPLOY_COLD_START_POLLS:-}" ]]; then
+    local counter_file="$state.cold_polls" count=0
+    [[ -f "$counter_file" ]] && count=$(<"$counter_file")
+    [[ "$count" -ge "$SPUR_DEPLOY_COLD_START_POLLS" ]]
+    return
+  fi
+  return 0
 }
 
 want_code=0

@@ -7,6 +7,12 @@
 # when $SPUR_DEPLOY_DAEMON_PORT_PID names a living process; once that process
 # dies, if $SPUR_DEPLOY_DAEMON_REBIND_PID is set it is reported instead
 # (simulates systemd rebinding the port after the orphan is killed).
+#
+# When $SPUR_DEPLOY_COLD_START_POLLS is set, a verb-active web is only
+# reported as actually listening from the Nth poll of :3012 onward (simulates
+# a cold `next start` where systemd reports the unit active before the socket
+# is bound). The poll count is shared with the curl stub via
+# "$SPUR_DEPLOY_STATE.cold_polls".
 set -euo pipefail
 
 state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
@@ -26,7 +32,16 @@ web_serving() {
   if [[ -f "$state" ]]; then
     last=$(grep -E ' spur-web\.service$' "$state" | tail -n1 | cut -d' ' -f1) || true
   fi
-  [[ "$last" == "start" || "$last" == "restart" ]]
+  [[ "$last" == "start" || "$last" == "restart" ]] || return 1
+  if [[ -n "${SPUR_DEPLOY_COLD_START_POLLS:-}" ]]; then
+    local counter_file="$state.cold_polls" count=0
+    [[ -f "$counter_file" ]] && count=$(<"$counter_file")
+    count=$((count + 1))
+    printf '%s' "$count" >"$counter_file"
+    [[ "$count" -ge "$SPUR_DEPLOY_COLD_START_POLLS" ]]
+    return
+  fi
+  return 0
 }
 
 if [[ "$port" == "4310" ]]; then

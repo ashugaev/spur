@@ -52,11 +52,21 @@ web_chunks_verified=true
 # Runs on every exit once armed (script exits, or INT/TERM below re-mapped to
 # an exit). Starts spur-web only if this run left it inactive; a failed start
 # warns instead of masking the original exit code under `set -e`.
+#
+# A build abort can land here after the build already did `rm -rf .next`
+# (BUILD_ID gone) — starting spur-web then is still the right call (a stopped
+# unit is worse than a crash-looping one), but silently reporting `active` on
+# a unit that is actually looping under Restart=always would hide the failure.
+# Warn loudly instead; this does not change the exit code or add a new
+# failure mode.
 restore_web_on_exit() {
   local rc=$?
   trap - EXIT
   if [[ "$web_restore_armed" == true ]] && ! systemctl_cmd is-active --quiet spur-web.service; then
     echo "main:deploy exiting rc=$rc with spur-web inactive — starting" >&2
+    if ! web_build_exists; then
+      echo "main:deploy WARNING: $web_next_dir has no BUILD_ID — the aborted build left it incomplete; spur-web will crash-loop under Restart=always until the next successful deploy" >&2
+    fi
     systemctl_cmd start spur-web.service \
       || echo "main:deploy WARNING: could not start spur-web on exit" >&2
   fi
@@ -149,16 +159,24 @@ web_is_healthy() {
 
 # Poll for the web terminal actually serving on :3012. Returns 0 when a listener
 # exists AND an HTTP request returns 200, within the retry budget.
+#
+# Budget is 30x1s (worst case 30s). Measured twice on the itest VM, a cold
+# `next start` took 13-20s; the previous 10x1s (10s) budget FATALed calls like
+# verify_and_heal's pre-check gate on a box that went on to serve healthily a
+# few seconds later. 30s covers the measured worst case with margin while
+# still failing loud, in bounded time, on a web that is genuinely never coming
+# up.
 web_is_serving() {
   local port=3012
   local code
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  local i
+  for i in $(seq 1 30); do
     if [[ -n "$($SS -tlnH "sport = :$port" 2>/dev/null)" ]]; then
       code=$($CURL -fsS -o /dev/null -w '%{http_code}' --max-time 3 \
         "http://127.0.0.1:$port/" 2>/dev/null) || code=""
       [[ "$code" == "200" ]] && return 0
     fi
-    sleep 1
+    sleep "${SPUR_DEPLOY_WEB_POLL_INTERVAL:-1}"
   done
   return 1
 }
@@ -197,6 +215,12 @@ web_chunks_consistent() {
 # Post-restart verification with self-healing. Restart can leave a unit dead
 # (crash on boot) or stopped (spur-web Requires= propagates the daemon's stop
 # but not its start). Heal by starting, then hard-fail loudly if still broken.
+#
+# Worst-case wall time: the pre-check gate's web_is_serving call (30s) plus the
+# 10-attempt heal loop below — attempt 1's stop+sleep(2)+start (2s), one full
+# web_is_serving wait among the remaining 9 attempts (30s, at
+# unverified_streak==2), and 1s of sleep on each of the other 8 attempts (8s)
+# — 30 + 2 + 30 + 8 = 70s. Bounded, not unbounded.
 verify_and_heal() {
   if ! systemctl_cmd is-active --quiet spur-daemon.service; then
     echo "main:deploy spur-daemon inactive after restart — starting" >&2
@@ -232,7 +256,7 @@ verify_and_heal() {
       systemctl_cmd start spur-web.service
     elif [[ "$web_chunks_verified" != true ]]; then
       # Two unverified attempts in a row: give one poll the real patience of
-      # web_is_serving's 10-iteration wait, in case spur-web is just slow to
+      # web_is_serving's 30-iteration wait, in case spur-web is just slow to
       # come up. Otherwise keep the cheap cadence so a spur-web that never
       # comes up doesn't pay that cost every attempt. Terminal failure is
       # deferred to loop exhaustion below.
