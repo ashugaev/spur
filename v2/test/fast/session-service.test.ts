@@ -5161,9 +5161,8 @@ describe("SessionService", () => {
   });
 
   it("spawns against the shared project path when worktree is disabled", async () => {
-    loadConfigMock.mockReturnValue(todoEnabledConfig());
     loadConfigMock.mockReturnValue({
-      ...baseConfig(),
+      ...todoEnabledConfig(),
       projects: {
         api: {
           ...baseConfig().projects.api,
@@ -5214,10 +5213,9 @@ describe("SessionService", () => {
   });
 
   it("generates shared session helpers with the custom parent config path", async () => {
-    loadConfigMock.mockReturnValue(todoEnabledConfig());
     const customConfig = "/tmp/custom-spur.yaml";
     loadConfigMock.mockReturnValue({
-      ...baseConfig(),
+      ...todoEnabledConfig(),
       configPath: customConfig,
       projects: {
         api: {
