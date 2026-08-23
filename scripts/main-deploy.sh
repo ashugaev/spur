@@ -231,16 +231,11 @@ verify_and_heal() {
       sleep 2
       systemctl_cmd start spur-web.service
     elif [[ "$web_chunks_verified" != true ]]; then
-      # Unverified (body fetch failed) is treated the same as not-serving: keep
-      # polling on the cheap single-shot curl rather than adding a dedicated
-      # wait here — the only pause between the heal start above and the first
-      # re-check is `sleep 2`, so a normal prod heal can still be unverified on
-      # attempt 2 without that being a hard failure. But two quick unverified
-      # attempts in a row mean the cheap curl alone isn't catching a spur-web
-      # that is merely slow to come up, not broken: fall through once to
-      # web_is_serving's own 10s-per-attempt poll so a slow heal still gets
-      # real patience, then go back to the cheap cadence so a spur-web that
-      # never comes up (never verified) doesn't pay that cost every attempt.
+      # Two unverified attempts in a row: give one poll the real patience of
+      # web_is_serving's 10-iteration wait, in case spur-web is just slow to
+      # come up. Otherwise keep the cheap cadence so a spur-web that never
+      # comes up doesn't pay that cost every attempt. Terminal failure is
+      # deferred to loop exhaustion below.
       unverified_streak=$((unverified_streak + 1))
       if [[ "$unverified_streak" == 2 ]]; then
         web_is_serving || true
