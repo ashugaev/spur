@@ -336,7 +336,10 @@ async function findSession(
 
 function sessionLabel(session: SourceSessionListItem): string {
   const emoji = telegramStatusEmoji(session.state);
-  const label = `${emoji} ${session.id} ${session.agent} ${session.state}`;
+  const title = session.title?.trim();
+  const label = title
+    ? `${emoji} ${session.id} ${session.state} — ${title}`
+    : `${emoji} ${session.id} ${session.agent} ${session.state}`;
   return label.length <= 64 ? label : `${label.slice(0, 61)}...`;
 }
 

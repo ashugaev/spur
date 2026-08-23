@@ -511,6 +511,7 @@ export async function startServer(
             project: session.project,
             agent: session.agent,
             state: session.state,
+            ...(session.slots?.title ? { title: session.slots.title } : {}),
           })),
         spawnSession: async (request) => {
           const session = await service.spawn(request);
@@ -519,6 +520,7 @@ export async function startServer(
             project: session.project,
             agent: session.agent,
             state: session.state,
+            ...(session.slots?.title ? { title: session.slots.title } : {}),
           };
         },
       });
