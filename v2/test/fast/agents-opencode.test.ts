@@ -186,9 +186,10 @@ describe("OpenCode adapter", () => {
     const binPath = join(binDir, "opencode");
     await writeFile(
       binPath,
-      ['#!/usr/bin/env node', 'process.stdout.write(JSON.stringify({ blob: "x".repeat(2_000_000) }));'].join(
-        "\n",
-      ),
+      [
+        "#!/usr/bin/env node",
+        'process.stdout.write(JSON.stringify({ blob: "x".repeat(2_000_000) }));',
+      ].join("\n"),
       "utf8",
     );
     await chmod(binPath, 0o755);
