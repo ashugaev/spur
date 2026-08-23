@@ -11215,9 +11215,9 @@ export class SessionService {
     if (sessionId !== anchorId) {
       collectFailure(() => removeSessionSlotTool(this.config.dataDir, sessionId));
     }
-    const siblingState: { live: boolean | null } = { live: null };
+    let liveDeskSibling: boolean | null = null;
     collectFailure(() => {
-      siblingState.live = listSessions(this.config.dataDir).some(
+      liveDeskSibling = listSessions(this.config.dataDir).some(
         (candidate) =>
           candidate.id !== sessionId &&
           candidate.project === session.project &&
@@ -11225,7 +11225,7 @@ export class SessionService {
           !isTerminalSessionStatus(candidate.status),
       );
     });
-    if (siblingState.live !== false) {
+    if (liveDeskSibling !== false) {
       if (failures.length > 0) {
         throw new AggregateError(failures, `Incomplete tool cleanup for ${sessionId}`);
       }
