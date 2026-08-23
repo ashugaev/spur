@@ -257,13 +257,36 @@ verify_and_heal() {
   done
 
   if [[ "$web_chunks_verified" != true ]]; then
+    print_build_id_mismatch_diagnostic
     echo "main:deploy FATAL: spur-web not serving after chunk heal — consistency unverified" >&2
     exit 1
   fi
 
+  print_build_id_mismatch_diagnostic
   echo "main:deploy FATAL: spur-web serving stale chunks" >&2
   echo "main:deploy sha stamp not advanced ($remote_head); re-run main:deploy to retry the same commit" >&2
   exit 1
+}
+
+# Diagnostic only — never changes the exit code or the FATAL wording above.
+# Compares the build id embedded in spur-web's served HTML (RSC flight payload
+# `\"b\":\"<id>\"`) against $web_next_dir/BUILD_ID on disk. A mismatch means
+# spur-web is serving out of an entirely different .next than $web_next_dir
+# (e.g. a host hand-switched to the npm-package tree), so "missing chunk"
+# refs are a serving-directory mismatch, not staleness this script can heal.
+# Prints nothing when either id can't be extracted or they match — never
+# fabricates a diagnosis from a partial read.
+print_build_id_mismatch_diagnostic() {
+  local html served_id disk_id
+  html=$($CURL -fsS --max-time 3 "http://127.0.0.1:3012/" 2>/dev/null) || return 0
+  served_id=$(printf '%s' "$html" | grep -oE '\\"b\\":\\"[A-Za-z0-9_-]+' | head -n1 \
+    | sed -E 's/.*\\"b\\":\\"//') || true
+  [[ -z "$served_id" ]] && return 0
+  [[ -f "$web_next_dir/BUILD_ID" ]] || return 0
+  disk_id=$(<"$web_next_dir/BUILD_ID")
+  [[ -z "$disk_id" ]] && return 0
+  [[ "$served_id" == "$disk_id" ]] && return 0
+  echo "main:deploy spur-web is serving build $served_id, but $web_next_dir/BUILD_ID is $disk_id — the missing refs are a serving-directory mismatch, not stale chunks" >&2
 }
 
 # Clear any orphan listener, restart both units, then verify/heal. Runs inside

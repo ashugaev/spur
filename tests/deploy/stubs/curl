@@ -17,6 +17,9 @@
 #      the body also embeds each ref in the prod RSC flight escape shape
 #      (`\"href\":\"<ref>\",\"precedence\"`), reproducing the double-escaped
 #      quotes that a real Next 15 payload emits.
+#      When $SPUR_DEPLOY_HTML_BUILD_ID is set, the body also embeds it in the
+#      RSC flight payload's build-id field (`\"b\":\"<id>\"`), reproducing the
+#      shape main-deploy.sh's build-id diagnostic extracts.
 set -euo pipefail
 
 state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
@@ -58,6 +61,10 @@ if [[ -n "${SPUR_DEPLOY_HTML_ESCAPED_CHUNKS:-}" ]]; then
     printf '<script>self.__next_f.push([1,"HL[\\"%s\\",\\"font\\",{\\"cross...' "$ref"
     printf '\\"href\\":\\"%s\\",\\"precedence\\":\\"next\\"..."])</script>' "$ref"
   done
+fi
+if [[ -n "${SPUR_DEPLOY_HTML_BUILD_ID:-}" ]]; then
+  printf '<script>self.__next_f.push([1,"0:{\\"b\\":\\"%s\\",\\"c\\":..."])</script>' \
+    "$SPUR_DEPLOY_HTML_BUILD_ID"
 fi
 printf '</body></html>'
 exit 0

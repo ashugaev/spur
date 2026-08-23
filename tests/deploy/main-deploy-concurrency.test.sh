@@ -78,6 +78,7 @@ EOF
   unset SPUR_DEPLOY_DAEMON_MAIN_PID
   unset SPUR_DEPLOY_DAEMON_REBIND_PID
   unset SPUR_DEPLOY_HTML_CHUNKS
+  unset SPUR_DEPLOY_HTML_BUILD_ID
   mkdir -p "$SPUR_DEPLOY_WEB_NEXT_DIR/static"
   printf 'test\n' >"$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID"
   : >"$MAIN_DEPLOY_DAEMON_ENV_FILE"
@@ -418,6 +419,75 @@ test_stale_chunks_loud_fail() {
   else
     bad "stale-fail: missing retry-path line"
     printf '%s\n' "$out"
+  fi
+}
+
+# --- Case (o): stale-chunk FATAL names a build-id mismatch -----------------
+# Served HTML carries a build id that differs from $web_next_dir/BUILD_ID on
+# disk (host serving out of a different .next entirely). The FATAL path must
+# name the mismatch as a serving-directory issue, not just "stale chunks".
+test_stale_chunks_fatal_names_build_id_mismatch() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  local head
+  head="$(git -C "$MAIN_DEPLOY_ROOT" rev-parse HEAD)"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  # Served HTML references a chunk that never lands on disk (same as the loud
+  # -fail case), plus a build id that differs from the on-disk BUILD_ID.
+  export SPUR_DEPLOY_HTML_CHUNKS="/_next/static/chunks/main-missing.js"
+  export SPUR_DEPLOY_HTML_BUILD_ID="served-build-id"
+  printf 'disk-build-id\n' >"$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]]; then
+    ok "build-id-mismatch: non-zero exit ($rc)"
+  else
+    bad "build-id-mismatch: exited 0"
+  fi
+  if grep -q 'FATAL: spur-web serving stale chunks' <<<"$out"; then
+    ok "build-id-mismatch: FATAL chunk message still printed"
+  else
+    bad "build-id-mismatch: missing FATAL chunk message"
+    printf '%s\n' "$out"
+  fi
+  if grep -q 'serving build served-build-id, but .*BUILD_ID is disk-build-id — the missing refs are a serving-directory mismatch' <<<"$out"; then
+    ok "build-id-mismatch: mismatch diagnostic printed"
+  else
+    bad "build-id-mismatch: missing mismatch diagnostic"
+    printf '%s\n' "$out"
+  fi
+}
+
+# --- Case (p): matching build id prints no mismatch diagnostic -------------
+# Confirms the existing loud-fail case, which emits no served build id at
+# all, stays silent on the diagnostic — never fabricate a mismatch from a
+# partial read.
+test_stale_chunks_no_diagnostic_without_build_id() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  local head
+  head="$(git -C "$MAIN_DEPLOY_ROOT" rev-parse HEAD)"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  export SPUR_DEPLOY_HTML_CHUNKS="/_next/static/chunks/main-missing.js"
+
+  local out
+  out="$(bash "$script" 2>&1)" || true
+  if grep -q 'serving-directory mismatch' <<<"$out"; then
+    bad "no-build-id: unexpected mismatch diagnostic"
+    printf '%s\n' "$out"
+  else
+    ok "no-build-id: no mismatch diagnostic printed"
   fi
 }
 
@@ -819,6 +889,8 @@ test_loud_failure
 test_build_hook_no_abort
 test_stale_chunks_heal
 test_stale_chunks_loud_fail
+test_stale_chunks_fatal_names_build_id_mismatch
+test_stale_chunks_no_diagnostic_without_build_id
 test_missing_next_rebuild
 test_stale_daemon_listener_killed_when_not_main_pid
 test_active_daemon_main_pid_preserved
