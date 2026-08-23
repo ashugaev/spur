@@ -85,7 +85,7 @@ export class TodoDisabledError extends Error {
   readonly statusCode = 409;
   readonly code = "todo_disabled";
   constructor() {
-    super("Spur ToDo is disabled by instance configuration");
+    super("Spur ToDo is disabled for this session");
   }
 }
 

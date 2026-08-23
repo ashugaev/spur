@@ -1895,7 +1895,10 @@ describe("SessionService", () => {
       expect(createTmuxSessionMock.mock.calls.at(-1)?.[0]?.env).not.toHaveProperty(
         "SPUR_TODO_COMMAND",
       );
-      await expect(service.readTodo(spawned.id)).rejects.toMatchObject({ code: "todo_disabled" });
+      await expect(service.readTodo(spawned.id)).rejects.toMatchObject({
+        code: "todo_disabled",
+        message: "Spur ToDo is disabled for this session",
+      });
       await service.complete(spawned.id, { skipPrCheck: true, skipRuntimeTeardown: true });
 
       expect(sessions.get(spawned.id)?.status).toBe("completed");
