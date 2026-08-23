@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { isSpurTodoProjection, type SpurTodoActor, type SpurTodoProjection } from "@/lib/types";
+import { TODO_STATUS_COLOR } from "@/lib/todo-status";
 
 function actorLabel(actor: SpurTodoActor): string {
   if (actor.kind === "agent") return `${actor.agent} · ${actor.sessionId}`;
@@ -142,7 +143,8 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                   >
                     <span
                       aria-label={item.status}
-                      className="uppercase text-[var(--color-text-tertiary)]"
+                      className="uppercase"
+                      style={{ color: TODO_STATUS_COLOR[item.status] }}
                     >
                       {item.status === "completed"
                         ? "✓"

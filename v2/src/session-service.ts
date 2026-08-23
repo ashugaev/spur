@@ -181,7 +181,7 @@ import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
-  deleteSession,
+  deleteSessionTracking,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
@@ -247,7 +247,6 @@ import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
   TODO_TOOL_NAME,
-  removeSessionTodoTool,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
@@ -361,6 +360,7 @@ import {
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSessionView,
+  type DashboardTodoState,
   type DeleteProjectResponse,
   type KillSessionRequest,
   type GithubPrCheckUnavailablePayload,
@@ -433,9 +433,13 @@ import {
 import {
   ensureTodoLedger,
   mutateTodo as applyTodoMutation,
+  readStampedTodoProjection,
+  readTodoLedgerStamp,
   recordTodoFinishOverride,
   TodoDisabledError,
+  TodoLedgerCorruptError,
   TodoOpenWorkError,
+  type TodoLedgerStamp,
   unfinishedTodo,
 } from "./todo.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -2353,6 +2357,10 @@ export class SessionService {
   private hostDiskProbe?: { checkedAtMs: number; freeKb: number | undefined };
   private hostDiskProbeInflight?: Promise<void>;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  private readonly dashboardTodoCache = new Map<
+    string,
+    { stamp: TodoLedgerStamp; state: DashboardTodoState }
+  >();
   // Records the exact record object last handed to enrichDashboard for each
   // id. Since listSessions() now returns the SAME object for an unchanged
   // file (see metadata.ts), object-identity inequality against this map is an
@@ -4059,18 +4067,26 @@ export class SessionService {
     registryPaths: string[],
     options: { unconfiguredToRemove?: string[] } = {},
   ): void {
-    const todoWasEnabled = this.config.todo.enabled;
     const nextRegistryPaths = [...new Set(registryPaths)];
     this.registryScanner.invalidateRemovedPaths(this.registryPaths, nextRegistryPaths);
     this.config = config;
-    if (!config.todo.enabled) {
-      for (const session of listSessions(config.dataDir)) {
-        if (todoWasEnabled) this.clearTodoNudge(session.id);
-        removeSessionTodoTool(config.dataDir, session.id);
-      }
-    } else {
-      for (const session of listSessions(config.dataDir)) {
-        this.prepareSessionTools(session.id, session.agent, session.project);
+    for (const stored of listSessions(config.dataDir)) {
+      const session =
+        typeof stored.todoEnabled === "boolean"
+          ? stored
+          : { ...stored, todoEnabled: this.resolveTodoEnabled(stored.project) };
+      if (session !== stored) writeSession(config.dataDir, session);
+      if (isTerminalSessionStatus(session.status)) {
+        this.clearTodoNudge(session.id);
+        this.removeSessionArtifacts(session);
+      } else {
+        this.prepareSessionTools(
+          session.id,
+          session.agent,
+          session.project,
+          session.todoEnabled === true,
+        );
+        if (!session.todoEnabled) this.clearTodoNudge(session.id);
       }
     }
     // Local project configs are parsed with the daemon config as defaults, so
@@ -4088,6 +4104,10 @@ export class SessionService {
       ),
     }));
     this.resumeSessionDelivery();
+  }
+
+  private resolveTodoEnabled(projectId: string): boolean {
+    return this.config.projects[projectId]?.todo?.enabled ?? this.config.todo.enabled;
   }
 
   getRegistryPaths(): string[] {
@@ -5086,6 +5106,11 @@ export class SessionService {
           this.dashboardCache.delete(id);
         }
       }
+      for (const id of this.dashboardTodoCache.keys()) {
+        if (!includedIds.has(id)) {
+          this.dashboardTodoCache.delete(id);
+        }
+      }
       // sessionProjectCache's consumer (resolveProjectForSession, via
       // enrich) is called from both ticks, so its retention has to match
       // the WIDER dashboard set, not pollAttentionStates' non-terminal
@@ -5786,7 +5811,7 @@ export class SessionService {
   }
 
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
-    if (!this.config.todo.enabled) return;
+    if (!session.todoEnabled) return;
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
@@ -5834,7 +5859,7 @@ export class SessionService {
   }
 
   private armTodoNudge(session: SessionRecord): void {
-    if (!this.config.todo.enabled || session.status !== "running") return;
+    if (!session.todoEnabled || session.status !== "running") return;
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
@@ -6382,6 +6407,7 @@ export class SessionService {
             reservedSession.id,
             reservedSession.agent,
             reservedSession.project,
+            reservedSession.todoEnabled === true,
           );
       const sessionEnv = buildSessionEnv({
         agent: reservedSession.agent,
@@ -6392,7 +6418,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: args.project.path,
         symlinks: args.project.symlinks,
-        todoEnabled: this.config.todo.enabled,
+        todoEnabled: reservedSession.todoEnabled === true,
         ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
       });
 
@@ -7896,6 +7922,7 @@ export class SessionService {
       replacingSessionId?: string;
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
+      todoEnabledOverride?: boolean;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -7922,6 +7949,7 @@ export class SessionService {
     let restrictWrites: boolean;
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
+    const todoEnabled = options?.todoEnabledOverride ?? this.resolveTodoEnabled(request.project);
     let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
     let preflightBranch: string | undefined;
     let preflightNoProjectBranchRequirements = false;
@@ -8094,9 +8122,10 @@ export class SessionService {
           : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
+        todoEnabled,
       };
       writeSession(this.config.dataDir, placeholder);
-      if (this.config.todo.enabled) {
+      if (placeholder.todoEnabled) {
         ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
         placeholder.todoLedgerVersion = 1;
       }
@@ -8106,7 +8135,12 @@ export class SessionService {
       workspacePath = placeholder.worktreePath;
 
       stage = "tools.setup";
-      const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
+      const sessionToolDir = this.prepareSessionTools(
+        sessionId,
+        agent,
+        request.project,
+        placeholder.todoEnabled === true,
+      );
 
       if (worktree) {
         stage = "worktree.create";
@@ -8191,7 +8225,7 @@ export class SessionService {
             this.config.tags,
             project.branchNaming?.regex,
             selfDestruct,
-            this.config.todo.enabled,
+            placeholder.todoEnabled,
           );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...placeholder, worktreePath: workspacePath },
@@ -8285,7 +8319,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
-        todoEnabled: this.config.todo.enabled,
+        todoEnabled: placeholder.todoEnabled === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
@@ -8468,20 +8502,24 @@ export class SessionService {
         }
 
         const message = error instanceof Error ? error.message : String(error);
+        const latestPlaceholder = readSession(this.config.dataDir, sessionId);
         const erroredRecord: SessionRecord = {
-          id: sessionId,
-          project: request.project,
-          workspaceId: failedSpawnSession.workspaceId,
-          agent,
-          prompt,
-          branch: resolvedBranch?.branch ?? sessionId,
-          ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
-          worktree,
-          worktreePath: workspacePath,
-          tmuxSession: sessionId,
-          launchCommand: "",
+          ...(latestPlaceholder ?? {
+            id: sessionId,
+            project: request.project,
+            workspaceId: failedSpawnSession.workspaceId,
+            agent,
+            prompt,
+            branch: resolvedBranch?.branch ?? sessionId,
+            ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
+            worktree,
+            worktreePath: workspacePath,
+            tmuxSession: sessionId,
+            launchCommand: "",
+            createdAt: createdAt ?? nowIso(),
+            todoEnabled,
+          }),
           status: "errored",
-          createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
         };
@@ -8818,6 +8856,7 @@ export class SessionService {
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
+    const todoEnabled = this.resolveTodoEnabled(request.project);
     const admissionReservation = this.reserveAdmission(request.project, "spawn");
     let admissionReserved = true;
     let stage = "validating";
@@ -8915,9 +8954,10 @@ export class SessionService {
           : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
+        todoEnabled,
       };
       writeSession(this.config.dataDir, placeholder);
-      if (this.config.todo.enabled) {
+      if (placeholder.todoEnabled) {
         ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
         placeholder.todoLedgerVersion = 1;
       }
@@ -8969,7 +9009,12 @@ export class SessionService {
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
+        sessionToolDir: this.prepareSessionTools(
+          sessionId,
+          agent,
+          request.project,
+          placeholder.todoEnabled === true,
+        ),
         startupAttachments,
       };
     } catch (error) {
@@ -8983,26 +9028,30 @@ export class SessionService {
         });
         const erroredBranchSource =
           resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+        const latestPlaceholder = readSession(this.config.dataDir, sessionId);
         writeSession(this.config.dataDir, {
-          id: sessionId,
-          project: request.project,
-          workspaceId: erroredWorkspaceId,
-          agent:
-            agent ??
-            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
-          prompt,
-          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
-          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
-          worktree,
-          worktreePath: reuseCtx
-            ? reuseCtx.workspacePath
-            : worktree
-              ? join(this.config.worktreeDir, request.project, sessionId)
-              : project.path,
-          tmuxSession: sessionId,
-          launchCommand: "",
+          ...(latestPlaceholder ?? {
+            id: sessionId,
+            project: request.project,
+            workspaceId: erroredWorkspaceId,
+            agent:
+              agent ??
+              parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+            prompt,
+            branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
+            ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
+            worktree,
+            worktreePath: reuseCtx
+              ? reuseCtx.workspacePath
+              : worktree
+                ? join(this.config.worktreeDir, request.project, sessionId)
+                : project.path,
+            tmuxSession: sessionId,
+            launchCommand: "",
+            createdAt: createdAt ?? nowIso(),
+            todoEnabled,
+          }),
           status: "errored",
-          createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
         });
@@ -9145,7 +9194,7 @@ export class SessionService {
         updatedAt: nowIso(),
       };
       writeSession(this.config.dataDir, spawnPlaceholder);
-      if (this.config.todo.enabled) {
+      if (spawnPlaceholder.todoEnabled) {
         ensureTodoLedger(this.config.dataDir, spawnPlaceholder, "spawn");
       }
       prepared.placeholder = spawnPlaceholder;
@@ -9218,7 +9267,7 @@ export class SessionService {
         this.config.tags,
         project.branchNaming?.regex,
         selfDestruct,
-        this.config.todo.enabled,
+        spawnPlaceholder.todoEnabled === true,
       );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...spawnPlaceholder, worktreePath: workspacePath },
@@ -9286,7 +9335,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
-        todoEnabled: this.config.todo.enabled,
+        todoEnabled: spawnPlaceholder.todoEnabled === true,
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -10525,7 +10574,7 @@ export class SessionService {
     return this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      if (!this.config.todo.enabled) throw new TodoDisabledError();
+      if (!session.todoEnabled) throw new TodoDisabledError();
       return ensureTodoLedger(this.config.dataDir, session);
     });
   }
@@ -10538,9 +10587,10 @@ export class SessionService {
     const result = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      if (!this.config.todo.enabled) throw new TodoDisabledError();
+      if (!session.todoEnabled) throw new TodoDisabledError();
       const before = ensureTodoLedger(this.config.dataDir, session);
       const projection = applyTodoMutation(this.config.dataDir, session, request, actor);
+      this.seedDashboardTodoCache(session, projection);
       if (projection.status === "resolved") {
         this.clearTodoNudge(session.id);
       } else if (this.lastObservedRunStates.get(session.id) === "waiting") {
@@ -10560,6 +10610,8 @@ export class SessionService {
         result.completed.eventAt,
       );
     }
+    const refreshed = readSession(this.config.dataDir, sessionId);
+    if (refreshed) await this.refreshDashboardCacheEntry(refreshed);
     return result.projection;
   }
 
@@ -10589,16 +10641,14 @@ export class SessionService {
     return this.withSessionLifecycleLocks(
       candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
       async () => {
-        const blocked = this.config.todo.enabled
-          ? candidates.flatMap((candidate) => {
-              const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
-              if (isTerminalSessionStatus(current.status)) return [];
-              const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, current));
-              return unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0
-                ? [{ sessionId: candidate.id, ...unfinished }]
-                : [];
-            })
-          : [];
+        const blocked = candidates.flatMap((candidate) => {
+          const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
+          if (isTerminalSessionStatus(current.status) || !current.todoEnabled) return [];
+          const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, current));
+          return unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0
+            ? [{ sessionId: candidate.id, ...unfinished }]
+            : [];
+        });
         if (
           blocked.length > 0 &&
           (!request.todoOverrideReason?.trim() ||
@@ -11048,7 +11098,12 @@ export class SessionService {
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
   }
 
-  private prepareSessionTools(sessionId: string, agent: AgentName, projectId?: string): string {
+  private prepareSessionTools(
+    sessionId: string,
+    agent: AgentName,
+    projectId: string | undefined,
+    todoEnabled: boolean,
+  ): string {
     const project = projectId ? this.config.projects[projectId] : undefined;
     return ensureSessionSlotTool({
       dataDir: this.config.dataDir,
@@ -11057,7 +11112,7 @@ export class SessionService {
       ...(projectId ? { projectId } : {}),
       ...(project?.branchNaming ? { branchNamingRegex: project.branchNaming.regex } : {}),
       agent,
-      todoEnabled: this.config.todo.enabled,
+      todoEnabled,
     });
   }
 
@@ -11302,7 +11357,7 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
-      if (targetStatus === "completed" && this.config.todo.enabled) {
+      if (targetStatus === "completed" && session.todoEnabled) {
         const projection = ensureTodoLedger(this.config.dataDir, session);
         const unfinished = unfinishedTodo(projection);
         if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
@@ -11310,13 +11365,14 @@ export class SessionService {
           if (!overrideReason || !options?.todoActor || options.todoActor.kind !== "human") {
             throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
           }
-          recordTodoFinishOverride(
+          const overridden = recordTodoFinishOverride(
             this.config.dataDir,
             sessionId,
             overrideReason,
             options.todoActor,
             projection,
           );
+          this.seedDashboardTodoCache(session, overridden);
         }
       }
       if (targetStatus === "completed" && !request.skipPrCheck) {
@@ -11762,7 +11818,12 @@ export class SessionService {
     await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
-    const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    const sessionToolDir = this.prepareSessionTools(
+      session.id,
+      session.agent,
+      session.project,
+      session.todoEnabled === true,
+    );
     const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
       session,
       project,
@@ -11840,7 +11901,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
-      todoEnabled: this.config.todo.enabled,
+      todoEnabled: session.todoEnabled === true,
       ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
     });
 
@@ -11964,7 +12025,7 @@ export class SessionService {
         this.config.tags,
         project.branchNaming?.regex,
         session.selfDestruct,
-        this.config.todo.enabled,
+        session.todoEnabled === true,
       );
       const recoveryPaneTarget = {
         id: session.id,
@@ -12131,7 +12192,12 @@ export class SessionService {
     let mcpSidecarUpdate: SessionRecord = current;
 
     try {
-      const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+      const sessionToolDir = this.prepareSessionTools(
+        current.id,
+        current.agent,
+        current.project,
+        current.todoEnabled === true,
+      );
       const restoreProjectConfig = this.getProject(current.project);
       const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig);
       mcpSidecarUpdate = mcpStart.session;
@@ -12275,7 +12341,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: this.getProject(current.project).path,
         symlinks: this.getProject(current.project).symlinks,
-        todoEnabled: this.config.todo.enabled,
+        todoEnabled: current.todoEnabled === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
@@ -12335,7 +12401,7 @@ export class SessionService {
           this.config.tags,
           restoreProject?.branchNaming?.regex,
           current.selfDestruct,
-          this.config.todo.enabled,
+          current.todoEnabled === true,
         );
         if (current.agent === "codex") {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
@@ -12987,7 +13053,7 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-    if (this.config.todo.enabled) {
+    if (session.todoEnabled) {
       const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, session));
       if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
         throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
@@ -13085,6 +13151,7 @@ export class SessionService {
           admissionReservation,
           modeResolution: "carried",
           ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
+          todoEnabledOverride: session.todoEnabled === true,
         },
       );
 
@@ -13148,35 +13215,55 @@ export class SessionService {
   private async compensateFailedHandoffSuccessor(sessionId: string): Promise<void> {
     const successor = readSession(this.config.dataDir, sessionId);
     if (!successor) return;
-    await this.killAgentPaneAndConfirmExit(successor, { failOnSurvivors: true });
+    const failures: unknown[] = [];
     try {
-      await this.cleanupSessionServices(successor);
+      await this.killAgentPaneAndConfirmExit(successor, { failOnSurvivors: true });
     } catch (error) {
-      this.logEvent("session.handoff.compensation_service_cleanup_failed", {
-        level: "warn",
-        sessionId,
-        projectId: successor.project,
-        message: `Failed to clean successor services during handoff compensation: ${error instanceof Error ? error.message : String(error)}`,
-      });
+      failures.push(error);
+    }
+    try {
+      await this.teardownSessionSidecars(successor);
+    } catch (error) {
+      failures.push(error);
+    }
+    let serviceCleanupFailed = false;
+    for (const service of listServiceInstancesForSession(this.config.dataDir, successor.id)) {
+      try {
+        await killTmuxSession(service.tmuxSession);
+        deleteServiceSourceStatesForService(
+          this.config.dataDir,
+          successor.project,
+          successor.id,
+          service.serviceId,
+        );
+        deleteServiceInstance(this.config.dataDir, successor.id, service.serviceId);
+      } catch (error) {
+        serviceCleanupFailed = true;
+        failures.push(error);
+      }
+    }
+    if (!serviceCleanupFailed) {
+      try {
+        deleteServiceSourceStatesForSession(this.config.dataDir, successor.project, successor.id);
+        deleteServiceInstancesForSession(this.config.dataDir, successor.id);
+      } catch (error) {
+        failures.push(error);
+      }
     }
     try {
       this.removeSessionArtifacts(successor);
     } catch (error) {
-      this.logEvent("session.handoff.compensation_artifact_cleanup_failed", {
-        level: "warn",
-        sessionId,
-        projectId: successor.project,
-        message: `Failed to clean successor artifacts during handoff compensation: ${error instanceof Error ? error.message : String(error)}`,
-      });
+      failures.push(error);
     }
-    try {
-      deleteSession(this.config.dataDir, successor);
-    } finally {
-      this.stateCache.delete(sessionId);
-      this.dashboardCache.delete(sessionId);
-      this.dashboardEnrichedRecords.delete(sessionId);
-      this.spawnsInFlight.delete(sessionId);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `Incomplete handoff compensation for ${sessionId}`);
     }
+    deleteSessionTracking(this.config.dataDir, successor);
+    this.stateCache.delete(sessionId);
+    this.dashboardCache.delete(sessionId);
+    this.dashboardTodoCache.delete(sessionId);
+    this.dashboardEnrichedRecords.delete(sessionId);
+    this.spawnsInFlight.delete(sessionId);
   }
 
   private resumeSessionDelivery(): void {
@@ -14275,11 +14362,11 @@ export class SessionService {
   }
 
   private async dispatchTaskCompleted(
-    targetSession: Pick<SessionRecord, "id" | "project">,
+    targetSession: Pick<SessionRecord, "id" | "project" | "todoEnabled">,
     revision: string,
     eventAt?: string,
   ): Promise<void> {
-    if (!this.config.todo.enabled) return;
+    if (!targetSession.todoEnabled) return;
     this.ensureStateSubscriptionIndex();
     const eventId = `task_completed-${targetSession.id}-${revision}`;
     const subscriberIds = this.stateSubscriptionIndex.get(targetSession.id);
@@ -14366,7 +14453,7 @@ export class SessionService {
   }
 
   private async reconcileTaskCompleted(session: SessionRecord): Promise<void> {
-    if (!this.config.todo.enabled || session.todoLedgerVersion !== 1) return;
+    if (!session.todoEnabled || session.todoLedgerVersion !== 1) return;
     const projection = ensureTodoLedger(this.config.dataDir, session);
     if (projection.status !== "resolved") return;
     await this.dispatchTaskCompleted(session, projection.revision, this.todoRevisionAt(projection));
@@ -15039,6 +15126,7 @@ export class SessionService {
         }),
       )
     ).filter((name): name is string => name !== null);
+    const todo = await this.todoForDashboard(session);
 
     return {
       ...dashboardSession,
@@ -15058,7 +15146,98 @@ export class SessionService {
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
+      ...(todo ? { todo } : {}),
     };
+  }
+
+  private todoSummary(projection: TodoProjection): DashboardTodoState {
+    return {
+      kind: "summary",
+      revision: projection.revision,
+      status: projection.status,
+      counts: projection.counts,
+    };
+  }
+
+  private seedDashboardTodoCache(
+    session: SessionRecord,
+    projection: TodoProjection,
+  ): DashboardTodoState {
+    const state = this.todoSummary(projection);
+    try {
+      const stamp = readTodoLedgerStamp(this.config.dataDir, session);
+      this.dashboardTodoCache.set(session.id, { stamp, state });
+      return state;
+    } catch {
+      this.dashboardTodoCache.delete(session.id);
+      return { kind: "error", code: "todo_unavailable" };
+    }
+  }
+
+  private async ensurePinnedTodoForDashboard(
+    sessionId: string,
+  ): Promise<DashboardTodoState | undefined> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session?.todoEnabled) {
+        this.dashboardTodoCache.delete(sessionId);
+        return undefined;
+      }
+      if (session.todoLedgerVersion === 1) return this.readDashboardTodo(session);
+      try {
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        return this.seedDashboardTodoCache(
+          readSession(this.config.dataDir, session.id) ?? session,
+          projection,
+        );
+      } catch (error) {
+        return this.todoDashboardError(session.id, error);
+      }
+    });
+  }
+
+  private todoDashboardError(sessionId: string, error: unknown): DashboardTodoState {
+    if (error instanceof TodoLedgerCorruptError) {
+      const state: DashboardTodoState = { kind: "error", code: "todo_ledger_corrupt" };
+      if (error.stamp) this.dashboardTodoCache.set(sessionId, { stamp: error.stamp, state });
+      return state;
+    }
+    this.dashboardTodoCache.delete(sessionId);
+    return { kind: "error", code: "todo_unavailable" };
+  }
+
+  private readDashboardTodo(session: SessionRecord): DashboardTodoState {
+    try {
+      const stamp = readTodoLedgerStamp(this.config.dataDir, session, true);
+      const cached = this.dashboardTodoCache.get(session.id);
+      if (
+        cached &&
+        cached.stamp.path === stamp.path &&
+        cached.stamp.ino === stamp.ino &&
+        cached.stamp.size === stamp.size &&
+        cached.stamp.mtimeMs === stamp.mtimeMs &&
+        cached.stamp.ctimeMs === stamp.ctimeMs
+      ) {
+        return cached.state;
+      }
+      const result = readStampedTodoProjection(this.config.dataDir, session);
+      const state = this.todoSummary(result.projection);
+      this.dashboardTodoCache.set(session.id, { stamp: result.stamp, state });
+      return state;
+    } catch (error) {
+      return this.todoDashboardError(session.id, error);
+    }
+  }
+
+  private async todoForDashboard(session: SessionRecord): Promise<DashboardTodoState | undefined> {
+    if (!session.todoEnabled) {
+      this.dashboardTodoCache.delete(session.id);
+      return undefined;
+    }
+    if (session.todoLedgerVersion !== 1) {
+      return this.ensurePinnedTodoForDashboard(session.id);
+    }
+    return this.readDashboardTodo(session);
   }
 
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.

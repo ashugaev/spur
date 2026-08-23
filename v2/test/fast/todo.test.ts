@@ -6,6 +6,7 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import {
   ensureTodoLedger,
   mutateTodo,
+  readStampedTodoProjection,
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
@@ -183,5 +184,37 @@ describe("Spur ToDo ledger", () => {
     mkdirSync(archivedParent, { recursive: true });
     renameSync(join(dataDir, "sessions", session.id), join(archivedParent, session.id));
     expect(replayTodo(dataDir, session.id)).toEqual(before);
+  });
+
+  it("returns a stable exact-path stamp and follows archive movement", async () => {
+    const { dataDir, session } = await fixture();
+    ensureTodoLedger(dataDir, session, "spawn");
+    const marked = requiredSession(dataDir, session.id);
+    const live = readStampedTodoProjection(dataDir, marked);
+    expect(live.stamp.path).toBe(join(dataDir, "sessions", session.id, "todo.jsonl"));
+    expect(live.stamp.ino).toBeGreaterThan(0);
+
+    const archivedParent = join(dataDir, "sessions-archive", session.project);
+    mkdirSync(archivedParent, { recursive: true });
+    renameSync(join(dataDir, "sessions", session.id), join(archivedParent, session.id));
+    const archived = readStampedTodoProjection(dataDir, marked);
+    expect(archived.stamp.path).toBe(join(archivedParent, session.id, "todo.jsonl"));
+    expect(archived.projection).toEqual(live.projection);
+  });
+
+  it("attaches the stable stamp to content corruption", async () => {
+    const { dataDir, session } = await fixture();
+    ensureTodoLedger(dataDir, session, "spawn");
+    const marked = requiredSession(dataDir, session.id);
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    writeFileSync(path, "not-json\n", "utf8");
+
+    try {
+      readStampedTodoProjection(dataDir, marked);
+      throw new Error("Expected corrupt ledger");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).stamp?.path).toBe(path);
+    }
   });
 });

@@ -753,6 +753,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.todoLedgerVersion === 1 ? { todoLedgerVersion: 1 as const } : {}),
+    ...(typeof normalizedSession.todoEnabled === "boolean"
+      ? { todoEnabled: normalizedSession.todoEnabled }
+      : {}),
   };
 }
 
@@ -787,6 +790,41 @@ export function deleteSession(
   rmSync(sessionShardDir(dataDir, session.id), { recursive: true, force: true });
   sessionFileCache.delete(path);
   deleteSessionIndexEntry(dataDir, session.id);
+}
+
+export function deleteSessionTracking(
+  dataDir: string,
+  session: Pick<SessionRecord, "id" | "project">,
+): void {
+  const path = sessionFilePath(dataDir, session.project, session.id);
+  const stagedPath = `${path}.deleting`;
+  renameSync(path, stagedPath);
+  try {
+    rmSync(sessionShardDir(dataDir, session.id), { recursive: true, force: true });
+    deleteSessionIndexEntry(dataDir, session.id);
+    rmSync(stagedPath);
+    sessionFileCache.delete(path);
+  } catch (error) {
+    const rollbackErrors: unknown[] = [];
+    try {
+      if (existsSync(stagedPath)) renameSync(stagedPath, path);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    try {
+      if (existsSync(path)) writeSessionIndexEntry(dataDir, session.id, path);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError(
+        rollbackErrors,
+        `Failed to delete ${session.id} tracking`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 // Deletes cache entries under rootDir that weren't in this listing's visited

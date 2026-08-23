@@ -236,6 +236,81 @@ describe("SessionRow", () => {
     expect(screen.getByText("Check CI")).toBeInTheDocument();
   });
 
+  it("renders ToDo progress geometry and all five counts", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "open", canMerge: false });
+    render(
+      <SessionRow
+        session={makeSession({
+          todo: {
+            kind: "summary",
+            revision: "rev-1",
+            status: "active",
+            counts: { total: 5, open: 2, held: 1, completed: 1, cancelled: 1 },
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "2 of 5 ToDo items resolved" });
+    expect(trigger).toHaveClass("h-5", "w-5");
+    const progress = trigger.querySelector('circle[transform="rotate(-90 10 10)"]');
+    expect(progress).toHaveAttribute("cx", "10");
+    expect(progress).toHaveAttribute("cy", "10");
+    expect(progress).toHaveAttribute("r", "7");
+    expect(progress).toHaveAttribute("stroke-width", "2");
+    fireEvent.click(trigger);
+    expect(screen.getByText("ToDo Progress")).toBeInTheDocument();
+    for (const count of ["Total", "Open", "Held", "Completed", "Cancelled"]) {
+      expect(screen.getByText(count)).toBeInTheDocument();
+    }
+  });
+
+  it("renders explicit ToDo errors without a progress ring", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "open", canMerge: false });
+    render(
+      <SessionRow
+        session={makeSession({ todo: { kind: "error", code: "todo_ledger_corrupt" } })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "ToDo ledger corrupt" });
+    expect(trigger.querySelector('circle[transform="rotate(-90 10 10)"]')).toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.getByText("ToDo ledger corrupt")).toBeInTheDocument();
+  });
+
+  it("keeps ToDo, wake, and sidecar popovers mutually exclusive", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "open", canMerge: false });
+    render(
+      <SessionRow
+        session={makeSession({
+          todo: {
+            kind: "summary",
+            revision: "rev-1",
+            status: "held",
+            counts: { total: 1, open: 0, held: 1, completed: 0, cancelled: 0 },
+          },
+          scheduledWake: { dueAt: new Date(Date.now() + 60_000).toISOString(), message: "Wake" },
+          runningSidecars: [{ name: "web" }],
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "0 of 1 ToDo items resolved" }));
+    expect(screen.getByText("ToDo Progress")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Wake scheduled" }));
+    expect(screen.queryByText("ToDo Progress")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Running sidecars for api-a1" }));
+    expect(screen.queryByText("Wake")).not.toBeInTheDocument();
+    expect(screen.getByText("Running Sidecars")).toBeInTheDocument();
+  });
+
   it("shows one-shot wake timer details from the row marker", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",

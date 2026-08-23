@@ -1427,6 +1427,12 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["staleAfterMinutes"],
     `${label}.staleAfterMinutes`,
   );
+  const todoRaw = raw["todo"];
+  const projectTodoEnabled =
+    todoRaw === undefined
+      ? undefined
+      : asOptionalBoolean(asObject(todoRaw, `${label}.todo`)["enabled"], `${label}.todo.enabled`);
+  const todo = projectTodoEnabled === undefined ? undefined : { enabled: projectTodoEnabled };
   const modes = parseModes(projectId, raw["modes"]);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
@@ -1525,6 +1531,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
     ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
+    ...(todo !== undefined ? { todo } : {}),
   };
 }
 
@@ -1958,7 +1965,7 @@ function parseConfigFile(
     },
     todo: {
       enabled:
-        mode === "instance" ? (asOptionalBoolean(todo["enabled"], "todo.enabled") ?? true) : true,
+        mode === "instance" ? (asOptionalBoolean(todo["enabled"], "todo.enabled") ?? false) : false,
     },
     voice: (() => {
       if (mode === "project") {

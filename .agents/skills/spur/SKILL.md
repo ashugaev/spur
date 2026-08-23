@@ -20,7 +20,7 @@ INTERFACES
   Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
   Deploy switch restart behavior: `docs/commands.md#daemon-http-api`.
   Session tool and environment contract: `docs/commands.md`; implementation `v2/src/session-service.ts`. Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path; login shells rebuild `PATH` and drop the tool directory.
-  Spur ToDo: daemon-authoritative when instance `todo.enabled` stays on (default). Complete or cancel all items before session completion. Hold blockers with a reason. Command, disable, event, and override contract: `docs/commands.md#todo`; config owner: `docs/configuration.md`.
+  Spur ToDo: daemon-authoritative when session-pinned policy stays enabled (default off; project override supported). Complete or cancel all items before session completion. Hold blockers with a reason. Command, dashboard error, event, and override contract: `docs/commands.md#todo`; config owner: `docs/configuration.md`.
   Session title write contract: `docs/commands.md`; implementation `v2/src/session-service.ts`.
 
 CONFIG FOOTGUNS

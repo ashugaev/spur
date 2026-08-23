@@ -2694,6 +2694,7 @@ projects:
 
     expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);
     expect(config.projects["sp"]?.spawn?.steps).toBeUndefined();
+    expect(config.projects["sp"]?.todo?.enabled).toBe(true);
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
@@ -4210,14 +4211,14 @@ projects:
     expect(config.admission.maxLiveSessionsSource).toBe("default");
   });
 
-  it("defaults instance ToDo on and parses an explicit boolean", async () => {
+  it("defaults instance ToDo off and parses an explicit boolean", async () => {
     const defaultPath = await writeConfig(`projects:\n  backend:\n    path: $REPO_PATH\n`);
-    const disabledPath = await writeConfig(
-      `todo:\n  enabled: false\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
+    const enabledPath = await writeConfig(
+      `todo:\n  enabled: true\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
     );
 
-    expect(loadConfig(defaultPath).todo.enabled).toBe(true);
-    expect(loadConfig(disabledPath).todo.enabled).toBe(false);
+    expect(loadConfig(defaultPath).todo.enabled).toBe(false);
+    expect(loadConfig(enabledPath).todo.enabled).toBe(true);
   });
 
   it("rejects a nonboolean instance ToDo setting", async () => {
@@ -4228,12 +4229,22 @@ projects:
     expect(() => loadConfig(configPath)).toThrow("todo.enabled must be a boolean");
   });
 
-  it("ignores a project ToDo block before semantic parsing", async () => {
+  it("ignores root ToDo in project mode and parses nested project overrides", async () => {
     const configPath = await writeConfig(
-      `todo:\n  enabled: not-a-boolean\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
+      `todo:\n  enabled: not-a-boolean\nprojects:\n  backend:\n    path: $REPO_PATH\n    todo:\n      enabled: true\n`,
     );
 
-    expect(loadProjectConfig(configPath).todo.enabled).toBe(true);
+    const config = loadProjectConfig(configPath);
+    expect(config.todo.enabled).toBe(false);
+    expect(config.projects["backend"]?.todo?.enabled).toBe(true);
+  });
+
+  it("rejects a nonboolean project ToDo override", async () => {
+    const configPath = await writeConfig(
+      `projects:\n  backend:\n    path: $REPO_PATH\n    todo:\n      enabled: no\n`,
+    );
+
+    expect(() => loadConfig(configPath)).toThrow("projects.backend.todo.enabled must be a boolean");
   });
 
   it("parses projects.<id>.maxLiveSessions in both instance and project mode", async () => {

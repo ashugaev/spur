@@ -539,6 +539,7 @@ vi.mock("../../src/metadata.js", () => ({
   archiveSessions: archiveSessionsMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteSession: deleteSessionMock,
+  deleteSessionTracking: deleteSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
@@ -1136,7 +1137,11 @@ type SessionServiceInternals = {
     message: string,
     options?: { interrupt?: boolean; freshLaunch?: boolean },
   ): Promise<AgentSendOutcome>;
-  enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
+  enrichDashboard(session: SessionRecord): Promise<{
+    id: string;
+    model?: string;
+    todo?: { kind: string; code?: string; counts?: { total: number } };
+  }>;
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
@@ -1154,6 +1159,7 @@ type SessionServiceInternals = {
   reconcileTaskCompleted(session: SessionRecord): Promise<void>;
   sendLocked(sessionId: string, request: { message: string }): Promise<SessionView>;
   cleanupSessionServices(session: SessionRecord): Promise<void>;
+  teardownSessionSidecars(session: SessionRecord): Promise<void>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -1844,6 +1850,39 @@ describe("SessionService", () => {
   });
 
   describe("Spur ToDo lifecycle", () => {
+    it("pins project ToDo overrides above the instance fallback in both directions", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const enabledProjectConfig = baseConfig() as unknown as AppConfig;
+      enabledProjectConfig.todo.enabled = false;
+      const apiProject = enabledProjectConfig.projects["api"];
+      if (!apiProject) throw new Error("Missing api project");
+      apiProject.todo = { enabled: true };
+      loadConfigMock.mockReturnValue(enabledProjectConfig);
+      const { SessionService } = await loadSessionServiceModule();
+      const enabledService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const enabled = await enabledService.spawn({ project: "api", prompt: "Enabled override" });
+      expect(sessions.get(enabled.id)?.todoEnabled).toBe(true);
+      expect(sessions.get(enabled.id)?.todoLedgerVersion).toBe(1);
+      enabledService.dispose();
+
+      sessions.clear();
+      const disabledProjectConfig = baseConfig() as unknown as AppConfig;
+      disabledProjectConfig.todo.enabled = true;
+      const disabledApiProject = disabledProjectConfig.projects["api"];
+      if (!disabledApiProject) throw new Error("Missing api project");
+      disabledApiProject.todo = { enabled: false };
+      loadConfigMock.mockReturnValue(disabledProjectConfig);
+      const disabledService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const disabled = await disabledService.spawn({
+        project: "api",
+        prompt: "Disabled override",
+      });
+      expect(sessions.get(disabled.id)?.todoEnabled).toBe(false);
+      expect(sessions.get(disabled.id)?.todoLedgerVersion).toBeUndefined();
+      disabledService.dispose();
+    });
+
     it("bypasses ToDo initialization and completion gates when disabled", async () => {
       const sessions = createSessionStore();
       loadConfigMock.mockReturnValue({ ...baseConfig(), todo: { enabled: false } });
@@ -1864,7 +1903,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("restores the ToDo wrapper and launch env when a disabled-born session is re-enabled", async () => {
+    it("keeps a disabled-born session pinned after config reload and restore", async () => {
       const sessions = createSessionStore();
       loadConfigMock.mockReturnValue({ ...baseConfig(), todo: { enabled: false } });
       await useRealTodoLedger();
@@ -1876,16 +1915,15 @@ describe("SessionService", () => {
 
       service.applyConfig(baseConfig() as unknown as AppConfig, ["/tmp/spur.yaml"]);
       expect(ensureSessionSlotToolMock).toHaveBeenCalledWith(
-        expect.objectContaining({ sessionId: spawned.id, todoEnabled: true }),
+        expect.objectContaining({ sessionId: spawned.id, todoEnabled: false }),
       );
       await service.restore(spawned.id);
 
-      expect(createTmuxSessionMock.mock.calls.at(-1)?.[0]?.env).toHaveProperty(
+      expect(createTmuxSessionMock.mock.calls.at(-1)?.[0]?.env).not.toHaveProperty(
         "SPUR_TODO_COMMAND",
-        "/tmp/spur-tools/api-1/spur-todo",
       );
       expect(sessions.get(spawned.id)?.todoLedgerVersion).toBeUndefined();
-      expect((await service.readTodo(spawned.id)).items).toHaveLength(1);
+      await expect(service.readTodo(spawned.id)).rejects.toMatchObject({ code: "todo_disabled" });
       service.dispose();
     });
 
@@ -1901,6 +1939,28 @@ describe("SessionService", () => {
       expect(readSessionMock(TEST_DATA_DIR, spawned.id)?.todoLedgerVersion).toBe(1);
       expect(projection.items).toHaveLength(1);
       expect(projection.items[0]).toMatchObject({ text: "Ship native ToDo", status: "open" });
+      service.dispose();
+    });
+
+    it("adds compact ToDo summary and corruption state to dashboard enrichment", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession({ todoEnabled: true });
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const todo = await import("../../src/todo.js");
+      todo.ensureTodoLedger(TEST_DATA_DIR, session, "spawn");
+      const marked = sessions.get(session.id);
+      if (!marked) throw new Error("Missing marked session");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+
+      const summary = await internals.enrichDashboard(marked);
+      expect(summary.todo).toMatchObject({ kind: "summary", counts: { total: 1 } });
+
+      writeFileSync(join(TEST_DATA_DIR, "sessions", session.id, "todo.jsonl"), "bad\n");
+      const corrupt = await internals.enrichDashboard(marked);
+      expect(corrupt.todo).toEqual({ kind: "error", code: "todo_ledger_corrupt" });
       service.dispose();
     });
 
@@ -2234,7 +2294,7 @@ describe("SessionService", () => {
 
     it("persists one-shot ToDo nudges and retries failed delivery", async () => {
       const sessions = createSessionStore();
-      const session = runningSession();
+      const session = runningSession({ todoEnabled: true });
       sessions.set(session.id, session);
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
@@ -27325,7 +27385,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("continues handoff successor teardown when service cleanup throws", async () => {
+    it("retains handoff successor tracking when resource cleanup throws", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       sessions.set(
@@ -27345,7 +27405,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      vi.spyOn(internals, "cleanupSessionServices")
+      vi.spyOn(internals, "teardownSessionSidecars")
         .mockResolvedValueOnce()
         .mockRejectedValueOnce(new Error("service cleanup failed"));
       vi.spyOn(
@@ -27357,16 +27417,16 @@ describe("SessionService", () => {
         "complete failed",
       );
 
-      expect(sessions.has("api-2")).toBe(false);
+      expect(sessions.has("api-2")).toBe(true);
       expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
-      expect(deleteSessionMock).toHaveBeenCalledWith(
+      expect(deleteSessionMock).not.toHaveBeenCalledWith(
         TEST_DATA_DIR,
         expect.objectContaining({ id: "api-2", workspaceId: "api-1" }),
       );
       expect(logSpurEventMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
         expect.objectContaining({
-          event: "session.handoff.compensation_service_cleanup_failed",
+          event: "session.handoff.compensation_failed",
           sessionId: "api-2",
         }),
       );
