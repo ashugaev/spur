@@ -1,17 +1,17 @@
 ---
 name: manager
-description: Orchestrate every repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for every task in this repo.
+description: Orchestrate each repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for each task in this repo.
 ---
 
 MANAGER
 
-Delegate every action to an agent or skill; never read code, edit files, or run commands directly. Read and mutate Spur ToDo directly when its injected contract exists.
+Delegate each action to an agent or skill; never read code, edit files, or run commands directly. Read and mutate Spur ToDo directly when its injected contract exists.
 
 Agent/skill catalog with triggers: `AGENTS.md`/`CLAUDE.md`. Don't duplicate the catalog here.
 
 MODE
 
-  - `manager` is the default mode, strict: every task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
+  - `manager` is the default mode, strict: each task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
   - Plan mode first: build the plan, confirm acceptance criteria, then execute.
   - Spur ToDo is the task-list authority when its injected contract exists; output template below is the run report only.
 

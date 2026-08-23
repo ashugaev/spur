@@ -789,6 +789,7 @@ export interface SessionStateSubscription {
   targetSessionId: string;
   states: SessionState[];
   events?: SessionSubscriptionEvent[];
+  eventArmedAt?: Partial<Record<SessionSubscriptionEvent, string>>;
   message?: string;
   createdAt: string;
   updatedAt: string;

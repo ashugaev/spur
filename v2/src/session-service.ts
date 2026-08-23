@@ -2427,6 +2427,7 @@ export class SessionService {
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
+  private readonly stateSubscriptionDeliveryLocks = new Map<string, Promise<void>>();
   private stateSubscriptionIndexReady = false;
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
@@ -4066,6 +4067,10 @@ export class SessionService {
       for (const session of listSessions(config.dataDir)) {
         if (todoWasEnabled) this.clearTodoNudge(session.id);
         removeSessionTodoTool(config.dataDir, session.id);
+      }
+    } else {
+      for (const session of listSessions(config.dataDir)) {
+        this.prepareSessionTools(session.id, session.agent, session.project);
       }
     }
     // Local project configs are parsed with the daemon config as defaults, so
@@ -5803,7 +5808,7 @@ export class SessionService {
           .map((item) => `- ${item.id}: ${item.text}`)
           .join(
             "\n",
-          )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
+          )}\nResolve it with \`"$SPUR_SESSION_TOOL_DIR/spur" todo complete|cancel|hold <itemId> --reason <reason> --session "$SPUR_SESSION"\`.`;
       } else if (humanHeld.length > 0) {
         message = `Spur ToDo needs human input:\n${humanHeld
           .map((item) => {
@@ -7019,6 +7024,15 @@ export class SessionService {
       targetSessionId,
       states,
       ...(events.length > 0 ? { events } : {}),
+      ...(events.includes("task_completed")
+        ? {
+            eventArmedAt: {
+              task_completed: previous?.events?.includes("task_completed")
+                ? (previous.eventArmedAt?.task_completed ?? previous.updatedAt)
+                : now,
+            },
+          }
+        : {}),
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       ...(message ? { message } : {}),
@@ -10521,26 +10535,32 @@ export class SessionService {
     request: TodoMutationRequest,
     actor: TodoActor,
   ): Promise<TodoProjection> {
-    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+    const result = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       if (!this.config.todo.enabled) throw new TodoDisabledError();
       const before = ensureTodoLedger(this.config.dataDir, session);
       const projection = applyTodoMutation(this.config.dataDir, session, request, actor);
-      if (before.status !== "resolved" && projection.status === "resolved") {
-        await this.dispatchTaskCompleted(
-          session,
-          projection.revision,
-          this.todoRevisionAt(projection),
-        );
-      }
       if (projection.status === "resolved") {
         this.clearTodoNudge(session.id);
       } else if (this.lastObservedRunStates.get(session.id) === "waiting") {
         this.armTodoNudge(readSession(this.config.dataDir, session.id) ?? session);
       }
-      return projection;
+      return {
+        projection,
+        ...(before.status !== "resolved" && projection.status === "resolved"
+          ? { completed: { session, eventAt: this.todoRevisionAt(projection) } }
+          : {}),
+      };
     });
+    if (result.completed) {
+      await this.dispatchTaskCompleted(
+        result.completed.session,
+        result.projection.revision,
+        result.completed.eventAt,
+      );
+    }
+    return result.projection;
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
@@ -13106,7 +13126,16 @@ export class SessionService {
           { retainInList: true },
         );
       } catch (error) {
-        await this.compensateFailedHandoffSuccessor(spawned.id);
+        try {
+          await this.compensateFailedHandoffSuccessor(spawned.id);
+        } catch (compensationError) {
+          this.logEvent("session.handoff.compensation_failed", {
+            level: "error",
+            sessionId: spawned.id,
+            projectId: spawned.project,
+            message: `Failed to compensate handoff successor ${spawned.id}: ${compensationError instanceof Error ? compensationError.message : String(compensationError)}`,
+          });
+        }
         throw error;
       }
 
@@ -13119,14 +13148,35 @@ export class SessionService {
   private async compensateFailedHandoffSuccessor(sessionId: string): Promise<void> {
     const successor = readSession(this.config.dataDir, sessionId);
     if (!successor) return;
-    await this.killAgentPaneAndConfirmExit(successor, { failOnSurvivors: false });
-    await this.cleanupSessionServices(successor);
-    this.removeSessionArtifacts(successor);
-    deleteSession(this.config.dataDir, successor);
-    this.stateCache.delete(sessionId);
-    this.dashboardCache.delete(sessionId);
-    this.dashboardEnrichedRecords.delete(sessionId);
-    this.spawnsInFlight.delete(sessionId);
+    await this.killAgentPaneAndConfirmExit(successor, { failOnSurvivors: true });
+    try {
+      await this.cleanupSessionServices(successor);
+    } catch (error) {
+      this.logEvent("session.handoff.compensation_service_cleanup_failed", {
+        level: "warn",
+        sessionId,
+        projectId: successor.project,
+        message: `Failed to clean successor services during handoff compensation: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+    try {
+      this.removeSessionArtifacts(successor);
+    } catch (error) {
+      this.logEvent("session.handoff.compensation_artifact_cleanup_failed", {
+        level: "warn",
+        sessionId,
+        projectId: successor.project,
+        message: `Failed to clean successor artifacts during handoff compensation: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+    try {
+      deleteSession(this.config.dataDir, successor);
+    } finally {
+      this.stateCache.delete(sessionId);
+      this.dashboardCache.delete(sessionId);
+      this.dashboardEnrichedRecords.delete(sessionId);
+      this.spawnsInFlight.delete(sessionId);
+    }
   }
 
   private resumeSessionDelivery(): void {
@@ -14235,17 +14285,18 @@ export class SessionService {
     const subscriberIds = this.stateSubscriptionIndex.get(targetSession.id);
     if (!subscriberIds) return;
     for (const subscriberId of subscriberIds) {
-      const subscriber = readSession(this.config.dataDir, subscriberId);
-      if (!subscriber) continue;
-      const subscriptions = subscriber.stateSubscriptions ?? [];
-      const deliverable = subscriptions.filter(
-        (subscription) =>
-          subscription.targetSessionId === targetSession.id &&
-          subscription.events?.includes("task_completed") === true &&
-          (eventAt === undefined || subscription.createdAt <= eventAt) &&
-          subscription.lastDeliveredEventId !== eventId,
-      );
-      for (const subscription of deliverable) {
+      await this.withStateSubscriptionDeliveryOwnership(subscriberId, async () => {
+        const subscriber = readSession(this.config.dataDir, subscriberId);
+        if (!subscriber) return;
+        const subscription = (subscriber.stateSubscriptions ?? []).find(
+          (entry) =>
+            entry.targetSessionId === targetSession.id &&
+            entry.events?.includes("task_completed") === true &&
+            (eventAt === undefined ||
+              (entry.eventArmedAt?.task_completed ?? entry.updatedAt) <= eventAt) &&
+            entry.lastDeliveredEventId !== eventId,
+        );
+        if (!subscription) return;
         try {
           const customMessage = subscription.message?.trim();
           await this.send(subscriberId, {
@@ -14253,7 +14304,7 @@ export class SessionService {
           });
           const deliveredAt = nowIso();
           const fresh = readSession(this.config.dataDir, subscriberId);
-          if (!fresh) continue;
+          if (!fresh) return;
           this.writeStateSubscriptions(
             fresh,
             (fresh.stateSubscriptions ?? []).map((entry) =>
@@ -14281,6 +14332,27 @@ export class SessionService {
             },
           });
         }
+      });
+    }
+  }
+
+  private async withStateSubscriptionDeliveryOwnership<T>(
+    subscriberId: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.stateSubscriptionDeliveryLocks.get(subscriberId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.stateSubscriptionDeliveryLocks.set(subscriberId, current);
+    await previous.catch(() => {});
+    try {
+      return await task();
+    } finally {
+      release();
+      if (this.stateSubscriptionDeliveryLocks.get(subscriberId) === current) {
+        this.stateSubscriptionDeliveryLocks.delete(subscriberId);
       }
     }
   }

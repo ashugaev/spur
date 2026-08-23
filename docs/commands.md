@@ -253,7 +253,7 @@ spur subscribe --list [--session <id>]
 spur subscribe --remove <subscriptionId> [--session <id>]
 ```
 
-Watches another session's state or ToDo completion and sends the subscriber a message on a matching transition. `task_completed` fires only when enabled ToDo work crosses from unfinished to resolved; adding work and resolving it again creates another event. Subscriber session defaults to `SPUR_SESSION`; pass `--session` from outside a live session.
+Watches another session's state or ToDo completion and sends the subscriber a message on a matching transition. `task_completed` fires only when enabled ToDo work crosses from unfinished to resolved after that event was added to the subscription; adding work and resolving it again creates another event. Subscriber session defaults to `SPUR_SESSION`; pass `--session` from outside a live session.
 
 One subscription per target: `id` is `state-<targetSessionId>`. Re-subscribing to the same target overwrites its states, events, and message. Cannot subscribe to yourself.
 

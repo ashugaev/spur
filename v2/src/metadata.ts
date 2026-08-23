@@ -654,6 +654,9 @@ function normalizeStateSubscriptions(
       ...(Array.isArray(subscription.events) && subscription.events.includes("task_completed")
         ? { events: ["task_completed" as const] }
         : {}),
+      ...(subscription.eventArmedAt?.task_completed
+        ? { eventArmedAt: { task_completed: subscription.eventArmedAt.task_completed } }
+        : {}),
       ...(subscription.message ? { message: subscription.message } : {}),
       createdAt: subscription.createdAt,
       updatedAt: subscription.updatedAt,
