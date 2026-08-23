@@ -10,7 +10,7 @@ Run from source with `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`.
 
 ## Session tools and environment
 
-Each agent receives `$SPUR_SESSION_TOOL_DIR` on `PATH`. It contains the session-bound `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, and `spur-todo` wrappers. A configured `branchNaming.regex` also adds `spur-branch` and a `git` wrapper that checks pushes. Hook-state agents also receive `spur-agent-state`. Call a wrapper by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path after a login shell rebuilds `PATH`.
+Each agent receives `$SPUR_SESSION_TOOL_DIR` on `PATH`. It contains the session-bound `spur`, `spur-slots`, `spur-sidecar`, and `spur-self-destruct` wrappers; enabled ToDo adds `spur-todo`. A configured `branchNaming.regex` also adds `spur-branch` and a `git` wrapper that checks pushes. Hook-state agents also receive `spur-agent-state`. Call a wrapper by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path after a login shell rebuilds `PATH`.
 
 Session identity and paths: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, and `$SPUR_REAL_HOME`. Command paths: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`, and, for hook-state agents, `$SPUR_AGENT_STATE_COMMAND` plus `$SPUR_AGENT_STATE_FILE`.
 
@@ -92,7 +92,7 @@ The `agent-process-ownership` check reports live agent processes their session r
 ## spawn
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <message>]]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> (--subscribe-state <state> | --subscribe-event task_completed) ... [--subscribe-message <message>]]
 ```
 
 Takes a task prompt, or starts an empty agent session. Optional `steps` are a pipeline skeleton around the task.
@@ -102,7 +102,7 @@ Takes a task prompt, or starts an empty agent session. Optional `steps` are a pi
 - `--plan` enables plan-mode startup, disables configured/manual steps, and appends a planning-only instruction. Claude adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag with launch behavior unchanged.
 - `--model <id>` applies to the resolved agent on fresh launch. Ids come from claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under configured `models.codexHome`, `cursor models`, or `opencode models`.
 - `--mode <name>` picks a session mode from `projects.<id>.modes`, overriding the project default. Unknown name fails the spawn. See [Modes](configuration.md#modes).
-- `--subscribe-to <sessionId>` arms one state subscription on the new session before spawn returns, watching `<sessionId>`; requires at least one `--subscribe-state`. `--subscribe-state <state>` is repeatable; `--subscribe-message <message>` sets the delivered text. See [`subscribe`](#subscribe) for state names and delivery semantics.
+- `--subscribe-to <sessionId>` arms one subscription on the new session before spawn returns, watching `<sessionId>`; requires at least one repeatable `--subscribe-state` or `--subscribe-event task_completed`. `--subscribe-message <message>` adds delivered text. See [`subscribe`](#subscribe).
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30s before auto-sending.
 - Project configs set default `spawn.steps`; manual/API/trigger steps override.
 
@@ -165,11 +165,11 @@ spur todo resume --session <id> <itemId> [--json]
 spur complete <sessionId> --todo-override-reason <reason>
 ```
 
-Every session owns one append-only daemon ToDo ledger. `add`, `complete`, `cancel`, and `hold` require a reason. `--human-action` records a human blocker; `resume` reopens held work. No delete action exists. Open or held work blocks completion, self-destruct, handoff, trigger completion, and desk completion. A host CLI or session-detail user can complete anyway with a fresh reason; item states stay unchanged and the override enters audit history. A target session cannot override itself.
+With `todo.enabled` on, every session owns one append-only daemon ToDo ledger. `add`, `complete`, `cancel`, and `hold` require a reason. `--human-action` records a human blocker; `resume` reopens held work. No delete action exists. Open or held work blocks completion, self-destruct, handoff, trigger completion, and desk completion. A host CLI or session-detail user can complete anyway with a fresh reason; item states stay unchanged and the override enters audit history. A target session cannot override itself.
 
-`$SPUR_TODO_COMMAND` points to a session-bound `spur-todo` wrapper. It accepts the same actions without `--session` and cannot target another ledger. `$SPUR_SESSION_TOOL_DIR/spur-todo` is the explicit path when a login shell drops the tool directory from `PATH`.
+`$SPUR_TODO_COMMAND` points to a session-bound `spur-todo` wrapper. It accepts the same actions without `--session` and cannot target another ledger. `$SPUR_SESSION_TOOL_DIR/spur-todo` is the explicit path when a login shell drops the tool directory from `PATH`. Disabled instances expose neither variable nor wrapper; GET and POST return `todo_disabled` (409), and session detail omits the section.
 
-Daemon routes: `GET /sessions/:id/todo` reads the projection. `POST /sessions/:id/todo` accepts `{ action: "add", text, reason }`, `{ action: "complete" | "cancel", itemId, reason }`, `{ action: "hold", itemId, reason, blocker, requiredHumanAction? }`, or `{ action: "resume", itemId }`. `blocker` is `external` or `human`; a human blocker requires `requiredHumanAction`, while an external blocker rejects it. Unknown fields and invalid bodies return `invalid_todo_request` (400). `todo_open_work` returns 409 with open/held ids. Invalid transitions return `todo_transition_conflict` (409); strict-ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy or DELETE route exists.
+Daemon routes: `GET /sessions/:id/todo` reads the projection. `POST /sessions/:id/todo` accepts `{ action: "add", text, reason }`, `{ action: "complete" | "cancel", itemId, reason }`, `{ action: "hold", itemId, reason, blocker, requiredHumanAction? }`, or `{ action: "resume", itemId }`. `blocker` is `external` or `human`; a human blocker requires `requiredHumanAction`, while an external blocker rejects it. Unknown fields and invalid bodies return `invalid_todo_request` (400). `todo_open_work` returns 409 with open/held ids. Invalid transitions return `todo_transition_conflict` (409); strict-ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy or DELETE route exists. A waiting episode arms one persisted ToDo nudge for 60 seconds later; mutation resets the due time, failed delivery retries on the next five-second sweep, successful delivery consumes it, and a later observed working-to-waiting edge rearms it.
 
 While an agent is busy, manual `send` queues per session and flushes when it returns to a prompt, ahead of the next auto-step. For a `stopped`/`paused` session with an existing workspace (shepherd excepted, see above), `send` first tries to resume the native agent conversation, then falls back to a fresh launch.
 
@@ -246,20 +246,20 @@ Spawn prompt tells agents to read `task`/`project` on start and write durable, h
 ## subscribe
 
 ```bash
-spur subscribe <targetSessionId> --state <state> [--state <state> ...] [--message <text>] [--session <id>]
+spur subscribe <targetSessionId> (--state <state> | --event task_completed) ... [--message <text>] [--session <id>]
 spur subscribe --list [--session <id>]
 spur subscribe --remove <subscriptionId> [--session <id>]
 ```
 
-Watches another session's state and sends the subscriber a message on a matching transition. Subscriber session defaults to `SPUR_SESSION`; pass `--session` from outside a live session.
+Watches another session's state or ToDo completion and sends the subscriber a message on a matching transition. `task_completed` fires only when enabled ToDo work crosses from unfinished to resolved; adding work and resolving it again creates another event. Subscriber session defaults to `SPUR_SESSION`; pass `--session` from outside a live session.
 
-One subscription per target: `id` is `state-<targetSessionId>`. Re-subscribing to the same target overwrites its states and message. Cannot subscribe to yourself.
+One subscription per target: `id` is `state-<targetSessionId>`. Re-subscribing to the same target overwrites its states, events, and message. Cannot subscribe to yourself.
 
 `--state` is repeatable. Valid states: `working`, `waiting`, `needs_input`, `rate_limited`, `stale`, `stopped`, `error`, `killed`. Delivery fires once per matching transition, immediately after the target session's state settles — not on every poll. If the target is already in a watched state when the subscription arms, nothing fires until the next transition into that state. `--message` sets custom text appended after a blank line to the default `Session <targetSessionId> changed state: <from> -> <to> at <iso> (source: <src>).` line.
 
 Delivery goes through the normal queued `send` path: a `stopped`/`paused` subscriber gets resumed (native conversation resume, then fresh launch fallback) to receive it. There is no retry of the dispatch itself — it fires once per transition. The transition is claimed as soon as `send` queues the message, not once it is actually delivered: a synchronous `send` failure (subscriber gone, not running) logs `session.subscription.delivery_failed` and leaves the transition unclaimed so a later matching transition can retry it; a pane-write failure after the message is queued does not — the transition stays claimed and the message itself retries through the message-queue events above.
 
-`spur spawn --subscribe-to/--subscribe-state/--subscribe-message` arms one subscription at spawn time — same target/state/message rules above. The CLI checks the target session exists before spawning and fails with a clear error if it doesn't. Direct API/MCP callers that skip this check get the daemon's own non-fatal behavior instead: an invalid spawn-time target doesn't fail the spawn — Spur logs `session.subscription.spawn_failed` and the new session comes up with no subscription armed.
+`spur spawn --subscribe-to/--subscribe-state/--subscribe-event/--subscribe-message` arms one subscription at spawn time under the same rules. The CLI checks the target session exists before spawning and fails if missing. Direct API/MCP callers skip this check: an invalid target logs `session.subscription.spawn_failed` without failing spawn.
 
 ## Sidecars
 

@@ -20,12 +20,14 @@ function reasonPreview(item: SpurTodoProjection["items"][number]): string {
 export function SessionTodo({ sessionId }: { sessionId: string }) {
   const [projection, setProjection] = useState<SpurTodoProjection | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [disabled, setDisabled] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let active = true;
     setProjection(null);
     setError(null);
+    setDisabled(false);
     setExpanded(new Set());
     const load = async () => {
       try {
@@ -33,6 +35,19 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
           cache: "no-store",
         });
         const payload = (await response.json()) as unknown;
+        if (
+          !response.ok &&
+          payload &&
+          typeof payload === "object" &&
+          "code" in payload &&
+          (payload as { code?: unknown }).code === "todo_disabled"
+        ) {
+          if (active) {
+            setDisabled(true);
+            window.clearInterval(timer);
+          }
+          return;
+        }
         if (!response.ok) {
           const message =
             payload && typeof payload === "object" && "error" in payload
@@ -59,6 +74,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   const resolved = projection ? projection.counts.completed + projection.counts.cancelled : 0;
+  if (disabled) return null;
   return (
     <section aria-labelledby="session-todo-heading">
       <h2

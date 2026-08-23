@@ -114,8 +114,34 @@ describe("spawn CLI state subscriptions", () => {
   it("rejects --subscribe-state without --subscribe-to, no spawn", async () => {
     await expect(
       parseSpawn(["spawn", "demo", "do the thing", "--subscribe-state", "waiting", "--json"]),
-    ).rejects.toThrow(/--subscribe-state and --subscribe-message require --subscribe-to/);
+    ).rejects.toThrow(
+      /--subscribe-state, --subscribe-event, and --subscribe-message require --subscribe-to/,
+    );
     expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("sends task_completed as a distinct spawn subscription event", async () => {
+    postJsonMock.mockResolvedValue({ id: "demo-2", project: "demo" });
+
+    await parseSpawn([
+      "spawn",
+      "demo",
+      "do the thing",
+      "--subscribe-to",
+      "demo-1",
+      "--subscribe-event",
+      "task_completed",
+      "--json",
+    ]);
+
+    expect(postJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions",
+      expect.objectContaining({
+        subscriptions: [{ targetSessionId: "demo-1", states: [], events: ["task_completed"] }],
+      }),
+      "/tmp/spur.yaml",
+    );
   });
 
   it("rejects --subscribe-to with zero states, no spawn", async () => {

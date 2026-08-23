@@ -79,6 +79,7 @@ import {
 import {
   InvalidTodoRequestError,
   TodoLedgerCorruptError,
+  TodoDisabledError,
   TodoOpenWorkError,
   TodoTransitionConflictError,
 } from "./todo.js";
@@ -477,13 +478,20 @@ function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionState
     throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
   }
   const states = raw["states"];
-  if (!Array.isArray(states) || states.length === 0) {
-    throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
-  }
-  if (!states.every(isSessionState)) {
+  if (states !== undefined && (!Array.isArray(states) || !states.every(isSessionState))) {
     throw new InvalidSessionSubscriptionInputError(
       `states must be one of: ${SESSION_STATES.join(", ")}`,
     );
+  }
+  const events = raw["events"];
+  if (
+    events !== undefined &&
+    (!Array.isArray(events) || !events.every((event) => event === "task_completed"))
+  ) {
+    throw new InvalidSessionSubscriptionInputError("events must contain only task_completed");
+  }
+  if ((states?.length ?? 0) === 0 && (events?.length ?? 0) === 0) {
+    throw new InvalidSessionSubscriptionInputError("states or events must be a non-empty array");
   }
   const message = raw["message"];
   if (message !== undefined && typeof message !== "string") {
@@ -491,7 +499,8 @@ function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionState
   }
   return {
     targetSessionId,
-    states,
+    states: states ?? [],
+    ...(events?.length ? { events } : {}),
     ...(message !== undefined ? { message } : {}),
   };
 }
@@ -1721,6 +1730,10 @@ export async function startServer(
       }
       if (error instanceof TodoOpenWorkError) {
         sendJson(response, error.statusCode, { code: error.code, sessions: error.sessions });
+        return;
+      }
+      if (error instanceof TodoDisabledError) {
+        sendJson(response, error.statusCode, { code: error.code, error: error.message });
         return;
       }
       if (error instanceof InvalidTodoRequestError) {

@@ -13,7 +13,7 @@ Merge order: instance config, then connected project configs in registry order. 
 
 A running session reads the `spur.yaml` in its own session directory only — worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
 
-Spur ToDo is always on. It has no config, spawn, source, or trigger field. Command and completion behavior: [todo](commands.md#todo).
+Spur ToDo defaults on. Set instance-only `todo.enabled: false` to suppress ledgers, session tools, prompts, completion gates, nudges, completion events, and web detail. Project `spur.yaml` files cannot override it. Existing ledgers stay on disk and resume when reenabled. Command and completion behavior: [todo](commands.md#todo).
 
 ## Config registry
 
@@ -251,6 +251,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `defaultAgent`: optional, `claude|codex|cursor|opencode`, default `claude`.
 - `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
 - `models.codexHome`: optional, default `~/.codex`. Instance config only. Codex picker reads visible entries from `models_cache.json` here; each Codex session copies that cache into its isolated home. Missing, malformed, or empty visible cache returns no Codex models.
+- `todo.enabled`: optional boolean, default `true`. Instance config only; project configs ignore `todo` before semantic parsing. See [ToDo](commands.md#todo).
 - Agent executable overrides: `SPUR_CLAUDE_BIN`, `SPUR_CODEX_BIN`, `SPUR_CURSOR_BIN`, and `SPUR_OPENCODE_BIN`. Each optional process environment value replaces that agent's standard PATH command for preflight, model discovery, launch, restore, transcript reads, and process matching. Use an absolute executable path for daemon and sidecar restarts. A missing OpenCode executable makes model discovery and spawn fail with the command and override name; it never returns a false empty catalog.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.

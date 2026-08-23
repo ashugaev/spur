@@ -4210,6 +4210,32 @@ projects:
     expect(config.admission.maxLiveSessionsSource).toBe("default");
   });
 
+  it("defaults instance ToDo on and parses an explicit boolean", async () => {
+    const defaultPath = await writeConfig(`projects:\n  backend:\n    path: $REPO_PATH\n`);
+    const disabledPath = await writeConfig(
+      `todo:\n  enabled: false\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
+    );
+
+    expect(loadConfig(defaultPath).todo.enabled).toBe(true);
+    expect(loadConfig(disabledPath).todo.enabled).toBe(false);
+  });
+
+  it("rejects a nonboolean instance ToDo setting", async () => {
+    const configPath = await writeConfig(
+      `todo:\n  enabled: no\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
+    );
+
+    expect(() => loadConfig(configPath)).toThrow("todo.enabled must be a boolean");
+  });
+
+  it("ignores a project ToDo block before semantic parsing", async () => {
+    const configPath = await writeConfig(
+      `todo:\n  enabled: not-a-boolean\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
+    );
+
+    expect(loadProjectConfig(configPath).todo.enabled).toBe(true);
+  });
+
   it("parses projects.<id>.maxLiveSessions in both instance and project mode", async () => {
     const configPath = await writeConfig(`
 projects:

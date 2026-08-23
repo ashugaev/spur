@@ -145,4 +145,17 @@ describe("SessionTodo", () => {
     expect(screen.getByText("Operator accepted risk")).toBeInTheDocument();
     expect(screen.getByLabelText("open")).toBeInTheDocument();
   });
+
+  it("omits the section when the daemon reports ToDo disabled", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "todo_disabled", error: "disabled" }), {
+        status: 409,
+      }),
+    );
+
+    render(<SessionTodo sessionId="api-1" />);
+
+    await waitFor(() => expect(screen.queryByText("ToDo")).not.toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });

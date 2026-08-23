@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -202,6 +202,18 @@ describe("session slots", () => {
     const todoWrapper = readFileSync(join(toolDir, TODO_TOOL_NAME), "utf8");
     expect(todoWrapper).toContain('exec "$SCRIPT_DIR/spur" todo "$@" --session \'api-1\'');
     expect(todoWrapper).not.toContain("delete");
+  });
+
+  it("removes the fixed-session ToDo wrapper when ToDo is disabled", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const args = { dataDir, sessionId: "api-1", configPath: "/tmp/spur.yaml" };
+    const toolDir = ensureSessionSlotTool(args);
+    expect(existsSync(join(toolDir, TODO_TOOL_NAME))).toBe(true);
+
+    ensureSessionSlotTool({ ...args, todoEnabled: false });
+
+    expect(existsSync(join(toolDir, TODO_TOOL_NAME))).toBe(false);
   });
 
   it("writes branch helpers when branch naming is configured", async () => {

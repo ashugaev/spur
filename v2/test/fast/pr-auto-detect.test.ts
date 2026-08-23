@@ -219,6 +219,7 @@ function baseConfig(): AppConfig {
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
     models: { codexHome: "/tmp/codex" },
+    todo: { enabled: true },
     voice: {
       provider: "whisper_cpp",
       language: "en",

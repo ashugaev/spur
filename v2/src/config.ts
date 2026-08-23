@@ -1858,6 +1858,7 @@ function parseConfigFile(
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const models = mode === "instance" && root["models"] ? asObject(root["models"], "models") : {};
+  const todo = mode === "instance" && root["todo"] ? asObject(root["todo"], "todo") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
   const userActionLog = root["userActionLog"]
@@ -1954,6 +1955,10 @@ function parseConfigFile(
                 resolvedDefaults.codexHome,
             )
           : resolvedDefaults.codexHome,
+    },
+    todo: {
+      enabled:
+        mode === "instance" ? (asOptionalBoolean(todo["enabled"], "todo.enabled") ?? true) : true,
     },
     voice: (() => {
       if (mode === "project") {

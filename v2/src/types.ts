@@ -660,6 +660,9 @@ export interface AppConfig {
   models: {
     codexHome: string;
   };
+  todo: {
+    enabled: boolean;
+  };
   voice:
     | {
         provider: "whisper_cpp" | "faster_whisper";
@@ -785,18 +788,23 @@ export interface SessionStateSubscription {
   id: string;
   targetSessionId: string;
   states: SessionState[];
+  events?: SessionSubscriptionEvent[];
   message?: string;
   createdAt: string;
   updatedAt: string;
   lastDeliveredTransitionId?: string;
+  lastDeliveredEventId?: string;
   lastDeliveredAt?: string;
 }
 
 export interface SubscribeSessionStatesRequest {
   targetSessionId: string;
-  states: SessionState[];
+  states?: SessionState[];
+  events?: SessionSubscriptionEvent[];
   message?: string;
 }
+
+export type SessionSubscriptionEvent = "task_completed";
 
 export interface SessionStateSubscriptionListResponse {
   records: SessionStateSubscription[];
@@ -881,6 +889,10 @@ export interface SessionRecord {
   rateLimitedAt?: string;
   serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
+  todoNudge?: {
+    dueAt: string;
+    episode: number;
+  };
   error?: string;
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;

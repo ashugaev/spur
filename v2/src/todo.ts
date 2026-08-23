@@ -61,6 +61,14 @@ export class TodoOpenWorkError extends Error {
   }
 }
 
+export class TodoDisabledError extends Error {
+  readonly statusCode = 409;
+  readonly code = "todo_disabled";
+  constructor() {
+    super("Spur ToDo is disabled by instance configuration");
+  }
+}
+
 function ledgerPath(dataDir: string, sessionId: string, project?: string): string {
   const live = join(dataDir, "sessions", sessionId, "todo.jsonl");
   if (existsSync(live)) return live;

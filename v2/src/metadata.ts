@@ -651,15 +651,23 @@ function normalizeStateSubscriptions(
       id: subscription.id,
       targetSessionId: subscription.targetSessionId,
       states: subscription.states.filter(isSessionState),
+      ...(Array.isArray(subscription.events) && subscription.events.includes("task_completed")
+        ? { events: ["task_completed" as const] }
+        : {}),
       ...(subscription.message ? { message: subscription.message } : {}),
       createdAt: subscription.createdAt,
       updatedAt: subscription.updatedAt,
       ...(subscription.lastDeliveredTransitionId
         ? { lastDeliveredTransitionId: subscription.lastDeliveredTransitionId }
         : {}),
+      ...(subscription.lastDeliveredEventId
+        ? { lastDeliveredEventId: subscription.lastDeliveredEventId }
+        : {}),
       ...(subscription.lastDeliveredAt ? { lastDeliveredAt: subscription.lastDeliveredAt } : {}),
     }))
-    .filter((subscription) => subscription.states.length > 0);
+    .filter(
+      (subscription) => subscription.states.length > 0 || (subscription.events?.length ?? 0) > 0,
+    );
   return normalized.length > 0 ? normalized : undefined;
 }
 
@@ -733,6 +741,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
+    ...(normalizedSession.todoNudge &&
+    typeof normalizedSession.todoNudge.dueAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.todoNudge.dueAt)) &&
+    Number.isInteger(normalizedSession.todoNudge.episode) &&
+    normalizedSession.todoNudge.episode >= 0
+      ? { todoNudge: normalizedSession.todoNudge }
+      : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.todoLedgerVersion === 1 ? { todoLedgerVersion: 1 as const } : {}),
   };
@@ -758,6 +773,17 @@ export function writeSession(dataDir: string, session: SessionRecord): void {
   const path = sessionFilePath(dataDir, session.project, session.id);
   writeJsonFile(path, normalizeSessionRecord(session));
   writeSessionIndexEntry(dataDir, session.id, path);
+}
+
+export function deleteSession(
+  dataDir: string,
+  session: Pick<SessionRecord, "id" | "project">,
+): void {
+  const path = sessionFilePath(dataDir, session.project, session.id);
+  rmSync(path, { force: true });
+  rmSync(sessionShardDir(dataDir, session.id), { recursive: true, force: true });
+  sessionFileCache.delete(path);
+  deleteSessionIndexEntry(dataDir, session.id);
 }
 
 // Deletes cache entries under rootDir that weren't in this listing's visited

@@ -406,9 +406,13 @@ function renderSourceReplyResponse(response: SourceReplyResponse): string {
 }
 
 function renderStateSubscription(record: SessionStateSubscription): string {
+  const watched = [
+    ...(record.states.length > 0 ? [`states ${record.states.join(", ")}`] : []),
+    ...(record.events?.length ? [`events ${record.events.join(", ")}`] : []),
+  ].join(" · ");
   const lines = [
     `${boldText(record.id)} -> ${record.targetSessionId}`,
-    dimText(`states ${record.states.join(", ")} · updated ${record.updatedAt}`),
+    dimText(`${watched} · updated ${record.updatedAt}`),
   ];
   if (record.message) {
     lines.push(record.message);
@@ -685,6 +689,7 @@ type KillCommandOptions = {
 
 type SubscribeCommandOptions = {
   state?: string[];
+  event?: string[];
   message?: string;
   session?: string;
   list?: boolean;
@@ -2101,17 +2106,23 @@ function resolveCliSpawnOverrides(options: {
 function buildSubscriptionRequest(
   targetSessionId: string,
   rawStates: string[] | undefined,
+  rawEvents: string[] | undefined,
   rawMessage: string | undefined,
-  emptyStatesError: string,
+  emptyError: string,
 ): SubscribeSessionStatesRequest {
   const states = (rawStates ?? []).map(parseSubscriptionState);
-  if (states.length === 0) {
-    throw new Error(emptyStatesError);
+  const events = (rawEvents ?? []).map((event) => {
+    if (event.trim() !== "task_completed") throw new Error("event must be task_completed");
+    return "task_completed" as const;
+  });
+  if (states.length === 0 && events.length === 0) {
+    throw new Error(emptyError);
   }
   const message = rawMessage?.trim();
   return {
     targetSessionId,
     states,
+    ...(events.length > 0 ? { events } : {}),
     ...(message ? { message } : {}),
   };
 }
@@ -2119,6 +2130,7 @@ function buildSubscriptionRequest(
 function resolveCliSpawnSubscriptions(options: {
   subscribeTo?: string;
   subscribeState?: string[];
+  subscribeEvent?: string[];
   subscribeMessage?: string;
 }): SubscribeSessionStatesRequest[] | undefined {
   if (options.subscribeTo !== undefined && !options.subscribeTo.trim()) {
@@ -2126,8 +2138,14 @@ function resolveCliSpawnSubscriptions(options: {
   }
   const target = options.subscribeTo?.trim();
   if (!target) {
-    if (options.subscribeState?.length || options.subscribeMessage !== undefined) {
-      throw new Error("--subscribe-state and --subscribe-message require --subscribe-to");
+    if (
+      options.subscribeState?.length ||
+      options.subscribeEvent?.length ||
+      options.subscribeMessage !== undefined
+    ) {
+      throw new Error(
+        "--subscribe-state, --subscribe-event, and --subscribe-message require --subscribe-to",
+      );
     }
     return undefined;
   }
@@ -2135,8 +2153,9 @@ function resolveCliSpawnSubscriptions(options: {
     buildSubscriptionRequest(
       target,
       options.subscribeState,
+      options.subscribeEvent,
       options.subscribeMessage,
-      "--subscribe-to requires at least one --subscribe-state",
+      "--subscribe-to requires at least one --subscribe-state or --subscribe-event",
     ),
   ];
 }
@@ -2465,6 +2484,11 @@ export function createProgram(cliEntrypoint: string): Command {
       "State to watch for --subscribe-to; repeatable",
       appendOptionValue,
     )
+    .option(
+      "--subscribe-event <event>",
+      "Event to watch for --subscribe-to; task_completed",
+      appendOptionValue,
+    )
     .option("--subscribe-message <message>", "Message delivered when the subscription fires")
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
@@ -2766,6 +2790,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Manage session state subscriptions.")
     .argument("[targetSessionId]", "Session id to watch")
     .option("--state <state>", "State to watch; repeatable", appendOptionValue)
+    .option("--event <event>", "Event to watch; task_completed", appendOptionValue)
     .option("--message <message>", "Message sent when subscription fires")
     .option("--session <sessionId>", "Subscriber session id; defaults to SPUR_SESSION")
     .option("--list", "List subscriptions for the subscriber")
@@ -2776,7 +2801,13 @@ export function createProgram(cliEntrypoint: string): Command {
         const configPath = prepareInstanceConfig(command.parent as Command).configPath;
         const subscriberId = resolveSubscriberId(options);
         if (options.list === true) {
-          if (targetSessionId || options.remove || options.state || options.message) {
+          if (
+            targetSessionId ||
+            options.remove ||
+            options.state ||
+            options.event ||
+            options.message
+          ) {
             throw new Error(
               "--list cannot be combined with target, --remove, --state, or --message",
             );
@@ -2795,7 +2826,7 @@ export function createProgram(cliEntrypoint: string): Command {
           return;
         }
         if (options.remove) {
-          if (targetSessionId || options.state || options.message) {
+          if (targetSessionId || options.state || options.event || options.message) {
             throw new Error("--remove cannot be combined with target, --state, or --message");
           }
           await outputResult({
@@ -2822,8 +2853,9 @@ export function createProgram(cliEntrypoint: string): Command {
         const payload = buildSubscriptionRequest(
           target,
           options.state,
+          options.event,
           options.message,
-          "subscribe requires at least one --state",
+          "subscribe requires at least one --state or --event",
         );
         await outputResult({
           json: Boolean(options.json),
