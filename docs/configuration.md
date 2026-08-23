@@ -318,6 +318,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `diskRetention.warnFreeGb`: optional, default `10`. Instance config only. Drives `doctor`'s `home-disk-headroom` check and the pre-spawn `host.disk.low` warning; see [commands.md](commands.md#cache) for the `spur cache` command it points at.
 - `rateLimitReactivation.afterHours`: optional, default `0`. Instance config only.
 - `staleAfterMinutes`: optional non-negative number, default `720` (12 hours). Instance config only. Minutes a `running` session may sit idle (state `waiting`) before parking. `0` disables parking. See [Stale mode](#stale-mode).
+- `autoUpdate`: optional boolean, default `false`. Instance config only. See [Auto update](#auto-update).
 - `sessionGc.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur gc`](commands.md#gc) policy on a timer; `spur gc` itself works regardless.
 - `sessionGc.olderThanDays`: optional, default `30`. Minimum age of a group's newest record. Also the `spur gc --older-than` default.
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
@@ -436,6 +437,18 @@ Tmux agent sessions survive daemon restarts: the systemd unit uses `KillMode=pro
 Trigger pending batches persist in `<dataDir>/pending-send-batches.json` and reload at startup, minus records whose trigger no longer matches config or whose payload no longer parses. Lost on restart: retry counters (a reloaded batch restarts at attempt 1), the send window (fresh window at restore), the state-classification cache (rebuilt in seconds), the state-history ring buffer.
 
 Unit files here are templates. Source deployments apply them through [install-from-source.md#deploy](install-from-source.md#deploy); npm user units refresh through [install-from-npm.md#upgrade](install-from-npm.md#upgrade).
+
+## Auto update
+
+`autoUpdate` (instance config only, default `false`) self-updates the daemon: once the npm registry publishes a version strictly newer than the running one, it runs the same switch a `Switch` press runs — same executor, guards, durable status record. See [Daemon HTTP API](commands.md#daemon-http-api).
+
+Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpdate: true`/`false` in `~/.spur/config.yaml`, re-read from disk every reaper tick — a hand edit takes effect on the next tick, no restart. Detection lag up to ~15 minutes (5-minute reaper tick plus the 10-minute registry cache), not immediate.
+
+An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release. A candidate already holding a terminal (`succeeded` or `failed`) status record is never retried. Events: `daemon.auto_update.started`, `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`.
+
+Rollback reaches only failures the switch helper itself detects ([commands.md](commands.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
+
+Pin a version by hand while auto-update is on: turn `autoUpdate` off first — [install-from-npm.md#upgrade](install-from-npm.md#upgrade) has the order and the reason.
 
 ## Restore after reboot
 

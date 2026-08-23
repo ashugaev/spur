@@ -450,6 +450,11 @@ import {
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
+import { readAutoUpdateFlag } from "./auto-update-config.js";
+import { runAutoUpdateTick } from "./auto-update.js";
+import { deploySwitchStatePath, reconcileDeploySwitchState } from "./deploy-switch-state.js";
+import { startDeploySwitch } from "./deploy-switch.js";
+import { getReleases } from "./releases-cache.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 // Not a message prefix (the message starts with "Session <id> ...") — a
@@ -2560,6 +2565,34 @@ export class SessionService {
       this.logEvent("session.sidecar_reaper.failed", {
         level: "warn",
         message: `Sidecar reaper failed: ${message}`,
+      });
+    }
+  }
+
+  // Folds the auto-update check into the existing reaper tick — no new
+  // timer. `readAutoUpdateFlag` re-reads the flag from disk on every call,
+  // never `this.config.autoUpdate` (rationale in auto-update-config.ts).
+  private async runAutoUpdateTick(): Promise<void> {
+    try {
+      await runAutoUpdateTick({
+        configPath: this.bootstrapConfigPath,
+        statePath: deploySwitchStatePath(this.config.dataDir),
+        currentVersion: getVersion(),
+        readFlag: readAutoUpdateFlag,
+        readState: reconcileDeploySwitchState,
+        getReleases,
+        start: (version) =>
+          startDeploySwitch({
+            version,
+            statePath: deploySwitchStatePath(this.config.dataDir),
+          }),
+        log: (event, entry) => this.logEvent(event, entry),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("daemon.auto_update.failed", {
+        level: "warn",
+        message: `Auto-update tick failed: ${message}`,
       });
     }
   }
@@ -5041,6 +5074,7 @@ export class SessionService {
       void this.reapOrphanedTmux();
       this.compactTerminalSessionLogs();
       flushEventLogCollapse(this.config.dataDir);
+      void this.runAutoUpdateTick();
     }, REAP_INTERVAL_MS);
     this.reaperTimer.unref();
   }

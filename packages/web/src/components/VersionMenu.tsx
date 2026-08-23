@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
@@ -30,6 +30,7 @@ interface ReleaseEntry {
 interface RuntimeVersionsResponse {
   current: string;
   available: ReleaseEntry[];
+  autoUpdate?: boolean;
   stale?: boolean;
   registryError?: string;
 }
@@ -37,6 +38,11 @@ interface RuntimeVersionsResponse {
 interface SwitchSuccess {
   accepted: true;
   version: string;
+  autoUpdate?: boolean;
+}
+
+interface AutoUpdateSuccess {
+  autoUpdate: boolean;
 }
 
 interface SwitchInProgress {
@@ -56,16 +62,23 @@ function isReleaseEntry(value: unknown): value is ReleaseEntry {
 
 function isRuntimeVersionsResponse(value: unknown): value is RuntimeVersionsResponse {
   if (typeof value !== "object" || value === null) return false;
-  const record = value as { current: unknown; available: unknown };
+  const record = value as { current: unknown; available: unknown; autoUpdate?: unknown };
   if (typeof record.current !== "string") return false;
   if (!Array.isArray(record.available)) return false;
+  if (record.autoUpdate !== undefined && typeof record.autoUpdate !== "boolean") return false;
   return record.available.every(isReleaseEntry);
 }
 
 function isSwitchSuccess(value: unknown): value is SwitchSuccess {
   if (typeof value !== "object" || value === null) return false;
-  const v = value as { accepted?: unknown; version?: unknown };
-  return v.accepted === true && typeof v.version === "string";
+  const v = value as { accepted?: unknown; version?: unknown; autoUpdate?: unknown };
+  if (v.accepted !== true || typeof v.version !== "string") return false;
+  return v.autoUpdate === undefined || typeof v.autoUpdate === "boolean";
+}
+
+function isAutoUpdateSuccess(value: unknown): value is AutoUpdateSuccess {
+  if (typeof value !== "object" || value === null) return false;
+  return typeof (value as { autoUpdate?: unknown }).autoUpdate === "boolean";
 }
 
 function isSwitchInProgress(value: unknown): value is SwitchInProgress {
@@ -106,6 +119,7 @@ export function VersionMenu() {
   const { phase: switchPhase, startSwitch, dismiss: dismissVersionSwitch } = useVersionSwitch();
   const [pending, setPending] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const queryClient = useQueryClient();
 
   const infoQuery = useQuery<RuntimeInfoResponse>({
     queryKey: ["runtime", "info"],
@@ -150,10 +164,37 @@ export function VersionMenu() {
       return payload;
     },
     onSuccess: (result) => {
+      // Load-bearing, not decorative: when the confirmation poll exhausts its
+      // 30 attempts the page never reloads (version-switch-context.tsx's
+      // poll-exhaustion path), so the 60s-stale versions cache would
+      // otherwise show a checked box against a daemon that already disarmed.
+      queryClient.setQueryData<RuntimeVersionsResponse>(["runtime", "versions"], (old) =>
+        old ? { ...old, autoUpdate: result.autoUpdate ?? false } : old,
+      );
       startSwitch(result.version);
       setPending(null);
       popover.dismiss();
       triggerRef.current?.focus();
+    },
+  });
+
+  const autoUpdateMutation = useMutation<AutoUpdateSuccess, Error, boolean>({
+    mutationFn: async (enabled) => {
+      const response = await fetch("/api/runtime/auto-update", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const payload = await readResponsePayload(response);
+      if (!response.ok || !isAutoUpdateSuccess(payload)) {
+        throw new Error(responseErrorMessage(payload, "Failed to update Auto setting."));
+      }
+      return payload;
+    },
+    onSuccess: (result) => {
+      queryClient.setQueryData<RuntimeVersionsResponse>(["runtime", "versions"], (old) =>
+        old ? { ...old, autoUpdate: result.autoUpdate } : old,
+      );
     },
   });
 
@@ -168,6 +209,7 @@ export function VersionMenu() {
   const latest = available[0]?.tag ?? "";
   const severity = updateSeverity(latest, current);
   const updateAvailable = severity !== "none";
+  const autoUpdateOn = versionsQuery.data?.autoUpdate ?? false;
 
   const { dismiss } = popover;
   useEffect(() => {
@@ -237,10 +279,36 @@ export function VersionMenu() {
       {popover.open && switchPhase === "idle" ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
-            <span className="text-[var(--color-text-secondary)]">Spur</span>
-            <span className="font-bold text-[var(--color-text-primary)]">
-              {current || triggerLabel}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--color-text-secondary)]">Spur</span>
+              <span className="font-bold text-[var(--color-text-primary)]">
+                {current || triggerLabel}
+              </span>
+            </div>
+            <label
+              className={`flex items-center gap-1.5 ${
+                autoUpdateMutation.isPending ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+              }`}
+              title="Update automatically as soon as a new version is detected"
+            >
+              <input
+                aria-label="Auto update"
+                checked={autoUpdateOn}
+                className="accent-[var(--color-accent)] disabled:cursor-not-allowed"
+                disabled={autoUpdateMutation.isPending}
+                type="checkbox"
+                onChange={(event) => autoUpdateMutation.mutate(event.target.checked)}
+              />
+              <span
+                className={
+                  autoUpdateOn
+                    ? "font-bold text-[var(--color-text-primary)]"
+                    : "text-[var(--color-text-tertiary)]"
+                }
+              >
+                Auto
+              </span>
+            </label>
           </div>
           {versionsQuery.data?.stale ? (
             <div
@@ -308,6 +376,7 @@ export function VersionMenu() {
       ) : null}
       {pending !== null ? (
         <SwitchVersionDialog
+          autoUpdate={autoUpdateOn}
           current={current}
           errorMessage={dialogErrorMessage}
           pending={pending}

@@ -723,6 +723,9 @@ export interface AppConfig {
   };
   admission: AdmissionConfig;
   staleAfterMinutes: number;
+  // Never decide off this snapshot: `readAutoUpdateFlag` in
+  // `auto-update-config.ts` re-reads the key from disk, and says why.
+  autoUpdate: boolean;
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }

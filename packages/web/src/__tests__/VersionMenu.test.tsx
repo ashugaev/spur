@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VersionMenu } from "@/components/VersionMenu";
+import { VersionSwitchOverlay } from "@/components/VersionSwitchOverlay";
 import { VersionSwitchProvider } from "@/lib/version-switch-context";
 
 function createTestQueryClient() {
@@ -39,11 +40,19 @@ interface MockResponse {
   payload: unknown;
 }
 
+interface AutoUpdateCallRecord {
+  body: unknown;
+}
+
 interface MockResponses {
   info?: MockResponse | (() => MockResponse);
   versions?: { status?: number; payload: unknown };
   switch?: { status?: number; payload: unknown };
   onSwitch?: (record: SwitchCallRecord) => void;
+  autoUpdate?: { status?: number; payload: unknown };
+  onAutoUpdate?: (record: AutoUpdateCallRecord) => void;
+  onVersionsFetch?: () => void;
+  autoUpdateDelay?: Promise<void>;
 }
 
 function mockFetch(responses: MockResponses) {
@@ -56,6 +65,7 @@ function mockFetch(responses: MockResponses) {
       return new Response(JSON.stringify(info.payload), { status: info.status ?? 200 });
     }
     if (url === "/api/runtime/versions") {
+      responses.onVersionsFetch?.();
       const versions = responses.versions ?? { payload: { current: "1.0.0", available: [] } };
       return new Response(JSON.stringify(versions.payload), { status: versions.status ?? 200 });
     }
@@ -75,6 +85,23 @@ function mockFetch(responses: MockResponses) {
       };
       return new Response(JSON.stringify(switchResponse.payload), {
         status: switchResponse.status ?? 202,
+      });
+    }
+    if (url === "/api/runtime/auto-update") {
+      const rawBody = init?.body;
+      let parsedBody: unknown = null;
+      if (typeof rawBody === "string") {
+        try {
+          parsedBody = JSON.parse(rawBody) as unknown;
+        } catch {
+          parsedBody = null;
+        }
+      }
+      responses.onAutoUpdate?.({ body: parsedBody });
+      if (responses.autoUpdateDelay) await responses.autoUpdateDelay;
+      const autoUpdateResponse = responses.autoUpdate ?? { payload: { autoUpdate: true } };
+      return new Response(JSON.stringify(autoUpdateResponse.payload), {
+        status: autoUpdateResponse.status ?? 200,
       });
     }
     throw new Error(`Unexpected fetch: ${url}`);
@@ -441,5 +468,235 @@ describe("VersionMenu", () => {
         "Update to 1.4.9 is already in progress.",
       );
     });
+  });
+
+  it("renders the Auto checkbox unchecked and dimmed by default", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [], autoUpdate: false } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    expect(checkbox).not.toBeChecked();
+    expect(screen.getByText("Auto")).toHaveClass("text-[var(--color-text-tertiary)]");
+  });
+
+  it("renders the Auto checkbox checked and bold when on", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [], autoUpdate: true } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    expect(checkbox).toBeChecked();
+    expect(screen.getByText("Auto")).toHaveClass("font-bold");
+    expect(screen.getByText("Auto")).toHaveClass("text-[var(--color-text-primary)]");
+  });
+
+  it("renders the Auto checkbox unchecked when the field is absent from the payload", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [] } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it("carries a non-empty tooltip on the Auto label", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [], autoUpdate: false } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    const label = checkbox.closest("label");
+    expect(label?.getAttribute("title")).toBeTruthy();
+  });
+
+  it("toggling posts enabled and settles on the server-confirmed value", async () => {
+    const autoUpdateCalls: AutoUpdateCallRecord[] = [];
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [], autoUpdate: false } },
+      autoUpdate: { payload: { autoUpdate: true } },
+      onAutoUpdate: (record) => autoUpdateCalls.push(record),
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      expect(checkbox).toBeChecked();
+    });
+    expect(autoUpdateCalls).toEqual([{ body: { enabled: true } }]);
+  });
+
+  it("dims the whole Auto control together while the toggle request is in flight", async () => {
+    let releaseAutoUpdate: (() => void) | undefined;
+    const autoUpdateDelay = new Promise<void>((resolve) => {
+      releaseAutoUpdate = resolve;
+    });
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [], autoUpdate: false } },
+      autoUpdate: { payload: { autoUpdate: true } },
+      autoUpdateDelay,
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      expect(checkbox).toBeDisabled();
+    });
+    const label = checkbox.closest("label");
+    expect(label?.className).toContain("cursor-not-allowed");
+    expect(label?.className).toContain("opacity-50");
+    expect(label?.className).not.toContain("cursor-pointer");
+
+    releaseAutoUpdate?.();
+    await waitFor(() => {
+      expect(checkbox).not.toBeDisabled();
+    });
+    expect(label?.className).toContain("cursor-pointer");
+    expect(label?.className).not.toContain("opacity-50");
+  });
+
+  it("leaves the box at the previous server value on a failed toggle", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: { payload: { current: "1.4.2", available: [], autoUpdate: false } },
+      autoUpdate: { status: 409, payload: { error: "config changed on disk" } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      expect(checkbox).not.toBeDisabled();
+    });
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it("shows the auto-update disarm sentence in the confirm dialog when Auto is on", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: {
+        payload: {
+          current: "1.4.2",
+          autoUpdate: true,
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+          ],
+        },
+      },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Auto update will be turned off.");
+  });
+
+  it("omits the auto-update disarm sentence when Auto is off", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: {
+        payload: {
+          current: "1.4.2",
+          autoUpdate: false,
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+          ],
+        },
+      },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).not.toHaveTextContent("Auto update will be turned off.");
+  });
+
+  it("reads the box unchecked on the next popover open after the poll-exhaustion failure path, with no versions refetch", async () => {
+    // AC 8: the confirmed (reload) path is the only one that actually
+    // refetches — jsdom stubs window.location.reload, so it cannot be
+    // observed here. The poll-exhaustion path is the one testable case with
+    // no reload: it leaves switchPhase at "failed", dismissed explicitly via
+    // the blocking overlay's Dismiss button, at which point the popover can
+    // reopen and must read the disarmed value already sitting in the cache.
+    let versionsFetchCount = 0;
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: {
+        payload: {
+          current: "1.4.2",
+          autoUpdate: true,
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+          ],
+        },
+      },
+      switch: { status: 202, payload: { accepted: true, version: "1.5.0", autoUpdate: false } },
+      onVersionsFetch: () => {
+        versionsFetchCount += 1;
+      },
+    });
+
+    render(
+      <>
+        <VersionMenu />
+        <VersionSwitchOverlay />
+      </>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+    expect(versionsFetchCount).toBe(1);
+
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+    await screen.findByRole("dialog");
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Switch" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
+    });
+    vi.useRealTimers();
+
+    await screen.findByText("Updating Spur failed");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /Show Spur version information/ }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
+    expect(checkbox).not.toBeChecked();
+    expect(versionsFetchCount).toBe(1);
   });
 });

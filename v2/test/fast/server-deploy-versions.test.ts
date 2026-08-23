@@ -9,17 +9,20 @@ import { findFreePort } from "../helpers/common.js";
 interface DeployVersionsResponse {
   current: string;
   available: Array<{ tag: string; publishedAt: string }>;
+  autoUpdate: boolean;
   stale?: boolean;
   registryError?: string;
 }
 
 function isDeployVersionsResponse(value: unknown): value is DeployVersionsResponse {
   if (typeof value !== "object" || value === null) return false;
-  const v = value as { current?: unknown; available?: unknown };
-  return typeof v.current === "string" && Array.isArray(v.available);
+  const v = value as { current?: unknown; available?: unknown; autoUpdate?: unknown };
+  return (
+    typeof v.current === "string" && Array.isArray(v.available) && typeof v.autoUpdate === "boolean"
+  );
 }
 
-async function setupConfig(port: number): Promise<string> {
+async function setupConfig(port: number, autoUpdate?: boolean): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "spur-deploy-versions-"));
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
@@ -34,6 +37,7 @@ async function setupConfig(port: number): Promise<string> {
       `  port: ${port}`,
       `dataDir: ${dataDir}`,
       `worktreeDir: ${worktreeDir}`,
+      ...(autoUpdate === undefined ? [] : [`autoUpdate: ${autoUpdate}`]),
       "projects:",
       "  demo:",
       `    path: ${repoDir}`,
@@ -90,6 +94,36 @@ describe("GET /deploy/versions", () => {
       if (!isDeployVersionsResponse(body)) throw new Error("unreachable");
       expect(typeof body.current).toBe("string");
       expect(body.available.map((entry) => entry.tag)).toEqual(["0.2.0", "0.1.0"]);
+      expect(body.autoUpdate).toBe(false);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("carries autoUpdate: true when the config sets the key", async () => {
+    const registryDoc = {
+      versions: { "0.1.0": {} },
+      time: { "0.1.0": "2026-01-01T00:00:00.000Z" },
+    };
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(registryDoc), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const port = await findFreePort();
+    const configPath = await setupConfig(port, true);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/versions`);
+      expect(response.status).toBe(200);
+      const body: unknown = await response.json();
+      expect(isDeployVersionsResponse(body)).toBe(true);
+      if (!isDeployVersionsResponse(body)) throw new Error("unreachable");
+      expect(body.autoUpdate).toBe(true);
     } finally {
       await server.stop();
     }

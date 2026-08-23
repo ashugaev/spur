@@ -19,7 +19,9 @@ function isDeprecated(meta: unknown): boolean {
   return typeof deprecated === "string" && deprecated !== "";
 }
 
-function compareSemverDesc(a: string, b: string): number {
+// Exported for auto-update.ts's "strictly newer" test — one comparator, not
+// two. Non-release strings compare as NaN there by design; see that call site.
+export function compareSemverDesc(a: string, b: string): number {
   const parse = (s: string): [number, number, number] => {
     const parts = s.split(".").map((n) => Number.parseInt(n, 10));
     return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];

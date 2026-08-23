@@ -98,6 +98,7 @@ import { POST as createProject } from "@/app/api/projects/route";
 import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
 import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
 import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
+import { POST as postAutoUpdate } from "@/app/api/runtime/auto-update/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -3418,6 +3419,68 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(404);
       expect(payload.error).toBe("Unknown project: api");
+    });
+  });
+
+  // ── POST /api/runtime/auto-update ─────────────────────────────────────
+
+  describe("POST /api/runtime/auto-update", () => {
+    it("forwards enabled to the daemon", async () => {
+      mockedSpurRequest.mockResolvedValue(
+        new Response(JSON.stringify({ autoUpdate: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const response = await postAutoUpdate(
+        new NextRequest("http://localhost:3000/api/runtime/auto-update", {
+          method: "POST",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequest).toHaveBeenCalledWith(
+        "/deploy/auto-update",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+      await expect(response.json()).resolves.toEqual({ autoUpdate: true });
+    });
+
+    it("passes a 409 body and status through verbatim", async () => {
+      const conflict = { error: "config changed on disk" };
+      mockedSpurRequest.mockResolvedValue(
+        new Response(JSON.stringify(conflict), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const response = await postAutoUpdate(
+        new NextRequest("http://localhost:3000/api/runtime/auto-update", {
+          method: "POST",
+          body: JSON.stringify({ enabled: false }),
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual(conflict);
+    });
+
+    it("returns 400 on a malformed body", async () => {
+      const response = await postAutoUpdate(
+        new NextRequest("http://localhost:3000/api/runtime/auto-update", {
+          method: "POST",
+          body: "not json",
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequest).not.toHaveBeenCalled();
     });
   });
 });
