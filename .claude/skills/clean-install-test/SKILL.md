@@ -1,6 +1,6 @@
 ---
 name: clean-install-test
-description: Clean-room test of the Spur server install by planting two coding agents — cursor-agent and Claude Code — on a persistent cloud VM that gets reset to a pre-install state each run; the harness never creates or deletes a VM. Cron-safe — runs end to end from the skill name alone, opens a PR for any doc fix, reports in-session. Reset the box over plain SSH, plant both agents by copying the operator's credentials (itest-only shortcut), run each on the README Install block verbatim, capture the transcripts, turn friction into doc fixes, verify services, compare the two agents.
+description: Clean-room test of the Spur server install by planting two coding agents — cursor-agent and Claude Code — on a persistent cloud VM that gets reset to a pre-install state each run; the harness never creates or deletes a VM. Cron-safe — runs end to end from the skill name alone, opens a PR for any doc fix, reports in-session. Reset the box over plain SSH, plant both agents by copying the operator's credentials (itest-only shortcut), run each on the README Install block verbatim, capture the transcripts, turn friction into doc fixes, verify services, compare the two agents. Same box owns the source-install deploy path — use on any change to `scripts/main-deploy.sh`, `deploy/*.service`, or that deploy path, and to verify a deploy end to end on the itest VM.
 ---
 
 CLEAN INSTALL TEST
@@ -122,6 +122,8 @@ For each real friction, edit the install doc minimally, then reset (step 2) and 
 Per agent: single-shot or not, each service check pass/fail, duration, friction hit, final user TODO. Then one friction list deduplicated across both agents — friction only one agent hits is still friction, the weaker agent is the bar, fix the doc for both. Write the friction log to `$SPUR_SESSION_ARTIFACTS_DIR`.
 
 SOURCE-INSTALL DEPLOY MODE
+
+Gate: a change to `scripts/main-deploy.sh`, `deploy/*.service`, or the source-install deploy path ships only after this mode passes on the box. No merge without it.
 
 Second use of the same box: run `scripts/main-deploy.sh` end to end against real systemd. The hermetic `tests/deploy` suite stubs `systemctl`, `curl`, `ss`, and `pnpm` — it proves nothing about real systemd, real startup timing, or a real Next build. Verified means the positive and the negative case below both pass. Planted agents play no part: skip steps 3-5, keep steps 2 and 6.
 

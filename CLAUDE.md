@@ -47,7 +47,7 @@ Capabilities loaded by description match. Source: .claude/skills/
   telegram            .claude/skills/telegram/SKILL.md            Send Telegram notification or fetch updates
   pr-comments-fix     .claude/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .claude/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
-  clean-install-test  .claude/skills/clean-install-test/SKILL.md  Clean-room test the npm server install on a throwaway cloud VM before release
+  clean-install-test  .claude/skills/clean-install-test/SKILL.md  Clean-room test the npm server install before release, or verify a source-install deploy change end to end on the itest VM
   spur-update         .claude/skills/spur-update/SKILL.md         Roll a Spur host onto a published npm version by hand when the automatic update fails
 
 
@@ -106,7 +106,6 @@ ALWAYS-ON RULES
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.
   Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.claude/skills/spur/SKILL.md` Safety and In this repo for detail.
   Deploy for review or test with `scripts/test-deploy.sh`, never `npm install -g` by hand.
-  Change to `scripts/main-deploy.sh`, `deploy/*.service`, or the source-install deploy path: verify end to end on the itest VM before merge, per `.claude/skills/clean-install-test/SKILL.md` SOURCE-INSTALL DEPLOY MODE.
   Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
   Capture what the task taught before closing it. Route by scope: reusable across projects -> global rules; specific to this repo -> the owning `SKILL.md` or `spur memory --scope project`. Skip what git history, the code, or an existing rule already records.
   Worth capturing: a protocol that worked, a tool quirk, a wrong assumption that cost a cycle, a load-bearing invariant. Not: task status, one-off trivia, anything re-derivable by reading the code.
