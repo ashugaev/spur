@@ -805,8 +805,8 @@ export function deleteSessionTracking(
   try {
     renameSync(path, stagedPath);
     deleteSessionIndexEntry(dataDir, session.id);
-    rmSync(stagedPath);
     if (hasShard) rmSync(stagedShardPath, { recursive: true, force: true });
+    rmSync(stagedPath);
     sessionFileCache.delete(path);
   } catch (error) {
     const rollbackErrors: unknown[] = [];

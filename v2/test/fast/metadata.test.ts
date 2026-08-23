@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import type * as NodeFs from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   archiveSessions,
   deleteSessionTracking,
@@ -30,8 +31,27 @@ import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
+const fsFaults = vi.hoisted(() => ({ shardDeletePath: null as string | null }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    rmSync: (
+      path: Parameters<typeof actual.rmSync>[0],
+      options?: Parameters<typeof actual.rmSync>[1],
+    ): void => {
+      if (String(path) === fsFaults.shardDeletePath) {
+        fsFaults.shardDeletePath = null;
+        throw new Error("injected shard deletion failure");
+      }
+      actual.rmSync(path, options);
+    },
+  };
+});
 
 afterEach(async () => {
+  fsFaults.shardDeletePath = null;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -88,6 +108,26 @@ describe("AC15 tracking-last deletion", () => {
 
     expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
     expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+  });
+
+  it("restores record, index, and retryable shard when staged shard deletion fails", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    const stagedShardPath = `${shardPath}.deleting`;
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.shardDeletePath = stagedShardPath;
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow(
+      "injected shard deletion failure",
+    );
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+    expect(existsSync(stagedShardPath)).toBe(false);
   });
 });
 
