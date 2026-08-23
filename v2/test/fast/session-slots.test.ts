@@ -10,6 +10,7 @@ import {
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
+  TODO_TOOL_NAME,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { createTempDir, findFreePort } from "../helpers/common.js";
@@ -198,6 +199,9 @@ describe("session slots", () => {
     expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
       "exec \"$SCRIPT_DIR/spur\" self-destruct 'api-1' --json",
     );
+    const todoWrapper = readFileSync(join(toolDir, TODO_TOOL_NAME), "utf8");
+    expect(todoWrapper).toContain('exec "$SCRIPT_DIR/spur" todo "$@" --session \'api-1\'');
+    expect(todoWrapper).not.toContain("delete");
   });
 
   it("writes branch helpers when branch naming is configured", async () => {

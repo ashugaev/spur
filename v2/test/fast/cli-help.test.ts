@@ -22,6 +22,7 @@ describe("spur help", () => {
     expect(help).toContain("send [options] <sessionId> <message...>");
     expect(help).toContain("pause [options] <sessionId>");
     expect(help).toContain("complete [options] <sessionId>");
+    expect(help).toContain("todo");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
     expect(help).toContain("reopen [options] <sessionId>");
@@ -36,6 +37,18 @@ describe("spur help", () => {
     expect(help).not.toContain("slots");
     expect(help).not.toContain("internal");
     expect(help).not.toContain("playwright");
+  });
+
+  it("exposes only the five ToDo mutations plus list", () => {
+    const todo = buildProgram().commands.find((command) => command.name() === "todo");
+    expect(todo?.commands.map((command) => command.name())).toEqual([
+      "list",
+      "add",
+      "complete",
+      "cancel",
+      "hold",
+      "resume",
+    ]);
   });
 
   it("documents the doctor scaffold flow and follow-up command path", () => {

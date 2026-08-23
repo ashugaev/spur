@@ -1,4 +1,6 @@
 import { test, expect, devices, type Page } from "playwright/test";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   makeWorkingSession,
   makeCompletedSession,
@@ -555,6 +557,89 @@ test.describe("S1: Session detail header", () => {
 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
     await expect(page.getByText("Task copied")).toBeVisible();
+  });
+});
+
+test.describe("Spur ToDo audit", () => {
+  test("renders delayed loading then a resolved expandable projection", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const session = makeCompletedSession({ id: "detail-todo-resolved" });
+    await mockSessionDetail(page, session);
+    let releaseTodo: (() => void) | undefined;
+    const todoReady = new Promise<void>((resolve) => {
+      releaseTodo = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/todo`, async (route) => {
+      await todoReady;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          revision: "event-2",
+          status: "resolved",
+          counts: { total: 1, open: 0, held: 0, completed: 1, cancelled: 0 },
+          items: [
+            {
+              id: "item-12345678",
+              text: "Implement native ToDo",
+              status: "completed",
+              added: {
+                reason: "Created from the session objective",
+                actor: { kind: "system", source: "spawn" },
+                at: "2026-08-20T10:00:00.000Z",
+              },
+              latestTransition: {
+                type: "completed",
+                reason: "All checks passed",
+                actor: { kind: "agent", agent: "codex", sessionId: session.id },
+                at: "2026-08-20T10:10:00.000Z",
+              },
+              history: [
+                {
+                  eventId: "event-1",
+                  type: "item_added",
+                  reason: "Created from the session objective",
+                  actor: { kind: "system", source: "spawn" },
+                  at: "2026-08-20T10:00:00.000Z",
+                },
+                {
+                  eventId: "event-2",
+                  type: "item_completed",
+                  reason: "All checks passed",
+                  actor: { kind: "agent", agent: "codex", sessionId: session.id },
+                  at: "2026-08-20T10:10:00.000Z",
+                },
+              ],
+            },
+          ],
+          finishOverrides: [],
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByLabel("Loading ToDo")).toBeVisible();
+    const screenshotDir = join(
+      process.env["SPUR_SESSION_ARTIFACTS_DIR"] ?? test.info().outputDir,
+      "screenshots",
+    );
+    mkdirSync(screenshotDir, { recursive: true });
+    await page.screenshot({ path: join(screenshotDir, "todo-loading.png"), fullPage: true });
+    releaseTodo?.();
+    await expect(page.getByLabel("1 of 1 ToDo items resolved")).toBeVisible();
+    await expect(page.getByText("0 open")).toHaveCount(0);
+    await expect(page.getByText("0 held")).toHaveCount(0);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    const toggle = page.getByRole("button", { name: /Implement native ToDo/ });
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      page.locator("#todo-audit-item-12345678").getByText("All checks passed"),
+    ).toBeVisible();
+    await page.screenshot({ path: join(screenshotDir, "todo-resolved.png"), fullPage: true });
   });
 });
 
