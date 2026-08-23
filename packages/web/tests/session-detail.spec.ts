@@ -641,6 +641,103 @@ test.describe("Spur ToDo audit", () => {
     ).toBeVisible();
     await page.screenshot({ path: join(screenshotDir, "todo-resolved.png"), fullPage: true });
   });
+
+  test("AC14 detail renders all four item states with shared tokens in dark and light", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-todo-status-matrix" });
+    await mockSessionDetail(page, session);
+    const statuses = ["open", "held", "completed", "cancelled"] as const;
+    const tokenByStatus = {
+      open: "--color-status-working",
+      held: "--color-status-attention",
+      completed: "--color-status-ready",
+      cancelled: "--color-status-error",
+    } as const;
+    const symbolByStatus = { open: "○", held: "Ⅱ", completed: "✓", cancelled: "×" } as const;
+    await page.route(`**/api/sessions/${session.id}/todo`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          revision: "event-cancelled",
+          status: "active",
+          counts: { total: 4, open: 1, held: 1, completed: 1, cancelled: 1 },
+          items: statuses.map((status, index) => {
+            const itemId = `item-${status}`;
+            const added = {
+              eventId: `event-add-${status}`,
+              type: "item_added",
+              reason: "Added for status coverage",
+              actor: { kind: "system", source: "spawn" },
+              at: `2026-08-20T10:0${index}:00.000Z`,
+            };
+            const transition =
+              status === "open"
+                ? undefined
+                : {
+                    eventId: `event-${status}`,
+                    type:
+                      status === "held"
+                        ? "item_held"
+                        : status === "completed"
+                          ? "item_completed"
+                          : "item_cancelled",
+                    reason: `${status} reason`,
+                    ...(status === "held" ? { blocker: { kind: "external" } } : {}),
+                    actor: { kind: "agent", agent: "codex", sessionId: session.id },
+                    at: `2026-08-20T10:1${index}:00.000Z`,
+                  };
+            return {
+              id: itemId,
+              text: `${status} item`,
+              status,
+              added: {
+                reason: added.reason,
+                actor: added.actor,
+                at: added.at,
+              },
+              ...(transition
+                ? {
+                    latestTransition: {
+                      type: status,
+                      reason: transition.reason,
+                      ...(status === "held" ? { blocker: transition.blocker } : {}),
+                      actor: transition.actor,
+                      at: transition.at,
+                    },
+                  }
+                : {}),
+              history: transition ? [added, transition] : [added],
+            };
+          }),
+          finishOverrides: [],
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+    const list = page.getByRole("list", { name: "Spur ToDo items" });
+    await expect(list).toBeVisible();
+
+    for (const theme of ["dark", "light"] as const) {
+      await page.evaluate((nextTheme) => {
+        document.documentElement.dataset.theme = nextTheme;
+      }, theme);
+      for (const status of statuses) {
+        const glyph = list.getByLabel(status);
+        await expect(glyph).toHaveText(symbolByStatus[status]);
+        await expect(glyph).toHaveAttribute("style", `color: var(${tokenByStatus[status]});`);
+        const colors = await glyph.evaluate(
+          (element, token) => ({
+            actual: getComputedStyle(element).color,
+            expected: getComputedStyle(document.documentElement).getPropertyValue(token).trim(),
+          }),
+          tokenByStatus[status],
+        );
+        expect(colors.actual).toBe(colors.expected);
+      }
+    }
+  });
 });
 
 // S2: Actions bar

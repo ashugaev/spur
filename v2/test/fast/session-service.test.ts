@@ -1964,7 +1964,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("AC2 spawn pin init failure leaves the foreground placeholder errored", async () => {
+    it("AC2 placeholder failure preservation before ledger leaves the foreground pin errored", async () => {
       const sessions = createSessionStore();
       const todo = await import("../../src/todo.js");
       vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
@@ -1985,7 +1985,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("AC2 spawn pin init failure leaves the background placeholder errored", async () => {
+    it("AC2 placeholder failure preservation before ledger leaves the background pin errored", async () => {
       const sessions = createSessionStore();
       const todo = await import("../../src/todo.js");
       vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
@@ -2005,6 +2005,57 @@ describe("SessionService", () => {
       });
       service.dispose();
     });
+
+    it("AC2 placeholder failure preservation after ledger retries without duplicate history", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      createWorktreeMock.mockRejectedValueOnce(new Error("worktree init failed"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "Pinned retry" })).rejects.toThrow(
+        "worktree init failed",
+      );
+      const ledgerPath = join(TEST_DATA_DIR, "sessions", "api-1", "todo.jsonl");
+      const afterFailure = readFileSync(ledgerPath, "utf8");
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        todoEnabled: true,
+        todoLedgerVersion: 1,
+      });
+
+      const retried = await service.spawn({ project: "api", prompt: "Pinned retry" });
+
+      expect(retried.id).toBe("api-1");
+      expect(readFileSync(ledgerPath, "utf8")).toBe(afterFailure);
+      expect((await service.readTodo(retried.id)).items).toHaveLength(1);
+      service.dispose();
+    });
+
+    it.each(["running", "stopped", "completed", "killed"] as const)(
+      "AC3 ToDo disabled exact bytes preserve a legacy %s ledger while pinning false",
+      async (status) => {
+        const sessions = createSessionStore();
+        const legacy = runningSession({ status, todoEnabled: undefined });
+        sessions.set(legacy.id, legacy);
+        const ledgerPath = join(TEST_DATA_DIR, "sessions", legacy.id, "todo.jsonl");
+        mkdirSync(dirname(ledgerPath), { recursive: true });
+        const ledgerBytes = `legacy-ledger-${status}\n`;
+        writeFileSync(ledgerPath, ledgerBytes, "utf8");
+        const disabled = baseConfig() as unknown as AppConfig;
+        disabled.todo.enabled = false;
+        loadConfigMock.mockReturnValue(disabled);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        service.applyConfig(disabled, ["/tmp/spur.yaml"]);
+
+        expect(sessions.get(legacy.id)?.todoEnabled).toBe(false);
+        expect(sessions.get(legacy.id)?.todoLedgerVersion).toBeUndefined();
+        expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBytes);
+        service.dispose();
+      },
+    );
 
     it("adds compact ToDo summary and corruption state to dashboard enrichment", async () => {
       const sessions = createSessionStore();
@@ -3756,9 +3807,11 @@ describe("SessionService", () => {
     });
   });
 
-  it("retries background spawn up to three attempts without reserving a new session id", async () => {
+  it("AC2 placeholder failure preservation after ledger retries background without duplicate history", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
+    await useRealTodoLedger();
     tmuxSessionExistsMock.mockResolvedValue(false);
     createTmuxSessionMock
       .mockRejectedValueOnce(new Error("tmux boom 1"))
@@ -3773,6 +3826,8 @@ describe("SessionService", () => {
     });
 
     expect(placeholder.id).toBe("api-1");
+    const ledgerPath = join(TEST_DATA_DIR, "sessions", placeholder.id, "todo.jsonl");
+    const initialLedger = readFileSync(ledgerPath, "utf8");
 
     await vi.waitFor(() => {
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
@@ -3782,6 +3837,7 @@ describe("SessionService", () => {
     });
 
     expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(initialLedger);
     expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
     expect(removeWorktreeMock).toHaveBeenCalledTimes(2);
     expect(deleteAgentHookStateMock).toHaveBeenCalledTimes(2);
@@ -27741,7 +27797,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("AC15 handoff compensation removes tracking only after every cleanup stage succeeds", async () => {
+    it("AC15 handoff compensation removes tracking and evicts cache rows only after every cleanup stage succeeds", async () => {
       const sessions = createSessionStore();
       const successor = sessionRecord({
         id: "api-2",
@@ -27752,6 +27808,20 @@ describe("SessionService", () => {
       sessions.set(successor.id, successor);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const caches = service as unknown as {
+        stateCache: Map<string, unknown>;
+        dashboardCache: Map<string, unknown>;
+        dashboardTodoCache: Map<string, unknown>;
+        dashboardEnrichedRecords: Map<string, unknown>;
+      };
+      for (const cache of [
+        caches.stateCache,
+        caches.dashboardCache,
+        caches.dashboardTodoCache,
+        caches.dashboardEnrichedRecords,
+      ]) {
+        cache.set(successor.id, {});
+      }
 
       await (
         service as unknown as {
@@ -27767,6 +27837,12 @@ describe("SessionService", () => {
         expect.objectContaining({ id: successor.id }),
       );
       expect(sessions.has(successor.id)).toBe(false);
+      expect({
+        state: caches.stateCache.has(successor.id),
+        dashboard: caches.dashboardCache.has(successor.id),
+        todo: caches.dashboardTodoCache.has(successor.id),
+        enriched: caches.dashboardEnrichedRecords.has(successor.id),
+      }).toEqual({ state: false, dashboard: false, todo: false, enriched: false });
       service.dispose();
     });
 

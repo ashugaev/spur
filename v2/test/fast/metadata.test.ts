@@ -31,12 +31,34 @@ import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
-const fsFaults = vi.hoisted(() => ({ shardDeletePath: null as string | null }));
+const fsFaults = vi.hoisted(() => ({
+  shardDeletePath: null as string | null,
+  stagedRecordDeletePath: null as string | null,
+  indexWriteFailuresRemaining: 0,
+  rollbackRenameFrom: null as string | null,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
+    renameSync: (
+      oldPath: Parameters<typeof actual.renameSync>[0],
+      newPath: Parameters<typeof actual.renameSync>[1],
+    ): void => {
+      if (String(oldPath) === fsFaults.rollbackRenameFrom) {
+        fsFaults.rollbackRenameFrom = null;
+        throw new Error("injected record rollback failure");
+      }
+      if (
+        String(newPath).endsWith("/sessions/.index.json") &&
+        fsFaults.indexWriteFailuresRemaining > 0
+      ) {
+        fsFaults.indexWriteFailuresRemaining -= 1;
+        throw new Error("injected index write failure");
+      }
+      actual.renameSync(oldPath, newPath);
+    },
     rmSync: (
       path: Parameters<typeof actual.rmSync>[0],
       options?: Parameters<typeof actual.rmSync>[1],
@@ -45,6 +67,10 @@ vi.mock("node:fs", async (importOriginal) => {
         fsFaults.shardDeletePath = null;
         throw new Error("injected shard deletion failure");
       }
+      if (String(path) === fsFaults.stagedRecordDeletePath) {
+        fsFaults.stagedRecordDeletePath = null;
+        throw new Error("injected staged record deletion failure");
+      }
       actual.rmSync(path, options);
     },
   };
@@ -52,6 +78,9 @@ vi.mock("node:fs", async (importOriginal) => {
 
 afterEach(async () => {
   fsFaults.shardDeletePath = null;
+  fsFaults.stagedRecordDeletePath = null;
+  fsFaults.indexWriteFailuresRemaining = 0;
+  fsFaults.rollbackRenameFrom = null;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -128,6 +157,73 @@ describe("AC15 tracking-last deletion", () => {
     expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
     expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
     expect(existsSync(stagedShardPath)).toBe(false);
+  });
+
+  it("AC15 tracking-last deletion restores record, index, and shard on index write failure", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.indexWriteFailuresRemaining = 1;
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow("injected index write failure");
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+  });
+
+  it("AC15 tracking-last deletion restores metadata after staged record deletion failure", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const recordPath = join(dataDir, "sessions", session.project, `${session.id}.json`);
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.stagedRecordDeletePath = `${recordPath}.deleting`;
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow(
+      "injected staged record deletion failure",
+    );
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(existsSync(shardPath)).toBe(false);
+  });
+
+  it("AC15 tracking-last deletion surfaces original and rollback failure", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const recordPath = join(dataDir, "sessions", session.project, `${session.id}.json`);
+    const stagedRecordPath = `${recordPath}.deleting`;
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.indexWriteFailuresRemaining = 1;
+    fsFaults.rollbackRenameFrom = stagedRecordPath;
+
+    let thrown: unknown;
+    try {
+      deleteSessionTracking(dataDir, session);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).cause).toMatchObject({
+      message: "injected index write failure",
+    });
+    expect((thrown as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: "injected record rollback failure" }),
+    ]);
+    expect(existsSync(recordPath)).toBe(false);
+    expect(existsSync(stagedRecordPath)).toBe(true);
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
   });
 });
 
