@@ -1,5 +1,10 @@
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  findOpenCodeSessionId,
+  readOpenCodeJson,
   buildOpenCodePlan,
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
@@ -174,5 +179,55 @@ describe("OpenCode adapter", () => {
       }),
     ).toEqual({ state: "rate_limited", reason: "assistant rate limit" });
     expect(parseOpenCodeState({ messages: "malformed" })).toBeNull();
+  });
+
+  it("captures CLI output past the pipe truncation and buffer limits", async () => {
+    const binDir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+    const binPath = join(binDir, "opencode");
+    await writeFile(
+      binPath,
+      [
+        "#!/usr/bin/env node",
+        'process.stdout.write(JSON.stringify({ blob: "x".repeat(2_000_000) }));',
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(binPath, 0o755);
+    vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+    try {
+      const stdout = await readOpenCodeJson(["export", "ses_big"], { timeoutMs: 20_000 });
+      expect(JSON.parse(stdout)).toEqual({ blob: "x".repeat(2_000_000) });
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("picks the newest session from a top-level updated timestamp", async () => {
+    const binDir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+    const worktree = await mkdtemp(join(tmpdir(), "spur-opencode-wt-"));
+    const binPath = join(binDir, "opencode");
+    await writeFile(
+      binPath,
+      [
+        "#!/usr/bin/env node",
+        "const sessions = [",
+        `  { id: "ses_old", directory: ${JSON.stringify(worktree)}, updated: 10 },`,
+        `  { id: "ses_new", directory: ${JSON.stringify(worktree)}, updated: 20 },`,
+        `  { id: "ses_other", directory: "/elsewhere", updated: 30 },`,
+        "];",
+        "process.stdout.write(JSON.stringify(sessions));",
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(binPath, 0o755);
+    vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+    try {
+      await expect(findOpenCodeSessionId(worktree)).resolves.toBe("ses_new");
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(binDir, { recursive: true, force: true });
+      await rm(worktree, { recursive: true, force: true });
+    }
   });
 });
