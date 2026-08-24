@@ -78,6 +78,7 @@ async function startSource(
     listSessions?: ReturnType<typeof vi.fn>;
     stop?: ReturnType<typeof vi.fn>;
     task?: ReturnType<typeof vi.fn>;
+    config?: Record<string, unknown>;
   } = {},
 ) {
   const listSessions =
@@ -121,6 +122,7 @@ async function startSource(
       runOnStart: false,
       token: "token-123",
       allowedUsers: [123],
+      ...overrides.config,
     },
     emit,
     signal: new AbortController().signal,
@@ -1042,6 +1044,250 @@ describe("telegramSourceModule", () => {
       "api-1.json",
     );
     await expect(readFile(replyTargetPath, "utf8")).rejects.toThrow();
+  });
+
+  const autoSpawnConfig = {
+    autoSpawn: {
+      enabled: true,
+      project: "spur-shepherd",
+      agent: "opencode",
+      model: "google/gemini-3.7-flash",
+      selfDestruct: { enabled: true },
+    },
+  };
+
+  it("auto-spawns a shepherd session for an unbound chat", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "shp-1",
+      project: "spur-shepherd",
+      agent: "opencode",
+      state: "working",
+    });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    const ctx = telegramContext({ text: "help me out" });
+    await bot.emitText(ctx);
+
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    expect(spawnSession).toHaveBeenCalledWith({
+      project: "spur-shepherd",
+      agent: "opencode",
+      model: "google/gemini-3.7-flash",
+      selfDestruct: { enabled: true },
+      prompt: expect.stringContaining("help me out"),
+    });
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(ctx.reply).toHaveBeenCalledWith("Spawned and bound: shp-1.");
+    const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
+    await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-1"');
+  });
+
+  it("keeps the rejection reply when autoSpawn is disabled", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn();
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: { autoSpawn: { ...autoSpawnConfig.autoSpawn, enabled: false } },
+    });
+    if (!bot) throw new Error("missing bot");
+
+    const ctx = telegramContext({ text: "hello?" });
+    await bot.emitText(ctx);
+
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith("No Spur session bound here. Use /watch or /spawn.");
+  });
+
+  it("does not auto-spawn when a live session is bound", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn();
+    const { bot, emit } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext({ text: "still watching" });
+    await bot.emitText(textCtx);
+
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", text: "still watching" }),
+    );
+  });
+
+  it("spawns once for two unbound messages in flight", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    let resolveSpawn: (value: unknown) => void = () => {};
+    const spawnPromise = new Promise((resolve) => {
+      resolveSpawn = resolve;
+    });
+    const spawnSession = vi.fn().mockReturnValue(spawnPromise);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    const ctx1 = telegramContext({ text: "first message" });
+    const ctx2 = telegramContext({ text: "second message" });
+    const a = bot.emitText(ctx1);
+    const b = bot.emitText(ctx2);
+    resolveSpawn({ id: "shp-2", project: "spur-shepherd", agent: "opencode", state: "working" });
+    await Promise.all([a, b]);
+
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    const busyReplies = [ctx1, ctx2].filter((ctx) =>
+      ctx.reply.mock.calls.some((call: unknown[]) => call[0] === "Spawn already in progress here."),
+    );
+    expect(busyReplies).toHaveLength(1);
+  });
+
+  it("auto-spawns after the bound session disappears", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "shp-3",
+      project: "spur-shepherd",
+      agent: "opencode",
+      state: "working",
+    });
+    const { bot, listSessions } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    listSessions.mockResolvedValue([]);
+
+    const textCtx = telegramContext({ text: "still there?" });
+    await bot.emitText(textCtx);
+
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    expect(textCtx.reply).not.toHaveBeenCalledWith(
+      expect.stringContaining("is gone. Unbound."),
+    );
+    expect(textCtx.reply).toHaveBeenCalledWith("Spawned and bound: shp-3.");
+    const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
+    await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-3"');
+    await expect(readFile(statePath, "utf8")).resolves.not.toContain('"sessionId": "api-1"');
+  });
+
+  it("does not unbind while an auto-spawn is in flight", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi.fn().mockResolvedValue([
+      { id: "api-1", project: "api", agent: "codex", state: "waiting" },
+    ]);
+    let resolveSpawn: (value: unknown) => void = () => {};
+    const spawnPromise = new Promise((resolve) => {
+      resolveSpawn = resolve;
+    });
+    const spawnSession = vi.fn().mockReturnValue(spawnPromise);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      listSessions,
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    listSessions.mockResolvedValue([]);
+
+    const persistSpy = vi.spyOn(metadataModule, "writeTelegramBindings");
+    persistSpy.mockClear();
+
+    const ctx1 = telegramContext({ text: "still there?" });
+    const ctx2 = telegramContext({ text: "still there? (again)" });
+    const a = bot.emitText(ctx1);
+    const b = bot.emitText(ctx2);
+    resolveSpawn({ id: "shp-5", project: "spur-shepherd", agent: "opencode", state: "working" });
+    await Promise.all([a, b]);
+
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    const busyReplies = [ctx1, ctx2].filter((ctx) =>
+      ctx.reply.mock.calls.some((call: unknown[]) => call[0] === "Spawn already in progress here."),
+    );
+    expect(busyReplies).toHaveLength(1);
+    const removeKeyCalls = persistSpy.mock.calls.filter((call) => {
+      const options = call[4] as { removeKeys?: Iterable<string> } | undefined;
+      return options?.removeKeys !== undefined;
+    });
+    expect(removeKeyCalls).toHaveLength(1);
+  });
+
+  it("reports the spawn failure and retries on the next message", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("boom token-123"))
+      .mockResolvedValueOnce({
+        id: "shp-4",
+        project: "spur-shepherd",
+        agent: "opencode",
+        state: "working",
+      });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    const ctx1 = telegramContext({ text: "first try" });
+    await bot.emitText(ctx1);
+
+    expect(ctx1.reply).toHaveBeenCalledWith("Spawn failed: boom <telegram-token>");
+    const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
+    await expect(readFile(statePath, "utf8")).rejects.toThrow();
+
+    const ctx2 = telegramContext({ text: "second try" });
+    await bot.emitText(ctx2);
+
+    expect(spawnSession).toHaveBeenCalledTimes(2);
+    expect(ctx2.reply).toHaveBeenCalledWith("Spawned and bound: shp-4.");
+  });
+
+  it("keeps command and pending-spawn paths ahead of autoSpawn", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "shp-6",
+      project: "spur-shepherd",
+      agent: "opencode",
+      state: "working",
+    });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    const unwatchCtx = telegramContext({ text: "/unwatch" });
+    await bot.emitText(unwatchCtx);
+    expect(unwatchCtx.reply).toHaveBeenCalledWith("No Spur session bound here.");
+
+    const unknownCtx = telegramContext({ text: "/notacommand", chat: { id: 555 } });
+    await bot.emitText(unknownCtx);
+    expect(unknownCtx.reply).toHaveBeenCalledWith("Unknown command. Use /help.");
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      await bot.emitText(telegramContext({ text: "/spawn codex" }));
+      vi.setSystemTime(new Date("2026-01-01T00:11:00.000Z"));
+      const expiredCtx = telegramContext({ text: "late prompt" });
+      await bot.emitText(expiredCtx);
+      expect(expiredCtx.reply).toHaveBeenCalledWith("Spawn prompt expired. Run /spawn again.");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(spawnSession).not.toHaveBeenCalled();
   });
 
   it("sets Telegram commands and command menu button on start", async () => {
