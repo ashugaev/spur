@@ -1,6 +1,6 @@
 # Voice input
 
-Dictate prompts and messages in the web UI via the microphone button (spawn modal, session message box, terminal controls). Stays disabled until the chosen provider's dependencies are installed. `openai_compatible` is the no-install path — one key in `~/.spur/.env`.
+Dictate prompts and messages via the web UI microphone button (spawn modal, session message box, terminal controls) or a Telegram voice note. Stays disabled until the chosen provider's dependencies are installed. `openai_compatible` is the no-install path — one key in `~/.spur/.env`.
 
 ## Server dependencies
 
@@ -58,6 +58,14 @@ voice:
 - `voice.apiVersion`: optional for `azure_openai`; falls back to env `AZURE_OPENAI_API_VERSION`, then `2024-10-21`.
 
 Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` and uses `int8` by default for that worker. Isolated daemons inherit `voice:` from `~/.spur/config.yaml`; a relative `voice.modelPath` resolves against the user config dir.
+
+## Telegram voice notes
+
+A voice note sent to a [Telegram source](configuration.md#events) chat becomes text: in a chat already bound with `/watch`, the transcript is sent to the agent like typed text; after `/spawn <agent>` with no binding yet, the transcript becomes the spawn prompt. A transcript is never parsed as a command, even one starting with `/`.
+
+The daemon posts the voice note to the web UI's transcribe route, so `spur-web` must be up and `ui.port` must match its real listen port (`spur doctor` flags a mismatch as `web-ui-port-drift`). `voice.provider: openai_realtime` always fails this path — it has no realtime transport for Telegram — and every failure replies in the chat instead of sending anything to the agent.
+
+Voice notes only: no `message:audio` files, video notes, or captions. See [`SPUR_WEB_URL`](configuration.md#field-reference) to point this at a non-default web UI or disable it for one instance.
 
 ## HTTPS
 

@@ -252,6 +252,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
 - `models.codexHome`: optional, default `~/.codex`. Instance config only. Codex picker reads visible entries from `models_cache.json` here; each Codex session copies that cache into its isolated home. Missing, malformed, or empty visible cache returns no Codex models.
 - Agent executable overrides: `SPUR_CLAUDE_BIN`, `SPUR_CODEX_BIN`, `SPUR_CURSOR_BIN`, and `SPUR_OPENCODE_BIN`. Each optional process environment value replaces that agent's standard PATH command for preflight, model discovery, launch, restore, transcript reads, and process matching. Use an absolute executable path for daemon and sidecar restarts. A missing OpenCode executable makes model discovery and spawn fail with the command and override name; it never returns a false empty catalog.
+- `SPUR_WEB_URL`: optional process environment value, base URL of this instance's web UI. Sources that call the web UI (Telegram voice transcription, see [voice.md](voice.md#telegram-voice-notes)) use it instead of `http://127.0.0.1:<ui.port>`. Set to a non-loopback URL when `WEB_HOST` binds off loopback; set to an empty string to disable the feature for this instance (isolated daemons always set it empty, so they never reach the host's web UI). Unset falls back to `http://127.0.0.1:<ui.port>`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
@@ -424,7 +425,7 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 - `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
-- `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`.
+- `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`. `text` also carries a transcribed voice note, see [voice.md](voice.md#telegram-voice-notes).
 
 `github` polls running sessions, matches each to a PR branch, emits changed signals only; state persists under `dataDir`. With `query` set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids. GitHub PR URLs seed the native `session.pr` binding; other review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 
