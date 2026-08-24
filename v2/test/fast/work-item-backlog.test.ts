@@ -41,6 +41,7 @@ function makeDeps(emitExisting: boolean): {
     emit,
     signal: new AbortController().signal,
     logger: {},
+    webBaseUrl: null,
   };
   return { deps, emit };
 }

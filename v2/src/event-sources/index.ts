@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { EventBus } from "../event-bus.js";
 import { logSpurEvent } from "../event-log.js";
+import { resolveWebBaseUrl } from "../ports.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubCiSourceModule } from "./github-ci.js";
@@ -120,6 +121,7 @@ export async function startConfiguredSources(
           },
           signal: abortController.signal,
           logger,
+          webBaseUrl: resolveWebBaseUrl(deps.config.ui.port),
         });
 
         logSpurEvent(deps.config.dataDir, {

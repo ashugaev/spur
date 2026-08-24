@@ -71,6 +71,7 @@ describe("cronSourceModule", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info },
+      webBaseUrl: null,
     });
 
     handle.runOnStart?.();
@@ -98,6 +99,7 @@ describe("cronSourceModule", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn() },
+        webBaseUrl: null,
       }),
     ).rejects.toThrow(/Unable to derive a minimum interval/);
   });
@@ -115,6 +117,7 @@ describe("cronSourceModule", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn() },
+        webBaseUrl: null,
       }),
     ).rejects.toThrow(/Unable to derive a minimum interval/);
   });
@@ -130,6 +133,7 @@ describe("cronSourceModule", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn() },
+      webBaseUrl: null,
     });
 
     handle.stop();
@@ -152,6 +156,7 @@ describe("cronSourceModule", () => {
       emit,
       signal: controller.signal,
       logger: { info: vi.fn() },
+      webBaseUrl: null,
     });
 
     handle.runOnStart?.();

@@ -44,6 +44,13 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   signal: AbortSignal;
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  /**
+   * Base URL of this instance's web UI, or `null` when voice transcription
+   * is disabled for this instance (see `resolveWebBaseUrl` in `ports.ts`).
+   * Required so every source module reads the same resolved value — no
+   * source computes its own fallback.
+   */
+  webBaseUrl: string | null;
 }
 
 export interface SourceHandle {

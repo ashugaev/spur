@@ -348,6 +348,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         logger: {
           warn: () => {},
         },
+        webBaseUrl: null,
       });
 
       try {
@@ -495,6 +496,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           logger: {
             warn: () => {},
           },
+          webBaseUrl: null,
         });
 
         try {
@@ -631,6 +633,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         },
         signal: abortController.signal,
         logger: { warn: () => {} },
+        webBaseUrl: null,
       });
 
       try {
@@ -776,6 +779,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         logger: {
           warn: () => {},
         },
+        webBaseUrl: null,
       });
 
       try {
@@ -895,6 +899,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         logger: {
           warn: () => {},
         },
+        webBaseUrl: null,
       });
 
       try {
@@ -1075,6 +1080,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           logger: {
             warn: () => {},
           },
+          webBaseUrl: null,
         });
 
         try {
@@ -1221,6 +1227,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           logger: {
             warn: () => {},
           },
+          webBaseUrl: null,
         });
 
         try {

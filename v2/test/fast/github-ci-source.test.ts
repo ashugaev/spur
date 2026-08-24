@@ -60,6 +60,7 @@ async function start(
     emit,
     signal: new AbortController().signal,
     logger: { info: vi.fn(), warn: vi.fn() },
+    webBaseUrl: null,
   });
 }
 
@@ -200,6 +201,7 @@ describe("github-ci source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn },
+      webBaseUrl: null,
     });
 
     expect(warn).toHaveBeenCalled();
