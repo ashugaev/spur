@@ -530,6 +530,20 @@ async function runRestoreScenario(args: {
     expect(paused.runtimeAlive).toBe(false);
     expect(paused.workspaceExists).toBe(true);
   } else {
+    // The fixture's read loop drains a multi-line paste for up to 500ms of
+    // silence before treating it as one complete message. The daemon's
+    // submit-ack wait only proves the initial prompt was *delivered*, not
+    // that the fixture's drain window has closed — sending "exit-now" too
+    // early lands inside that still-open window and gets silently
+    // concatenated onto the initial prompt instead of matching the
+    // `exit-now` case arm, so the fixture never exits and the state poll
+    // below times out waiting for an "error" state that can never arrive.
+    // Wait for the fixture's own "ack: <prompt>" echo, which only prints
+    // once its case statement runs on the closed initial message.
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ack: restore runtime prompt"),
+    });
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
   }
 
@@ -1087,6 +1101,22 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
           .stdout,
       ) as SessionView;
 
+      // The fixture's read loop drains a multi-line paste for up to 500ms of
+      // silence (see helpers/runtime.ts's read loop comment) before treating
+      // it as one complete message. The daemon's own submit-ack wait only
+      // proves the paste was *delivered*, not that the fixture's drain
+      // window has actually closed — so sending the next message too early
+      // lands inside that still-open drain window and gets silently
+      // concatenated onto the first message instead of starting a new one
+      // (confirmed by inspecting the fixture's transcript jsonl on a failing
+      // run). Wait for the fixture's own "ack: <message>" echo, which only
+      // prints once its case statement actually runs on a closed message,
+      // before sending the next one.
+      await pollUntil(async () => captureTmuxPane(spawned.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("ack: notify me"),
+      });
+
       await context.execCli(["--config", configPath, "send", spawned.id, "show-waiting-menu"]);
 
       const firstNotification = await pollUntil(
@@ -1454,6 +1484,15 @@ projects:
       stderr: expect.stringContaining(`Session ${spawned.id} is not in a terminal state`),
     });
 
+    // The complete gate is unconditional on session state: it 409s while the
+    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
+    // "waiting" (which lands strictly after its own resolve_initial_todo
+    // call) before completing, or this races the fixture's todo resolution.
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
+
     const completed = JSON.parse(
       (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
     ) as SessionView;
@@ -1502,6 +1541,15 @@ projects:
     const killSession = JSON.parse(
       (await context.execCli(["--config", configPath, "spawn", "api", "kill me", "--json"])).stdout,
     ) as SessionView;
+
+    // The complete gate is unconditional on session state: it 409s while the
+    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
+    // "waiting" (which lands strictly after its own resolve_initial_todo
+    // call) before completing, or this races the fixture's todo resolution.
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${completeSession.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
 
     await writeFile(
       configPath,
@@ -1848,6 +1896,15 @@ projects:
       ).stdout,
     ) as SessionView;
     expect(spawned.branch).toBe(occupiedBranch);
+
+    // The complete gate is unconditional on session state: it 409s while the
+    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
+    // "waiting" (which lands strictly after its own resolve_initial_todo
+    // call) before completing, or this races the fixture's todo resolution.
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
 
     await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
 
@@ -2417,6 +2474,17 @@ projects:
         )
       ).stdout,
     ) as SessionView;
+
+    // The fixture's fake agent resolves the initial ToDo item (its own
+    // `resolve_initial_todo` step) AFTER it prints the ready marker that
+    // `spawnSession` waits on, but strictly BEFORE it signals "waiting".
+    // Reading the ToDo list right after spawn races that resolution; wait
+    // for the agent to reach "waiting" so the transition is guaranteed to
+    // have landed.
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
 
     const initial = JSON.parse(
       (
@@ -4411,6 +4479,16 @@ projects:
         ])
       ).stdout,
     ) as SessionView;
+
+    // The complete gate is unconditional on session state: it 409s while the
+    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
+    // "waiting" (which lands strictly after its own resolve_initial_todo
+    // call) before completing, or this races the fixture's todo resolution.
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${target.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
+
     await context.execCli(["--config", configPath, "complete", target.id, "--json"]);
 
     const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
@@ -4528,6 +4606,20 @@ projects:
       ).stdout,
     ) as SessionView;
 
+    // The fixture's read loop drains a multi-line paste for up to 500ms of
+    // silence before treating it as one complete message. The daemon's
+    // submit-ack wait only proves the initial prompt was *delivered*, not
+    // that the fixture's drain window has closed — sending "exit-now" too
+    // early lands inside that still-open window and gets silently
+    // concatenated onto the initial prompt instead of matching the
+    // `exit-now` case arm, so the fixture never exits and the state poll
+    // below times out waiting for an "error" state that can never arrive.
+    // Wait for the fixture's own "ack: <prompt>" echo, which only prints
+    // once its case statement runs on the closed initial message.
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ack: restore runtime prompt"),
+    });
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
     // The agent process exits on its own, leaving the tmux pane/session alive
