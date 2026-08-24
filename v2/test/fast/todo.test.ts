@@ -1,13 +1,16 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import type * as NodeFs from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readSession, writeSession } from "../../src/metadata.js";
 import {
   ensureTodoLedger,
   mutateTodo,
+  readStampedTodoProjection,
   replayTodo,
   TodoLedgerCorruptError,
+  TodoLedgerUnavailableError,
   InvalidTodoRequestError,
   TodoTransitionConflictError,
 } from "../../src/todo.js";
@@ -16,6 +19,36 @@ import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const actor: TodoActor = { kind: "agent", agent: "codex", sessionId: "s-1" };
+const fsFaults = vi.hoisted(() => ({
+  statPath: null as string | null,
+  statCode: null as string | null,
+  statFailuresRemaining: 0,
+  statCalls: 0,
+  changeStampOnSecondCall: false,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    statSync: (path: Parameters<typeof actual.statSync>[0]): ReturnType<typeof actual.statSync> => {
+      if (String(path) === fsFaults.statPath) {
+        fsFaults.statCalls += 1;
+        if (fsFaults.statFailuresRemaining > 0) {
+          fsFaults.statFailuresRemaining -= 1;
+          const error = new Error(`injected ${fsFaults.statCode ?? "unknown"} stat failure`);
+          Object.assign(error, { code: fsFaults.statCode });
+          throw error;
+        }
+        if (fsFaults.changeStampOnSecondCall && fsFaults.statCalls === 2) {
+          const now = new Date(Date.now() + 10_000);
+          actual.utimesSync(path, now, now);
+        }
+      }
+      return actual.statSync(path);
+    },
+  };
+});
 
 function requiredSession(dataDir: string, sessionId: string): SessionRecord {
   const session = readSession(dataDir, sessionId);
@@ -24,6 +57,11 @@ function requiredSession(dataDir: string, sessionId: string): SessionRecord {
 }
 
 afterEach(async () => {
+  fsFaults.statPath = null;
+  fsFaults.statCode = null;
+  fsFaults.statFailuresRemaining = 0;
+  fsFaults.statCalls = 0;
+  fsFaults.changeStampOnSecondCall = false;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -142,7 +180,7 @@ describe("Spur ToDo ledger", () => {
     ).toThrow(InvalidTodoRequestError);
   });
 
-  it("migrates terminal legacy records with a terminal item", async () => {
+  it("AC5 ledger migration pins terminal legacy records with a terminal item", async () => {
     const { dataDir, session } = await fixture("completed");
     const projection = ensureTodoLedger(dataDir, session);
     expect(projection.status).toBe("resolved");
@@ -184,4 +222,64 @@ describe("Spur ToDo ledger", () => {
     renameSync(join(dataDir, "sessions", session.id), join(archivedParent, session.id));
     expect(replayTodo(dataDir, session.id)).toEqual(before);
   });
+
+  it("AC7 exact-path ledger stamp follows archive movement", async () => {
+    const { dataDir, session } = await fixture();
+    ensureTodoLedger(dataDir, session, "spawn");
+    const marked = requiredSession(dataDir, session.id);
+    const live = readStampedTodoProjection(dataDir, marked);
+    expect(live.stamp.path).toBe(join(dataDir, "sessions", session.id, "todo.jsonl"));
+    expect(live.stamp.ino).toBeGreaterThan(0);
+
+    const archivedParent = join(dataDir, "sessions-archive", session.project);
+    mkdirSync(archivedParent, { recursive: true });
+    renameSync(join(dataDir, "sessions", session.id), join(archivedParent, session.id));
+    const archived = readStampedTodoProjection(dataDir, marked);
+    expect(archived.stamp.path).toBe(join(archivedParent, session.id, "todo.jsonl"));
+    expect(archived.projection).toEqual(live.projection);
+  });
+
+  it("AC7 exact-path ledger corruption keeps its stable stamp", async () => {
+    const { dataDir, session } = await fixture();
+    ensureTodoLedger(dataDir, session, "spawn");
+    const marked = requiredSession(dataDir, session.id);
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    writeFileSync(path, "not-json\n", "utf8");
+
+    try {
+      readStampedTodoProjection(dataDir, marked);
+      throw new Error("Expected corrupt ledger");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).stamp?.path).toBe(path);
+    }
+  });
+
+  it("AC7 exact-path ledger read retries replay concurrency after a stamp change", async () => {
+    const { dataDir, session } = await fixture();
+    const expected = ensureTodoLedger(dataDir, session, "spawn");
+    const marked = requiredSession(dataDir, session.id);
+    fsFaults.statPath = join(dataDir, "sessions", session.id, "todo.jsonl");
+    fsFaults.changeStampOnSecondCall = true;
+
+    const result = readStampedTodoProjection(dataDir, marked);
+
+    expect(result.projection).toEqual(expected);
+    expect(fsFaults.statCalls).toBe(4);
+  });
+
+  it.each(["EACCES", "EPERM", "EIO", "ESTALE", "EBUSY"])(
+    "AC7 exact-path ledger read transient I/O matrix returns unavailable for %s",
+    async (code) => {
+      const { dataDir, session } = await fixture();
+      ensureTodoLedger(dataDir, session, "spawn");
+      const marked = requiredSession(dataDir, session.id);
+      fsFaults.statPath = join(dataDir, "sessions", session.id, "todo.jsonl");
+      fsFaults.statCode = code;
+      fsFaults.statFailuresRemaining = 2;
+
+      expect(() => readStampedTodoProjection(dataDir, marked)).toThrow(TodoLedgerUnavailableError);
+      expect(fsFaults.statCalls).toBe(2);
+    },
+  );
 });

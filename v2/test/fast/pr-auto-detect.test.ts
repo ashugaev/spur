@@ -219,6 +219,7 @@ function baseConfig(): AppConfig {
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
     models: { codexHome: "/tmp/codex" },
+    todo: { enabled: true },
     voice: {
       provider: "whisper_cpp",
       language: "en",
@@ -302,6 +303,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     tmuxSession: "api-a1b2",
     launchCommand: "claude",
     status: "running",
+    todoEnabled: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides,

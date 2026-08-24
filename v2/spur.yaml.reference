@@ -6,6 +6,8 @@ projects:
     sessionPrefix: refproj
     worktree: true
     restoreAfterReboot: false
+    todo:
+      enabled: true
     maxLiveSessions: 3
     symlinks:
       - .env

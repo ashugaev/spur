@@ -1,19 +1,27 @@
 ---
 name: manager
-description: Orchestrate every repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for every task in this repo.
+description: Orchestrate each repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for each task in this repo.
 ---
 
 MANAGER
 
-Delegate every action to an agent or skill; never read code, edit files, or run commands directly.
+Delegate each action to an agent or skill; never read code, edit files, or run commands directly. Read and mutate Spur ToDo directly when its injected contract exists.
 
 Agent/skill catalog with triggers: `AGENTS.md`/`CLAUDE.md`. Don't duplicate the catalog here.
 
 MODE
 
-  - `manager` is the default mode, strict: every task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
+  - `manager` is the default mode, strict: each task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
   - Plan mode first: build the plan, confirm acceptance criteria, then execute.
-  - `TodoWrite` is the single source of truth for the task list; output template below is the run report only.
+  - Spur ToDo is the task-list authority when its injected contract exists; output template below is the run report only.
+
+TODO ITEM CLASSES
+
+  - Intake outcome: reuse spawn item; split independently closable outcomes.
+  - Gate: add before each applicable gate; complete on pass, cancel when inapplicable, keep open through rerun.
+  - Fix/rerun: add on `CHANGES_REQUESTED` or `FAIL`; complete after fix and passing rerun.
+  - Blocker: hold active item with reason; name required human action for human blockers; resume after clearance.
+  - Scope expansion: add requested or proven-required work outside current items; name source in add reason.
 
 ROUTING RULES
 
@@ -44,7 +52,7 @@ CANONICAL GATE ORDER
 PROCESS
 
   1  Intake: parse the user message into concrete todos. State acceptance criteria first. Treat pasted logs, errors, diffs, PR links as source of truth. At most one concise question, only when a wrong assumption changes implementation.
-  2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo via `TodoWrite`.
+  2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo through Spur ToDo when its injected contract exists.
   3  Execute the canonical gate order above, one delegation per step. Critic selects one approach. Clarify only when ambiguity changes implementation, one batched round.
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
        - Docs: same change as the surface; never stale or missing.
@@ -83,7 +91,7 @@ OUTPUT
     <one or two sentences: which packages/modules touched, how data flows between them, what new boundaries or contracts exist>
 
   Completed:
-    <todo from TodoWrite> — <gate that closed it>
+    <todo from Spur ToDo> — <gate that closed it>
 
   Risks:
     <risk>

@@ -1427,6 +1427,12 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["staleAfterMinutes"],
     `${label}.staleAfterMinutes`,
   );
+  const todoRaw = raw["todo"];
+  const projectTodoEnabled =
+    todoRaw === undefined
+      ? undefined
+      : asOptionalBoolean(asObject(todoRaw, `${label}.todo`)["enabled"], `${label}.todo.enabled`);
+  const todo = projectTodoEnabled === undefined ? undefined : { enabled: projectTodoEnabled };
   const modes = parseModes(projectId, raw["modes"]);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
@@ -1525,6 +1531,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
     ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
+    ...(todo !== undefined ? { todo } : {}),
   };
 }
 
@@ -1858,6 +1865,7 @@ function parseConfigFile(
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const models = mode === "instance" && root["models"] ? asObject(root["models"], "models") : {};
+  const todo = mode === "instance" && root["todo"] ? asObject(root["todo"], "todo") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
   const userActionLog = root["userActionLog"]
@@ -1954,6 +1962,10 @@ function parseConfigFile(
                 resolvedDefaults.codexHome,
             )
           : resolvedDefaults.codexHome,
+    },
+    todo: {
+      enabled:
+        mode === "instance" ? (asOptionalBoolean(todo["enabled"], "todo.enabled") ?? false) : false,
     },
     voice: (() => {
       if (mode === "project") {

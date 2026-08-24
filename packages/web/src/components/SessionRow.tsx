@@ -13,6 +13,8 @@ import {
   reviewProviderFromUrl,
 } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
+import { TODO_STATUS_COLOR } from "@/lib/todo-status";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import {
   canComplete,
   getAttentionLevel,
@@ -23,7 +25,128 @@ import {
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
-type ActiveRowPopover = "wake" | "sidecars" | null;
+type ActiveRowPopover = "todo" | "wake" | "sidecars" | null;
+
+function TodoIndicator({
+  open,
+  session,
+  onToggle,
+  onClose,
+}: {
+  open: boolean;
+  session: DashboardSession;
+  onToggle: () => void;
+  onClose: () => void;
+}) {
+  const todo = session.todo;
+  const panelId = `todo-progress-${session.id}`;
+  const headingId = `${panelId}-heading`;
+  const anchored = useAnchoredMenu({
+    open,
+    onClose,
+    contentDeps: [todo?.kind, todo?.kind === "summary" ? todo.revision : todo?.code],
+  });
+  if (!todo) return null;
+
+  const error = todo.kind === "error";
+  const resolved = todo.kind === "summary" ? todo.counts.completed + todo.counts.cancelled : 0;
+  const total = todo.kind === "summary" ? todo.counts.total : 0;
+  const progress = total === 0 ? 0 : resolved / total;
+  const circumference = 2 * Math.PI * 7;
+  const label = error
+    ? todo.code === "todo_ledger_corrupt"
+      ? "ToDo ledger corrupt"
+      : "ToDo unavailable"
+    : `Spur ToDo: ${resolved} of ${total} resolved, ${todo.counts.open} open, ${todo.counts.held} held`;
+  const color = error ? TODO_STATUS_COLOR.error : TODO_STATUS_COLOR[todo.status];
+
+  return (
+    <div className="relative inline-flex shrink-0" ref={anchored.containerRef}>
+      <button
+        aria-controls={panelId}
+        aria-expanded={open}
+        aria-label={label}
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-hover-overlay)] focus-visible:border-[var(--color-border-strong)] focus-visible:outline-none"
+        onClick={onToggle}
+        ref={anchored.buttonRef}
+        style={{ color }}
+        title={label}
+        type="button"
+      >
+        {error ? (
+          <svg
+            aria-hidden="true"
+            className="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeWidth="2"
+            viewBox="0 0 20 20"
+          >
+            <circle cx="10" cy="10" r="7" />
+            <path d="M10 6v5" />
+            <path d="M10 14h.01" />
+          </svg>
+        ) : (
+          <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 20 20">
+            <circle
+              cx="10"
+              cy="10"
+              fill="none"
+              r="7"
+              stroke="var(--color-border-strong)"
+              strokeWidth="2"
+            />
+            <circle
+              cx="10"
+              cy="10"
+              fill="none"
+              r="7"
+              stroke="currentColor"
+              strokeDasharray={circumference}
+              strokeDashoffset={circumference * (1 - progress)}
+              strokeLinecap="round"
+              strokeWidth="2"
+              transform="rotate(-90 10 10)"
+            />
+          </svg>
+        )}
+      </button>
+      {open ? (
+        <div
+          aria-labelledby={headingId}
+          className="fixed z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          id={panelId}
+          ref={anchored.menuRef}
+          role="status"
+          style={anchored.menuStyle}
+        >
+          <span
+            className="block font-bold uppercase tracking-[0.12em]"
+            id={headingId}
+            style={{ color }}
+          >
+            {error ? label : "ToDo Progress"}
+          </span>
+          {todo.kind === "summary" ? (
+            <span className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 font-mono">
+              <span>Total</span>
+              <span>{todo.counts.total}</span>
+              <span>Open</span>
+              <span>{todo.counts.open}</span>
+              <span>Held</span>
+              <span>{todo.counts.held}</span>
+              <span>Completed</span>
+              <span>{todo.counts.completed}</span>
+              <span>Cancelled</span>
+              <span>{todo.counts.cancelled}</span>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function WakeIndicator({
   open,
@@ -287,6 +410,13 @@ export function SessionRow({
           {deskMemberCount}
         </span>
       ) : null}
+
+      <TodoIndicator
+        onClose={() => setActivePopover(null)}
+        onToggle={() => togglePopover("todo")}
+        open={activePopover === "todo"}
+        session={session}
+      />
 
       {hasWake ? (
         <WakeIndicator

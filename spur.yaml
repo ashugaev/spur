@@ -4,6 +4,8 @@ projectsRoot: ~/projects
 projects:
   sp:
     path: ~/projects/spur
+    todo:
+      enabled: true
     defaultBranch: main
     sessionPrefix: spur
     defaultAgent: claude

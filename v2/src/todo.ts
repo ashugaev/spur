@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  statSync,
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -29,9 +30,28 @@ export class TodoLedgerCorruptError extends Error {
     readonly sessionId: string,
     message: string,
     readonly line?: number,
+    readonly stamp?: TodoLedgerStamp,
   ) {
     super(message);
   }
+}
+
+export class TodoLedgerUnavailableError extends Error {
+  readonly code = "todo_unavailable";
+  constructor(
+    readonly sessionId: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export interface TodoLedgerStamp {
+  path: string;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
 }
 
 export class InvalidTodoRequestError extends Error {
@@ -58,6 +78,14 @@ export class TodoOpenWorkError extends Error {
     readonly sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>,
   ) {
     super("Resolve or explicitly override unfinished Spur ToDo items before completion");
+  }
+}
+
+export class TodoDisabledError extends Error {
+  readonly statusCode = 409;
+  readonly code = "todo_disabled";
+  constructor() {
+    super("Spur ToDo is disabled for this session");
   }
 }
 
@@ -178,8 +206,7 @@ function eventBase(sessionId: string, actor: TodoActor) {
   };
 }
 
-export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
-  const path = ledgerPath(dataDir, sessionId);
+function replayTodoPath(path: string, sessionId: string): TodoProjection {
   if (!existsSync(path)) throw new TodoLedgerCorruptError(sessionId, "ToDo ledger is missing");
   const text = readFileSync(path, "utf8");
   if (!text || !text.endsWith("\n"))
@@ -264,6 +291,105 @@ export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
     items,
     finishOverrides,
   };
+}
+
+export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
+  return replayTodoPath(ledgerPath(dataDir, sessionId), sessionId);
+}
+
+function stampTodoPath(path: string): TodoLedgerStamp {
+  const stat = statSync(path);
+  return {
+    path,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+  };
+}
+
+export function sameTodoLedgerStamp(left: TodoLedgerStamp, right: TodoLedgerStamp): boolean {
+  return (
+    left.path === right.path &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+function unavailable(sessionId: string, error: unknown): TodoLedgerUnavailableError {
+  return new TodoLedgerUnavailableError(
+    sessionId,
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+export function readTodoLedgerStamp(
+  dataDir: string,
+  session: Pick<SessionRecord, "id" | "project">,
+  allowMissing = false,
+): TodoLedgerStamp {
+  let path = join(dataDir, "sessions", session.id, "todo.jsonl");
+  try {
+    path = ledgerPath(dataDir, session.id, session.project);
+    return stampTodoPath(path);
+  } catch (error) {
+    if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { path, ino: 0, size: 0, mtimeMs: 0, ctimeMs: 0 };
+    }
+    throw unavailable(session.id, error);
+  }
+}
+
+export function readStampedTodoProjection(
+  dataDir: string,
+  session: Pick<SessionRecord, "id" | "project">,
+): { stamp: TodoLedgerStamp; projection: TodoProjection } {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let path: string;
+    try {
+      path = ledgerPath(dataDir, session.id, session.project);
+    } catch (error) {
+      throw unavailable(session.id, error);
+    }
+    let before: TodoLedgerStamp;
+    try {
+      before = stampTodoPath(path);
+    } catch (error) {
+      if (attempt === 0) continue;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        throw new TodoLedgerCorruptError(session.id, "ToDo ledger is missing", undefined, {
+          path,
+          ino: 0,
+          size: 0,
+          mtimeMs: 0,
+          ctimeMs: 0,
+        });
+      }
+      throw unavailable(session.id, error);
+    }
+    try {
+      const projection = replayTodoPath(path, session.id);
+      const after = stampTodoPath(path);
+      if (sameTodoLedgerStamp(before, after)) return { stamp: after, projection };
+    } catch (error) {
+      if (error instanceof TodoLedgerCorruptError) {
+        try {
+          const after = stampTodoPath(path);
+          if (sameTodoLedgerStamp(before, after)) {
+            throw new TodoLedgerCorruptError(error.sessionId, error.message, error.line, after);
+          }
+        } catch (afterError) {
+          if (afterError instanceof TodoLedgerCorruptError) throw afterError;
+        }
+      }
+      if (attempt === 0) continue;
+      throw unavailable(session.id, error);
+    }
+  }
+  throw new TodoLedgerUnavailableError(session.id, "ToDo ledger changed during replay");
 }
 
 export function ensureTodoLedger(

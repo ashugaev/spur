@@ -252,6 +252,10 @@ function slotToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
 }
 
+export function removeSessionTodoTool(dataDir: string, sessionId: string): void {
+  rmSync(join(slotToolDir(dataDir, sessionId), TODO_TOOL_NAME), { force: true });
+}
+
 function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
   if (!agent) {
     return true;
@@ -266,6 +270,7 @@ export function ensureSessionSlotTool(args: {
   projectId?: string;
   branchNamingRegex?: string;
   agent?: AgentName;
+  todoEnabled?: boolean;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
@@ -296,15 +301,20 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.session
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
-    join(toolDir, TODO_TOOL_NAME),
-    `#!/usr/bin/env bash
+  const todoToolPath = join(toolDir, TODO_TOOL_NAME);
+  if (args.todoEnabled !== false) {
+    writeFileSync(
+      todoToolPath,
+      `#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" todo "$@" --session ${shellEscape(args.sessionId)}
 `,
-    { encoding: "utf8", mode: 0o755 },
-  );
+      { encoding: "utf8", mode: 0o755 },
+    );
+  } else {
+    removeSessionTodoTool(args.dataDir, args.sessionId);
+  }
   if (args.projectId && args.branchNamingRegex) {
     writeFileSync(
       join(toolDir, BRANCH_TOOL_NAME),

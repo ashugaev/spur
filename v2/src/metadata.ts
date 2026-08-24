@@ -651,15 +651,26 @@ function normalizeStateSubscriptions(
       id: subscription.id,
       targetSessionId: subscription.targetSessionId,
       states: subscription.states.filter(isSessionState),
+      ...(Array.isArray(subscription.events) && subscription.events.includes("task_completed")
+        ? { events: ["task_completed" as const] }
+        : {}),
+      ...(subscription.eventArmedAt?.task_completed
+        ? { eventArmedAt: { task_completed: subscription.eventArmedAt.task_completed } }
+        : {}),
       ...(subscription.message ? { message: subscription.message } : {}),
       createdAt: subscription.createdAt,
       updatedAt: subscription.updatedAt,
       ...(subscription.lastDeliveredTransitionId
         ? { lastDeliveredTransitionId: subscription.lastDeliveredTransitionId }
         : {}),
+      ...(subscription.lastDeliveredEventId
+        ? { lastDeliveredEventId: subscription.lastDeliveredEventId }
+        : {}),
       ...(subscription.lastDeliveredAt ? { lastDeliveredAt: subscription.lastDeliveredAt } : {}),
     }))
-    .filter((subscription) => subscription.states.length > 0);
+    .filter(
+      (subscription) => subscription.states.length > 0 || (subscription.events?.length ?? 0) > 0,
+    );
   return normalized.length > 0 ? normalized : undefined;
 }
 
@@ -733,8 +744,18 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
+    ...(normalizedSession.todoNudge &&
+    typeof normalizedSession.todoNudge.dueAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.todoNudge.dueAt)) &&
+    Number.isInteger(normalizedSession.todoNudge.episode) &&
+    normalizedSession.todoNudge.episode >= 0
+      ? { todoNudge: normalizedSession.todoNudge }
+      : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
     ...(normalizedSession.todoLedgerVersion === 1 ? { todoLedgerVersion: 1 as const } : {}),
+    ...(typeof normalizedSession.todoEnabled === "boolean"
+      ? { todoEnabled: normalizedSession.todoEnabled }
+      : {}),
   };
 }
 
@@ -758,6 +779,59 @@ export function writeSession(dataDir: string, session: SessionRecord): void {
   const path = sessionFilePath(dataDir, session.project, session.id);
   writeJsonFile(path, normalizeSessionRecord(session));
   writeSessionIndexEntry(dataDir, session.id, path);
+}
+
+export function deleteSession(
+  dataDir: string,
+  session: Pick<SessionRecord, "id" | "project">,
+): void {
+  const path = sessionFilePath(dataDir, session.project, session.id);
+  rmSync(path, { force: true });
+  rmSync(sessionShardDir(dataDir, session.id), { recursive: true, force: true });
+  sessionFileCache.delete(path);
+  deleteSessionIndexEntry(dataDir, session.id);
+}
+
+export function deleteSessionTracking(
+  dataDir: string,
+  session: Pick<SessionRecord, "id" | "project">,
+): void {
+  const path = sessionFilePath(dataDir, session.project, session.id);
+  const stagedPath = `${path}.deleting`;
+  const shardPath = sessionShardDir(dataDir, session.id);
+  const stagedShardPath = `${shardPath}.deleting`;
+  const hasShard = existsSync(shardPath);
+  if (hasShard) renameSync(shardPath, stagedShardPath);
+  try {
+    renameSync(path, stagedPath);
+    deleteSessionIndexEntry(dataDir, session.id);
+    if (hasShard) rmSync(stagedShardPath, { recursive: true, force: true });
+    rmSync(stagedPath);
+    sessionFileCache.delete(path);
+  } catch (error) {
+    const rollbackErrors: unknown[] = [];
+    try {
+      if (existsSync(stagedPath)) renameSync(stagedPath, path);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    try {
+      if (hasShard && existsSync(stagedShardPath)) renameSync(stagedShardPath, shardPath);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    try {
+      if (existsSync(path)) writeSessionIndexEntry(dataDir, session.id, path);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError(rollbackErrors, `Failed to delete ${session.id} tracking`, {
+        cause: error,
+      });
+    }
+    throw error;
+  }
 }
 
 // Deletes cache entries under rootDir that weren't in this listing's visited

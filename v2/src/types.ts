@@ -574,6 +574,9 @@ export interface ProjectConfig {
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
   staleAfterMinutes?: number;
+  todo?: {
+    enabled: boolean;
+  };
 }
 
 export type ProviderReasoningEffort = "low" | "medium" | "high";
@@ -659,6 +662,9 @@ export interface AppConfig {
   };
   models: {
     codexHome: string;
+  };
+  todo: {
+    enabled: boolean;
   };
   voice:
     | {
@@ -785,18 +791,24 @@ export interface SessionStateSubscription {
   id: string;
   targetSessionId: string;
   states: SessionState[];
+  events?: SessionSubscriptionEvent[];
+  eventArmedAt?: Partial<Record<SessionSubscriptionEvent, string>>;
   message?: string;
   createdAt: string;
   updatedAt: string;
   lastDeliveredTransitionId?: string;
+  lastDeliveredEventId?: string;
   lastDeliveredAt?: string;
 }
 
 export interface SubscribeSessionStatesRequest {
   targetSessionId: string;
-  states: SessionState[];
+  states?: SessionState[];
+  events?: SessionSubscriptionEvent[];
   message?: string;
 }
+
+export type SessionSubscriptionEvent = "task_completed";
 
 export interface SessionStateSubscriptionListResponse {
   records: SessionStateSubscription[];
@@ -881,10 +893,20 @@ export interface SessionRecord {
   rateLimitedAt?: string;
   serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
+  todoNudge?: {
+    dueAt: string;
+    episode: number;
+  };
   error?: string;
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
+  /** Immutable ToDo policy resolved from daemon-registered config at creation. */
+  todoEnabled?: boolean;
 }
+
+export type DashboardTodoState =
+  | ({ kind: "summary" } & Pick<TodoProjection, "revision" | "status" | "counts">)
+  | { kind: "error"; code: "todo_ledger_corrupt" | "todo_unavailable" };
 
 // Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
 // and reap.ts's sidecar-claims sweep — one definition, never two copies.
@@ -968,6 +990,7 @@ export interface DashboardSessionView extends SessionRecord {
   hasServiceIssues?: boolean;
   runningSidecarNames?: string[];
   deskGroupMembers?: SessionDeskMember[];
+  todo?: DashboardTodoState;
 }
 
 export type SessionListView = SessionView | DashboardSessionView;

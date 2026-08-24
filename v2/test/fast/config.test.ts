@@ -2694,6 +2694,7 @@ projects:
 
     expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);
     expect(config.projects["sp"]?.spawn?.steps).toBeUndefined();
+    expect(config.projects["sp"]?.todo?.enabled).toBe(true);
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
@@ -4208,6 +4209,42 @@ projects:
     expect(config.admission.enabled).toBe(true);
     expect(config.admission.maxLiveSessions).toBe(100);
     expect(config.admission.maxLiveSessionsSource).toBe("default");
+  });
+
+  it("defaults instance ToDo off and parses an explicit boolean", async () => {
+    const defaultPath = await writeConfig(`projects:\n  backend:\n    path: $REPO_PATH\n`);
+    const enabledPath = await writeConfig(
+      `todo:\n  enabled: true\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
+    );
+
+    expect(loadConfig(defaultPath).todo.enabled).toBe(false);
+    expect(loadConfig(enabledPath).todo.enabled).toBe(true);
+  });
+
+  it("rejects a nonboolean instance ToDo setting", async () => {
+    const configPath = await writeConfig(
+      `todo:\n  enabled: no\nprojects:\n  backend:\n    path: $REPO_PATH\n`,
+    );
+
+    expect(() => loadConfig(configPath)).toThrow("todo.enabled must be a boolean");
+  });
+
+  it("ignores root ToDo in project mode and parses nested project overrides", async () => {
+    const configPath = await writeConfig(
+      `todo:\n  enabled: not-a-boolean\nprojects:\n  backend:\n    path: $REPO_PATH\n    todo:\n      enabled: true\n`,
+    );
+
+    const config = loadProjectConfig(configPath);
+    expect(config.todo.enabled).toBe(false);
+    expect(config.projects["backend"]?.todo?.enabled).toBe(true);
+  });
+
+  it("rejects a nonboolean project ToDo override", async () => {
+    const configPath = await writeConfig(
+      `projects:\n  backend:\n    path: $REPO_PATH\n    todo:\n      enabled: no\n`,
+    );
+
+    expect(() => loadConfig(configPath)).toThrow("projects.backend.todo.enabled must be a boolean");
   });
 
   it("parses projects.<id>.maxLiveSessions in both instance and project mode", async () => {

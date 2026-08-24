@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import type * as NodeFs from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   archiveSessions,
+  deleteSessionTracking,
   deletePendingSendBatch,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
@@ -29,8 +31,56 @@ import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
+const fsFaults = vi.hoisted(() => ({
+  shardDeletePath: null as string | null,
+  stagedRecordDeletePath: null as string | null,
+  indexWriteFailuresRemaining: 0,
+  rollbackRenameFrom: null as string | null,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    renameSync: (
+      oldPath: Parameters<typeof actual.renameSync>[0],
+      newPath: Parameters<typeof actual.renameSync>[1],
+    ): void => {
+      if (String(oldPath) === fsFaults.rollbackRenameFrom) {
+        fsFaults.rollbackRenameFrom = null;
+        throw new Error("injected record rollback failure");
+      }
+      if (
+        String(newPath).endsWith("/sessions/.index.json") &&
+        fsFaults.indexWriteFailuresRemaining > 0
+      ) {
+        fsFaults.indexWriteFailuresRemaining -= 1;
+        throw new Error("injected index write failure");
+      }
+      actual.renameSync(oldPath, newPath);
+    },
+    rmSync: (
+      path: Parameters<typeof actual.rmSync>[0],
+      options?: Parameters<typeof actual.rmSync>[1],
+    ): void => {
+      if (String(path) === fsFaults.shardDeletePath) {
+        fsFaults.shardDeletePath = null;
+        throw new Error("injected shard deletion failure");
+      }
+      if (String(path) === fsFaults.stagedRecordDeletePath) {
+        fsFaults.stagedRecordDeletePath = null;
+        throw new Error("injected staged record deletion failure");
+      }
+      actual.rmSync(path, options);
+    },
+  };
+});
 
 afterEach(async () => {
+  fsFaults.shardDeletePath = null;
+  fsFaults.stagedRecordDeletePath = null;
+  fsFaults.indexWriteFailuresRemaining = 0;
+  fsFaults.rollbackRenameFrom = null;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -39,6 +89,168 @@ async function newDataDir(): Promise<string> {
   tempDirs.push(dir);
   return dir;
 }
+
+describe("AC15 tracking-last deletion", () => {
+  function trackedSession(): SessionRecord {
+    return {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+  }
+
+  it("stages the shard first and removes record, index, and shard on commit", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+
+    deleteSessionTracking(dataDir, session);
+
+    expect(readSession(dataDir, session.id)).toBeNull();
+    expect(existsSync(shardPath)).toBe(false);
+  });
+
+  it("keeps record, index, and shard when shard staging fails", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    const stagedShardPath = `${shardPath}.deleting`;
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    mkdirSync(stagedShardPath, { recursive: true });
+    writeFileSync(join(stagedShardPath, "owned"), "collision\n");
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow();
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+  });
+
+  it("restores record, index, and retryable shard when staged shard deletion fails", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    const stagedShardPath = `${shardPath}.deleting`;
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.shardDeletePath = stagedShardPath;
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow(
+      "injected shard deletion failure",
+    );
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+    expect(existsSync(stagedShardPath)).toBe(false);
+  });
+
+  it("AC15 tracking-last deletion restores record, index, and shard on index write failure", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.indexWriteFailuresRemaining = 1;
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow("injected index write failure");
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+  });
+
+  it("AC15 tracking-last deletion restores metadata after staged record deletion failure", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const recordPath = join(dataDir, "sessions", session.project, `${session.id}.json`);
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.stagedRecordDeletePath = `${recordPath}.deleting`;
+
+    expect(() => deleteSessionTracking(dataDir, session)).toThrow(
+      "injected staged record deletion failure",
+    );
+
+    expect(readSession(dataDir, session.id)).toMatchObject({ id: session.id });
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(existsSync(shardPath)).toBe(false);
+  });
+
+  it("AC15 tracking-last deletion surfaces original and rollback failure", async () => {
+    const dataDir = await newDataDir();
+    const session = trackedSession();
+    writeSession(dataDir, session);
+    const recordPath = join(dataDir, "sessions", session.project, `${session.id}.json`);
+    const stagedRecordPath = `${recordPath}.deleting`;
+    const shardPath = join(dataDir, "sessions", session.id);
+    mkdirSync(shardPath, { recursive: true });
+    writeFileSync(join(shardPath, "todo.jsonl"), "ledger\n");
+    fsFaults.indexWriteFailuresRemaining = 1;
+    fsFaults.rollbackRenameFrom = stagedRecordPath;
+
+    let thrown: unknown;
+    try {
+      deleteSessionTracking(dataDir, session);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).cause).toMatchObject({
+      message: "injected index write failure",
+    });
+    expect((thrown as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: "injected record rollback failure" }),
+    ]);
+    expect(existsSync(recordPath)).toBe(false);
+    expect(existsSync(stagedRecordPath)).toBe(true);
+    expect(readFileSync(join(dataDir, "sessions", ".index.json"), "utf8")).toContain(session.id);
+    expect(readFileSync(join(shardPath, "todo.jsonl"), "utf8")).toBe("ledger\n");
+  });
+});
+
+describe("ToDo pin persistence", () => {
+  it("AC2 ToDo pin survives session normalization", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-todo-pin",
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-todo-pin",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-todo-pin",
+      launchCommand: "claude",
+      status: "running",
+      todoEnabled: true,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, session.id)?.todoEnabled).toBe(true);
+  });
+});
 
 describe("work-item registry", () => {
   it("round-trips recorded ids", async () => {

@@ -311,7 +311,17 @@ export interface SpurSessionView {
     enabled: boolean;
     conditions?: string;
   };
+  todo?: DashboardTodoState;
 }
+
+export type DashboardTodoState =
+  | {
+      kind: "summary";
+      revision: string;
+      status: "active" | "held" | "resolved";
+      counts: SpurTodoProjection["counts"];
+    }
+  | { kind: "error"; code: "todo_ledger_corrupt" | "todo_unavailable" };
 
 export type SpurTodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
@@ -658,6 +668,7 @@ export interface DashboardSession {
     enabled: boolean;
     conditions?: string;
   };
+  todo?: DashboardTodoState;
 }
 
 export interface SpawnOverrides {
@@ -739,6 +750,7 @@ export function toDashboardSession(
       : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
+    ...(session.todo ? { todo: session.todo } : {}),
   };
 }
 

@@ -1753,6 +1753,160 @@ test.describe("D6: Attention zone sections", () => {
   });
 });
 
+test.describe("Spur ToDo dashboard indicator", () => {
+  test("omits disabled rows and makes no per-session ToDo request", async ({ page }) => {
+    const todoRequests: string[] = [];
+    page.on("request", (request) => {
+      if (/\/api\/sessions\/[^/]+\/todo(?:\?|$)/.test(request.url())) {
+        todoRequests.push(request.url());
+      }
+    });
+    await mockSessions(page, [makeWorkingSession({ id: "todo-disabled", todo: undefined })]);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: /^Spur ToDo:/ })).toHaveCount(0);
+    expect(todoRequests).toEqual([]);
+  });
+
+  test("shows summary and both error states without browser N+1 requests", async ({ page }) => {
+    const todoRequests: string[] = [];
+    page.on("request", (request) => {
+      if (/\/api\/sessions\/[^/]+\/todo(?:\?|$)/.test(request.url())) {
+        todoRequests.push(request.url());
+      }
+    });
+    await mockSessions(page, [
+      makeWorkingSession({
+        id: "todo-summary",
+        todo: {
+          kind: "summary",
+          revision: "rev-1",
+          status: "active",
+          counts: { total: 5, open: 2, held: 1, completed: 1, cancelled: 1 },
+        },
+      }),
+      makeWorkingSession({
+        id: "todo-corrupt",
+        todo: { kind: "error", code: "todo_ledger_corrupt" },
+      }),
+      makeWorkingSession({
+        id: "todo-unavailable",
+        todo: { kind: "error", code: "todo_unavailable" },
+      }),
+    ]);
+    await page.goto("/");
+
+    await expect(
+      page.getByRole("button", {
+        name: "Spur ToDo: 2 of 5 resolved, 2 open, 1 held",
+      }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "ToDo ledger corrupt" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "ToDo unavailable" })).toBeVisible();
+    expect(todoRequests).toEqual([]);
+  });
+
+  test("supports Enter, Space, Escape, outside dismissal, and indicator exclusion", async ({
+    page,
+  }) => {
+    await mockSessions(page, [
+      makeWorkingSession({
+        id: "todo-keyboard",
+        todo: {
+          kind: "summary",
+          revision: "rev-1",
+          status: "held",
+          counts: { total: 1, open: 0, held: 1, completed: 0, cancelled: 0 },
+        },
+        scheduledWake: { dueAt: new Date(Date.now() + 60_000).toISOString(), message: "Wake" },
+        runningSidecarNames: ["web"],
+      }),
+    ]);
+    await page.goto("/");
+    const todo = page.getByRole("button", {
+      name: "Spur ToDo: 0 of 1 resolved, 0 open, 1 held",
+    });
+
+    await todo.focus();
+    await todo.press("Enter");
+    await expect(page.getByText("ToDo Progress")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByText("ToDo Progress")).toHaveCount(0);
+    await todo.press("Space");
+    await expect(page.getByText("ToDo Progress")).toBeVisible();
+    await page.getByRole("button", { name: "Wake scheduled" }).click();
+    await expect(page.getByText("ToDo Progress")).toHaveCount(0);
+    await todo.click();
+    await page.getByLabel("Running sidecars for todo-keyboard").click();
+    await expect(page.getByText("ToDo Progress")).toHaveCount(0);
+    await expect(page.locator("#sidecars-todo-keyboard")).toBeVisible();
+    await todo.click();
+    await expect(page.locator("#sidecars-todo-keyboard")).toHaveCount(0);
+    await page.locator("body").click({ position: { x: 2, y: 2 } });
+    await expect(page.getByText("ToDo Progress")).toHaveCount(0);
+  });
+
+  test("clamps the popover at 390px and exposes theme token states", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessions(page, [
+      makeWorkingSession({
+        id: "todo-mobile",
+        todo: {
+          kind: "summary",
+          revision: "rev-1",
+          status: "resolved",
+          counts: { total: 2, open: 0, held: 0, completed: 1, cancelled: 1 },
+        },
+      }),
+    ]);
+    await page.goto("/");
+    const todo = page.getByRole("button", {
+      name: "Spur ToDo: 2 of 2 resolved, 0 open, 0 held",
+    });
+    await expect(todo).toHaveAttribute("style", /--color-status-ready/);
+    await todo.click();
+    const popover = page.getByRole("status");
+    const box = await popover.boundingBox();
+    if (!box) throw new Error("Expected visible ToDo popover");
+    expect(box.x).toBeGreaterThanOrEqual(8);
+    expect(box.x + box.width).toBeLessThanOrEqual(382);
+
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "dark";
+    });
+    await expect(todo).toHaveAttribute("style", /--color-status-ready/);
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "light";
+    });
+    await expect(todo).toHaveAttribute("style", /--color-status-ready/);
+  });
+
+  test("replaces a live summary with an unavailable error without stale counts", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    let todo: SpurSessionView["todo"] = {
+      kind: "summary",
+      revision: "rev-1",
+      status: "active",
+      counts: { total: 2, open: 1, held: 0, completed: 1, cancelled: 0 },
+    };
+    await mockSessions(page, () => [makeWorkingSession({ id: "todo-live-update", todo })]);
+    await page.goto("/");
+    await expect(
+      page.getByRole("button", {
+        name: "Spur ToDo: 1 of 2 resolved, 1 open, 0 held",
+      }),
+    ).toBeVisible();
+
+    todo = { kind: "error", code: "todo_unavailable" };
+    await page.clock.fastForward(DASHBOARD_POLL_WAIT_MS);
+
+    await expect(page.getByRole("button", { name: "ToDo unavailable" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Spur ToDo:/ })).toHaveCount(0);
+  });
+});
+
 test.describe("D6a: Backlog zone", () => {
   test("shows backlog above sessions only when available items exist", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [

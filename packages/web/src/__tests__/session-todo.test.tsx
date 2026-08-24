@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionTodo } from "@/components/SessionTodo.js";
 import type { SpurTodoProjection } from "@/lib/types.js";
+import { TODO_STATUS_COLOR } from "@/lib/todo-status.js";
 
 const projection: SpurTodoProjection = {
   revision: "event-2",
@@ -57,6 +58,7 @@ describe("SessionTodo", () => {
 
     expect(screen.getByLabelText("Loading ToDo")).toBeInTheDocument();
     expect(await screen.findByText("Human action: Choose command name")).toBeInTheDocument();
+    expect(screen.getByLabelText("held")).toHaveStyle({ color: TODO_STATUS_COLOR.held });
     const toggle = screen.getByRole("button", { name: /Choose the public command/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(toggle);
@@ -114,8 +116,16 @@ describe("SessionTodo", () => {
     render(<SessionTodo sessionId="api-1" />);
 
     expect(await screen.findByText("1 resolved")).toBeInTheDocument();
+    expect(screen.getByLabelText("completed")).toHaveStyle({ color: TODO_STATUS_COLOR.completed });
     expect(screen.queryByText("0 open")).not.toBeInTheDocument();
     expect(screen.queryByText("0 held")).not.toBeInTheDocument();
+  });
+
+  it("maps every ToDo item status to the shared status palette", () => {
+    expect(TODO_STATUS_COLOR.open).toBe("var(--color-status-working)");
+    expect(TODO_STATUS_COLOR.held).toBe("var(--color-status-attention)");
+    expect(TODO_STATUS_COLOR.completed).toBe("var(--color-status-ready)");
+    expect(TODO_STATUS_COLOR.cancelled).toBe("var(--color-status-error)");
   });
 
   it("renders completion override audit history without changing item state", async () => {
@@ -144,5 +154,18 @@ describe("SessionTodo", () => {
     expect(screen.getByText(/Completion override/)).toBeInTheDocument();
     expect(screen.getByText("Operator accepted risk")).toBeInTheDocument();
     expect(screen.getByLabelText("open")).toBeInTheDocument();
+  });
+
+  it("omits the section when the daemon reports ToDo disabled", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "todo_disabled", error: "disabled" }), {
+        status: 409,
+      }),
+    );
+
+    render(<SessionTodo sessionId="api-1" />);
+
+    await waitFor(() => expect(screen.queryByText("ToDo")).not.toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

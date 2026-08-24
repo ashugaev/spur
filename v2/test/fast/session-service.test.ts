@@ -58,11 +58,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const TODO_PROMPT = `Spur ToDo:
-- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.
-- The initial task already exists. Run \`"$SPUR_TODO_COMMAND" list\` first.
-- Add new requested work with \`"$SPUR_TODO_COMMAND" add --text <text> --reason <reason>\`.
-- Complete, cancel, or hold items with a reason. Human holds must name the required action. Resume held work before continuing.
-- Do not finish or self-destruct with open or held work.`;
+- Spur ToDo is authoritative. Provider or local lists may mirror it but do not replace it.
+- Run \`"$SPUR_SESSION_TOOL_DIR/spur" todo list --session "$SPUR_SESSION"\` first; the initial task already exists.
+- Add work with \`"$SPUR_SESSION_TOOL_DIR/spur" todo add --text <text> --reason <reason> --session "$SPUR_SESSION"\`.
+- Complete, cancel, hold, or resume through the same pinned command and session arguments. Give each transition its required reason or human action.
+- Resolve open or held work before finishing or self-destructing.`;
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 type HasEstablishedConnections = (port: number) => Promise<"established" | "none" | "unknown">;
@@ -120,6 +120,7 @@ const requestGitHubMergeConflictRestoreReplayMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
+const deleteSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
 const deleteTelegramSourceStateForSessionMock = vi.fn();
@@ -223,7 +224,9 @@ const applySlotsUpdateMock = vi.fn();
 const normalizeSlotLinksMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
+const removeSessionTodoToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
+const deleteSessionArtifactsDirMock = vi.fn();
 const deleteSessionArtifactsExceptMock = vi.fn();
 const listSessionArtifactsMock = vi.fn();
 const readSessionArtifactMock = vi.fn();
@@ -536,6 +539,8 @@ vi.mock("../../src/ids.js", () => ({
 vi.mock("../../src/metadata.js", () => ({
   archiveSessions: archiveSessionsMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
+  deleteSession: deleteSessionMock,
+  deleteSessionTracking: deleteSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
@@ -678,6 +683,7 @@ vi.mock("../../src/session-slots.js", () => ({
   TODO_TOOL_NAME: "spur-todo",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
+  removeSessionTodoTool: removeSessionTodoToolMock,
   normalizeSlotsUpdate: vi.fn(
     (request: {
       title?: string;
@@ -709,9 +715,7 @@ vi.mock("../../src/session-artifacts.js", () => ({
     return dir;
   }),
   deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
-  deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
-    rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
-  }),
+  deleteSessionArtifactsDir: deleteSessionArtifactsDirMock,
   listSessionArtifacts: listSessionArtifactsMock,
   readSessionArtifact: readSessionArtifactMock,
   setSessionArtifactOrigin: setSessionArtifactOriginMock,
@@ -781,6 +785,7 @@ function baseConfig() {
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
     models: { codexHome: "/tmp/codex" },
+    todo: { enabled: false },
     rateLimitReactivation: { afterHours: 0 },
     authRotation: {
       autoRotateOnRateLimit: false,
@@ -836,6 +841,10 @@ function baseConfig() {
   };
 }
 
+function todoEnabledConfig() {
+  return { ...baseConfig(), todo: { enabled: true } };
+}
+
 async function loadSessionServiceModule() {
   vi.resetModules();
   const module = await import("../../src/session-service.js");
@@ -875,6 +884,7 @@ function sessionRecord(
     tmuxSession: id,
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: false,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
     ...rest,
@@ -902,6 +912,9 @@ function createSessionStore() {
   });
   writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
     sessions.set(session.id, clone(session));
+  });
+  deleteSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
+    sessions.delete(session.id);
   });
   listSessionsMock.mockImplementation(() =>
     [...sessions.values()].map((session) => {
@@ -931,6 +944,7 @@ function seedShepherdSession(overrides: Partial<SessionRecord> = {}) {
     tmuxSession: "shp-1",
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: true,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:00:00.000Z",
     ...overrides,
@@ -953,6 +967,7 @@ function seedQueuedSendSession(state: string) {
     tmuxSession: "api-1",
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: true,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
     queuedMessages: {
@@ -1102,6 +1117,7 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     tmuxSession: id,
     launchCommand: "claude --dangerously-skip-permissions",
     status: "running",
+    todoEnabled: true,
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:01:00.000Z",
     ...overrides,
@@ -1128,7 +1144,11 @@ type SessionServiceInternals = {
     message: string,
     options?: { interrupt?: boolean; freshLaunch?: boolean },
   ): Promise<AgentSendOutcome>;
-  enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
+  enrichDashboard(session: SessionRecord): Promise<{
+    id: string;
+    model?: string;
+    todo?: { kind: string; code?: string; counts?: { total: number } };
+  }>;
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
@@ -1141,6 +1161,15 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  armTodoNudge(session: SessionRecord): void;
+  lastObservedRunStates: Map<string, SessionState>;
+  reconcileTaskCompleted(session: SessionRecord): Promise<void>;
+  sendLocked(sessionId: string, request: { message: string }): Promise<SessionView>;
+  cleanupSessionServices(session: SessionRecord): Promise<void>;
+  teardownSessionSidecars(
+    session: SessionRecord,
+    options?: { failOnSurvivors?: boolean },
+  ): Promise<void>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -1370,6 +1399,7 @@ describe("SessionService", () => {
     deleteServiceInstanceMock.mockReset();
     deleteServiceInstancesForSessionMock.mockReset();
     deleteRuntimeLogCursorsForSessionMock.mockReset();
+    deleteSessionMock.mockReset();
     deleteServiceSourceStatesForServiceMock.mockReset();
     deleteServiceSourceStatesForSessionMock.mockReset();
     deleteTelegramSourceStateForSessionMock.mockReset();
@@ -1455,7 +1485,13 @@ describe("SessionService", () => {
     // failed lookup, which blocks teardown on purpose.
     ghMock.mockReset().mockResolvedValue(emptyPrLookupEnvelope());
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
+    removeSessionTodoToolMock.mockReset();
     removeSessionSlotToolMock.mockReset();
+    deleteSessionArtifactsDirMock
+      .mockReset()
+      .mockImplementation((_dataDir: string, sessionId: string) => {
+        rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
+      });
     deleteSessionArtifactsExceptMock.mockReset();
     listSessionArtifactsMock.mockReset().mockReturnValue([]);
     readSessionArtifactMock.mockReset().mockReturnValue(null);
@@ -1729,6 +1765,7 @@ describe("SessionService", () => {
   });
 
   it("spawns a session through one clear path and returns the enriched view", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -1828,7 +1865,90 @@ describe("SessionService", () => {
     ]);
   });
 
-  describe("Spur ToDo lifecycle", () => {
+  describe("ToDo pin and dashboard ToDo policy matrices", () => {
+    beforeEach(() => {
+      loadConfigMock.mockReturnValue(todoEnabledConfig());
+    });
+    it("pins project ToDo overrides above the instance fallback in both directions", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const enabledProjectConfig = baseConfig() as unknown as AppConfig;
+      enabledProjectConfig.todo.enabled = false;
+      const apiProject = enabledProjectConfig.projects["api"];
+      if (!apiProject) throw new Error("Missing api project");
+      apiProject.todo = { enabled: true };
+      loadConfigMock.mockReturnValue(enabledProjectConfig);
+      const { SessionService } = await loadSessionServiceModule();
+      const enabledService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const enabled = await enabledService.spawn({ project: "api", prompt: "Enabled override" });
+      expect(sessions.get(enabled.id)?.todoEnabled).toBe(true);
+      expect(sessions.get(enabled.id)?.todoLedgerVersion).toBe(1);
+      enabledService.dispose();
+
+      sessions.clear();
+      const disabledProjectConfig = baseConfig() as unknown as AppConfig;
+      disabledProjectConfig.todo.enabled = true;
+      const disabledApiProject = disabledProjectConfig.projects["api"];
+      if (!disabledApiProject) throw new Error("Missing api project");
+      disabledApiProject.todo = { enabled: false };
+      loadConfigMock.mockReturnValue(disabledProjectConfig);
+      const disabledService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const disabled = await disabledService.spawn({
+        project: "api",
+        prompt: "Disabled override",
+      });
+      expect(sessions.get(disabled.id)?.todoEnabled).toBe(false);
+      expect(sessions.get(disabled.id)?.todoLedgerVersion).toBeUndefined();
+      disabledService.dispose();
+    });
+
+    it("bypasses ToDo initialization and completion gates when disabled", async () => {
+      const sessions = createSessionStore();
+      loadConfigMock.mockReturnValue({ ...baseConfig(), todo: { enabled: false } });
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spawned = await service.spawn({ project: "api", prompt: "Disabled task" });
+
+      expect(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1]).not.toContain("Spur ToDo:");
+      expect(createTmuxSessionMock.mock.calls.at(-1)?.[0]?.env).not.toHaveProperty(
+        "SPUR_TODO_COMMAND",
+      );
+      await expect(service.readTodo(spawned.id)).rejects.toMatchObject({
+        code: "todo_disabled",
+        message: "Spur ToDo is disabled for this session",
+      });
+      await service.complete(spawned.id, { skipPrCheck: true, skipRuntimeTeardown: true });
+
+      expect(sessions.get(spawned.id)?.status).toBe("completed");
+      expect(sessions.get(spawned.id)?.todoLedgerVersion).toBeUndefined();
+      service.dispose();
+    });
+
+    it("keeps a disabled-born session pinned after config reload and restore", async () => {
+      const sessions = createSessionStore();
+      loadConfigMock.mockReturnValue({ ...baseConfig(), todo: { enabled: false } });
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spawned = await service.spawn({ project: "api", prompt: "Disabled task" });
+      await service.pause(spawned.id);
+      ensureSessionSlotToolMock.mockClear();
+
+      service.applyConfig(baseConfig() as unknown as AppConfig, ["/tmp/spur.yaml"]);
+      expect(ensureSessionSlotToolMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: spawned.id, todoEnabled: false }),
+      );
+      await service.restore(spawned.id);
+
+      expect(createTmuxSessionMock.mock.calls.at(-1)?.[0]?.env).not.toHaveProperty(
+        "SPUR_TODO_COMMAND",
+      );
+      expect(sessions.get(spawned.id)?.todoLedgerVersion).toBeUndefined();
+      await expect(service.readTodo(spawned.id)).rejects.toMatchObject({ code: "todo_disabled" });
+      service.dispose();
+    });
+
     it("initializes the spawn ledger before returning the session", async () => {
       createSessionStore();
       await useRealTodoLedger();
@@ -1841,6 +1961,121 @@ describe("SessionService", () => {
       expect(readSessionMock(TEST_DATA_DIR, spawned.id)?.todoLedgerVersion).toBe(1);
       expect(projection.items).toHaveLength(1);
       expect(projection.items[0]).toMatchObject({ text: "Ship native ToDo", status: "open" });
+      service.dispose();
+    });
+
+    it("AC2 placeholder failure preservation before ledger leaves the foreground pin errored", async () => {
+      const sessions = createSessionStore();
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
+        throw new Error("ledger init failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "Pinned foreground" })).rejects.toThrow(
+        "Failed to spawn api-1: ledger init failed",
+      );
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        todoEnabled: true,
+        error: "ledger init failed",
+      });
+      service.dispose();
+    });
+
+    it("AC2 placeholder failure preservation before ledger leaves the background pin errored", async () => {
+      const sessions = createSessionStore();
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementationOnce(() => {
+        throw new Error("ledger init failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawnInBackground({ project: "api", prompt: "Pinned background" }),
+      ).rejects.toThrow("ledger init failed");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        todoEnabled: true,
+        error: "ledger init failed",
+      });
+      service.dispose();
+    });
+
+    it("AC2 placeholder failure preservation after ledger retries without duplicate history", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      createWorktreeMock.mockRejectedValueOnce(new Error("worktree init failed"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.spawn({ project: "api", prompt: "Pinned retry" })).rejects.toThrow(
+        "worktree init failed",
+      );
+      const ledgerPath = join(TEST_DATA_DIR, "sessions", "api-1", "todo.jsonl");
+      const afterFailure = readFileSync(ledgerPath, "utf8");
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        todoEnabled: true,
+        todoLedgerVersion: 1,
+      });
+
+      const retried = await service.spawn({ project: "api", prompt: "Pinned retry" });
+
+      expect(retried.id).toBe("api-1");
+      expect(readFileSync(ledgerPath, "utf8")).toBe(afterFailure);
+      expect((await service.readTodo(retried.id)).items).toHaveLength(1);
+      service.dispose();
+    });
+
+    it.each(["running", "stopped", "completed", "killed"] as const)(
+      "AC3 ToDo disabled exact bytes preserve a legacy %s ledger while pinning false",
+      async (status) => {
+        const sessions = createSessionStore();
+        const legacy = runningSession({ status, todoEnabled: undefined });
+        sessions.set(legacy.id, legacy);
+        const ledgerPath = join(TEST_DATA_DIR, "sessions", legacy.id, "todo.jsonl");
+        mkdirSync(dirname(ledgerPath), { recursive: true });
+        const ledgerBytes = `legacy-ledger-${status}\n`;
+        writeFileSync(ledgerPath, ledgerBytes, "utf8");
+        const disabled = baseConfig() as unknown as AppConfig;
+        disabled.todo.enabled = false;
+        loadConfigMock.mockReturnValue(disabled);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        service.applyConfig(disabled, ["/tmp/spur.yaml"]);
+
+        expect(sessions.get(legacy.id)?.todoEnabled).toBe(false);
+        expect(sessions.get(legacy.id)?.todoLedgerVersion).toBeUndefined();
+        expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBytes);
+        service.dispose();
+      },
+    );
+
+    it("adds compact ToDo summary and corruption state to dashboard enrichment", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession({ todoEnabled: true });
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const todo = await import("../../src/todo.js");
+      todo.ensureTodoLedger(TEST_DATA_DIR, session, "spawn");
+      const marked = sessions.get(session.id);
+      if (!marked) throw new Error("Missing marked session");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+
+      const summary = await internals.enrichDashboard(marked);
+      expect(summary.todo).toMatchObject({ kind: "summary", counts: { total: 1 } });
+
+      writeFileSync(join(TEST_DATA_DIR, "sessions", session.id, "todo.jsonl"), "bad\n");
+      const corrupt = await internals.enrichDashboard(marked);
+      expect(corrupt.todo).toEqual({ kind: "error", code: "todo_ledger_corrupt" });
       service.dispose();
     });
 
@@ -1904,9 +2139,277 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("retries failed level-triggered nudges and throttles successful delivery", async () => {
+    it("delivers task_completed once per resolving ledger revision", async () => {
       const sessions = createSessionStore();
-      const session = runningSession();
+      sessions.set("api-1", runningSession({ id: "api-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const send = vi.spyOn(service, "send").mockImplementation(async (id) => service.get(id));
+      service.subscribeToSessionStates("api-2", {
+        targetSessionId: "api-1",
+        events: ["task_completed"],
+      });
+      const initial = await service.readTodo("api-1");
+      const initialId = initial.items[0]?.id;
+      if (!initialId) throw new Error("Expected initial ToDo item");
+
+      await service.mutateTodo(
+        "api-1",
+        { action: "complete", itemId: initialId, reason: "Done" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredEventId).toContain(
+        "task_completed-api-1-",
+      );
+
+      const reopened = await service.mutateTodo(
+        "api-1",
+        { action: "add", text: "Follow-up", reason: "New input" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
+      const followUpId = reopened.items.find((item) => item.status === "open")?.id;
+      if (!followUpId) throw new Error("Expected follow-up ToDo item");
+      await service.mutateTodo(
+        "api-1",
+        { action: "complete", itemId: followUpId, reason: "Done again" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
+      expect(send).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("reconciles a failed task_completed delivery from the persisted ledger", async () => {
+      const sessions = createSessionStore();
+      const target = runningSession({ id: "api-1" });
+      sessions.set("api-1", target);
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const send = vi
+        .spyOn(service, "send")
+        .mockRejectedValueOnce(new Error("subscriber unavailable"))
+        .mockImplementation(async (id) => service.get(id));
+      service.subscribeToSessionStates("api-2", {
+        targetSessionId: "api-1",
+        events: ["task_completed"],
+      });
+      const initial = await service.readTodo("api-1");
+      const itemId = initial.items[0]?.id;
+      if (!itemId) throw new Error("Expected initial ToDo item");
+
+      await service.mutateTodo(
+        "api-1",
+        { action: "complete", itemId, reason: "Done" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
+      expect(sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredEventId).toBeUndefined();
+
+      await (
+        service as unknown as {
+          reconcileTaskCompleted(session: SessionRecord): Promise<void>;
+        }
+      ).reconcileTaskCompleted(sessions.get("api-1") ?? target);
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredEventId).toContain(
+        "task_completed-api-1-",
+      );
+      service.dispose();
+    });
+
+    it("serializes concurrent mutation and reconciliation delivery for one revision", async () => {
+      const sessions = createSessionStore();
+      const target = runningSession({ id: "api-1" });
+      sessions.set(target.id, target);
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const send = vi.spyOn(service, "send").mockRejectedValueOnce(new Error("retry later"));
+      service.subscribeToSessionStates("api-2", {
+        targetSessionId: target.id,
+        events: ["task_completed"],
+      });
+      const itemId = (await service.readTodo(target.id)).items[0]?.id;
+      if (!itemId) throw new Error("Expected initial ToDo item");
+      await service.mutateTodo(
+        target.id,
+        { action: "complete", itemId, reason: "Done" },
+        { kind: "agent", agent: "claude", sessionId: target.id },
+      );
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      send.mockImplementation(async (id) => {
+        await gate;
+        return sessions.get(id) as unknown as SessionView;
+      });
+      const resolvedTarget = sessions.get(target.id) ?? target;
+      const first = sessionServiceInternals(service).reconcileTaskCompleted(resolvedTarget);
+      const second = sessionServiceInternals(service).reconcileTaskCompleted(resolvedTarget);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+      release();
+      await Promise.all([first, second]);
+
+      expect(send).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("does not deliver a resolution that predates task_completed opt-in across restart", async () => {
+      const sessions = createSessionStore();
+      const target = runningSession({ id: "api-1" });
+      sessions.set(target.id, target);
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const itemId = (await service.readTodo(target.id)).items[0]?.id;
+      if (!itemId) throw new Error("Expected initial ToDo item");
+      await service.mutateTodo(
+        target.id,
+        { action: "complete", itemId, reason: "Done before opt-in" },
+        { kind: "agent", agent: "claude", sessionId: target.id },
+      );
+      vi.advanceTimersByTime(1);
+      service.subscribeToSessionStates("api-2", {
+        targetSessionId: target.id,
+        events: ["task_completed"],
+      });
+      service.dispose();
+
+      const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.001Z");
+      const send = vi.spyOn(restarted, "send");
+      await sessionServiceInternals(restarted).reconcileTaskCompleted(
+        sessions.get(target.id) ?? target,
+      );
+
+      expect(send).not.toHaveBeenCalled();
+      restarted.dispose();
+    });
+
+    it("re-arms task_completed only when a state-only subscription adds the event again", async () => {
+      const sessions = createSessionStore();
+      const target = runningSession({ id: "api-1" });
+      sessions.set(target.id, target);
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.subscribeToSessionStates("api-2", {
+        targetSessionId: target.id,
+        events: ["task_completed"],
+      });
+      service.subscribeToSessionStates("api-2", {
+        targetSessionId: target.id,
+        states: ["waiting"],
+      });
+      const itemId = (await service.readTodo(target.id)).items[0]?.id;
+      if (!itemId) throw new Error("Expected initial ToDo item");
+      await service.mutateTodo(
+        target.id,
+        { action: "complete", itemId, reason: "Done while state-only" },
+        { kind: "agent", agent: "claude", sessionId: target.id },
+      );
+      vi.advanceTimersByTime(1);
+      const send = vi.spyOn(service, "send");
+      const added = service.subscribeToSessionStates("api-2", {
+        targetSessionId: target.id,
+        events: ["task_completed"],
+      });
+      await sessionServiceInternals(service).reconcileTaskCompleted(
+        sessions.get(target.id) ?? target,
+      );
+
+      expect(added.record.eventArmedAt?.task_completed).toBe("2026-03-18T10:05:00.001Z");
+      expect(send).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("delivers without deadlock to a subscriber in the target workspace", async () => {
+      const sessions = createSessionStore();
+      const target = runningSession({ id: "api-1", workspaceId: "desk-1" });
+      sessions.set(target.id, target);
+      sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(sessionServiceInternals(service), "sendLocked").mockImplementation(
+        async (id) => sessions.get(id) as unknown as SessionView,
+      );
+      service.subscribeToSessionStates("api-2", {
+        targetSessionId: target.id,
+        events: ["task_completed"],
+      });
+      const itemId = (await service.readTodo(target.id)).items[0]?.id;
+      if (!itemId) throw new Error("Expected initial ToDo item");
+
+      await service.mutateTodo(
+        target.id,
+        { action: "complete", itemId, reason: "Done" },
+        { kind: "agent", agent: "claude", sessionId: target.id },
+      );
+
+      expect(sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredEventId).toContain(
+        "task_completed-api-1-",
+      );
+      service.dispose();
+    });
+
+    it("delivers reciprocal cross-workspace completions without deadlock", async () => {
+      const sessions = createSessionStore();
+      const first = runningSession({ id: "api-1" });
+      const second = runningSession({ id: "api-2" });
+      sessions.set(first.id, first);
+      sessions.set(second.id, second);
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(sessionServiceInternals(service), "sendLocked").mockImplementation(
+        async (id) => sessions.get(id) as unknown as SessionView,
+      );
+      service.subscribeToSessionStates(first.id, {
+        targetSessionId: second.id,
+        events: ["task_completed"],
+      });
+      service.subscribeToSessionStates(second.id, {
+        targetSessionId: first.id,
+        events: ["task_completed"],
+      });
+      const firstItem = (await service.readTodo(first.id)).items[0]?.id;
+      const secondItem = (await service.readTodo(second.id)).items[0]?.id;
+      if (!firstItem || !secondItem) throw new Error("Expected initial ToDo items");
+
+      await Promise.all([
+        service.mutateTodo(
+          first.id,
+          { action: "complete", itemId: firstItem, reason: "First done" },
+          { kind: "agent", agent: "claude", sessionId: first.id },
+        ),
+        service.mutateTodo(
+          second.id,
+          { action: "complete", itemId: secondItem, reason: "Second done" },
+          { kind: "agent", agent: "claude", sessionId: second.id },
+        ),
+      ]);
+
+      expect(sessions.get(first.id)?.stateSubscriptions?.[0]?.lastDeliveredEventId).toContain(
+        "task_completed-api-2-",
+      );
+      expect(sessions.get(second.id)?.stateSubscriptions?.[0]?.lastDeliveredEventId).toContain(
+        "task_completed-api-1-",
+      );
+      service.dispose();
+    });
+
+    it("persists one-shot ToDo nudges and retries failed delivery", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession({ todoEnabled: true });
       sessions.set(session.id, session);
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
@@ -1917,18 +2420,35 @@ describe("SessionService", () => {
         .mockRejectedValueOnce(new Error("pane unavailable"))
         .mockResolvedValue(SUBMITTED);
 
-      await internals.maybeNudgeTodo(session);
-      await internals.maybeNudgeTodo(session);
-      await internals.maybeNudgeTodo(session);
+      vi.setSystemTime(new Date("2026-03-18T10:00:00.000Z"));
+      internals.armTodoNudge(session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).not.toHaveBeenCalled();
+
+      vi.setSystemTime(new Date("2026-03-18T10:00:59.999Z"));
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).not.toHaveBeenCalled();
+
+      vi.setSystemTime(new Date("2026-03-18T10:01:00.000Z"));
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(2);
       expect(send.mock.calls[1]?.[1]).toContain("Spur ToDo still has open work");
+      expect(send.mock.calls[1]?.[1]).toContain(
+        '"$SPUR_SESSION_TOOL_DIR/spur" todo complete|cancel|hold',
+      );
+      expect(send.mock.calls[1]?.[1]).toContain('--session "$SPUR_SESSION"');
+      expect(send.mock.calls[1]?.[1]).not.toContain("SPUR_TODO_COMMAND");
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
 
       vi.setSystemTime(new Date("2026-03-18T10:06:01.000Z"));
       await internals.maybeNudgeTodo(session);
-      expect(send).toHaveBeenCalledTimes(3);
+      expect(send).toHaveBeenCalledTimes(2);
 
       const itemId = (await service.readTodo(session.id)).items[0]?.id;
       if (!itemId) throw new Error("Expected initial ToDo item");
+      internals.lastObservedRunStates.set(session.id, "waiting");
       await service.mutateTodo(
         session.id,
         {
@@ -1940,7 +2460,9 @@ describe("SessionService", () => {
         },
         { kind: "agent", agent: "claude", sessionId: session.id },
       );
-      vi.setSystemTime(new Date("2026-03-18T10:07:02.000Z"));
+      internals.armTodoNudge(sessions.get(session.id) ?? session);
+      expect(sessions.get(session.id)?.todoNudge?.dueAt).toBe("2026-03-18T10:07:01.000Z");
+      vi.setSystemTime(new Date("2026-03-18T10:07:01.000Z"));
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send.mock.calls.at(-1)?.[1]).toContain("Choose the release window");
       service.dispose();
@@ -1948,6 +2470,7 @@ describe("SessionService", () => {
   });
 
   it("persists the exact fresh OpenCode session before sending the prompt", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     agentWaitsForSubmitAckMock.mockReturnValue(true);
     createAgentSubmitAckBindingMock.mockResolvedValue({
       scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
@@ -2616,6 +3139,7 @@ describe("SessionService", () => {
   });
 
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     mockClaudeJsonlState("waiting");
     createSessionStore();
     tmuxSessionExistsMock.mockResolvedValue(false);
@@ -2918,7 +3442,7 @@ describe("SessionService", () => {
   });
 
   function configWithModes() {
-    const base = baseConfig();
+    const base = todoEnabledConfig();
     return {
       ...base,
       projects: {
@@ -2963,6 +3487,7 @@ describe("SessionService", () => {
   });
 
   it("delivers the Spur ToDo contract when no prompt or mode is supplied", async () => {
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2988,6 +3513,7 @@ describe("SessionService", () => {
 
   it("produces a byte-identical prompt for a project without a modes registry", async () => {
     mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
     // baseConfig() has no modes key on the "api" project; this is the
     // regression guard that D5 ("no modes: -> today's behavior exactly")
     // holds.
@@ -3281,9 +3807,11 @@ describe("SessionService", () => {
     });
   });
 
-  it("retries background spawn up to three attempts without reserving a new session id", async () => {
+  it("AC2 placeholder failure preservation after ledger retries background without duplicate history", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
+    loadConfigMock.mockReturnValue(todoEnabledConfig());
+    await useRealTodoLedger();
     tmuxSessionExistsMock.mockResolvedValue(false);
     createTmuxSessionMock
       .mockRejectedValueOnce(new Error("tmux boom 1"))
@@ -3298,6 +3826,8 @@ describe("SessionService", () => {
     });
 
     expect(placeholder.id).toBe("api-1");
+    const ledgerPath = join(TEST_DATA_DIR, "sessions", placeholder.id, "todo.jsonl");
+    const initialLedger = readFileSync(ledgerPath, "utf8");
 
     await vi.waitFor(() => {
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
@@ -3307,6 +3837,7 @@ describe("SessionService", () => {
     });
 
     expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(initialLedger);
     expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
     expect(removeWorktreeMock).toHaveBeenCalledTimes(2);
     expect(deleteAgentHookStateMock).toHaveBeenCalledTimes(2);
@@ -4606,7 +5137,7 @@ describe("SessionService", () => {
 
   it("allows spawn without a prompt, skips default steps, and sends the ToDo contract", async () => {
     loadConfigMock.mockReturnValue({
-      ...baseConfig(),
+      ...todoEnabledConfig(),
       projects: {
         api: {
           ...baseConfig().projects.api,
@@ -4687,7 +5218,7 @@ describe("SessionService", () => {
 
   it("spawns against the shared project path when worktree is disabled", async () => {
     loadConfigMock.mockReturnValue({
-      ...baseConfig(),
+      ...todoEnabledConfig(),
       projects: {
         api: {
           ...baseConfig().projects.api,
@@ -4740,7 +5271,7 @@ describe("SessionService", () => {
   it("generates shared session helpers with the custom parent config path", async () => {
     const customConfig = "/tmp/custom-spur.yaml";
     loadConfigMock.mockReturnValue({
-      ...baseConfig(),
+      ...todoEnabledConfig(),
       configPath: customConfig,
       projects: {
         api: {
@@ -4765,6 +5296,7 @@ describe("SessionService", () => {
       configPath: customConfig,
       projectId: "api",
       agent: "claude",
+      todoEnabled: true,
     });
   });
 
@@ -26361,6 +26893,7 @@ describe("SessionService", () => {
       expect(shepherdHeaderMatches.length).toBeLessThanOrEqual(1);
       expect(operatorRequestMatches.length).toBeLessThanOrEqual(1);
       expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+      expect(launchPrompt).not.toContain("Spur ToDo:");
     });
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
@@ -26892,6 +27425,7 @@ describe("SessionService", () => {
     it("rejects handoff when already-locked source completion fails", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
+      mkdirSync(artifactDirForSession("api-1"), { recursive: true });
       sessions.set(
         "api-1",
         sessionRecord({
@@ -26921,6 +27455,466 @@ describe("SessionService", () => {
       );
 
       expect(sessions.get("api-1")?.status).not.toBe("completed");
+      expect(sessions.has("api-2")).toBe(false);
+      expect(deleteSessionMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ id: "api-2", workspaceId: "api-1" }),
+      );
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
+      expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
+    });
+
+    it("keeps a tracked handoff successor when its agent process survives compensation", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      terminateAgentProcessesMock
+        .mockResolvedValueOnce({ status: "clear" })
+        .mockResolvedValueOnce({ status: "survivors", pids: [4242] });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(
+        service as unknown as { applyManualStatusLocked(): Promise<SessionView> },
+        "applyManualStatusLocked",
+      ).mockRejectedValueOnce(new Error("complete failed"));
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+        "complete failed",
+      );
+
+      expect(sessions.has("api-2")).toBe(true);
+      expect(deleteSessionMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ id: "api-2" }),
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.compensation_failed",
+          sessionId: "api-2",
+        }),
+      );
+    });
+
+    it("retains handoff successor tracking when resource cleanup throws", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "teardownSessionSidecars")
+        .mockResolvedValueOnce()
+        .mockRejectedValueOnce(new Error("service cleanup failed"));
+      vi.spyOn(
+        service as unknown as { applyManualStatusLocked(): Promise<SessionView> },
+        "applyManualStatusLocked",
+      ).mockRejectedValueOnce(new Error("complete failed"));
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+        "complete failed",
+      );
+
+      expect(sessions.has("api-2")).toBe(true);
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
+      expect(deleteSessionMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ id: "api-2", workspaceId: "api-1" }),
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.compensation_failed",
+          sessionId: "api-2",
+        }),
+      );
+    });
+
+    it.each(["process", "service", "sidecar", "artifact", "tool", "workspace"] as const)(
+      "AC15 handoff compensation retains tracking and caches on %s cleanup failure",
+      async (failureStage) => {
+        const sessions = createSessionStore();
+        const successor = sessionRecord({
+          id: "api-2",
+          workspaceId: "api-2",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-2",
+        });
+        sessions.set(successor.id, successor);
+        if (failureStage === "process") {
+          terminateAgentProcessesMock.mockResolvedValueOnce({
+            status: "survivors",
+            pids: [4242],
+          });
+        }
+        if (failureStage === "service") {
+          listServiceInstancesForSessionMock.mockReturnValue([
+            {
+              sessionId: successor.id,
+              project: successor.project,
+              serviceId: "web",
+              command: "pnpm dev",
+              cwd: successor.worktreePath,
+              tmuxSession: `${successor.id}--svc--web`,
+              status: "running",
+              createdAt: successor.createdAt,
+              updatedAt: successor.updatedAt,
+            },
+          ]);
+          killTmuxSessionMock.mockImplementation(async (name: string) => {
+            if (name.endsWith("--svc--web")) throw new Error("service survived");
+          });
+        }
+        if (failureStage === "artifact") {
+          deleteSessionArtifactsDirMock.mockImplementationOnce(() => {
+            throw new Error("artifact cleanup failed");
+          });
+        }
+        if (failureStage === "tool") {
+          removeSessionSlotToolMock.mockImplementationOnce(() => {
+            throw new Error("tool cleanup failed");
+          });
+        }
+        if (failureStage === "workspace") {
+          removeWorktreeMock.mockRejectedValueOnce(new Error("workspace cleanup failed"));
+        }
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.settleBackgroundSpawns();
+        service.dispose();
+        if (failureStage === "sidecar") {
+          vi.spyOn(
+            sessionServiceInternals(service),
+            "teardownSessionSidecars",
+          ).mockRejectedValueOnce(new Error("sidecar survived"));
+        }
+        const caches = service as unknown as {
+          stateCache: Map<string, unknown>;
+          dashboardCache: Map<string, unknown>;
+          dashboardTodoCache: Map<string, unknown>;
+          dashboardEnrichedRecords: Map<string, unknown>;
+        };
+        for (const cache of [
+          caches.stateCache,
+          caches.dashboardCache,
+          caches.dashboardTodoCache,
+          caches.dashboardEnrichedRecords,
+        ]) {
+          cache.set(successor.id, {});
+        }
+
+        await expect(
+          (
+            service as unknown as {
+              compensateFailedHandoffSuccessor(id: string): Promise<void>;
+            }
+          ).compensateFailedHandoffSuccessor(successor.id),
+        ).rejects.toThrow("Incomplete handoff compensation");
+
+        expect(sessions.has(successor.id)).toBe(true);
+        expect(deleteSessionMock).not.toHaveBeenCalled();
+        expect({
+          state: caches.stateCache.has(successor.id),
+          dashboard: caches.dashboardCache.has(successor.id),
+          todo: caches.dashboardTodoCache.has(successor.id),
+          enriched: caches.dashboardEnrichedRecords.has(successor.id),
+        }).toEqual({ state: true, dashboard: true, todo: true, enriched: true });
+      },
+    );
+
+    it("AC15 handoff compensation attempts every sidecar after one signal fails", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              first: { command: "pnpm first", autoStart: false },
+              second: { command: "pnpm second", autoStart: false },
+            },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        sidecarNames: ["first", "second"],
+        slots: {
+          links: [
+            { label: "first", url: "http://127.0.0.1:3001" },
+            { label: "second", url: "http://127.0.0.1:3002" },
+          ],
+        },
+      });
+      sessions.set(successor.id, successor);
+      killTmuxSessionMock.mockImplementation(async (name: string) => {
+        if (name.endsWith("--first")) throw new Error("first signal failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        sessionServiceInternals(service).teardownSessionSidecars(successor, {
+          failOnSurvivors: true,
+        }),
+      ).rejects.toThrow("Incomplete sidecar teardown");
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-2--first");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-2--second");
+      expect(applySlotsUpdateMock).toHaveBeenCalledWith(expect.anything(), {
+        unlinkLabels: ["second"],
+      });
+      expect(applySlotsUpdateMock).not.toHaveBeenCalledWith(expect.anything(), {
+        unlinkLabels: ["first"],
+      });
+      service.dispose();
+    });
+
+    it("AC15 retains missing-pane tracking when a detached recorded process cannot be confirmed", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { worker: { command: "sleep 30", autoStart: false } },
+          },
+        },
+      });
+      const child = spawnChildProcess("sleep", ["30"], { detached: true, stdio: "ignore" });
+      const pid = child.pid;
+      if (pid === undefined) throw new Error("expected detached child pid");
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        sidecarNames: ["worker"],
+        sidecarProcs: { worker: { pid, pgid: pid, starttime: -1 } },
+        slots: { links: [{ label: "worker", url: "http://127.0.0.1:3001" }] },
+      });
+      sessions.set(successor.id, successor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await expect(
+          sessionServiceInternals(service).teardownSessionSidecars(successor, {
+            failOnSurvivors: true,
+          }),
+        ).rejects.toThrow("Incomplete sidecar teardown");
+
+        expect(process.kill(pid, 0)).toBe(true);
+        expect(sessions.get(successor.id)?.sidecarProcs?.worker).toBeDefined();
+        expect(applySlotsUpdateMock).not.toHaveBeenCalled();
+      } finally {
+        process.kill(-pid, "SIGKILL");
+        service.dispose();
+      }
+    });
+
+    it("AC15 clears missing-pane tracking when the recorded process is absent", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { worker: { command: "sleep 30", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        sidecarNames: ["worker"],
+        sidecarProcs: {
+          worker: { pid: 999_999_999, pgid: 999_999_999, starttime: 1 },
+        },
+        slots: { links: [{ label: "worker", url: "http://127.0.0.1:3001" }] },
+      });
+      sessions.set(successor.id, successor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await sessionServiceInternals(service).teardownSessionSidecars(successor, {
+        failOnSurvivors: true,
+      });
+
+      expect(sessions.get(successor.id)?.sidecarProcs?.worker).toBeUndefined();
+      expect(applySlotsUpdateMock).toHaveBeenCalledWith(expect.anything(), {
+        unlinkLabels: ["worker"],
+      });
+      service.dispose();
+    });
+
+    it("AC15 handoff compensation attempts anchor-tool and workspace cleanup after member-tool failure", async () => {
+      const sessions = createSessionStore();
+      const successor = sessionRecord({ id: "api-2", workspaceId: "api-1" });
+      sessions.set(successor.id, successor);
+      removeSessionSlotToolMock.mockImplementationOnce(() => {
+        throw new Error("member tool cleanup failed");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const { readWorkspaceState, writeWorkspaceState } = await loadWorkspaceStoreModule();
+      writeWorkspaceState(TEST_DATA_DIR, "api-1", { slots: { title: "Shared", links: [] } });
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() =>
+        (
+          service as unknown as {
+            removeSessionToolsAndWorkspaceState(session: SessionRecord): void;
+          }
+        ).removeSessionToolsAndWorkspaceState(successor),
+      ).toThrow("Incomplete tool cleanup");
+
+      expect(removeSessionSlotToolMock).toHaveBeenNthCalledWith(1, TEST_DATA_DIR, "api-2");
+      expect(removeSessionSlotToolMock).toHaveBeenNthCalledWith(2, TEST_DATA_DIR, "api-1");
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")).toBeNull();
+      service.dispose();
+    });
+
+    it("AC15 handoff compensation removes tracking and evicts cache rows only after every cleanup stage succeeds", async () => {
+      const sessions = createSessionStore();
+      const successor = sessionRecord({
+        id: "api-2",
+        workspaceId: "api-2",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-2",
+      });
+      sessions.set(successor.id, successor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const caches = service as unknown as {
+        stateCache: Map<string, unknown>;
+        dashboardCache: Map<string, unknown>;
+        dashboardTodoCache: Map<string, unknown>;
+        dashboardEnrichedRecords: Map<string, unknown>;
+      };
+      for (const cache of [
+        caches.stateCache,
+        caches.dashboardCache,
+        caches.dashboardTodoCache,
+        caches.dashboardEnrichedRecords,
+      ]) {
+        cache.set(successor.id, {});
+      }
+
+      await (
+        service as unknown as {
+          compensateFailedHandoffSuccessor(id: string): Promise<void>;
+        }
+      ).compensateFailedHandoffSuccessor(successor.id);
+
+      expect(terminateAgentProcessesMock).toHaveBeenCalled();
+      expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", successor.worktreePath);
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, successor.id);
+      expect(deleteSessionMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ id: successor.id }),
+      );
+      expect(sessions.has(successor.id)).toBe(false);
+      expect({
+        state: caches.stateCache.has(successor.id),
+        dashboard: caches.dashboardCache.has(successor.id),
+        todo: caches.dashboardTodoCache.has(successor.id),
+        enriched: caches.dashboardEnrichedRecords.has(successor.id),
+      }).toEqual({ state: false, dashboard: false, todo: false, enriched: false });
+      service.dispose();
+    });
+
+    it("AC16 shared anchor tools keep the anchor and remove the member tool", async () => {
+      const sessions = createSessionStore();
+      const anchor = sessionRecord({ id: "api-1", workspaceId: "api-1" });
+      const member = sessionRecord({ id: "api-2", workspaceId: "api-1" });
+      sessions.set(anchor.id, anchor);
+      sessions.set(member.id, member);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      (
+        service as unknown as {
+          removeSessionToolsAndWorkspaceState(session: SessionRecord): void;
+        }
+      ).removeSessionToolsAndWorkspaceState(member);
+
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, member.id);
+      expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, anchor.id);
+      service.dispose();
+    });
+
+    it("AC16 shared anchor tools remove the anchor after the final live member", async () => {
+      const sessions = createSessionStore();
+      const anchor = sessionRecord({ id: "api-1", workspaceId: "api-1" });
+      sessions.set(anchor.id, anchor);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      (
+        service as unknown as {
+          removeSessionToolsAndWorkspaceState(session: SessionRecord): void;
+        }
+      ).removeSessionToolsAndWorkspaceState(anchor);
+
+      expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, anchor.id);
+      service.dispose();
+    });
+
+    it("AC16 ToDo tool reconciliation prepares every nonterminal status and skips terminal status", async () => {
+      const sessions = createSessionStore();
+      const statuses: SessionRecord["status"][] = [
+        "running",
+        "spawning",
+        "paused",
+        "stopped",
+        "errored",
+        "completed",
+        "killed",
+      ];
+      for (const status of statuses) {
+        sessions.set(
+          `api-${status}`,
+          sessionRecord({ id: `api-${status}`, status, todoEnabled: true }),
+        );
+      }
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      ensureSessionSlotToolMock.mockClear();
+
+      service.applyConfig(todoEnabledConfig() as unknown as AppConfig, ["/tmp/spur.yaml"]);
+
+      const preparedIds = ensureSessionSlotToolMock.mock.calls.map(
+        ([request]) => (request as { sessionId: string }).sessionId,
+      );
+      expect(preparedIds.sort()).toEqual(
+        ["errored", "paused", "running", "spawning", "stopped"].map((status) => `api-${status}`),
+      );
+      expect(preparedIds).not.toContain("api-completed");
+      expect(preparedIds).not.toContain("api-killed");
+      service.dispose();
     });
 
     it("leaves the source stopped when spawn fails after teardown", async () => {
@@ -28596,6 +29590,7 @@ describe("SessionService", () => {
       });
       const initialMessage = buildAgentLaunchPlanMock.mock.calls[0]?.[1] as string;
       expect(initialMessage).toContain("You are Spur Shepherd");
+      expect(initialMessage).toContain("Spur ToDo:");
       expect(initialMessage).not.toContain("long-lived");
       expect(initialMessage).toContain("Watch project health");
       expect(initialMessage).toContain("do not write or modify product code yourself");
