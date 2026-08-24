@@ -1,6 +1,7 @@
 ---
 name: spur
 description: Spur orchestrates AI coding agents (claude/codex/cursor/opencode) via CLI, daemon, web UI, or Telegram. Use when spawning, messaging, automating, or configuring a session, tmux pane, or Spur config. Don't use for driving an agent's CLI, or plain git worktree work.
+hostInstall: true
 ---
 
 SPUR

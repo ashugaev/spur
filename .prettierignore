@@ -10,4 +10,5 @@ node_modules/
 .next/
 coverage/
 *.tsbuildinfo
+v2/skills/
 pnpm-lock.yaml
