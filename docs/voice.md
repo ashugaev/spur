@@ -61,11 +61,11 @@ Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` and uses `int8` by d
 
 ## Telegram voice notes
 
-A voice note sent to a [Telegram source](configuration.md#events) chat becomes text: in a chat already bound with `/watch`, the transcript is sent to the agent like typed text; after `/spawn <agent>` with no binding yet, the transcript becomes the spawn prompt. A transcript is never parsed as a command, even one starting with `/`.
+A voice note in a [Telegram source](configuration.md#events) chat becomes text. Chat bound with `/watch`: transcript goes to the agent as typed text. After `/spawn <agent>`, no binding yet: transcript becomes the spawn prompt. Transcript is never parsed as a command, even one starting with `/`.
 
-The daemon posts the voice note to the web UI's transcribe route, so `spur-web` must be up and `ui.port` must match its real listen port (`spur doctor` flags a mismatch as `web-ui-port-drift`). `voice.provider: openai_realtime` always fails this path — it has no realtime transport for Telegram — and every failure replies in the chat instead of sending anything to the agent.
+The daemon posts the voice note to the web UI transcribe route. Requires `spur-web` up on the resolved [`ui.port`](configuration.md#field-reference). `voice.provider: openai_realtime` always fails that route with 502. Failure replies in the chat; nothing reaches the agent.
 
-Voice notes only: no `message:audio` files, video notes, or captions. See [`SPUR_WEB_URL`](configuration.md#field-reference) to point this at a non-default web UI or disable it for one instance.
+Voice notes only: no `message:audio` files, video notes, or captions. Override the web UI base URL, or disable this per instance, with [`SPUR_WEB_URL`](configuration.md#field-reference).
 
 ## HTTPS
 
