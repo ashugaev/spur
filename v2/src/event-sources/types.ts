@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import {
   isStaleParked,
   type AgentName,
+  type SelfDestructConfig,
   type SessionRecord,
   type SourceConfig,
   type SourceType,
@@ -31,6 +32,8 @@ export interface SourceSpawnSessionRequest {
   project: string;
   prompt?: string;
   agent?: AgentName;
+  model?: string;
+  selfDestruct?: SelfDestructConfig;
 }
 
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
