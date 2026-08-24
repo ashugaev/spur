@@ -91,6 +91,7 @@ YAML
 cat > "$TOOL_DIR/spur" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
+export SPUR_WEB_URL=""
 mkdir -p "$CONFIG_DIR/data"
 registry_tmp="$CONFIG_DIR/data/config-registry.json.tmp.\$\$"
 cat > "\$registry_tmp" <<JSON
@@ -129,4 +130,5 @@ mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
 "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
+export SPUR_WEB_URL=""
 exec "$TOOL_DIR/spur" daemon start

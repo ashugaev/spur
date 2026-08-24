@@ -50,3 +50,40 @@ describe("spur-isolated-daemon USER_CONFIG_PATH precedence", () => {
     expect(resolved).toBe("/tmp/explicit-override/config.yaml");
   });
 });
+
+// An isolated daemon must never reach the host's production web UI on the
+// default port 5555 (spur.yaml can carry a live `telegram` source with a
+// real token). resolveWebBaseUrl() in v2/src/ports.ts treats
+// SPUR_WEB_URL="" as "voice transcription disabled for this instance", so
+// both places this script can launch a daemon from must export it empty:
+// the wrapper heredoc written to $TOOL_DIR/spur (client.ts's spawnDaemon
+// execs that wrapper with no explicit `env`, inheriting whatever the
+// invoking CLI process saw) and the launcher's own top-level
+// `exec "$TOOL_DIR/spur" daemon start`.
+describe("spur-isolated-daemon SPUR_WEB_URL guard", () => {
+  function scriptLines(): string[] {
+    return readFileSync(SCRIPT_PATH, "utf8").split("\n");
+  }
+
+  it('exports SPUR_WEB_URL="" inside the $TOOL_DIR/spur wrapper heredoc', () => {
+    const lines = scriptLines();
+    const heredocStart = lines.findIndex((line) =>
+      line.includes('cat > "$TOOL_DIR/spur" <<WRAPPER'),
+    );
+    const heredocEnd = lines.findIndex((line, index) => index > heredocStart && line === "WRAPPER");
+    if (heredocStart === -1 || heredocEnd === -1) {
+      throw new Error("$TOOL_DIR/spur wrapper heredoc not found in spur-isolated-daemon.sh");
+    }
+    const heredocBody = lines.slice(heredocStart + 1, heredocEnd);
+    expect(heredocBody).toContain('export SPUR_WEB_URL=""');
+  });
+
+  it('exports SPUR_WEB_URL="" before the launcher\'s own daemon exec', () => {
+    const lines = scriptLines();
+    const execIndex = lines.findIndex((line) => line === 'exec "$TOOL_DIR/spur" daemon start');
+    if (execIndex === -1) {
+      throw new Error('exec "$TOOL_DIR/spur" daemon start not found in spur-isolated-daemon.sh');
+    }
+    expect(lines[execIndex - 1]).toBe('export SPUR_WEB_URL=""');
+  });
+});
