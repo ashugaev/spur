@@ -2169,7 +2169,7 @@ function samePathOnDisk(a: string, b: string): boolean {
   }
 }
 
-function isDefaultInstanceConfigPath(configPath: string): boolean {
+export function isDefaultInstanceConfigPath(configPath: string): boolean {
   return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
 }
 

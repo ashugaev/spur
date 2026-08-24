@@ -25,6 +25,8 @@ import {
   type InstanceConfigReadResult,
 } from "./config.js";
 import { parseDfField } from "./disk-space.js";
+import { installHostSkills, renderHostSkillWarnings } from "./host-skills.js";
+import { writeStderr } from "./io.js";
 import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { withTimeout } from "./promise-timeout.js";
@@ -1506,4 +1508,17 @@ export function runNpmInit(
   }
   args.push(options.tailscale === false ? "--no-tailscale" : "--tailscale");
   execFileSync("bash", [script, ...args], { stdio: "inherit" });
+  // Refreshes ~/.claude/skills and ~/.codex/skills for every `spur init` /
+  // `update` / `reinit` / `POST /deploy/switch` / auto-update tick — the
+  // callers that all funnel through this function. Never allowed to fail
+  // the init/update/reinit flow (see `install-and-restart.sh` rollback).
+  try {
+    for (const line of renderHostSkillWarnings(installHostSkills())) {
+      writeStderr(line);
+    }
+  } catch (error) {
+    writeStderr(
+      `spur: failed to install host skill symlinks: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }

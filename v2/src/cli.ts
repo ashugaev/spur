@@ -70,6 +70,7 @@ import {
   renderWaitingInputAlert,
   withSpinner,
 } from "./cli-view.js";
+import { installHostSkillsForDaemonStart, renderHostSkillWarnings } from "./host-skills.js";
 import { writeStderr, writeStdout } from "./io.js";
 import { ensureNpmPinFile } from "./npm-prefix.js";
 import { sortSessionsForList } from "./session-display.js";
@@ -3730,6 +3731,21 @@ export function createProgram(cliEntrypoint: string): Command {
       } catch (error) {
         writeStderr(
           `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      // Own try/catch, kept separate from the pin-file one above: a skill
+      // failure must stay distinguishable in stderr from a pin-file failure,
+      // and must still run even if `ensureNpmPinFile` throws first. Only
+      // fires for the default instance config (see
+      // `installHostSkillsForDaemonStart`), so an isolated-daemon/sidecar/
+      // worktree-daemon `--config` never touches these paths.
+      try {
+        for (const line of renderHostSkillWarnings(installHostSkillsForDaemonStart(configPath))) {
+          writeStderr(line);
+        }
+      } catch (error) {
+        writeStderr(
+          `spur: failed to install host skill symlinks: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       await outputResult({
