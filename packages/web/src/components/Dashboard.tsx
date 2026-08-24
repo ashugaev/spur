@@ -30,7 +30,7 @@ import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
-import { buildSpawnOverrides } from "@/hooks/useSpawnComposer";
+import { buildSpawnOverrides, buildSpawnSessionPayload } from "@/lib/spawn-payload";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import {
@@ -40,8 +40,6 @@ import {
   responseErrorMessage,
 } from "@/lib/json-payload";
 import {
-  assertAttachmentsWithinLimit,
-  encodeFileAttachments,
   fileAttachmentsFromFiles,
   mergeAttachmentsWithinLimit,
   type FileAttachment,
@@ -1849,36 +1847,22 @@ export function Dashboard() {
     spawningRef.current = true;
     setSpawning(true);
     try {
-      const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
-      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-
-      const payload: Record<string, unknown> = {
+      const payload = buildSpawnSessionPayload({
         projectId: nextProjectId,
         prompt: nextPrompt,
         agent: spawnAgent,
-      };
-      // Only the settled-empty-catalog case omits `model`; every other model
-      // state (including a manual pick or a resolved default) sends it.
-      if (spawnModel !== null) payload.model = spawnModel;
-      payload.overrides = overrides;
-      if (effectiveSessionMode) payload.mode = effectiveSessionMode;
-      const encodedAttachments = encodeFileAttachments(spawnAttachments);
-      assertAttachmentsWithinLimit(encodedAttachments);
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      const normalizedBranch = normalizeBranchName(spawnBranch);
-      if (normalizedBranch) payload.branch = normalizedBranch;
-      if (spawnPlanMode) payload.planMode = true;
-      if (spawnSelfDestruct) {
-        const conditions = spawnSelfDestructConditions.trim();
-        payload.selfDestruct = {
-          enabled: true,
-          ...(conditions ? { conditions } : {}),
-        };
-      }
-      if (filteredSteps.length > 0) payload.steps = filteredSteps;
-      if (spawnTrackerUrl) {
-        payload.slots = { links: [{ label: "tracker", url: spawnTrackerUrl }] };
-      }
+        model: spawnModel,
+        mode: effectiveSessionMode,
+        attachments: spawnAttachments,
+        branch: spawnBranch,
+        planMode: spawnPlanMode,
+        selfDestruct: spawnSelfDestruct,
+        selfDestructConditions: spawnSelfDestructConditions,
+        steps: spawnSteps,
+        trackerUrl: spawnTrackerUrl,
+        workspaceMode: spawnWorkspaceMode,
+        defaultBranch: spawnDefaultBranch,
+      });
 
       const response = await fetch("/api/spawn", {
         method: "POST",

@@ -3,16 +3,17 @@ import {
   buildDeskSpawnPayload,
   buildRespawnSessionPayload,
   buildSpawnSessionPayload,
-  type SpawnComposerState,
-} from "@/hooks/useSpawnComposer";
+  type SpawnPayloadFields,
+} from "@/lib/spawn-payload";
 
-function composer(overrides: Partial<SpawnComposerState>): SpawnComposerState {
+function composer(overrides: Partial<SpawnPayloadFields>): SpawnPayloadFields {
   return {
     agent: "claude",
     attachments: [],
     branch: "",
     defaultBranch: "",
     model: null,
+    mode: null,
     planMode: false,
     projectId: "api",
     prompt: "  Fix auth  ",
@@ -20,6 +21,7 @@ function composer(overrides: Partial<SpawnComposerState>): SpawnComposerState {
     selfDestructConditions: "",
     startupAttachmentIds: [],
     steps: [],
+    trackerUrl: null,
     workspaceMode: "worktree",
     ...overrides,
   };
@@ -53,6 +55,7 @@ describe("spawn composer payload builders", () => {
           branch: "Feature: Auth!",
           defaultBranch: " main ",
           model: "opus",
+          mode: "manager",
           planMode: true,
           selfDestruct: true,
           selfDestructConditions: " after tests ",
@@ -60,6 +63,7 @@ describe("spawn composer payload builders", () => {
             { id: 1, value: " research " },
             { id: 2, value: "" },
           ],
+          trackerUrl: "https://example.com/issues/42",
           workspaceMode: "worktree",
         }),
       ),
@@ -68,11 +72,13 @@ describe("spawn composer payload builders", () => {
       prompt: "Fix auth",
       agent: "claude",
       model: "opus",
+      mode: "manager",
       attachments: [{ name: "bad_name.png", data: "abc" }],
       branch: "feature-auth",
       planMode: true,
       selfDestruct: { enabled: true, conditions: "after tests" },
       steps: ["research"],
+      slots: { links: [{ label: "tracker", url: "https://example.com/issues/42" }] },
       overrides: { worktree: true, defaultBranch: "main" },
     });
   });
@@ -80,11 +86,13 @@ describe("spawn composer payload builders", () => {
   it("builds respawn payload without agent unless changed", () => {
     expect(
       buildRespawnSessionPayload(
-        composer({
+        {
           agent: "codex",
+          attachments: [],
           model: "gpt-5.5",
+          prompt: "  Fix auth  ",
           startupAttachmentIds: ["img-1"],
-        }),
+        },
         "claude",
         true,
       ),
@@ -100,13 +108,15 @@ describe("spawn composer payload builders", () => {
   it("builds desk payload with fixed session context and selected model", () => {
     expect(
       buildDeskSpawnPayload(
-        composer({
+        {
           agent: "cursor",
+          attachments: [],
           branch: "helper/auth",
           model: "auto",
           planMode: true,
+          prompt: "  Fix auth  ",
           steps: [{ id: 1, value: " test " }],
-        }),
+        },
         { id: "api-a1", projectId: "api", worktree: true },
       ),
     ).toEqual({
