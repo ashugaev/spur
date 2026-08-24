@@ -68,8 +68,10 @@ export function classifyHostSkillTarget(
 
   if (!existsSync(resolvedTarget)) {
     // Dangling. Never existsSync the target again from here — only the
-    // structure of the link TEXT decides ownership.
-    return basename(dirname(linkText)) === "skills" ? "owned" : "foreign-symlink";
+    // structure of the RESOLVED target decides ownership (never the raw
+    // link text: a relative dangling text like `./spur` or `spur` resolves
+    // to the right directory but has no `skills` component of its own).
+    return basename(dirname(resolvedTarget)) === "skills" ? "owned" : "foreign-symlink";
   }
 
   const skillsDir = dirname(resolvedTarget);
@@ -102,12 +104,21 @@ export function installHostSkills(options?: {
   const outcomes: HostSkillOutcome[] = [];
   const hostRoots = [join(home, ".claude", "skills"), join(home, ".codex", "skills")];
 
-  for (const name of skillNames) {
-    const pkgSkillDir = join(skillsDir, name);
-    for (const root of hostRoots) {
+  for (const root of hostRoots) {
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      for (const name of skillNames) {
+        outcomes.push({ skill: name, dir: join(root, name), status: "error", error: message });
+      }
+      continue;
+    }
+
+    for (const name of skillNames) {
+      const pkgSkillDir = join(skillsDir, name);
       const link = join(root, name);
       try {
-        mkdirSync(root, { recursive: true });
         const classification = classifyHostSkillTarget(link);
 
         if (classification === "absent") {

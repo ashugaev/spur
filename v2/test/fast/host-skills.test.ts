@@ -284,4 +284,17 @@ describe("classifyHostSkillTarget", () => {
     await symlink(outsideDir, link, "dir");
     expect(classifyHostSkillTarget(link)).toBe("foreign-symlink");
   });
+
+  it("classifies a RELATIVE dangling link text as owned — the resolved path decides, not the raw text", async () => {
+    // A relative dangling text like `spur` or `./spur` has no `skills`
+    // component of its own; only the RESOLVED path (which does, because the
+    // link itself lives under a `.../skills/` dir) may decide ownership.
+    const skillsSubdir = join(home, "some-root", "skills");
+    await mkdir(skillsSubdir, { recursive: true });
+    const link = join(skillsSubdir, "spur");
+    // Self-referential relative dangling link: resolves under the same
+    // `skills/` dir but never points at a real path.
+    await symlink("spur", link);
+    expect(classifyHostSkillTarget(link)).toBe("owned");
+  });
 });
