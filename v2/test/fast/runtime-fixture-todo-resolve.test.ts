@@ -1,0 +1,128 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { fakeAgentScript } from "../helpers/runtime.js";
+
+// Regression coverage for the #751 daemon-authoritative-todo fixture race:
+// the fake agent's resolve_initial_todo used to swallow a failed "todo
+// complete" with `|| true`, and Cursor separately wrote an assistant-role
+// transcript record (which classifyCursorJsonlState reads as "waiting") at
+// startup, before resolve_initial_todo ever ran. Both let a runtime test's
+// later `spur complete <session>` 409 with an open Spur ToDo item that the
+// fixture had silently failed, or never gotten a chance, to resolve.
+
+const tempDirs: string[] = [];
+
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+function writeTodoStub(dir: string, mode: "succeed" | "fail"): string {
+  const stubPath = join(dir, "spur-todo-stub.sh");
+  writeFileSync(
+    stubPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  list)
+    printf '{"items":[{"id":"item-1","status":"open"}]}'
+    ;;
+  complete)
+    if [[ "${mode}" == "fail" ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  return stubPath;
+}
+
+function runCursorFixture(args: { todoStubMode: "succeed" | "fail" }): {
+  status: number | null;
+  logText: string;
+  transcriptDir: string;
+} {
+  const home = makeTempDir("spur-fixture-home-");
+  const logDir = makeTempDir("spur-fixture-log-");
+  const cwd = makeTempDir("spur-fixture-cwd-");
+  const scriptPath = join(makeTempDir("spur-fixture-bin-"), "agent.sh");
+  writeFileSync(scriptPath, fakeAgentScript("cursor"), { encoding: "utf8" });
+  chmodSync(scriptPath, 0o755);
+  const todoCommand = writeTodoStub(makeTempDir("spur-fixture-todo-"), args.todoStubMode);
+
+  const result = spawnSync("bash", [scriptPath], {
+    cwd,
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      HOME: home,
+      SPUR_FAKE_AGENT_LOG_DIR: logDir,
+      SPUR_SESSION: "fixture-session",
+      SPUR_TODO_COMMAND: todoCommand,
+    },
+    input: "",
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+
+  const logFile = join(logDir, "fixture-session.log");
+  const logText = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
+  // Mirrors the fixture's own `cursor_project_slug` derivation exactly:
+  // strip leading slashes, drop every dot, then replace each remaining
+  // slash with a hyphen (no run-collapsing, unlike the production
+  // toCursorProjectPath slugifier).
+  const cursorProjectSlug = cwd.replace(/^\/+/, "").replaceAll(".", "").replaceAll("/", "-");
+  const transcriptDir = join(
+    home,
+    ".cursor",
+    "projects",
+    cursorProjectSlug,
+    "agent-transcripts",
+    "chat-fixture-session",
+  );
+
+  return { status: result.status, logText, transcriptDir };
+}
+
+describe("fakeAgentScript resolve_initial_todo (fixture race regression)", () => {
+  afterEach(() => {
+    tempDirs.length = 0;
+  });
+
+  it("completes the seeded todo item and signals waiting once it lands", () => {
+    const { status, transcriptDir } = runCursorFixture({ todoStubMode: "succeed" });
+
+    expect(status).toBe(0);
+    const transcriptFile = join(transcriptDir, "chat-fixture-session.jsonl");
+    expect(existsSync(transcriptFile)).toBe(true);
+    const lines = readFileSync(transcriptFile, "utf8").trim().split("\n");
+    // Exactly one assistant record: the fixture must not also write an
+    // early "ready" record before resolve_initial_todo runs, which used to
+    // let the daemon observe "waiting" before the seeded todo was resolved.
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
+      role: "assistant",
+      message: { content: [{ type: "text", text: "done" }] },
+    });
+  });
+
+  it("fails loudly instead of silently swallowing a todo complete failure", () => {
+    const { status, logText, transcriptDir } = runCursorFixture({ todoStubMode: "fail" });
+
+    expect(status).toBe(1);
+    expect(logText).toContain("resolve_initial_todo: failed to complete seeded todo item item-1");
+    // The script must exit before ever reaching the waiting signal, so no
+    // transcript record — and therefore no "waiting" state — is produced.
+    const transcriptFile = join(transcriptDir, "chat-fixture-session.jsonl");
+    expect(existsSync(transcriptFile)).toBe(false);
+  });
+});

@@ -173,7 +173,7 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(
+export function fakeAgentScript(
   agentName: "claude" | "codex" | "cursor",
   options?: { hupResistant?: boolean },
 ): string {
@@ -418,12 +418,7 @@ fi
 touch_chat_store "$chat_id"
 transcript_dir="$HOME/.cursor/projects/$cursor_project_slug/agent-transcripts/$chat_id"
 mkdir -p "$transcript_dir"
-transcript_file="$transcript_dir/$chat_id.jsonl"
-if [[ "$mode" == "resume" && -f "$transcript_file" ]]; then
-  :
-else
-  printf '{"role":"assistant","message":{"content":[{"type":"text","text":"ready"}]}}\\n' > "$transcript_file"
-fi`;
+transcript_file="$transcript_dir/$chat_id.jsonl"`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
@@ -674,11 +669,28 @@ resolve_initial_todo() {
   if [[ -z "\${SPUR_TODO_COMMAND:-}" ]]; then
     return
   fi
-  local todo_id
+  # The daemon writes the session's todo ledger synchronously before this
+  # script ever runs, so a missing open item here means there is nothing to
+  # resolve (already-completed ledger on --resume), not a race. A found item
+  # that refuses to complete IS a bug: a test that later calls session
+  # complete needs this to have actually landed, so retry it a bounded
+  # number of times and fail loudly (nonzero exit) rather than swallow it -
+  # a silent failure here used to surface downstream as a bare "Request
+  # failed with status 409" with no indication the seeded todo was the cause.
+  local todo_id=""
   todo_id="$(SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
-  if [[ -n "$todo_id" ]]; then
-    SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
+  if [[ -z "$todo_id" ]]; then
+    return
   fi
+  local attempt
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    if SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.1
+  done
+  printf 'resolve_initial_todo: failed to complete seeded todo item %s after retries\n' "$todo_id" >> "$log_file"
+  exit 1
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 printf '%s\n' "${header}"
