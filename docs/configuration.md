@@ -227,9 +227,9 @@ Respawn, handoff, and restore carry the persisted mode forward. A mode renamed o
 
 ## Telegram binding
 
-Chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with an inline picker: sessions from all connected projects grouped by project, each labeled with its session title, plus a back button. `/watch <sessionId>` binds directly. One bot token serves all projects; access stays controlled by that source's `allowedUsers` / `allowedChats`. `/watch@otherbot` is ignored in group chats. Bound messages, and messages that spawn a session, reach the agent with a contract: the requester sees only replies sent with `spur source reply "<message>"`, terminal output is invisible.
+Chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with an inline picker: sessions from all connected projects grouped by project, each labeled with its session title, plus a back button. `/watch <sessionId>` binds directly. A message from an allowed user in a chat with no live bound session auto-spawns an ephemeral `spur-shepherd` session and binds the chat to it — one session per unbound chat — and the session self-destructs when its task is done; see `autoSpawn` below. One bot token serves all projects; access stays controlled by that source's `allowedUsers` / `allowedChats`. `/watch@otherbot` is ignored in group chats. Bound messages, and messages that spawn a session, reach the agent with a contract: the requester sees only replies sent with `spur source reply "<message>"`, terminal output is invisible.
 
-Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` send a farewell and close the topic. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
+Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` always send a farewell and drop the binding — the forum topic closes too, unless the session was spawned with `selfDestruct` enabled, which keeps it open for the next request. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
 
 ## Event log retention
 
@@ -293,6 +293,11 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.token`: required for `telegram`; supports `${ENV_VAR}` from the project `.env` or process env.
 - `projects.<id>.sources.<sourceId>.allowedUsers`: required non-empty Telegram user id allowlist.
 - `projects.<id>.sources.<sourceId>.allowedChats`: optional Telegram chat id allowlist; when omitted, any `allowedUsers` member can reach the bot from any shared chat.
+- `projects.<id>.sources.<sourceId>.autoSpawn.enabled`: optional boolean, default `true`. `false` restores the dead-end "No Spur session bound here." reply for an unbound chat.
+- `projects.<id>.sources.<sourceId>.autoSpawn.project`: optional, default `spur-shepherd`.
+- `projects.<id>.sources.<sourceId>.autoSpawn.agent`: optional `claude|codex|cursor|opencode`, default `opencode`.
+- `projects.<id>.sources.<sourceId>.autoSpawn.model`: optional; defaults to `google/gemini-3.7-flash` only when `agent` is omitted. Setting `model` without `agent` throws. Forwarded verbatim — an invalid model surfaces as a `Spawn failed: <cause>` reply, never a silent fallback.
+- `projects.<id>.sources.<sourceId>.autoSpawn.selfDestruct`: optional, default `{enabled: true}`. Same shape as a trigger's `selfDestruct`.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn` | `send`: exactly one required; `spawn` accepts object form or a flat block array.
