@@ -478,6 +478,17 @@ $extra"
     printf '%s\\n' "$extra" >> "$log_file"
   done
   ${claudeEmitBuffered}
+  # The fake shell drains a multiline paste for 500ms so its final line arrives
+  # before Spur's submit Enter. A fast follow-up runtime control can land in
+  # that artificial drain window even though real Claude keeps separate Enter
+  # submissions separate. Re-split reserved controls and emit their exact ack.
+  case "$full_msg" in
+    *$'\n'exit-now|*$'\n'show-waiting-menu|*$'\n'simulate-work|*$'\n'slow-tool-result)
+      line="\${full_msg##*$'\n'}"
+      full_msg="$line"
+      ${claudeEmitBuffered}
+      ;;
+  esac
   case "$line" in
     show-waiting-menu)
       ${signalNeedsInput}

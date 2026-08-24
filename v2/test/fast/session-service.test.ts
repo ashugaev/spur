@@ -5297,6 +5297,41 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
+  it("keeps claude submit acknowledgment enabled by the codex-only skip override", async () => {
+    const previousSkipOverride = process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+    process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"] = "1";
+    const claudeScanMock = vi.fn().mockResolvedValue({
+      found: true,
+      lastScannedFile: "/home/test/.claude/projects/api-1/abc.jsonl",
+    });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: claudeScanMock } : null,
+    );
+
+    try {
+      const service = await createDisposedSessionService();
+
+      await sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "claude",
+          launchCommand: "claude --dangerously-skip-permissions",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      );
+    } finally {
+      if (previousSkipOverride === undefined) {
+        delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+      } else {
+        process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"] = previousSkipOverride;
+      }
+    }
+
+    expect(claudeScanMock).toHaveBeenCalledWith("follow up");
+  });
+
   it("retries claude submit with a bare Enter and throws when the ack never arrives", async () => {
     const claudeScanMock = vi
       .fn()
