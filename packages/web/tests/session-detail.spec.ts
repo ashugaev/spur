@@ -1206,7 +1206,7 @@ test.describe("S2: Actions bar", () => {
     const modelButton = page.getByRole("button", { name: "Desk spawn model" });
     await expect(modelButton).toBeVisible();
     await modelButton.click();
-    await page.getByRole("menuitem", { name: /^Opus opus$/ }).click();
+    await page.getByRole("menuitem", { name: /^Opus(?:\(catalog default\))? opus$/ }).click();
     await expect(page.getByRole("textbox", { name: "branch name" })).toHaveValue(
       "feature/current-session",
     );

@@ -107,9 +107,13 @@ test.describe("D7c: Spawn modal model picker", () => {
     const stored = await page.evaluate(() => window.localStorage.getItem("spur:model-favorites"));
     expect(stored ?? "").toContain("claude:claude-haiku");
 
-    // Reload and reopen — the favorite stays pinned to the top, and is now
-    // also what the control preselects (rung 2, ahead of the catalog's own
-    // default).
+    // Keep this scenario about favorite persistence. The spawn draft has its
+    // own persistence coverage and can otherwise race the reload debounce by
+    // restoring the model that was selected before Haiku was favorited.
+    await page.addInitScript(() => window.localStorage.removeItem("spur:spawn-draft"));
+
+    // Reload and reopen — the favorite stays pinned to the top and is what
+    // an unresolved control preselects (rung 2).
     await page.reload();
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("button", { name: "Spawn model" })).toHaveText(/Claude Haiku/);
