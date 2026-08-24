@@ -8266,10 +8266,7 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(
-              runningRecord.agentSessionId,
-              spawnInitialMessage,
-            )))
+            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -9267,10 +9264,7 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(
-              runningRecord.agentSessionId,
-              spawnInitialMessage,
-            )))
+            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
