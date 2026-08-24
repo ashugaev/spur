@@ -1720,7 +1720,11 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoOpenWorkError) {
-        sendJson(response, error.statusCode, { code: error.code, sessions: error.sessions });
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          error: error.message,
+          sessions: error.sessions,
+        });
         return;
       }
       if (error instanceof InvalidTodoRequestError) {

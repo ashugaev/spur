@@ -51,13 +51,31 @@ export class TodoTransitionConflictError extends Error {
   }
 }
 
+function describeTodoOpenWork(
+  sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>,
+): string {
+  const detail = sessions
+    .map((entry) => {
+      const parts: string[] = [];
+      if (entry.openItemIds.length > 0) {
+        parts.push(`open: ${entry.openItemIds.join(", ")}`);
+      }
+      if (entry.heldItemIds.length > 0) {
+        parts.push(`held: ${entry.heldItemIds.join(", ")}`);
+      }
+      return `${entry.sessionId} (${parts.join("; ")})`;
+    })
+    .join(", ");
+  return `Resolve or explicitly override unfinished Spur ToDo items before completion: ${detail}`;
+}
+
 export class TodoOpenWorkError extends Error {
   readonly statusCode = 409;
   readonly code = "todo_open_work";
   constructor(
     readonly sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>,
   ) {
-    super("Resolve or explicitly override unfinished Spur ToDo items before completion");
+    super(describeTodoOpenWork(sessions));
   }
 }
 
