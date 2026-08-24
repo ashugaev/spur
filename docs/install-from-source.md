@@ -18,6 +18,7 @@ Any proxy that forwards `/` covers `/ws` (same origin) — no extra port or env 
 ## Prerequisites
 
 - Host packages: `git tmux nginx gh curl`.
+- A C/C++ toolchain: `build-essential make g++` (Debian/Ubuntu) or equivalent. `pnpm install` builds `node-pty` from source; without a toolchain that build fails silently and the web terminal has no PTY — install completes, but the terminal doesn't work.
 - Node 20+.
 - pnpm pinned to `9.15.4` via corepack. This exact version matters: pnpm 11+ uses vm dynamic-import semantics incompatible with Node 24 and crashes on startup with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`.
 - GitHub SSH access on the VM (for the clone).
@@ -142,7 +143,7 @@ For a private-bound deploy, also probe `http://<private-ip>:5555` from another d
 
 ## Release + auto-deploy
 
-Release: merge to `main`, SSH in, `pnpm main:deploy`, re-verify. A failed deploy doesn't advance the SHA stamp — the next run retries the same commit; don't delete the stamp to force it.
+Release: merge to `main`, SSH in, `pnpm main:deploy`, re-verify. A failed deploy doesn't advance the SHA stamp — the next run retries the same commit; don't delete the stamp to force it. A failed deploy restarts `spur-web` instead of leaving it down. That restarted `spur-web` may be serving a half-written build — the next run's chunk-consistency check catches it before advancing the stamp.
 
 Optional hourly auto-release from the managed clone:
 
