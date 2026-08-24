@@ -3106,6 +3106,16 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
+    // Wait for the fixture to actually resolve the session's seeded Spur
+    // ToDo item before completing — spawn returns as soon as the tmux ready
+    // marker is visible, which lands before resolve_initial_todo runs, so
+    // completing immediately races the fixture's own todo-resolution CLI
+    // calls and can 409 on an open item that hasn't landed yet.
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
+
     await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
     expect(existsSync(artifactDir)).toBe(false);
 
