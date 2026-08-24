@@ -38,6 +38,12 @@ class FakeBot {
     if (!handler) throw new Error("missing callback_query:data handler");
     await handler(ctx);
   }
+
+  async emitVoice(ctx: unknown): Promise<void> {
+    const handler = this.handlers.get("message:voice");
+    if (!handler) throw new Error("missing message:voice handler");
+    await handler(ctx);
+  }
 }
 
 vi.mock("grammy", () => ({
@@ -70,6 +76,24 @@ function telegramContext(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function telegramVoiceContext(overrides: Record<string, unknown> = {}) {
+  const { updateId, getFile, ...messageOverrides } = overrides;
+  return {
+    ...(typeof updateId === "number" ? { update: { update_id: updateId } } : {}),
+    message: {
+      message_id: 10,
+      message_thread_id: 22,
+      chat: { id: -1001 },
+      from: { id: 123, username: "alek" },
+      voice: { file_id: "file-1", file_unique_id: "unique-1", duration: 3 },
+      ...messageOverrides,
+    },
+    reply: vi.fn().mockResolvedValue({ message_id: 55 }),
+    api: { editMessageText: vi.fn().mockResolvedValue(undefined) },
+    getFile: getFile ?? vi.fn().mockResolvedValue({ file_path: "voice/file_1.oga" }),
+  };
+}
+
 async function startSource(
   dataDir: string,
   emit = vi.fn(),
@@ -78,6 +102,7 @@ async function startSource(
     listSessions?: ReturnType<typeof vi.fn>;
     stop?: ReturnType<typeof vi.fn>;
     task?: ReturnType<typeof vi.fn>;
+    webBaseUrl?: string | null;
   } = {},
 ) {
   const listSessions =
@@ -127,6 +152,7 @@ async function startSource(
     logger,
     listSessions,
     spawnSession,
+    webBaseUrl: overrides.webBaseUrl !== undefined ? overrides.webBaseUrl : "http://127.0.0.1:5555",
   });
   return { bot: botInstances[0], emit, handle, listSessions, logger, spawnSession, stop, task };
 }
@@ -1142,5 +1168,363 @@ describe("telegramSourceModule", () => {
     );
     const events = readEventLog(dataDir);
     expect(events.some((entry) => entry.event === "source.telegram.auth_failed")).toBe(true);
+  });
+});
+
+function mockTranscribeFetch(text: string): ReturnType<typeof vi.fn> {
+  return vi.fn().mockImplementation((url: unknown) => {
+    if (typeof url === "string" && url.includes("api.telegram.org")) {
+      return Promise.resolve({ ok: true, arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ text }) });
+  });
+}
+
+describe("telegramSourceModule voice notes", () => {
+  beforeEach(() => {
+    botInstances.splice(0);
+    runMock.mockReset();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it("A1: emits telegram:message with the transcript as text in a bound chat", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    await bot.emitVoice(telegramVoiceContext());
+
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    expect(emit).toHaveBeenCalledWith("telegram:message", {
+      sessionId: "api-1",
+      chatId: -1001,
+      messageThreadId: 22,
+      userId: 123,
+      username: "alek",
+      messageId: 10,
+      text: "fix the sidecar",
+    });
+  });
+
+  it("A2: spawns via wrapTelegramSpawnPrompt when no binding exists", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, spawnSession } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    spawnSession.mockResolvedValue({
+      id: "api-9",
+      project: "api",
+      agent: "codex",
+      state: "waiting",
+    });
+    await bot.emitText(telegramContext({ text: "/spawn codex" }));
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    await bot.emitVoice(telegramVoiceContext());
+
+    await vi.waitFor(() => expect(spawnSession).toHaveBeenCalled());
+    expect(spawnSession).toHaveBeenCalledWith({
+      project: "api",
+      agent: "codex",
+      prompt: wrapTelegramSpawnPrompt("fix the sidecar"),
+    });
+  });
+
+  it("A3: a non-2xx transcribe response replies with failure and emits nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit, spawnSession } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: unknown) => {
+        if (typeof url === "string" && url.includes("api.telegram.org")) {
+          return Promise.resolve({
+            ok: true,
+            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
+          });
+        }
+        return Promise.resolve({ ok: false, status: 502 });
+      }),
+    );
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
+
+    await vi.waitFor(() =>
+      expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
+        -1001,
+        55,
+        expect.stringContaining("Voice transcription failed"),
+      ),
+    );
+    expect(emit).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
+  it("A3: a rejected fetch replies with failure and emits nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit, spawnSession } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
+
+    await vi.waitFor(() =>
+      expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
+        -1001,
+        55,
+        expect.stringContaining("Voice transcription failed: network down"),
+      ),
+    );
+    expect(emit).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
+  it("A4: a repeated update_id performs no download and no emit", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    const fetchMock = mockTranscribeFetch("first take");
+    vi.stubGlobal("fetch", fetchMock);
+    await bot.emitVoice(telegramVoiceContext({ updateId: 11 }));
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
+
+    await bot.emitVoice(telegramVoiceContext({ updateId: 11 }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenCalledTimes(1);
+  });
+
+  it("A5: the handler resolves while the transcribe fetch is still pending", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    let resolveTranscribe: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      resolveTranscribe = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: unknown) => {
+        if (typeof url === "string" && url.includes("api.telegram.org")) {
+          return Promise.resolve({
+            ok: true,
+            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
+          });
+        }
+        return pending.then(() => ({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ text: "later" }),
+        }));
+      }),
+    );
+
+    await bot.emitVoice(telegramVoiceContext());
+    expect(emit).not.toHaveBeenCalled();
+
+    resolveTranscribe?.();
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+  });
+
+  it("A6: a /help transcript emits telegram:message and never sends the help reply", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("/help"));
+    await bot.emitVoice(telegramVoiceContext());
+
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ text: "/help" }),
+    );
+    expect(emit).not.toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ text: expect.stringContaining("Spur Telegram bot") }),
+    );
+  });
+
+  it("A7: an empty transcript replies with failure and emits nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("   "));
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
+
+    await vi.waitFor(() =>
+      expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
+        -1001,
+        55,
+        expect.stringContaining("empty transcript"),
+      ),
+    );
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("A8: an absent webBaseUrl replies unavailable and never fetches", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { webBaseUrl: null });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
+
+    await vi.waitFor(() =>
+      expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
+        -1001,
+        55,
+        "Voice transcription is disabled for this Spur instance.",
+      ),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("A9: posts multipart form with an audio File named voice.ogg", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    const fetchMock = mockTranscribeFetch("fix the sidecar");
+    vi.stubGlobal("fetch", fetchMock);
+    await bot.emitVoice(telegramVoiceContext());
+
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    const transcribeCall = fetchMock.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("/api/runtime/voice/transcribe"),
+    );
+    expect(transcribeCall?.[0]).toBe("http://127.0.0.1:5555/api/runtime/voice/transcribe");
+    const body = (transcribeCall?.[1] as { body: FormData }).body;
+    const audio = body.get("audio") as File;
+    expect(audio.name).toBe("voice.ogg");
+  });
+
+  it("A10: a rejected reply on the failure path logs a redacted warning with no unhandled rejection", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, logger } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    const voiceCtx = telegramVoiceContext();
+    voiceCtx.api.editMessageText.mockRejectedValue(new Error("edit failed"));
+    voiceCtx.reply.mockImplementation((text: string) => {
+      if (text === "Transcribing voice message...") return Promise.resolve({ message_id: 55 });
+      return Promise.reject(new Error("reply failed"));
+    });
+
+    let unhandled = false;
+    const onUnhandled = () => {
+      unhandled = true;
+    };
+    process.once("unhandledRejection", onUnhandled);
+    try {
+      await bot.emitVoice(voiceCtx);
+      await vi.waitFor(() =>
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram voice failed:")),
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toBe(false);
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("A11: a transcription resolving after abort emits nothing, spawns nothing, replies nothing further", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const emit = vi.fn();
+    const spawnSession = vi.fn();
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const task = vi.fn().mockReturnValue(Promise.resolve());
+    runMock.mockReturnValue({ stop, start: vi.fn(), size: vi.fn(), task, isRunning: vi.fn() });
+    const controller = new AbortController();
+    await telegramSourceModule.start({
+      sourceId: "telegram",
+      projectId: "api",
+      dataDir,
+      config: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123] },
+      emit,
+      signal: controller.signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      listSessions,
+      spawnSession,
+      webBaseUrl: "http://127.0.0.1:5555",
+    });
+    const bot = botInstances[0];
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    let resolveTranscribe: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      resolveTranscribe = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: unknown) => {
+        if (typeof url === "string" && url.includes("api.telegram.org")) {
+          return Promise.resolve({
+            ok: true,
+            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
+          });
+        }
+        return pending.then(() => ({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ text: "too late" }),
+        }));
+      }),
+    );
+
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
+    controller.abort();
+    resolveTranscribe?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(emit).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(voiceCtx.api.editMessageText).not.toHaveBeenCalledWith(
+      -1001,
+      55,
+      expect.stringContaining("Heard:"),
+    );
   });
 });
