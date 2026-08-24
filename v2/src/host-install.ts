@@ -4,6 +4,7 @@ import {
   existsSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   statSync,
   unlinkSync,
@@ -25,7 +26,12 @@ import {
   type InstanceConfigReadResult,
 } from "./config.js";
 import { parseDfField } from "./disk-space.js";
-import { installHostSkills, renderHostSkillWarnings } from "./host-skills.js";
+import {
+  classifyHostSkillTarget,
+  installHostSkills,
+  packagedSkillsDir,
+  renderHostSkillWarnings,
+} from "./host-skills.js";
 import { writeStderr } from "./io.js";
 import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
@@ -103,6 +109,68 @@ export function checkOpenCodeExecutable(): HostInstallCheck {
       : {
           fix: "npm install -g --prefix ~/.local opencode-ai, or set SPUR_OPENCODE_BIN to an executable path",
         }),
+  };
+}
+
+// Read-only: classifies every host skill target, never writes. Inert when
+// the running install ships no packaged skills (source checkout / a build
+// that has not run `bundle-skills.sh` yet — see I6). `detail` always names
+// the CURRENT link target per skill/host-dir, including the `ok: true` case,
+// so "my host skill points at a worktree" (see A9) is a one-command
+// discovery via `spur doctor`.
+export function checkHostSkillSymlinks(home: string): HostInstallCheck {
+  const skillsDir = packagedSkillsDir();
+  const inert: HostInstallCheck = {
+    id: "skills-symlinks",
+    ok: true,
+    severity: "info",
+    detail: "skipped — no packaged skills in this install",
+  };
+  if (!existsSync(skillsDir)) {
+    return inert;
+  }
+
+  let skillNames: string[];
+  try {
+    skillNames = readdirSync(skillsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return inert;
+  }
+
+  const details: string[] = [];
+  const fixes: string[] = [];
+  let hasConflict = false;
+
+  for (const name of skillNames) {
+    for (const root of [join(home, ".claude", "skills"), join(home, ".codex", "skills")]) {
+      const link = join(root, name);
+      const classification = classifyHostSkillTarget(link);
+      const currentTarget =
+        classification === "absent"
+          ? "(absent)"
+          : classification === "file" || classification === "directory"
+            ? `(not a symlink, ${classification})`
+            : readlinkSync(link);
+      details.push(`${link}: ${classification} -> ${currentTarget}`);
+      if (
+        classification === "foreign-symlink" ||
+        classification === "file" ||
+        classification === "directory"
+      ) {
+        hasConflict = true;
+        fixes.push(`move or delete ${link}, then run \`spur reinit\``);
+      }
+    }
+  }
+
+  return {
+    id: "skills-symlinks",
+    ok: !hasConflict,
+    severity: "warn",
+    detail: details.join("\n"),
+    ...(fixes.length ? { fix: fixes.join("; ") } : {}),
   };
 }
 
@@ -1332,6 +1400,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkNodeVersion());
   checks.push(checkClaudeOnboarding(home));
   checks.push(checkOpenCodeExecutable());
+  checks.push(checkHostSkillSymlinks(home));
 
   const warnFreeGb =
     instanceConfig.status === "ok"
