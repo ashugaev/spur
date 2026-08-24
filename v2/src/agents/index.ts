@@ -43,7 +43,7 @@ import {
   findOpenCodeSessionId,
   opencodeCommand,
   readOpenCodeConversation,
-  scanOpenCodeExportForMessage,
+  scanOpenCodeForNewUserMessage,
 } from "./opencode.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
@@ -519,9 +519,9 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
       }
       return {
-        async scan(text) {
+        async scan() {
           return {
-            found: await scanOpenCodeExportForMessage(baseline, text),
+            found: await scanOpenCodeForNewUserMessage(baseline),
             lastScannedFile: null,
           };
         },
