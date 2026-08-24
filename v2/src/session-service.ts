@@ -245,6 +245,7 @@ import {
 import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
+  TODO_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
@@ -423,7 +424,17 @@ import {
   type TagDefinition,
   type TranscriptEntry,
   type UpdateSessionSlotsRequest,
+  type TodoActor,
+  type TodoMutationRequest,
+  type TodoProjection,
 } from "./types.js";
+import {
+  ensureTodoLedger,
+  mutateTodo as applyTodoMutation,
+  recordTodoFinishOverride,
+  TodoOpenWorkError,
+  unfinishedTodo,
+} from "./todo.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
 import {
   formatNestedSidecarStartError,
@@ -1331,16 +1342,19 @@ function buildInitialMessage(
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
 ): string {
-  if (!initialMessage.trim()) return "";
-  let base = withSelfDestructInstructions(
-    withSharedMemoryInstructions(
-      withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
-    ),
-    selfDestruct,
-  );
+  let base = initialMessage.trim()
+    ? withSelfDestructInstructions(
+        withSharedMemoryInstructions(
+          withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+        ),
+        selfDestruct,
+      )
+    : "";
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
+  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The initial task already exists. Run \`"$SPUR_TODO_COMMAND" list\` first.\n- Add new requested work with \`"$SPUR_TODO_COMMAND" add --text <text> --reason <reason>\`.\n- Complete, cancel, or hold items with a reason. Human holds must name the required action. Resume held work before continuing.\n- Do not finish or self-destruct with open or held work.`;
+  base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
@@ -1555,6 +1569,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
+    SPUR_TODO_COMMAND: join(args.sessionToolDir, TODO_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -2412,6 +2427,7 @@ export class SessionService {
   // Serializes sendAgentMessage per tmux pane so two trigger batches on one
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
+  private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
 
   constructor(
     configPath?: string,
@@ -4760,6 +4776,9 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
+          if (view.status === "running" && view.state === "waiting") {
+            await this.maybeNudgeTodo(session);
+          }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
           // view.lastActivityAt: that value is the UI-facing max of agent
           // activity AND every routine record write, so gating on it directly
@@ -4850,6 +4869,9 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
+      if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
+    }
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.codexMcpDialogOverrides.delete(sessionId);
@@ -5733,6 +5755,50 @@ export class SessionService {
       });
     } catch (error) {
       this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
+    }
+  }
+
+  private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
+    if (
+      hasQueuedMessages(session) ||
+      session.queuedMessages?.awaitingPrompt === true ||
+      session.pipeline?.status === "running"
+    ) {
+      return;
+    }
+    const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
+    if (Date.now() - lastSuccessful < 60_000) return;
+    try {
+      const projection = ensureTodoLedger(this.config.dataDir, session);
+      const open = projection.items.filter((item) => item.status === "open");
+      const humanHeld = projection.items.filter(
+        (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
+      );
+      let message: string | null = null;
+      if (open.length > 0) {
+        message = `Spur ToDo still has open work:\n${open
+          .map((item) => `- ${item.id}: ${item.text}`)
+          .join(
+            "\n",
+          )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
+      } else if (humanHeld.length > 0) {
+        message = `Spur ToDo needs human input:\n${humanHeld
+          .map((item) => {
+            const blocker = item.latestTransition?.blocker;
+            return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
+          })
+          .join("\n")}\nRequest the required input before continuing.`;
+      }
+      if (!message) return;
+      await this.sendAgentMessage(session, message, { interrupt: false });
+      this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
+    } catch (error) {
+      this.logEvent("session.todo.nudge_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Failed to nudge ${session.id} about Spur ToDo: ${error instanceof Error ? error.message : String(error)}`,
+      });
     }
   }
 
@@ -7943,6 +8009,8 @@ export class SessionService {
         originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
+      ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
+      placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
@@ -8758,6 +8826,8 @@ export class SessionService {
         originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
+      ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
+      placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
@@ -8982,6 +9052,7 @@ export class SessionService {
         updatedAt: nowIso(),
       };
       writeSession(this.config.dataDir, spawnPlaceholder);
+      ensureTodoLedger(this.config.dataDir, spawnPlaceholder, "spawn");
       prepared.placeholder = spawnPlaceholder;
 
       stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
@@ -10346,11 +10417,31 @@ export class SessionService {
   async complete(
     sessionId: string,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean },
+    options?: { retainInList?: boolean; todoActor?: TodoActor },
   ): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.applyManualStatusLocked(sessionId, "completed", request, options),
     );
+  }
+
+  async readTodo(sessionId: string): Promise<TodoProjection> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      return ensureTodoLedger(this.config.dataDir, session);
+    });
+  }
+
+  async mutateTodo(
+    sessionId: string,
+    request: TodoMutationRequest,
+    actor: TodoActor,
+  ): Promise<TodoProjection> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      return applyTodoMutation(this.config.dataDir, session, request, actor);
+    });
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
@@ -10368,6 +10459,7 @@ export class SessionService {
   async completeDesk(
     sessionId: string,
     request: CompleteSessionRequest = {},
+    options?: { todoActor?: TodoActor },
   ): Promise<CompleteDeskResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -10375,20 +10467,37 @@ export class SessionService {
     }
     const candidates = this.listDeskSessions(session);
 
-    const completedIds: string[] = [];
-    for (const candidate of candidates) {
-      if (candidate.status === "completed") {
-        continue;
-      }
-      await this.withWorkspaceLifecycleLocks(candidate.id, () =>
-        this.applyManualStatusLocked(candidate.id, "completed", request),
-      );
-      completedIds.push(candidate.id);
-    }
-
-    return {
-      completedIds,
-    };
+    return this.withSessionLifecycleLocks(
+      candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
+      async () => {
+        const blocked = candidates.flatMap((candidate) => {
+          const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
+          if (isTerminalSessionStatus(current.status)) return [];
+          const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, current));
+          return unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0
+            ? [{ sessionId: candidate.id, ...unfinished }]
+            : [];
+        });
+        if (
+          blocked.length > 0 &&
+          (!request.todoOverrideReason?.trim() ||
+            !options?.todoActor ||
+            options.todoActor.kind !== "human")
+        ) {
+          throw new TodoOpenWorkError(blocked);
+        }
+        const completedIds: string[] = [];
+        for (const candidate of candidates) {
+          const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
+          if (isTerminalSessionStatus(current.status)) continue;
+          await this.applyManualStatusLocked(candidate.id, "completed", request, {
+            ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+          });
+          completedIds.push(candidate.id);
+        }
+        return { completedIds };
+      },
+    );
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -11013,13 +11122,13 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request?: CompleteSessionRequest,
-    options?: { retainInList?: boolean; skipEnrichment?: false },
+    options?: { retainInList?: boolean; skipEnrichment?: false; todoActor?: TodoActor },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean; skipEnrichment?: boolean },
+    options?: { retainInList?: boolean; skipEnrichment?: boolean; todoActor?: TodoActor },
   ): Promise<SessionView | void> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
@@ -11071,6 +11180,23 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
+      if (targetStatus === "completed") {
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const unfinished = unfinishedTodo(projection);
+        if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
+          const overrideReason = request.todoOverrideReason?.trim();
+          if (!overrideReason || !options?.todoActor || options.todoActor.kind !== "human") {
+            throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
+          }
+          recordTodoFinishOverride(
+            this.config.dataDir,
+            sessionId,
+            overrideReason,
+            options.todoActor,
+            projection,
+          );
+        }
+      }
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
@@ -12709,6 +12835,15 @@ export class SessionService {
   }
 
   async handoff(sessionId: string, request: HandoffSessionRequest): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.handoffLocked(sessionId, request),
+    );
+  }
+
+  private async handoffLocked(
+    sessionId: string,
+    request: HandoffSessionRequest,
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -12725,6 +12860,10 @@ export class SessionService {
     }
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
+    }
+    const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, session));
+    if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
+      throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
     }
     // Gate before any teardown below. The source session is still on-disk as
     // running/spawning here, so a denial leaves it fully untouched — no kill,
@@ -12851,21 +12990,12 @@ export class SessionService {
         }
       }
 
-      try {
-        await this.complete(
-          session.id,
-          { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-          { retainInList: true },
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logEvent("session.handoff.source_complete_failed", {
-          level: "warn",
-          sessionId,
-          projectId: session.project,
-          message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
-        });
-      }
+      await this.applyManualStatusLocked(
+        session.id,
+        "completed",
+        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+        { retainInList: true },
+      );
 
       return spawned;
     } finally {

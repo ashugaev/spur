@@ -13,6 +13,13 @@
 #   -> prints an HTML body. When $SPUR_DEPLOY_HTML_CHUNKS is set, the body
 #      embeds one <script src="<ref>"> per whitespace-separated ref so the
 #      script's grep finds /_next/static refs; otherwise a body with no refs.
+#      When $SPUR_DEPLOY_HTML_ESCAPED_CHUNKS is set (independent of the above),
+#      the body also embeds each ref in the prod RSC flight escape shape
+#      (`\"href\":\"<ref>\",\"precedence\"`), reproducing the double-escaped
+#      quotes that a real Next 15 payload emits.
+#      When $SPUR_DEPLOY_HTML_BUILD_ID is set, the body also embeds it in the
+#      RSC flight payload's build-id field (`\"b\":\"<id>\"`), reproducing the
+#      shape main-deploy.sh's build-id diagnostic extracts.
 set -euo pipefail
 
 state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
@@ -22,7 +29,14 @@ web_serving() {
   if [[ -f "$state" ]]; then
     last=$(grep -E ' spur-web\.service$' "$state" | tail -n1 | cut -d' ' -f1) || true
   fi
-  [[ "$last" == "start" || "$last" == "restart" ]]
+  [[ "$last" == "start" || "$last" == "restart" ]] || return 1
+  if [[ -n "${SPUR_DEPLOY_COLD_START_POLLS:-}" ]]; then
+    local counter_file="$state.cold_polls" count=0
+    [[ -f "$counter_file" ]] && count=$(<"$counter_file")
+    [[ "$count" -ge "$SPUR_DEPLOY_COLD_START_POLLS" ]]
+    return
+  fi
+  return 0
 }
 
 want_code=0
@@ -48,6 +62,16 @@ if [[ -n "${SPUR_DEPLOY_HTML_CHUNKS:-}" ]]; then
   for ref in ${SPUR_DEPLOY_HTML_CHUNKS}; do
     printf '<script src="%s"></script>' "$ref"
   done
+fi
+if [[ -n "${SPUR_DEPLOY_HTML_ESCAPED_CHUNKS:-}" ]]; then
+  for ref in ${SPUR_DEPLOY_HTML_ESCAPED_CHUNKS}; do
+    printf '<script>self.__next_f.push([1,"HL[\\"%s\\",\\"font\\",{\\"cross...' "$ref"
+    printf '\\"href\\":\\"%s\\",\\"precedence\\":\\"next\\"..."])</script>' "$ref"
+  done
+fi
+if [[ -n "${SPUR_DEPLOY_HTML_BUILD_ID:-}" ]]; then
+  printf '<script>self.__next_f.push([1,"0:{\\"b\\":\\"%s\\",\\"c\\":..."])</script>' \
+    "$SPUR_DEPLOY_HTML_BUILD_ID"
 fi
 printf '</body></html>'
 exit 0

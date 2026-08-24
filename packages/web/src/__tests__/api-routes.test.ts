@@ -66,6 +66,7 @@ import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
+import { GET as getSessionTodo } from "@/app/api/sessions/[id]/todo/route";
 import { GET as getArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
@@ -275,6 +276,42 @@ describe("Spur web API routes", () => {
     });
 
     expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
+  });
+
+  it("GET /api/sessions/:id/todo preserves typed daemon errors", async () => {
+    const payload = {
+      code: "todo_ledger_corrupt",
+      sessionId: "my/session 1",
+      error: "Ledger truncated",
+      line: 2,
+    };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(payload), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const response = await getSessionTodo(new Request("http://localhost"), {
+      params: Promise.resolve({ id: "my/session 1" }),
+    });
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual(payload);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201/todo");
+  });
+
+  it("GET /api/sessions/:id/todo rejects malformed successful daemon payloads", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ status: "resolved", items: [] }), { status: 200 }),
+    );
+
+    const response = await getSessionTodo(new Request("http://localhost"), {
+      params: Promise.resolve({ id: "api-1" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "Invalid ToDo response from Spur daemon",
+    });
   });
 
   // ── GET /api/sessions/:id/artifacts/:artifactId ────────────────────────
@@ -1079,6 +1116,25 @@ describe("Spur web API routes", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ scope: "desk" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/complete trims and forwards ToDo override reason", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture()), { status: 200 }),
+    );
+    await completeSession(
+      new NextRequest("http://localhost/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ todoOverrideReason: "  Operator accepted risk  " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({
+        body: JSON.stringify({ todoOverrideReason: "Operator accepted risk" }),
       }),
     );
   });

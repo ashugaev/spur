@@ -882,6 +882,8 @@ export interface SessionRecord {
   serverErrorAt?: string;
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+  /** Presence distinguishes initialized ledgers from pre-ToDo records. */
+  todoLedgerVersion?: 1;
 }
 
 // Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites
@@ -1098,7 +1100,93 @@ export interface CompleteSessionRequest {
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
   skipRuntimeTeardown?: boolean;
+  todoOverrideReason?: string;
 }
+
+export type TodoActor =
+  | { kind: "agent"; agent: AgentName; sessionId: string }
+  | { kind: "human"; origin: "cli" | "ui" }
+  | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
+
+export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
+
+interface TodoEventBase {
+  version: 1;
+  eventId: string;
+  sessionId: string;
+  at: string;
+  actor: TodoActor;
+}
+
+export type TodoEvent =
+  | (TodoEventBase & {
+      type: "item_added";
+      itemId: string;
+      text: string;
+      reason: string;
+    })
+  | (TodoEventBase & {
+      type: "item_completed" | "item_cancelled";
+      itemId: string;
+      reason: string;
+    })
+  | (TodoEventBase & {
+      type: "item_held";
+      itemId: string;
+      reason: string;
+      blocker: TodoBlocker;
+    })
+  | (TodoEventBase & {
+      type: "item_resumed";
+      itemId: string;
+    })
+  | (TodoEventBase & {
+      type: "finish_override_recorded";
+      reason: string;
+      unfinishedItemIds: string[];
+    });
+
+export interface TodoItemProjection {
+  id: string;
+  text: string;
+  status: "open" | "held" | "completed" | "cancelled";
+  added: { reason: string; actor: TodoActor; at: string };
+  latestTransition?: {
+    type: "completed" | "cancelled" | "held" | "resumed";
+    reason?: string;
+    blocker?: TodoBlocker;
+    actor: TodoActor;
+    at: string;
+  };
+  history: TodoEvent[];
+}
+
+export interface TodoProjection {
+  revision: string;
+  status: "active" | "held" | "resolved";
+  counts: {
+    total: number;
+    open: number;
+    held: number;
+    completed: number;
+    cancelled: number;
+  };
+  items: TodoItemProjection[];
+  finishOverrides: TodoEvent[];
+}
+
+export type TodoMutationRequest =
+  | { action: "add"; text: string; reason: string }
+  | { action: "complete"; itemId: string; reason: string }
+  | { action: "cancel"; itemId: string; reason: string }
+  | {
+      action: "hold";
+      itemId: string;
+      reason: string;
+      blocker: "external" | "human";
+      requiredHumanAction?: string;
+    }
+  | { action: "resume"; itemId: string };
 
 export interface KillSessionRequest {
   force?: boolean;

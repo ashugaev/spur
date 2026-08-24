@@ -18,8 +18,8 @@ WHAT SPUR IS
 INTERFACES
 
   CLI: `spur --help`, then `spur <command> --help`.
-  `$SPUR_SESSION_TOOL_DIR` holds `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set.
-  Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
+  `$SPUR_SESSION_TOOL_DIR` holds `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set.
+  Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
 
 SAFETY
 

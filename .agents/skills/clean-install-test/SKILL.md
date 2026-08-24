@@ -1,6 +1,6 @@
 ---
 name: clean-install-test
-description: Clean-room test of the Spur server install by planting two coding agents — cursor-agent and Claude Code — on a persistent cloud VM that gets reset to a pre-install state each run; the harness never creates or deletes a VM. Cron-safe — runs end to end from the skill name alone, opens a PR for any doc fix, reports in-session. Reset the box over plain SSH, plant both agents by copying the operator's credentials (itest-only shortcut), run each on the README Install block verbatim, capture the transcripts, turn friction into doc fixes, verify services, compare the two agents.
+description: Clean-room test of the Spur server install by planting two coding agents — cursor-agent and Claude Code — on a persistent cloud VM that gets reset to a pre-install state each run; the harness never creates or deletes a VM. Cron-safe — runs end to end from the skill name alone, opens a PR for any doc fix, reports in-session. Reset the box over plain SSH, plant both agents by copying the operator's credentials (itest-only shortcut), run each on the README Install block verbatim, capture the transcripts, turn friction into doc fixes, verify services, compare the two agents. Same box owns the source-install deploy path — use on any change to `scripts/main-deploy.sh`, `deploy/*.service`, or that deploy path, and to verify a deploy end to end on the itest VM.
 ---
 
 CLEAN INSTALL TEST
@@ -12,8 +12,8 @@ Runs with no prompt beyond the skill name and no human present — see AUTONOMOU
 GROUND RULES
 
   - Never create a VM. Never delete a VM. One box stays up permanently; reset it in place before each run. Lifecycle: read the recipe -> reset the box -> plant both agents -> run the test on each -> analyze -> verify services -> evolve docs -> report. Provisioning a replacement box is a one-time exception on the user's explicit instruction only, never part of this cycle — see APPENDIX at the end.
-  - Ubuntu 24.04 LTS. e2-small is the floor machine, not e2-micro: the planted agent runs ON the box and competes with the install for CPU. e2-micro wedged mid-run on a repeat test — CPU credit exhaustion, not RAM (peaked 686 MB of 955 MB on the pass run) — sshd stopped answering, serial console showed `systemd-networkd: Could not set DHCPv4 address: Connection timed out`, a stop/start did not recover it within 5 min. npm bundle ships the web UI prebuilt, no on-box build. Never open app ports to the internet — default firewall leaves only SSH reachable, leave it.
-  - Never stop the box. It stays up, so its ephemeral external IP holds and SSH keeps working with no cloud CLI. A stop/start reassigns the IP and is the one thing that forces a cloud-CLI round trip to re-fetch it — so don't. A reserved static IP would remove even that risk; not set up yet, the attempt failed on expired gcloud auth.
+  - Ubuntu 24.04 LTS. e2-small is the floor machine, not e2-micro: the planted agent runs ON the box and competes with the install for CPU. e2-micro wedged mid-run on a repeat test — CPU credit exhaustion, not RAM (peaked 686 MB of 955 MB on the pass run) — sshd stopped answering, serial console showed `systemd-networkd: Could not set DHCPv4 address: Connection timed out`, a stop/start did not recover it within 5 min. Resized to e2-small 2026-08-23: 1961 MB RAM, 2 vCPU. npm bundle ships the web UI prebuilt, no on-box build. The source-install mode below runs a full `pnpm install` plus a Next build on the box — that path sets the floor. Never open app ports to the internet — default firewall leaves only SSH reachable, leave it.
+  - The external IP is a reserved static address, reserved 2026-08-23. Stop/start keeps it, so a resize or a recovery stop/start is allowed. Never release the address reservation.
   - No hard hacking: a planted agent never bypasses an identity/auth step; lacking the user's own account it records a TODO and moves on — never hint it past friction, fix the doc instead. Copying credentials onto the VM (step 3) is an ITEST-ONLY harness shortcut for an unattended run: never outside itest, never between real hosts. Secrets and credentials go to the VM only, piped over SSH stdin, never echoed to logs or chat.
   - A run that finds zero friction is a pass. Report it and stop — never invent a doc edit to justify the cycle.
 
@@ -24,6 +24,12 @@ GROUND RULES
 1 CONNECT (CLOUD-CLI-INDEPENDENT)
 
   ssh -i <keypath> -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <user>@<IP> '<cmd>'
+
+The box's name and IP live only in the host-local recipe. That entry is a cache; the cloud is truth. SSH does not answer: the box is not wedged and a replacement is not the fix. Re-verify against the cloud first, then reconcile the recipe:
+
+  gcloud compute instances list --filter='name~itest' --format='value(name,status,EXTERNAL_IP)'
+
+Measured 2026-08-23: the recipe named an instance absent from the project, and filed the live box — 6 days uptime, different IP — under a "dead box, awaiting deletion" heading. Three SSH attempts at a 30s connect timeout all timed out. Reading the recipe alone points at bootstrapping a second VM for nothing.
 
 2 RESET THE BOX (EVERY RUN)
 
@@ -114,6 +120,24 @@ For each real friction, edit the install doc minimally, then reset (step 2) and 
 8 REPORT
 
 Per agent: single-shot or not, each service check pass/fail, duration, friction hit, final user TODO. Then one friction list deduplicated across both agents — friction only one agent hits is still friction, the weaker agent is the bar, fix the doc for both. Write the friction log to `$SPUR_SESSION_ARTIFACTS_DIR`.
+
+SOURCE-INSTALL DEPLOY MODE
+
+Gate: a change to `scripts/main-deploy.sh`, `deploy/*.service`, or the source-install deploy path ships only after this mode passes on the box. No merge without it.
+
+Second use of the same box: run `scripts/main-deploy.sh` end to end against real systemd. The hermetic `tests/deploy` suite stubs `systemctl`, `curl`, `ss`, and `pnpm` — it proves nothing about real systemd, real startup timing, or a real Next build. Verified means the positive and the negative case below both pass. Planted agents play no part: skip steps 3-5, keep steps 2 and 6.
+
+  1  Reset in place (step 2). A box carrying the previous run's units and `.next` proves nothing.
+  2  Install node 22 and pnpm on the tested PATH. Create `/etc/spur/daemon.env` — main-deploy exits 1 without it. Passwordless sudo required; the script installs units with `sudo tee`.
+  3  `main-deploy.sh` resets its clone to `origin/main` every run, so `main` must BE the branch under test. Serve it from a local bare mirror:
+
+     git clone --bare https://github.com/<owner>/spur.git ~/spur-mirror
+     git -C ~/spur-mirror fetch origin '+refs/heads/<branch>:refs/heads/main'
+     git clone ~/spur-mirror ~/spur
+     cd ~/spur && pnpm main:deploy
+
+  4  Positive case: script exits 0, `spur-daemon.service` and `spur-web.service` both active, web answers 200 on 127.0.0.1:3012 (source-install port, not the npm path's 5555), and the run prints no `missing chunk` or `serving stale chunks` line.
+  5  Negative case: re-run and SIGTERM the script mid-build, then assert `spur-web.service` is still active — the exit trap restarts it.
 
 AUTONOMOUS MODE
 

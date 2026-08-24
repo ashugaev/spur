@@ -43,6 +43,8 @@ import { SendIcon } from "@/components/icons/SendIcon";
 import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { SessionTodo } from "@/components/SessionTodo";
+import { TodoOverrideDialog } from "@/components/TodoOverrideDialog";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
@@ -1597,6 +1599,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
+  const [todoOverride, setTodoOverride] = useState<{
+    body?: Record<string, unknown>;
+    openCount: number;
+    heldCount: number;
+  } | null>(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
     action: "complete" | "kill";
     body?: Record<string, unknown>;
@@ -1915,6 +1922,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       const payload = await readResponsePayload(response);
       if (!response.ok) {
+        if (
+          action === "complete" &&
+          payload &&
+          typeof payload === "object" &&
+          "code" in payload &&
+          (payload as { code?: unknown }).code === "todo_open_work" &&
+          "sessions" in payload &&
+          Array.isArray((payload as { sessions?: unknown }).sessions)
+        ) {
+          const sessions = (
+            payload as { sessions: Array<{ openItemIds?: unknown; heldItemIds?: unknown }> }
+          ).sessions;
+          setTodoOverride({
+            body,
+            openCount: sessions.reduce(
+              (count, entry) =>
+                count + (Array.isArray(entry.openItemIds) ? entry.openItemIds.length : 0),
+              0,
+            ),
+            heldCount: sessions.reduce(
+              (count, entry) =>
+                count + (Array.isArray(entry.heldItemIds) ? entry.heldItemIds.length : 0),
+              0,
+            ),
+          });
+          return false;
+        }
         if (
           (action === "complete" || action === "kill") &&
           isOpenPrActionRequiredPayload(payload)
@@ -2959,6 +2993,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {/* Content */}
           <div className="mt-4 grid gap-4 [&>*]:min-w-0 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
             <div className="space-y-4">
+              <SessionTodo sessionId={session.id} />
               {/* Conversation dialog - all agents */}
               <ConversationView
                 entries={conversation?.entries ?? []}
@@ -3594,6 +3629,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
+            />
+          ) : null}
+          {todoOverride ? (
+            <TodoOverrideDialog
+              openCount={todoOverride.openCount}
+              heldCount={todoOverride.heldCount}
+              busy={busyAction === "complete"}
+              onCancel={() => setTodoOverride(null)}
+              onSubmit={(reason) => {
+                const body = { ...(todoOverride.body ?? {}), todoOverrideReason: reason };
+                setTodoOverride(null);
+                void handleAction("complete", body);
+              }}
             />
           ) : null}
           {prCheckUnavailable ? (
