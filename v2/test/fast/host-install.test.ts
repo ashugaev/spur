@@ -897,6 +897,19 @@ describe("checkHostSkillSymlinks", () => {
     expect(check.fix).toContain("spur reinit");
   });
 
+  it("T10 degrades one unreadable target to an 'unreadable' line, never throws, never flips ok", async () => {
+    // Reviewer repro: a file where a host agent dir's PARENT should be a
+    // directory makes lstat on the skill path itself throw ENOTDIR/ENOENT
+    // variants — this must never escape and kill the other ~60 checks.
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(join(home, ".claude", "skills"), "not a directory");
+
+    expect(() => checkHostSkillSymlinks(home)).not.toThrow();
+    const check = checkHostSkillSymlinks(home);
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain("unreadable");
+  });
+
   it("T10 is ok with an empty home, naming the current (absent) target", async () => {
     const check = checkHostSkillSymlinks(home);
     expect(check.ok).toBe(true);

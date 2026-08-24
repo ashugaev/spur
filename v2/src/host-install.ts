@@ -146,21 +146,31 @@ export function checkHostSkillSymlinks(home: string): HostInstallCheck {
   for (const name of skillNames) {
     for (const root of [join(home, ".claude", "skills"), join(home, ".codex", "skills")]) {
       const link = join(root, name);
-      const classification = classifyHostSkillTarget(link);
-      const currentTarget =
-        classification === "absent"
-          ? "(absent)"
-          : classification === "file" || classification === "directory"
-            ? `(not a symlink, ${classification})`
-            : readlinkSync(link);
-      details.push(`${link}: ${classification} -> ${currentTarget}`);
-      if (
-        classification === "foreign-symlink" ||
-        classification === "file" ||
-        classification === "directory"
-      ) {
-        hasConflict = true;
-        fixes.push(`move or delete ${link}, then run \`spur reinit\``);
+      // Read-only classification of one hostile host path (e.g. a file
+      // where a parent dir should be) must never take down the other ~60
+      // doctor checks — degrade this one target to an "unreadable" line
+      // instead, same as `readdirSync` above and the file's own convention
+      // (`checkClaudeOnboarding`, `checkSpurOnPath`) of never throwing.
+      try {
+        const classification = classifyHostSkillTarget(link);
+        const currentTarget =
+          classification === "absent"
+            ? "(absent)"
+            : classification === "file" || classification === "directory"
+              ? `(not a symlink, ${classification})`
+              : readlinkSync(link);
+        details.push(`${link}: ${classification} -> ${currentTarget}`);
+        if (
+          classification === "foreign-symlink" ||
+          classification === "file" ||
+          classification === "directory"
+        ) {
+          hasConflict = true;
+          fixes.push(`move or delete ${link}, then run \`spur reinit\``);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        details.push(`${link}: unreadable (${message})`);
       }
     }
   }
