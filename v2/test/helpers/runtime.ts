@@ -677,6 +677,9 @@ resolve_initial_todo() {
   # number of times and fail loudly (nonzero exit) rather than swallow it -
   # a silent failure here used to surface downstream as a bare "Request
   # failed with status 409" with no indication the seeded todo was the cause.
+  # The 20-attempt budget is a bound on CLI invocations, not wall time: each
+  # attempt spins up a fresh node CLI process, so real elapsed time is well
+  # past the 0.1s*20 sleep floor under load.
   local todo_id=""
   todo_id="$(SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
   if [[ -z "$todo_id" ]]; then
@@ -687,9 +690,21 @@ resolve_initial_todo() {
     if SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1; then
       return
     fi
+    # A failed complete isn't necessarily a real failure: it also surfaces as
+    # todo_transition_conflict when the item was already resolved between
+    # this attempt's list and complete calls (e.g. a prior attempt landed on
+    # the daemon before its own CLI process reported success/failure). Only
+    # keep retrying, and only fail loudly, while the item is still open.
+    local still_open=""
+    still_open="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); wanted=sys.argv[1]; print(next((item["id"] for item in data["items"] if item["id"] == wanted and item["status"] == "open"), ""))' "$todo_id" 2>/dev/null || true)"
+    if [[ -z "$still_open" ]]; then
+      return
+    fi
     sleep 0.1
   done
-  printf 'resolve_initial_todo: failed to complete seeded todo item %s after retries\n' "$todo_id" >> "$log_file"
+  local failure_reason="resolve_initial_todo: failed to complete seeded todo item $todo_id after retries"
+  printf '%s\n' "$failure_reason" >> "$log_file"
+  printf '%s\n' "$failure_reason" >&2
   exit 1
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"

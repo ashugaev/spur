@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,11 +7,14 @@ import { fakeAgentScript } from "../helpers/runtime.js";
 
 // Regression coverage for the #751 daemon-authoritative-todo fixture race:
 // the fake agent's resolve_initial_todo used to swallow a failed "todo
-// complete" with `|| true`, and Cursor separately wrote an assistant-role
-// transcript record (which classifyCursorJsonlState reads as "waiting") at
-// startup, before resolve_initial_todo ever ran. Both let a runtime test's
-// later `spur complete <session>` 409 with an open Spur ToDo item that the
-// fixture had silently failed, or never gotten a chance, to resolve.
+// complete" with `|| true`, silently leaving the seeded item open with no
+// diagnostic. Separately, Cursor wrote an assistant-role transcript record
+// at startup, before resolve_initial_todo ever ran; the daemon's `complete`
+// gate is unconditional on session state, so this ordering alone never
+// caused the 409, but it did make the "waiting" state a false signal that
+// resolve_initial_todo had already run, which the fix below relies on to
+// make `waitForState(..., "waiting")` a trustworthy synchronization point
+// for runtime tests that call `spur complete` right after it.
 
 const tempDirs: string[] = [];
 
@@ -21,17 +24,31 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-function writeTodoStub(dir: string, mode: "succeed" | "fail"): string {
+type TodoStubMode = "succeed" | "fail" | "resolved-elsewhere";
+
+function writeTodoStub(dir: string, mode: TodoStubMode): string {
   const stubPath = join(dir, "spur-todo-stub.sh");
+  const resolvedMarker = join(dir, "resolved-elsewhere.marker");
   writeFileSync(
     stubPath,
     `#!/usr/bin/env bash
 set -euo pipefail
 case "\${1:-}" in
   list)
-    printf '{"items":[{"id":"item-1","status":"open"}]}'
+    if [[ -f "${resolvedMarker}" ]]; then
+      printf '{"items":[]}'
+    else
+      printf '{"items":[{"id":"item-1","status":"open"}]}'
+    fi
     ;;
   complete)
+    if [[ "${mode}" == "resolved-elsewhere" ]]; then
+      # Simulate another actor completing the item between this attempt's
+      # list and complete calls: the complete call itself still fails (as a
+      # real todo_transition_conflict would), but the item is no longer open.
+      touch "${resolvedMarker}"
+      exit 1
+    fi
     if [[ "${mode}" == "fail" ]]; then
       exit 1
     fi
@@ -47,7 +64,7 @@ esac
   return stubPath;
 }
 
-function runCursorFixture(args: { todoStubMode: "succeed" | "fail" }): {
+function runCursorFixture(args: { todoStubMode: TodoStubMode }): {
   status: number | null;
   logText: string;
   transcriptDir: string;
@@ -95,7 +112,9 @@ function runCursorFixture(args: { todoStubMode: "succeed" | "fail" }): {
 
 describe("fakeAgentScript resolve_initial_todo (fixture race regression)", () => {
   afterEach(() => {
-    tempDirs.length = 0;
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("completes the seeded todo item and signals waiting once it lands", () => {
@@ -106,8 +125,10 @@ describe("fakeAgentScript resolve_initial_todo (fixture race regression)", () =>
     expect(existsSync(transcriptFile)).toBe(true);
     const lines = readFileSync(transcriptFile, "utf8").trim().split("\n");
     // Exactly one assistant record: the fixture must not also write an
-    // early "ready" record before resolve_initial_todo runs, which used to
-    // let the daemon observe "waiting" before the seeded todo was resolved.
+    // early "ready" record before resolve_initial_todo runs. That early
+    // write let the daemon report "waiting" before the seeded todo had
+    // landed, so a test waiting on "waiting" as its synchronization point
+    // before calling `complete` would not actually be synchronized.
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
       role: "assistant",
@@ -124,5 +145,13 @@ describe("fakeAgentScript resolve_initial_todo (fixture race regression)", () =>
     // transcript record — and therefore no "waiting" state — is produced.
     const transcriptFile = join(transcriptDir, "chat-fixture-session.jsonl");
     expect(existsSync(transcriptFile)).toBe(false);
+  });
+
+  it("does not fail loud when a failed complete call actually landed (todo_transition_conflict)", () => {
+    const { status, transcriptDir } = runCursorFixture({ todoStubMode: "resolved-elsewhere" });
+
+    expect(status).toBe(0);
+    const transcriptFile = join(transcriptDir, "chat-fixture-session.jsonl");
+    expect(existsSync(transcriptFile)).toBe(true);
   });
 });
