@@ -53,6 +53,7 @@ import { getVersion } from "./version.js";
 import {
   SESSION_STATES,
   isSessionState,
+  type AgentName,
   type CompleteSessionRequest,
   type ConnectProjectConfigRequest,
   type CreateProjectRequest,
@@ -72,7 +73,15 @@ import {
   type SubscribeSessionStatesRequest,
   type UpdateProjectRequest,
   type UpdateSessionSlotsRequest,
+  type TodoActor,
+  type TodoMutationRequest,
 } from "./types.js";
+import {
+  InvalidTodoRequestError,
+  TodoLedgerCorruptError,
+  TodoOpenWorkError,
+  TodoTransitionConflictError,
+} from "./todo.js";
 
 interface JsonError {
   error: string;
@@ -102,6 +111,26 @@ function readParsedBody(request: IncomingMessage): unknown {
 function parseOrigin(value: string | string[] | undefined): UserActionOrigin {
   if (value === "cli" || value === "ui") return value;
   return "unknown";
+}
+
+export async function resolveTodoMutationActor(args: {
+  origin: UserActionOrigin;
+  callerHeader: string | string[] | undefined;
+  targetSessionId: string;
+  lookup: (sessionId: string) => Promise<{ id: string; agent: AgentName }>;
+}): Promise<TodoActor> {
+  const { origin, callerHeader, targetSessionId, lookup } = args;
+  if (Array.isArray(callerHeader))
+    throw new InvalidTodoRequestError("Caller session header is invalid");
+  if (callerHeader) {
+    if (origin !== "cli") throw new InvalidTodoRequestError("Caller session requires CLI origin");
+    if (callerHeader !== targetSessionId)
+      throw new InvalidTodoRequestError("Caller session does not match ToDo owner");
+    const caller = await lookup(callerHeader);
+    return { kind: "agent", agent: caller.agent, sessionId: caller.id };
+  }
+  if (origin === "cli" || origin === "ui") return { kind: "human", origin };
+  throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
 export type StartedServer = SessionService & {
@@ -273,11 +302,61 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
+  const todoOverrideReason = raw["todoOverrideReason"];
+  if (
+    todoOverrideReason !== undefined &&
+    (typeof todoOverrideReason !== "string" || !todoOverrideReason.trim())
+  ) {
+    throw new Error("todoOverrideReason must be nonblank");
+  }
   return {
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
+    ...(typeof todoOverrideReason === "string"
+      ? { todoOverrideReason: todoOverrideReason.trim() }
+      : {}),
   };
+}
+
+function parseTodoMutationRequest(raw: unknown): TodoMutationRequest {
+  if (!isRecord(raw)) throw new Error("ToDo request must be an object");
+  const action = raw["action"];
+  const allowed =
+    action === "add"
+      ? ["action", "text", "reason"]
+      : action === "resume"
+        ? ["action", "itemId"]
+        : action === "hold"
+          ? ["action", "itemId", "reason", "blocker", "requiredHumanAction"]
+          : ["action", "itemId", "reason"];
+  if (Object.keys(raw).some((key) => !allowed.includes(key)))
+    throw new Error("ToDo request contains unknown fields");
+  const required = (name: string): string => {
+    const value = raw[name];
+    if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be nonblank`);
+    return value.trim();
+  };
+  if (action === "add") return { action, text: required("text"), reason: required("reason") };
+  if (action === "complete" || action === "cancel")
+    return { action, itemId: required("itemId"), reason: required("reason") };
+  if (action === "resume") return { action, itemId: required("itemId") };
+  if (action === "hold") {
+    const blocker = raw["blocker"];
+    if (blocker !== "external" && blocker !== "human")
+      throw new Error("blocker must be external or human");
+    if (blocker === "external" && raw["requiredHumanAction"] !== undefined)
+      throw new Error("requiredHumanAction is valid only for a human blocker");
+    const requiredHumanAction = blocker === "human" ? required("requiredHumanAction") : undefined;
+    return {
+      action,
+      itemId: required("itemId"),
+      reason: required("reason"),
+      blocker,
+      ...(requiredHumanAction ? { requiredHumanAction } : {}),
+    };
+  }
+  throw new Error("Unsupported ToDo action");
 }
 
 export function parseKillSessionRequest(raw: unknown): KillSessionRequest {
@@ -1401,6 +1480,32 @@ export async function startServer(
         return;
       }
 
+      const todoSessionId = path.match(/^\/sessions\/([^/]+)\/todo$/)?.[1];
+      if (method === "GET" && todoSessionId) {
+        sendJson(response, 200, await service.readTodo(decodeURIComponent(todoSessionId)));
+        return;
+      }
+      if (method === "POST" && todoSessionId) {
+        const targetSessionId = decodeURIComponent(todoSessionId);
+        const callerHeader = request.headers["x-spur-caller-session"];
+        const actor = await resolveTodoMutationActor({
+          origin,
+          callerHeader,
+          targetSessionId,
+          lookup: (callerSessionId) => service.get(callerSessionId),
+        });
+        let body: TodoMutationRequest;
+        try {
+          body = parseTodoMutationRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          throw new InvalidTodoRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid ToDo request",
+          );
+        }
+        sendJson(response, 200, await service.mutateTodo(targetSessionId, body, actor));
+        return;
+      }
+
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
         let body: CompleteSessionRequest;
@@ -1414,12 +1519,18 @@ export async function startServer(
           );
           return;
         }
+        const todoOptions =
+          body.todoOverrideReason &&
+          !request.headers["x-spur-caller-session"] &&
+          (origin === "cli" || origin === "ui")
+            ? { todoActor: { kind: "human" as const, origin } }
+            : undefined;
         sendJson(
           response,
           200,
           body.scope === "desk"
-            ? await service.completeDesk(completeSessionId, body)
-            : await service.complete(completeSessionId, body),
+            ? await service.completeDesk(completeSessionId, body, todoOptions)
+            : await service.complete(completeSessionId, body, todoOptions),
         );
         return;
       }
@@ -1606,6 +1717,32 @@ export async function startServer(
           message,
         });
         sendJson(response, error.statusCode, error.payload);
+        return;
+      }
+      if (error instanceof TodoOpenWorkError) {
+        sendJson(response, error.statusCode, { code: error.code, sessions: error.sessions });
+        return;
+      }
+      if (error instanceof InvalidTodoRequestError) {
+        sendJson(response, error.statusCode, { code: error.code, error: error.message });
+        return;
+      }
+      if (error instanceof TodoTransitionConflictError) {
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          sessionId: error.sessionId,
+          itemId: error.itemId,
+          error: error.message,
+        });
+        return;
+      }
+      if (error instanceof TodoLedgerCorruptError) {
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          sessionId: error.sessionId,
+          error: error.message,
+          ...(error.line ? { line: error.line } : {}),
+        });
         return;
       }
       logEvent("http.request.failed", {

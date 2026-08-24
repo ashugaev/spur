@@ -13,6 +13,7 @@ import type {
   SidecarPortConflictPayload,
   SessionRecord,
   SessionView,
+  TodoProjection,
 } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, processExists, sleep } from "../helpers/common.js";
 import {
@@ -2393,6 +2394,116 @@ projects:
     });
   });
 
+  it("mutates Spur ToDo through the built public CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-todo-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("todo.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+    const humanCli = { env: { SPUR_SESSION: "" } };
+    const spawned = JSON.parse(
+      (
+        await context.execCli(
+          ["--config", configPath, "spawn", "api", "exercise native todo", "--json"],
+          humanCli,
+        )
+      ).stdout,
+    ) as SessionView;
+
+    const initial = JSON.parse(
+      (
+        await context.execCli(
+          ["--config", configPath, "todo", "list", "--session", spawned.id, "--json"],
+          humanCli,
+        )
+      ).stdout,
+    ) as TodoProjection;
+    expect(initial.items[0]?.latestTransition?.actor).toEqual({
+      kind: "agent",
+      agent: spawned.agent,
+      sessionId: spawned.id,
+    });
+
+    const added = JSON.parse(
+      (
+        await context.execCli(
+          [
+            "--config",
+            configPath,
+            "todo",
+            "add",
+            "--session",
+            spawned.id,
+            "--text",
+            "Verify CLI transitions",
+            "--reason",
+            "Runtime coverage",
+            "--json",
+          ],
+          humanCli,
+        )
+      ).stdout,
+    ) as TodoProjection;
+    const item = added.items.find((candidate) => candidate.text === "Verify CLI transitions");
+    if (!item) throw new Error("Expected CLI-added ToDo item");
+
+    const held = JSON.parse(
+      (
+        await context.execCli(
+          [
+            "--config",
+            configPath,
+            "todo",
+            "hold",
+            item.id,
+            "--session",
+            spawned.id,
+            "--reason",
+            "Need operator",
+            "--human-action",
+            "Approve release",
+            "--json",
+          ],
+          humanCli,
+        )
+      ).stdout,
+    ) as TodoProjection;
+    expect(held.items.find((candidate) => candidate.id === item.id)?.status).toBe("held");
+
+    await context.execCli(
+      ["--config", configPath, "todo", "resume", item.id, "--session", spawned.id, "--json"],
+      humanCli,
+    );
+    const completed = JSON.parse(
+      (
+        await context.execCli(
+          [
+            "--config",
+            configPath,
+            "todo",
+            "complete",
+            item.id,
+            "--session",
+            spawned.id,
+            "--reason",
+            "Verified",
+            "--json",
+          ],
+          humanCli,
+        )
+      ).stdout,
+    ) as TodoProjection;
+    expect(completed.items.find((candidate) => candidate.id === item.id)?.status).toBe("completed");
+  });
+
   it("persists recurring wake state from wake through CLI, list, API, and disk", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -4071,7 +4182,7 @@ projects:
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("Claude Code"),
+      accept: (value) => value.includes("Ctrl+G back"),
     });
 
     await sendKeysToTmux(controllerSessionName, "C-g");

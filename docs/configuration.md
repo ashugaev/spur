@@ -13,6 +13,8 @@ Merge order: instance config, then connected project configs in registry order. 
 
 A running session reads the `spur.yaml` in its own session directory only — worktree root, or `path` when `worktree: false`. Never a parent's. Without one it uses the project as the daemon has it.
 
+Spur ToDo is always on. It has no config, spawn, source, or trigger field. Command and completion behavior: [todo](commands.md#todo).
+
 ## Config registry
 
 Registered project config paths persist in `config-registry.json` under `dataDir`. Boot reloads every registered path, rehydrates sessions, resumes pipelines, restarts sources and triggers.
