@@ -42,6 +42,9 @@ function runGuardRaw(stdin: string, gateOn = true): Promise<HookDecision> {
         resolve(JSON.parse(stdout) as HookDecision);
       },
     );
+    // With the gate off the guard prints its decision and exits without
+    // draining stdin, so this write can lose the race and EPIPE.
+    child.stdin?.on("error", () => {});
     child.stdin?.end(stdin);
   });
 }
