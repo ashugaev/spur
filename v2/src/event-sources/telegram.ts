@@ -1023,7 +1023,13 @@ async function transcribeAndRoute(
   try {
     transcript = await transcribeTelegramVoice(ctx, deps, webBaseUrl);
   } catch (error) {
-    if (!isAborted(deps)) {
+    if (isAborted(deps)) {
+      // An abort-cancelled fetch must not reply during shutdown, but the
+      // failure still gets logged so it isn't silent in the daemon's own log.
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
+      );
+    } else {
       await editOrReply(
         ctx,
         message.chat.id,
@@ -1070,8 +1076,14 @@ async function handleTelegramVoice(
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
-  const status = await ctx.reply("Transcribing voice message...");
-  const statusMessageId = extractMessageId(status);
+  let statusMessageId: number | undefined;
+  try {
+    statusMessageId = extractMessageId(await ctx.reply("Transcribing voice message..."));
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice ack failed: ${errorText(error)}`,
+    );
+  }
 
   void transcribeAndRoute(runtime, ctx, message, from, statusMessageId).catch((error: unknown) => {
     deps.logger.warn?.(

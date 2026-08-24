@@ -1292,6 +1292,74 @@ describe("telegramSourceModule voice notes", () => {
     expect(spawnSession).not.toHaveBeenCalled();
   });
 
+  it("A1-G2: an abort mid-fetch on the failure path replies nothing and logs a warning", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const emit = vi.fn();
+    const spawnSession = vi.fn();
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const task = vi.fn().mockReturnValue(Promise.resolve());
+    runMock.mockReturnValue({ stop, start: vi.fn(), size: vi.fn(), task, isRunning: vi.fn() });
+    const controller = new AbortController();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    await telegramSourceModule.start({
+      sourceId: "telegram",
+      projectId: "api",
+      dataDir,
+      config: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123] },
+      emit,
+      signal: controller.signal,
+      logger,
+      listSessions,
+      spawnSession,
+      webBaseUrl: "http://127.0.0.1:5555",
+    });
+    const bot = botInstances[0];
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    let rejectTranscribe: ((error: Error) => void) | undefined;
+    const pending = new Promise((_resolve, reject) => {
+      rejectTranscribe = reject;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: unknown) => {
+        if (typeof url === "string" && url.includes("api.telegram.org")) {
+          return Promise.resolve({
+            ok: true,
+            arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
+          });
+        }
+        return pending;
+      }),
+    );
+
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
+    await vi.waitFor(() => expect((fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2));
+
+    controller.abort();
+    rejectTranscribe?.(new DOMException("This operation was aborted", "AbortError"));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(voiceCtx.api.editMessageText).not.toHaveBeenCalledWith(
+      -1001,
+      55,
+      expect.stringContaining("Voice transcription failed"),
+    );
+    expect(voiceCtx.reply).not.toHaveBeenCalledWith(
+      expect.stringContaining("Voice transcription failed"),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram voice failed:"));
+    expect(emit).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
   it("A4: a repeated update_id performs no download and no emit", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -1353,16 +1421,19 @@ describe("telegramSourceModule voice notes", () => {
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
 
     vi.stubGlobal("fetch", mockTranscribeFetch("/help"));
-    await bot.emitVoice(telegramVoiceContext());
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
 
     await vi.waitFor(() => expect(emit).toHaveBeenCalled());
     expect(emit).toHaveBeenCalledWith(
       "telegram:message",
       expect.objectContaining({ text: "/help" }),
     );
-    expect(emit).not.toHaveBeenCalledWith(
-      "telegram:message",
-      expect.objectContaining({ text: expect.stringContaining("Spur Telegram bot") }),
+    expect(voiceCtx.reply).not.toHaveBeenCalledWith(expect.stringContaining("Spur Telegram bot"));
+    expect(voiceCtx.api.editMessageText).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.stringContaining("Spur Telegram bot"),
     );
   });
 
@@ -1429,6 +1500,32 @@ describe("telegramSourceModule voice notes", () => {
     const body = (transcribeCall?.[1] as { body: FormData }).body;
     const audio = body.get("audio") as File;
     expect(audio.name).toBe("voice.ogg");
+  });
+
+  it("guards the ack reply: a rejected placeholder ack still transcribes and routes the prompt", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit, logger } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    const voiceCtx = telegramVoiceContext();
+    voiceCtx.reply.mockRejectedValueOnce(new Error("429 Too Many Requests"));
+
+    await bot.emitVoice(voiceCtx);
+
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ text: "fix the sidecar" }),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram voice ack failed: 429 Too Many Requests",
+    );
+    // No statusMessageId to edit: the echo and the routing ack both fall
+    // back to a fresh ctx.reply call.
+    expect(voiceCtx.api.editMessageText).not.toHaveBeenCalled();
   });
 
   it("A10: a rejected reply on the failure path logs a redacted warning with no unhandled rejection", async () => {
@@ -1521,10 +1618,60 @@ describe("telegramSourceModule voice notes", () => {
 
     expect(emit).not.toHaveBeenCalled();
     expect(spawnSession).not.toHaveBeenCalled();
+    expect(voiceCtx.reply).toHaveBeenCalledTimes(1);
     expect(voiceCtx.api.editMessageText).not.toHaveBeenCalledWith(
       -1001,
       55,
       expect.stringContaining("Heard:"),
     );
+  });
+
+  it("A1-G7: an abort landing while the echo reply is in flight emits nothing and spawns nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const emit = vi.fn();
+    const spawnSession = vi.fn();
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const task = vi.fn().mockReturnValue(Promise.resolve());
+    runMock.mockReturnValue({ stop, start: vi.fn(), size: vi.fn(), task, isRunning: vi.fn() });
+    const controller = new AbortController();
+    await telegramSourceModule.start({
+      sourceId: "telegram",
+      projectId: "api",
+      dataDir,
+      config: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123] },
+      emit,
+      signal: controller.signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      listSessions,
+      spawnSession,
+      webBaseUrl: "http://127.0.0.1:5555",
+    });
+    const bot = botInstances[0];
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+
+    let resolveEcho: (() => void) | undefined;
+    const pendingEcho = new Promise<void>((resolve) => {
+      resolveEcho = resolve;
+    });
+    const voiceCtx = telegramVoiceContext();
+    voiceCtx.api.editMessageText.mockImplementation(() => pendingEcho);
+
+    await bot.emitVoice(voiceCtx);
+    await vi.waitFor(() => expect(voiceCtx.api.editMessageText).toHaveBeenCalled());
+
+    controller.abort();
+    resolveEcho?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(emit).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
   });
 });
