@@ -675,9 +675,9 @@ resolve_initial_todo() {
     return
   fi
   local todo_id
-  todo_id="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
+  todo_id="$(SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
   if [[ -n "$todo_id" ]]; then
-    "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
+    SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
   fi
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
