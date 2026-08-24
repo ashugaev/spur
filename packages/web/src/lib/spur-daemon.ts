@@ -50,17 +50,41 @@ function jsonHeaders(): Record<string, string> {
   return { "content-type": "application/json" };
 }
 
-export async function spurRequest(path: string, init?: RequestInit): Promise<Response> {
+export class SpurDaemonError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SpurDaemonError";
+    this.status = status;
+  }
+}
+
+export function isSpurDaemonError(error: unknown): error is SpurDaemonError {
+  return error instanceof SpurDaemonError;
+}
+
+// timeoutMs is opt-in per call: most spurRequest callers proxy an operation
+// the daemon itself already bounds (spawn, kill, restore, ...), so a blanket
+// timeout here would risk cutting those off mid-flight. Callers whose daemon
+// route can hang on an unbounded external call (e.g. spawn-defaults shelling
+// out to `cursor models`) pass one explicitly instead.
+export type SpurRequestInit = RequestInit & { timeoutMs?: number };
+
+export async function spurRequest(path: string, init?: SpurRequestInit): Promise<Response> {
+  const { timeoutMs, signal, ...requestInit } = init ?? {};
   return fetch(`${daemonBaseUrl()}${path}`, {
-    ...init,
+    ...requestInit,
     headers: {
-      ...(init?.headers ?? {}),
+      ...(requestInit.headers ?? {}),
+      "x-spur-origin": "ui",
     },
     cache: "no-store",
+    signal: timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : signal,
   });
 }
 
-export async function spurRequestJson<T>(path: string, init?: RequestInit): Promise<T> {
+export async function spurRequestJson<T>(path: string, init?: SpurRequestInit): Promise<T> {
   const response = await spurRequest(path, init);
   const text = await response.text();
   let payload: unknown = {};
@@ -80,7 +104,7 @@ export async function spurRequestJson<T>(path: string, init?: RequestInit): Prom
       typeof payload === "object" && payload !== null && "error" in payload
         ? String((payload as { error?: unknown }).error ?? "Spur daemon request failed")
         : `Spur daemon request failed (${response.status})`;
-    throw new Error(message);
+    throw new SpurDaemonError(message, response.status);
   }
 
   return payload as T;

@@ -6,7 +6,13 @@
 [Unit]
 Description=Spur web UI
 After=network.target spur-daemon.service
-Requires=spur-daemon.service
+# Wants, never Requires: Requires propagates the daemon's stop to this unit, and
+# an explicit `systemctl stop spur-daemon` (unlike a restart or a crash
+# auto-restart) has no matching start job for the dependent — the web UI stays
+# dead until someone starts it by hand. This server never talks to the daemon at
+# startup, so it keeps serving while the daemon is down and the UI shows its
+# reconnect state instead.
+Wants=spur-daemon.service
 
 [Service]
 Type=simple
@@ -15,9 +21,6 @@ WorkingDirectory={{SPUR_ROOT}}
 Environment=HOME={{SPUR_SERVICE_HOME}}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=WEB_HOST=127.0.0.1
-Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1
-Environment=DIRECT_TERMINAL_BIND_PORT=14801
-Environment=DIRECT_TERMINAL_PUBLIC_PORT=443
 Environment=PORT=3012
 ExecStart=/usr/bin/pnpm ui:start
 Restart=always

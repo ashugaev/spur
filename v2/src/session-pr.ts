@@ -1,4 +1,5 @@
 import { gh } from "./gh.js";
+import { type PrLookupPr, resolvePrLookupRepo, resolvePrLookups } from "./pr-lookup.js";
 import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from "./types.js";
 import { readCurrentBranch } from "./workspace.js";
 
@@ -189,11 +190,54 @@ export async function resolvePrDiscoveryBranch(
   return sessionBranch;
 }
 
+/**
+ * One-shot open-PR discovery for a single branch. Thin wrapper over the batched
+ * resolver: one `gh api graphql` instead of one `gh pr list --head`, bypassing
+ * the poll queue and the poll budget gate so interactive callers (teardown's
+ * open-PR check) keep today's behavior.
+ *
+ * Returns null only for a definite "no open PR". A lookup that produced no
+ * answer at all — rate limit, HTTP 5xx, auth, timeout — throws, because the
+ * caller's fail-safe (the open-PR teardown prompt) reads null as "safe to
+ * remove the branch". Collapsing the two would delete a worktree and branch out
+ * from under an open PR every time GitHub was briefly unreachable.
+ */
 export async function discoverSessionPrBinding(
   worktreePath: string,
   sessionBranch: string,
 ): Promise<SessionPrBinding | null> {
   const branch = await resolvePrDiscoveryBranch(worktreePath, sessionBranch);
+  const slug = await resolvePrLookupRepo(worktreePath, { bypassMissMemo: true });
+  if (!slug) {
+    // No slug from the remotes: a GitHub Enterprise host Spur cannot recognize
+    // by name, an ssh alias, or no GitHub remote at all. gh resolves the host
+    // itself, so ask it per branch rather than reporting "no PR" — and let its
+    // failure propagate, same as before batching.
+    return discoverSessionPrBindingViaPrList(worktreePath, branch);
+  }
+  const [outcome] = await resolvePrLookups([{ slug, branch, worktreePath }]);
+  if (!outcome || outcome.status === "skipped") {
+    throw new Error(
+      `PR lookup for ${slug.owner}/${slug.name}#${branch} produced no answer: ${
+        outcome?.message ?? "no outcome"
+      }`,
+    );
+  }
+  if (outcome.status !== "found") {
+    return null;
+  }
+  return prLookupBindingOf(outcome.pr);
+}
+
+/**
+ * Per-branch discovery through `gh pr list`, for repos whose remote yields no
+ * usable owner/name. gh resolves the host from its own config, so this covers
+ * every host gh is authenticated against; a gh failure throws.
+ */
+async function discoverSessionPrBindingViaPrList(
+  worktreePath: string,
+  branch: string,
+): Promise<SessionPrBinding | null> {
   const raw = await gh(
     worktreePath,
     "pr",
@@ -205,24 +249,64 @@ export async function discoverSessionPrBinding(
     "--limit",
     "1",
   );
-  let prs: Array<{ number: number; url: string }>;
+  let parsed: unknown;
   try {
-    prs = JSON.parse(raw) as Array<{ number: number; url: string }>;
+    parsed = JSON.parse(raw) as unknown;
   } catch {
+    throw new Error(`gh pr list returned unreadable JSON for ${branch}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`gh pr list returned an unexpected payload for ${branch}`);
+  }
+  const first: unknown = parsed[0];
+  if (first === undefined) {
     return null;
   }
-  const pr = prs[0];
-  if (!pr?.url) {
+  if (
+    typeof first !== "object" ||
+    first === null ||
+    typeof (first as { url?: unknown }).url !== "string" ||
+    typeof (first as { number?: unknown }).number !== "number"
+  ) {
+    throw new Error(`gh pr list returned an unexpected PR entry for ${branch}`);
+  }
+  const entry = first as { number: number; url: string };
+  const binding = parseSessionPrBinding(entry.url);
+  if (!binding) {
     return null;
   }
+  return { ...binding, number: entry.number };
+}
+
+/** Maps a found lookup result onto a session PR binding. Open PRs only. */
+export function prLookupBindingOf(pr: PrLookupPr): SessionPrBinding | null {
   const binding = parseSessionPrBinding(pr.url);
   if (!binding) {
     return null;
   }
-  return {
-    ...binding,
-    number: pr.number,
-  };
+  return { ...binding, number: pr.number };
+}
+
+/**
+ * The `--repo` argument for a session's bound PR.
+ *
+ * The binding carries its own repo, which can differ from the worktree's remote
+ * (workspace reuse, a handoff, a stale auto-detect). Without --repo gh resolves
+ * the number against the worktree remote and fails with "Could not resolve to a
+ * PullRequest", which teardown reports as a permanent "PR check unavailable" 409.
+ *
+ * A bare `owner/repo` would drop the host and send an Enterprise binding to
+ * github.com, so the host from the binding URL is carried the same way
+ * `boundRepoSlug` carries it in review-providers/github.ts.
+ */
+function prRepoArg(pr: SessionPrBinding): string {
+  let host: string;
+  try {
+    host = new URL(pr.url).hostname.toLowerCase();
+  } catch {
+    return pr.repo;
+  }
+  return host === "github.com" ? pr.repo : `${host}/${pr.repo}`;
 }
 
 export async function viewSessionPrState(
@@ -234,6 +318,8 @@ export async function viewSessionPrState(
     "pr",
     "view",
     String(pr.number),
+    "--repo",
+    prRepoArg(pr),
     "--json",
     "number,state,title,url",
   );
@@ -247,7 +333,91 @@ export async function viewSessionPrState(
 }
 
 export async function closeSessionPr(worktreePath: string, pr: SessionPrBinding): Promise<void> {
-  await gh(worktreePath, "pr", "close", String(pr.number));
+  await gh(worktreePath, "pr", "close", String(pr.number), "--repo", prRepoArg(pr));
+}
+
+export interface OpenPullRequestSummary {
+  number: number;
+  headRefName: string;
+}
+
+const DEFAULT_OPEN_PR_LIST_LIMIT = 1000;
+
+function isOpenPullRequestSummary(value: unknown): value is OpenPullRequestSummary {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record["number"] === "number" && typeof record["headRefName"] === "string";
+}
+
+// Session GC's PR probe: one batch call per repo (github-ci.ts's `gh run
+// list --repo` precedent) instead of one `gh pr view` per session. Any
+// failure — bad JSON, a non-array payload, a malformed item, or the result
+// count saturating `limit` (meaning the true open-PR set may be larger than
+// what came back) — throws, never returns a partial or "assume none" result.
+// The GC invariant is "any probe error blocks", so a throw here is exactly
+// the contract the caller needs.
+export async function listOpenPullRequests(
+  repo: string,
+  limit = DEFAULT_OPEN_PR_LIST_LIMIT,
+): Promise<OpenPullRequestSummary[]> {
+  const raw = await gh(
+    process.cwd(),
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--json",
+    "number,headRefName",
+    "--limit",
+    String(limit),
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new Error(`gh pr list --repo ${repo} returned invalid JSON`, { cause: error });
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`gh pr list --repo ${repo} returned a non-array payload`);
+  }
+  const items: OpenPullRequestSummary[] = [];
+  for (const entry of parsed) {
+    if (!isOpenPullRequestSummary(entry)) {
+      throw new Error(`gh pr list --repo ${repo} returned an item with an unexpected shape`);
+    }
+    items.push({ number: entry.number, headRefName: entry.headRefName });
+  }
+  if (items.length >= limit) {
+    throw new Error(
+      `gh pr list --repo ${repo} returned ${items.length} open PRs, at or above the ${limit} limit; open-PR set is unresolvable`,
+    );
+  }
+  return items;
+}
+
+// Resolves the `owner/repo` slug for a worktree-less project path (a
+// session's `pr` binding already carries its own repo slug; this is only
+// needed as a fallback when no member has one yet).
+export async function resolveRepoSlug(cwd: string): Promise<string> {
+  const raw = await gh(cwd, "repo", "view", "--json", "nameWithOwner");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new Error(`gh repo view returned invalid JSON for ${cwd}`, { cause: error });
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`gh repo view returned a non-object payload for ${cwd}`);
+  }
+  const nameWithOwner = (parsed as Record<string, unknown>)["nameWithOwner"];
+  if (typeof nameWithOwner !== "string" || !nameWithOwner.trim()) {
+    throw new Error(`gh repo view returned an unexpected shape for ${cwd}`);
+  }
+  return nameWithOwner;
 }
 
 export async function resolveSessionPrBinding(session: SessionRecord): Promise<{

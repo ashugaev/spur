@@ -5,7 +5,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  claudeUsageMenuOptionOneSelected,
+  detectClaudeCompacting,
   detectClaudeRateLimit,
+  detectClaudeUsageLimitMenu,
+  detectCodexMcpPermissionDialog,
   detectCodexRateLimit,
   detectCursorRateLimit,
   scanTmuxRateLimit,
@@ -32,6 +36,16 @@ const CODEX_HEALTHY = {
   plan_type: "team",
   rate_limit_reached_type: null,
 };
+// Real ass-22bf false-positive payload: a team/window-metered account reports
+// has_credits:false as a benign soft signal alongside a live 0%-used window.
+const CODEX_TEAM_SOFT_CREDITS = {
+  limit_id: "codex",
+  primary: { used_percent: 0.0, window_minutes: 10080 },
+  secondary: null,
+  credits: { has_credits: false, unlimited: false, balance: null },
+  plan_type: "team",
+  rate_limit_reached_type: null,
+};
 
 // Real claude synthetic rate-limit transcript record.
 const CLAUDE_RATE_LIMIT_LINE = JSON.stringify({
@@ -53,6 +67,21 @@ const CLAUDE_NORMAL_LINE = JSON.stringify({
     stop_reason: "end_turn",
     content: [{ type: "text", text: "Done." }],
   },
+});
+
+// Bookkeeping/pass-through records Claude Code appends after a turn — these
+// carry no rate-limit signal and must be skipped when walking the tail
+// backward for the last meaningful record.
+const CLAUDE_TRAILING_SYSTEM_LINE = JSON.stringify({
+  type: "system",
+  subtype: "turn_duration",
+  durationMs: 1234,
+});
+const CLAUDE_TRAILING_STOP_HOOK_LINE = JSON.stringify({
+  type: "stop_hook_summary",
+});
+const CLAUDE_TRAILING_FILE_HISTORY_LINE = JSON.stringify({
+  type: "file-history-snapshot",
 });
 
 const tempDirs: string[] = [];
@@ -90,6 +119,36 @@ describe("detectCodexRateLimit", () => {
     expect(detectCodexRateLimit(CODEX_HEALTHY)).toEqual({ limited: false, reason: "" });
   });
 
+  it("does not flag has_credits:false when a live usage window is present (team/enterprise soft signal)", () => {
+    expect(detectCodexRateLimit(CODEX_TEAM_SOFT_CREDITS)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does not flag has_credits:false when only the secondary window is live (primary null)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: null,
+        secondary: { used_percent: 3, window_minutes: 10080 },
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: false, reason: "" });
+  });
+
+  it("still flags an exhausted window even when has_credits is false (guard doesn't mask genuine exhaustion)", () => {
+    expect(
+      detectCodexRateLimit({
+        limit_id: "codex",
+        primary: { used_percent: 100, window_minutes: 300 },
+        secondary: null,
+        credits: { has_credits: false, unlimited: false, balance: null },
+        plan_type: "team",
+        rate_limit_reached_type: null,
+      }),
+    ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
+  });
+
   it("returns null when no usable rate_limits data is present", () => {
     expect(detectCodexRateLimit(null)).toBeNull();
     expect(detectCodexRateLimit(undefined)).toBeNull();
@@ -124,6 +183,49 @@ describe("detectClaudeRateLimit", () => {
   it("returns null with no records", () => {
     expect(detectClaudeRateLimit([])).toBeNull();
   });
+
+  it("flags a rate-limit record followed by a trailing system/turn_duration record", () => {
+    const limit = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
+    const trailing = parseJsonlRecord(CLAUDE_TRAILING_SYSTEM_LINE, 1);
+    expect(limit).toBeDefined();
+    expect(trailing).toBeDefined();
+    if (!limit || !trailing) {
+      return;
+    }
+    expect(detectClaudeRateLimit([limit, trailing])).toEqual({
+      limited: true,
+      reason: "claude rate_limit",
+    });
+  });
+
+  it("flags a rate-limit record followed by a stack of trailing bookkeeping records", () => {
+    const limit = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
+    const system = parseJsonlRecord(CLAUDE_TRAILING_SYSTEM_LINE, 1);
+    const stopHook = parseJsonlRecord(CLAUDE_TRAILING_STOP_HOOK_LINE, 2);
+    const fileHistory = parseJsonlRecord(CLAUDE_TRAILING_FILE_HISTORY_LINE, 3);
+    expect(limit).toBeDefined();
+    expect(system).toBeDefined();
+    expect(stopHook).toBeDefined();
+    expect(fileHistory).toBeDefined();
+    if (!limit || !system || !stopHook || !fileHistory) {
+      return;
+    }
+    expect(detectClaudeRateLimit([limit, system, stopHook, fileHistory])).toEqual({
+      limited: true,
+      reason: "claude rate_limit",
+    });
+  });
+
+  it("is not limited when a normal end_turn record is followed by a trailing system record", () => {
+    const normal = parseJsonlRecord(CLAUDE_NORMAL_LINE, 0);
+    const trailing = parseJsonlRecord(CLAUDE_TRAILING_SYSTEM_LINE, 1);
+    expect(normal).toBeDefined();
+    expect(trailing).toBeDefined();
+    if (!normal || !trailing) {
+      return;
+    }
+    expect(detectClaudeRateLimit([normal, trailing])).toEqual({ limited: false, reason: "" });
+  });
 });
 
 describe("detectCursorRateLimit", () => {
@@ -144,6 +246,234 @@ describe("detectCursorRateLimit", () => {
 
   it("returns null without text", () => {
     expect(detectCursorRateLimit(null)).toBeNull();
+  });
+});
+
+describe("detectClaudeUsageLimitMenu", () => {
+  const MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "> 1. Stop and wait for limit to reset",
+    "  2. Ask your admin for more usage",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  it("flags the full realistic usage-limit menu", () => {
+    expect(detectClaudeUsageLimitMenu(MENU_TEXT)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it.each(["·", "-", "|", "/"])("flags the footer with the %s separator glyph", (separator) => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Ask your admin for more usage",
+      "",
+      `Enter to confirm ${separator} Esc to cancel`,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the menu when the cursor is on option 2 instead of option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "> 2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags a lowercase/mixed-case variant of the same menu", () => {
+    const lowerMenu = [
+      "what do you want to do?",
+      "",
+      "> 1. sTOP and WAIT for limit TO reset",
+      "  2. ask YOUR admin FOR more usage",
+      "",
+      "enter to confirm · esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(lowerMenu)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("returns null when only the option-1 line is present", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Try again later",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when only the option-2 line is present", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Retry now",
+      "  2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when both options are present but the footer line is not", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Ask your admin for more usage",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for unrelated normal Claude Code output", () => {
+    const paneText = ["Working on the task...", "Editing src/index.ts"].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("returns null for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("returns null for session-service.test.ts's raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+});
+
+describe("claudeUsageMenuOptionOneSelected", () => {
+  const MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "> 1. Stop and wait for limit to reset",
+    "  2. Ask your admin for more usage",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  it("returns true when option 1 carries the cursor", () => {
+    expect(claudeUsageMenuOptionOneSelected(MENU_TEXT)).toBe(true);
+  });
+
+  it("returns false when the cursor is on option 2 instead of option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "> 2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns false for plain unrelated text", () => {
+    expect(claudeUsageMenuOptionOneSelected("just some regular output\nnothing to see here")).toBe(
+      false,
+    );
+  });
+});
+
+describe("detectClaudeCompacting", () => {
+  it("flags a live spinner line", () => {
+    const paneText = ["Some earlier output", "✳ Compacting conversation… (18s)", ""].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(true);
+  });
+
+  it("flags a lowercased variant", () => {
+    const paneText = ["compacting conversation... (5s)"].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(true);
+  });
+
+  it("returns false for a prose/quoted mid-line mention", () => {
+    const paneText = [
+      'Spur must derive session state "working" when the pane renders "Compacting',
+      'conversation… (Ns)" spinner.',
+    ].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(false);
+  });
+
+  it("returns false for an idle pane", () => {
+    const paneText = ["Waiting for the next task."].join("\n");
+    expect(detectClaudeCompacting(paneText)).toBe(false);
+  });
+
+  it("returns false for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectClaudeCompacting(source)).toBe(false);
+  });
+});
+
+describe("detectCodexMcpPermissionDialog", () => {
+  // Real captured render (session-artifacts/shp-a4bc, intelas-f45c): codex mid
+  // tool call, hit the interactive MCP permission gate for playwright.
+  const DIALOG_TEXT = [
+    "  Field 1/1",
+    '  Allow the playwright MCP server to run tool "browser_navigate"?',
+    "",
+    "  url: https://github.com/intelas/intelas-web/pull/3905/files",
+    "",
+    "  › 1. Allow                   Run the tool and continue.",
+    "    2. Allow for this session  Run the tool and remember this choice for this session.",
+    "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+    "    4. Cancel                  Cancel this tool call",
+    "  enter to submit | esc to cancel",
+  ].join("\n");
+
+  it("returns true for the real captured MCP permission dialog render", () => {
+    expect(detectCodexMcpPermissionDialog(DIALOG_TEXT)).toBe(true);
+  });
+
+  it("returns false for prose that merely mentions similar wording", () => {
+    const paneText = [
+      "I noticed you could allow the mcp server later if needed.",
+      "For now let's keep working on the diff.",
+    ].join("\n");
+    expect(detectCodexMcpPermissionDialog(paneText)).toBe(false);
+  });
+
+  it("returns false for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectCodexMcpPermissionDialog(source)).toBe(false);
+  });
+
+  it("returns false for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
+    expect(detectCodexMcpPermissionDialog(source)).toBe(false);
+  });
+
+  it("returns false once the dialog has scrolled out of the pane's recent tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `  line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    const paneText = `${DIALOG_TEXT}\n${subsequentOutput}`;
+    expect(detectCodexMcpPermissionDialog(paneText)).toBe(false);
   });
 });
 

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { getDisplayTaskLine, parseSessionPromptView } from "@/lib/session-prompt";
+import {
+  getDisplayTaskLine,
+  isGeneratedBootstrapPrompt,
+  parseSessionPromptView,
+} from "@/lib/session-prompt";
+import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
 import type { DashboardSession } from "@/lib/types";
+import { renderBootstrapPrompt } from "../../../../v2/src/bootstrap-prompt.js";
 
 function makeSession(overrides: Partial<DashboardSession>): DashboardSession {
   return {
@@ -46,6 +52,28 @@ Initial action:
 
 Operator request:
 ping`;
+const TELEGRAM_REPLY_SUFFIX = `
+
+Source: telegram. The requester only sees messages you send with:
+spur source reply "<message>"
+Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
+const BOOTSTRAP_PROMPT = `You are configuring a new Spur project named "Demo App".
+
+Inputs (do not change these values):
+- project id: demo-app
+- sessionPrefix: demo
+- project path: /repo/demo
+
+Goal: write a spur.yaml at the project root that registers this project, then ask Spur to connect it.
+
+Steps:
+1. Inspect the project.
+
+Constraints:
+- Do not modify any file other than spur.yaml.
+- Do not run package managers, build tools, or tests.
+- Do not create branches, commits, or pushes.
+- Keep total output under 40 lines.`;
 
 describe("parseSessionPromptView", () => {
   it("shows only the operator request for shepherd sessions", () => {
@@ -77,6 +105,98 @@ describe("parseSessionPromptView", () => {
     });
   });
 
+  it("removes the exact trailing Telegram reply suffix from stored provenance", () => {
+    const view = parseSessionPromptView(
+      makeSession({
+        originalTaskPrompt: `Fix payment retries${TELEGRAM_REPLY_SUFFIX}`,
+        prompt: "runtime prompt",
+      }),
+    );
+
+    expect(view.task).toBe("Fix payment retries");
+  });
+
+  it("removes the exact trailing Telegram reply suffix from the raw prompt fallback", () => {
+    const view = parseSessionPromptView(
+      makeSession({
+        prompt: `Fix payment retries${TELEGRAM_REPLY_SUFFIX}`,
+      }),
+    );
+
+    expect(view.task).toBe("Fix payment retries");
+  });
+
+  it("preserves Telegram reply text when it is not the trailing wrapper", () => {
+    const prompt = `Keep this exact example:${TELEGRAM_REPLY_SUFFIX}
+
+Then update the docs.`;
+
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(prompt);
+  });
+
+  it("keeps generated bootstrap configuration prompts available for display", () => {
+    expect(
+      parseSessionPromptView(
+        makeSession({
+          originalTaskPrompt: BOOTSTRAP_PROMPT,
+          prompt: BOOTSTRAP_PROMPT,
+        }),
+      ).task,
+    ).toBe(BOOTSTRAP_PROMPT);
+  });
+
+  it("keeps generated bootstrap prompts whose display name contains quotes available for display", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "api",
+      displayName: 'Bob’s "API"',
+      prefix: "api",
+      path: "/repo/api",
+      port: 3000,
+      referencePath: "/repo/api/spur.yaml.reference",
+    });
+
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(prompt.trim());
+  });
+
+  it("recognizes the rendered bootstrap prompt as generated for a plain display name", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "api",
+      displayName: "API",
+      prefix: "api",
+      path: "/repo/api",
+      port: 3000,
+      referencePath: "/repo/api/spur.yaml.reference",
+    });
+
+    expect(isGeneratedBootstrapPrompt(prompt.trim())).toBe(true);
+  });
+
+  it("recognizes the rendered bootstrap prompt as generated for a quote-containing display name", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "api",
+      displayName: 'Bob’s "API"',
+      prefix: "api",
+      path: "/repo/api",
+      port: 3000,
+      referencePath: "/repo/api/spur.yaml.reference",
+    });
+
+    expect(isGeneratedBootstrapPrompt(prompt.trim())).toBe(true);
+  });
+
+  it("preserves user tasks that only resemble bootstrap prose", () => {
+    const prompt = 'You are configuring a new Spur project named "Demo App".';
+
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(prompt);
+  });
+
+  it("preserves text appended after a bootstrap-shaped task", () => {
+    const prompt = `${BOOTSTRAP_PROMPT}
+Then audit the deployment.`;
+
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(prompt);
+  });
+
   it("surfaces self-destruct conditions from session metadata", () => {
     const view = parseSessionPromptView(
       makeSession({
@@ -86,6 +206,17 @@ describe("parseSessionPromptView", () => {
     );
 
     expect(view.selfDestructLabel).toBe("the summary is posted");
+  });
+
+  it("falls back to the default self-destruct condition when none is set", () => {
+    const view = parseSessionPromptView(
+      makeSession({
+        originalTaskPrompt: "ship it",
+        selfDestruct: { enabled: true },
+      }),
+    );
+
+    expect(view.selfDestructLabel).toBe(DEFAULT_SELF_DESTRUCT_CONDITION);
   });
 });
 

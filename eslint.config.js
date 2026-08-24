@@ -1,6 +1,7 @@
 import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier";
+import { visibleWaitTextPlugin } from "./eslint-rules/no-visible-wait-text.js";
 
 const SPUR_TS_FILES = ["v2/src/**/*.ts"];
 
@@ -18,6 +19,7 @@ export default tseslint.config(
       "packages/web/next.config.js",
       "packages/web/postcss.config.mjs",
       ".claude/worktrees/**",
+      "v2/web/**",
     ],
   },
 
@@ -103,6 +105,14 @@ export default tseslint.config(
     rules: {
       "no-console": "off", // Next.js uses console for server logs
     },
+  },
+
+  // Waiting states use animated feedback; static wait copy is inaccessible visual noise.
+  {
+    files: ["packages/web/src/**/*.tsx", "packages/web/src/**/*.ts"],
+    ignores: ["packages/web/src/**/__tests__/**", "packages/web/src/**/*.test.*"],
+    plugins: { "spur-web": visibleWaitTextPlugin },
+    rules: { "spur-web/no-visible-wait-text": "error" },
   },
 
   // Scripts directory - Node.js environment

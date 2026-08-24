@@ -1,3 +1,6 @@
+# Base dir for projects created without an explicit path. Unset falls back to <dataDir>/projects.
+projectsRoot: ~/projects
+
 projects:
   sp:
     path: ~/projects/spur
@@ -6,7 +9,7 @@ projects:
     defaultAgent: claude
     defaultModels:
       claude: opus
-      cursor: composer-2.5
+      cursor: auto
     symlinks:
       - .env
       - node_modules
@@ -21,18 +24,16 @@ projects:
         - label: Web IDE
           kind: link
           value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
+    reasoningEffort:
+      claude: medium
+      codex: medium
     codexArgs:
       - -c
-      - 'model_reasoning_effort="high"'
-      - -c
-      - 'service_tier="fast"'
-      - --enable
-      - fast_mode
+      - 'service_tier="default"'
     preflight: {}
     sidecars:
       isolated-daemon:
         command: ./scripts/spur-isolated-daemon.sh
-        autoStart: true
         ports:
           daemon:
             env: SPUR_RESERVED_PORT_DAEMON
@@ -40,23 +41,21 @@ projects:
             end: 4399
       isolated-ui:
         command: ./scripts/spur-isolated-ui.sh
-        autoStart: true
+        dependsOn:
+          - isolated-daemon
         ports:
           ui:
             env: SPUR_RESERVED_PORT_UI
             start: 5600
             end: 5699
-            url: SPUR_SIDECAR_PUBLIC_URL
-          terminal:
-            env: SPUR_RESERVED_PORT_TERMINAL
-            start: 15600
-            end: 15699
+            url: "https://{port}.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
         env:
-          SPUR_SIDECAR_PUBLIC_HOST: SPUR_SIDECAR_PUBLIC_HOST
-          SPUR_SIDECAR_PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
-    spawn:
-      steps:
-        - "run $manager"
+          SPUR_SIDECAR_PUBLIC_HOST: "*.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
+          SPUR_SIDECAR_PUBLIC_URL: "https://{port}.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
+    modes:
+      manager:
+        skill: manager
+        default: true
     sources:
       gh:
         type: github
@@ -66,17 +65,25 @@ projects:
         runOnStart: false
         emitExisting: true
         query: "repo:ashugaev/spur"
+      tg:
+        type: telegram
+        token: ${TELEGRAM_BOT_TOKEN}
+        allowedUsers: [444269670, 6211305103]
+      itest-schedule:
+        type: cron
+        schedule: "0 3 */3 * *"
+        runOnStart: false
     triggers:
       gh-changes-requested:
         source: gh
         event: github:changes_requested
         send:
-          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
+          prompt: "Run $manager and $github. Address requested changes on the active PR."
       gh-ci-failed:
         source: gh
         event: github:ci_failed
         send:
-          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
+          prompt: "Run $manager and $github. Fix failing CI on the active PR — own change or another agent's — then rerun checks and push. If not fixable, say why."
       gh-comment:
         source: gh
         event: github:comment
@@ -86,34 +93,12 @@ projects:
         source: gh
         event: github:merge_conflict
         send:
-          prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
-      gh-pr-review-spawn:
-        source: gh-pr-review
-        event: github:work_item.new
-        spawn:
-          restrictWrites: true
-          allowedTriggers: []
-          blocks:
-            - agent: claude
-              model: sonnet
-              prompt: |
-                Run /code-review {{url}}.
-                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
-              selfDestruct:
-                enabled: true
-                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
-              overrides:
-                worktree: false
-            - agent: cursor
-              model: composer-2.5
-              prompt: |
-                Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
-                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
-              selfDestruct:
-                enabled: true
-                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
-              overrides:
-                worktree: false
+          prompt: "Resolve merge conflicts on the active PR. Rebase or merge fresh main into the branch. Push."
+      gh-merged:
+        source: gh
+        event: github:merged
+        send:
+          prompt: "If your task prompt defines self-destruct conditions, recheck them now and self-destruct if satisfied. Otherwise ignore."
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)
@@ -124,4 +109,14 @@ projects:
         source: gh
         event: github:ready_for_review
         send:
-          prompt: "Run $manager and $github. The active PR is ready for review."
+          prompt: "Run $manager and $github. Active PR is ready for review."
+      tg-message:
+        source: tg
+        event: telegram:message
+        send:
+          interrupt: false
+      itest-run:
+        source: itest-schedule
+        event: cron:tick
+        spawn:
+          prompt: "/clean-install-test"

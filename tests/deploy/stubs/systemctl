@@ -29,6 +29,12 @@ is-active)
   [[ "$last" == "start" || "$last" == "restart" ]] && exit 0
   exit 1
   ;;
+show)
+  # Only ever invoked as: show -p MainPID --value <unit>
+  if [[ "$1" == "-p" && "$2" == "MainPID" && "$4" == "spur-daemon.service" ]]; then
+    printf '%s\n' "${SPUR_DEPLOY_DAEMON_MAIN_PID:-0}"
+  fi
+  ;;
 daemon-reload)
   : # no-op
   ;;

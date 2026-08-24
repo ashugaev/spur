@@ -2,7 +2,12 @@
 
 import { SessionRow } from "@/components/SessionRow";
 import { Zone } from "@/components/Zone";
-import type { AttentionLevel, DashboardSession, DeskCollapsedRow } from "@/lib/types";
+import {
+  ATTENTION_LANE_META,
+  type AttentionLevel,
+  type DashboardSession,
+  type DeskCollapsedRow,
+} from "@/lib/types";
 
 interface AttentionZoneProps {
   level: AttentionLevel;
@@ -11,24 +16,11 @@ interface AttentionZoneProps {
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  // The row only awaits completion; the dashboard's handler returns whether the
+  // session actually completed, which only its own dialogs consume.
+  onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
-
-const zoneConfig: Record<AttentionLevel, { label: string; color: string; dividerColor?: string }> =
-  {
-    error: { label: "Errors", color: "var(--color-status-error)" },
-    rate_limited: { label: "Rate Limited", color: "var(--color-status-attention)" },
-    respond: { label: "Needs Input", color: "var(--color-status-error)" },
-    working: { label: "Working", color: "var(--color-status-working)" },
-    pending: { label: "Waiting", color: "var(--color-status-attention)" },
-    stopped: {
-      label: "Stopped",
-      color: "var(--color-text-tertiary)",
-      dividerColor: "var(--color-border-subtle)",
-    },
-    done: { label: "Completed", color: "var(--color-status-ready)" },
-  };
 
 export function AttentionZone({
   level,
@@ -40,7 +32,7 @@ export function AttentionZone({
   onCompleteSession,
   onRestoreSession,
 }: AttentionZoneProps) {
-  const config = zoneConfig[level];
+  const config = ATTENTION_LANE_META[level];
 
   const sessionRows = rows.map((entry) => (
     <SessionRow

@@ -39,11 +39,23 @@ export function ghHeaders(): Record<string, string> {
   return headers;
 }
 
-export function handleGitHubRateLimit(response: Response): void {
+export interface GitHubGraphQLError {
+  type?: string;
+  message?: string;
+}
+
+// GraphQL rate limits can arrive inside an HTTP 200 body, which is why this also inspects `errors`.
+export function handleGitHubRateLimit(
+  response: Response,
+  errors?: readonly GitHubGraphQLError[],
+): void {
   const remaining = response.headers.get("x-ratelimit-remaining");
   const isRateLimited =
     response.status === 429 ||
-    ((response.status === 403 || response.status === 401) && remaining === "0");
+    ((response.status === 403 || response.status === 401) && remaining === "0") ||
+    errors?.some(
+      (e) => e.type === "RATE_LIMITED" || (e.message ?? "").toLowerCase().includes("rate limit"),
+    ) === true;
   if (!isRateLimited) return;
 
   const reset = response.headers.get("x-ratelimit-reset");

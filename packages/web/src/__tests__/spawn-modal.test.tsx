@@ -1,6 +1,6 @@
 import { createRef } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { SpawnModal, type SpawnModalMode } from "@/components/SpawnModal";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
@@ -32,9 +32,15 @@ function makeVoiceInput(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
 const spawnMode: SpawnModalMode = {
   kind: "spawn",
   project: { value: "", onChange: vi.fn(), options: [{ id: "p1", label: "Project One" }] },
-  model: { value: null, onChange: vi.fn() },
+  model: {
+    value: null,
+    onChange: vi.fn(),
+    spawnDefaults: { model: null, worktree: null, loading: false, error: null },
+    carry: null,
+    onResolvedChange: vi.fn(),
+  },
   branch: { value: "", onChange: vi.fn() },
-  workspaceMode: { value: "default", onChange: vi.fn() },
+  workspaceMode: { value: "worktree", onChange: vi.fn() },
   planMode: { value: false, onChange: vi.fn() },
   selfDestruct: { value: false, onChange: vi.fn() },
   steps: { items: [], onUpdate: vi.fn(), onAdd: vi.fn(), onRemove: vi.fn() },
@@ -42,12 +48,17 @@ const spawnMode: SpawnModalMode = {
 
 const respawnMode: SpawnModalMode = {
   kind: "respawn",
-  model: { value: null, onChange: vi.fn() },
+  model: {
+    value: null,
+    onChange: vi.fn(),
+    spawnDefaults: { model: null, worktree: null, loading: false, error: null },
+    carry: null,
+    onResolvedChange: vi.fn(),
+  },
 };
 
 const deskMode: SpawnModalMode = {
   kind: "desk",
-  model: { value: null, onChange: vi.fn() },
   branch: { value: "", onChange: vi.fn() },
   planMode: { value: false, onChange: vi.fn() },
   steps: { items: [], onUpdate: vi.fn(), onAdd: vi.fn(), onRemove: vi.fn() },
@@ -64,7 +75,7 @@ function renderModal(mode: SpawnModalMode, overrides: Record<string, unknown> = 
     onSubmit,
     submitting: false,
     submitLabel: "Go",
-    submitBusyLabel: "Going...",
+    submitBusyAriaLabel: "Going",
     submitDisabled: false,
     showCancel: false,
     agent: "claude" as const,
@@ -88,15 +99,6 @@ function renderModal(mode: SpawnModalMode, overrides: Record<string, unknown> = 
   return { onSubmit, onClose };
 }
 
-beforeEach(() => {
-  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
-});
-
-afterEach(() => {
-  cleanup();
-  vi.restoreAllMocks();
-});
-
 describe("SpawnModal", () => {
   it("spawn mode renders project, workspace, self-destruct, steps, and prompt", () => {
     renderModal(spawnMode);
@@ -109,6 +111,73 @@ describe("SpawnModal", () => {
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
   });
 
+  it("insets the fullscreen mobile panel on all sides by the display safe area", () => {
+    renderModal(spawnMode);
+    const panel = screen.getByRole("dialog").firstElementChild;
+    expect(panel).not.toBeNull();
+    const className = panel?.className ?? "";
+    expect(className).toContain("pt-[max(1rem,var(--safe-top))]");
+    expect(className).toContain("pb-[max(1rem,var(--safe-bottom))]");
+    expect(className).toContain("pl-[max(1rem,var(--safe-left))]");
+    expect(className).toContain("pr-[max(1rem,var(--safe-right))]");
+    expect(className).not.toMatch(/(^|\s)p-4(\s|$)/);
+    expect(className).toContain("sm:p-5");
+  });
+
+  it("explains the disabled project select instead of showing a blank box when no projects are configured", () => {
+    renderModal({
+      ...spawnMode,
+      project: { value: "", onChange: vi.fn(), options: [] },
+    });
+    expect(screen.getByLabelText("Spawn project")).toBeDisabled();
+    expect(screen.getByText("No projects configured yet.")).toBeInTheDocument();
+  });
+
+  it("spawn mode selects expose only concrete options, never a Default/Select placeholder", () => {
+    renderModal(spawnMode);
+    const projectOptions = screen.getByLabelText("Spawn project").querySelectorAll("option");
+    expect(projectOptions).toHaveLength(
+      spawnMode.kind === "spawn" ? spawnMode.project.options.length : 0,
+    );
+    expect([...projectOptions].map((option) => option.textContent)).toEqual(["Project One"]);
+
+    const workspaceOptions = [
+      ...screen.getByLabelText("workspace mode").querySelectorAll("option"),
+    ].map((option) => option.textContent);
+    expect(workspaceOptions).toEqual(["Worktree", "Shared"]);
+  });
+
+  it("spawn mode renders no session mode combobox when sessionMode is undefined", () => {
+    renderModal(spawnMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+  });
+
+  it("spawn mode renders the session mode combobox with options and fires onChange", () => {
+    const onChange = vi.fn();
+    renderModal({
+      ...spawnMode,
+      sessionMode: {
+        value: "manager",
+        onChange,
+        options: [
+          { value: "manager", label: "manager" },
+          { value: "council", label: "council" },
+        ],
+      },
+    });
+    const select = screen.getByRole("combobox", { name: "Spawn session mode" });
+    expect(select).toHaveValue("manager");
+    fireEvent.change(select, { target: { value: "council" } });
+    expect(onChange).toHaveBeenCalledWith("council");
+  });
+
+  it("respawn and desk modes render no session mode combobox", () => {
+    renderModal(respawnMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+    renderModal(deskMode);
+    expect(screen.queryByRole("combobox", { name: "Spawn session mode" })).not.toBeInTheDocument();
+  });
+
   it("respawn mode renders agent + model + prompt only", () => {
     renderModal(respawnMode);
     expect(screen.getByLabelText("Agent")).toBeInTheDocument();
@@ -119,10 +188,9 @@ describe("SpawnModal", () => {
     expect(screen.queryByRole("button", { name: "+ Step" })).not.toBeInTheDocument();
   });
 
-  it("desk mode renders agent + model + branch + plan + steps but no project", () => {
+  it("desk mode renders agent + branch + plan + steps but no model or project", () => {
     renderModal(deskMode);
     expect(screen.getByLabelText("Agent")).toBeInTheDocument();
-    expect(screen.getByLabelText("Desk spawn model")).toBeInTheDocument();
     expect(screen.getByLabelText("branch name")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Spawn project")).not.toBeInTheDocument();
@@ -157,7 +225,7 @@ describe("SpawnModal", () => {
 
   it("disables close and cancel and gates backdrop click when canClose is false", () => {
     const { onClose } = renderModal(spawnMode, { canClose: false, showCancel: true });
-    const closeButton = screen.getByRole("button", { name: "✕" });
+    const closeButton = screen.getByRole("button", { name: "Close" });
     expect(closeButton).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
     fireEvent.click(document.querySelector(".fixed.inset-0") as Element);
@@ -168,5 +236,27 @@ describe("SpawnModal", () => {
     const { onClose } = renderModal(spawnMode);
     fireEvent.click(document.querySelector(".fixed.inset-0") as Element);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a spinner and accessible verb on the submit button while submitting", () => {
+    renderModal(deskMode, { submitting: true, submitDisabled: true });
+    const submitButton = screen.getByRole("button", { name: "Going" });
+    expect(submitButton.querySelector(".voice-spinner")).not.toBeNull();
+    expect(screen.getByText("Go").parentElement).toHaveClass("invisible");
+    expect(submitButton).toHaveAttribute("aria-busy", "true");
+    expect(submitButton).toBeDisabled();
+  });
+
+  it("panel is full-screen on small mobile with tall prompt textarea", () => {
+    renderModal(spawnMode, {
+      promptAriaLabel: "Prompt input",
+      promptMinHeightClass: "min-h-[24rem]",
+    });
+    const panel = document.querySelector(".fixed.inset-0")?.firstElementChild;
+    expect(panel).not.toBeNull();
+    expect(panel).toHaveClass("h-[100dvh]");
+    expect(panel).toHaveClass("w-screen");
+    expect(panel).toHaveClass("sm:max-w-lg");
+    expect(screen.getByLabelText("Prompt input")).toHaveClass("min-h-[24rem]");
   });
 });

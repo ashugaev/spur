@@ -47,6 +47,11 @@ describe("resolveTerminalStatus", () => {
       pulse: false,
       title: "error",
     });
+    expect(resolveTerminalStatus("connected", "stale", null)).toMatchObject({
+      colorVar: "var(--color-text-tertiary)",
+      pulse: false,
+      title: "stale",
+    });
     expect(resolveTerminalStatus("connected", "stopped", null)).toMatchObject({
       colorVar: "var(--color-text-tertiary)",
       pulse: false,

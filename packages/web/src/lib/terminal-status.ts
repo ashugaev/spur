@@ -10,6 +10,32 @@ export interface ResolvedTerminalStatus {
   wsStatus: TerminalWsStatus;
 }
 
+/** Per-activity `{ colorVar, pulse, title }`, shared by the terminal status dot and the tab favicon. */
+export function resolveActivityStatus(
+  activity: SpurSessionState | null | undefined,
+): Pick<ResolvedTerminalStatus, "colorVar" | "pulse" | "title"> {
+  switch (activity) {
+    case "working":
+      return { colorVar: "var(--color-status-working)", pulse: true, title: "working" };
+    case "waiting":
+      return { colorVar: "var(--color-status-attention)", pulse: false, title: "waiting" };
+    case "needs_input":
+      return { colorVar: "var(--color-status-error)", pulse: false, title: "needs input" };
+    case "rate_limited":
+      return { colorVar: "var(--color-status-attention)", pulse: false, title: "rate limited" };
+    case "stale":
+      return { colorVar: "var(--color-text-tertiary)", pulse: false, title: "stale" };
+    case "error":
+      return { colorVar: "var(--color-status-error)", pulse: false, title: "error" };
+    case "stopped":
+      return { colorVar: "var(--color-text-tertiary)", pulse: false, title: "stopped" };
+    case "killed":
+      return { colorVar: "var(--color-text-tertiary)", pulse: false, title: "killed" };
+    default:
+      return { colorVar: "var(--color-status-ready)", pulse: false, title: "connected" };
+  }
+}
+
 export function resolveTerminalStatus(
   wsStatus: TerminalWsStatus,
   activity: SpurSessionState | null | undefined,
@@ -45,70 +71,5 @@ export function resolveTerminalStatus(
     };
   }
 
-  switch (activity) {
-    case "working":
-      return {
-        activity,
-        colorVar: "var(--color-status-working)",
-        pulse: true,
-        title: "working",
-        wsStatus,
-      };
-    case "waiting":
-      return {
-        activity,
-        colorVar: "var(--color-status-attention)",
-        pulse: false,
-        title: "waiting",
-        wsStatus,
-      };
-    case "needs_input":
-      return {
-        activity,
-        colorVar: "var(--color-status-error)",
-        pulse: false,
-        title: "needs input",
-        wsStatus,
-      };
-    case "rate_limited":
-      return {
-        activity,
-        colorVar: "var(--color-status-attention)",
-        pulse: false,
-        title: "rate limited",
-        wsStatus,
-      };
-    case "error":
-      return {
-        activity,
-        colorVar: "var(--color-status-error)",
-        pulse: false,
-        title: "error",
-        wsStatus,
-      };
-    case "stopped":
-      return {
-        activity,
-        colorVar: "var(--color-text-tertiary)",
-        pulse: false,
-        title: "stopped",
-        wsStatus,
-      };
-    case "killed":
-      return {
-        activity,
-        colorVar: "var(--color-text-tertiary)",
-        pulse: false,
-        title: "killed",
-        wsStatus,
-      };
-    default:
-      return {
-        activity,
-        colorVar: "var(--color-status-ready)",
-        pulse: false,
-        title: "connected",
-        wsStatus,
-      };
-  }
+  return { activity, wsStatus, ...resolveActivityStatus(activity) };
 }

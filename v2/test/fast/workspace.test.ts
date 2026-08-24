@@ -64,6 +64,7 @@ vi.mock("node:fs", () => ({
   rmSync: vi.fn((path: string) => {
     fsMockState.files.delete(path);
   }),
+  statSync: vi.fn(),
   symlinkSync: vi.fn(),
   unlinkSync: vi.fn((path: string) => {
     if (!fsMockState.files.delete(path)) {
@@ -79,14 +80,21 @@ vi.mock("node:fs", () => ({
 }));
 
 import * as childProcess from "node:child_process";
-import { existsSync, linkSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import {
   branchStatus,
+  checkProjectWorkspace,
   createWorktree,
   findWorktreePathForBranch,
+  hasUncommittedChanges,
+  hasUnpushedCommits,
+  pruneRepoWorktrees,
+  readCurrentBranch,
   readDoctorBranchHint,
+  readRemoteUrls,
   resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
+  workspaceExists,
 } from "../../src/workspace.js";
 
 const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
@@ -104,6 +112,7 @@ const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 const mockLinkSync = linkSync as ReturnType<typeof vi.fn>;
 const mockMkdirSync = mkdirSync as ReturnType<typeof vi.fn>;
 const mockRmSync = rmSync as ReturnType<typeof vi.fn>;
+const mockStatSync = statSync as ReturnType<typeof vi.fn>;
 const mockSymlinkSync = symlinkSync as ReturnType<typeof vi.fn>;
 
 function mockGitSuccess(stdout = ""): void {
@@ -112,6 +121,16 @@ function mockGitSuccess(stdout = ""): void {
 
 function mockGitFailure(message: string, code = 1): void {
   mockExecFileAsync.mockRejectedValueOnce(Object.assign(new Error(message), { code }));
+}
+
+// Every git spawn carries a timeout: no git call may wait forever. Mutating
+// commands get the generous cap, read probes the short one.
+function gitOpts(cwd: string): { cwd: string; timeout: number } {
+  return { cwd, timeout: 5 * 60_000 };
+}
+
+function gitProbeOpts(cwd: string): { cwd: string; timeout: number } {
+  return { cwd, timeout: 5_000 };
 }
 
 const baseInput = {
@@ -147,6 +166,7 @@ describe("createWorktree", () => {
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
+    mockGitSuccess();
     mockGitFailure("missing local main");
     mockGitFailure("missing local branch");
     mockGitFailure("missing remote branch");
@@ -154,18 +174,26 @@ describe("createWorktree", () => {
 
     await createWorktree(baseInput);
 
-    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["fetch", "origin", "--quiet"], {
-      cwd: "/repo/api",
-    });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["remote", "get-url", "origin"],
+      gitProbeOpts("/repo/api"),
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["fetch", "origin", "--quiet"],
+      gitOpts("/repo/api"),
+    );
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
   it("uses origin/defaultBranch as base when checked-out default branch is dirty and behind", async () => {
     mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -183,17 +211,18 @@ describe("createWorktree", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
     expect(mockExecFileAsync).not.toHaveBeenCalledWith(
       "git",
       ["merge", "--ff-only", "origin/main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
   it("fast-forwards a clean checked-out default branch before creating the worktree", async () => {
     mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -209,18 +238,21 @@ describe("createWorktree", () => {
 
     await createWorktree(baseInput);
 
-    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["merge", "--ff-only", "origin/main"], {
-      cwd: "/repo/api",
-    });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["merge", "--ff-only", "origin/main"],
+      gitOpts("/repo/api"),
+    );
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
   it("creates an explicit branch from origin/<branch> when it only exists remotely", async () => {
     mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -238,12 +270,13 @@ describe("createWorktree", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "release", "/tmp/spur-worktrees/api/api-1", "origin/release"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
   it("fast-forwards an existing local branch from origin before adding the worktree", async () => {
     mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -271,17 +304,18 @@ describe("createWorktree", () => {
     expect(forceUpdateCall).toEqual([
       "git",
       ["branch", "-f", "feature/fresh", "origin/feature/fresh"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     ]);
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "/tmp/spur-worktrees/api/api-1", "feature/fresh"],
-      { cwd: "/repo/api" },
+      gitOpts("/repo/api"),
     );
   });
 
   it("fails fast when origin cannot be fetched", async () => {
     mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess();
     mockGitFailure("network down");
 
@@ -296,6 +330,34 @@ describe("createWorktree", () => {
           call[1][1] === "add",
       ),
     ).toBe(false);
+  });
+
+  it("skips the origin fetch and resolves the local branch when the repo has no origin remote", async () => {
+    mockWorkspaceLockResolution();
+    mockGitSuccess(); // worktree prune
+    mockGitFailure("no such remote 'origin'", 2); // remote get-url origin
+    mockGitFailure("missing remote main"); // refExists origin/main
+    mockGitFailure("missing local branch"); // refExists heads/api-1
+    mockGitFailure("missing remote branch"); // refExists origin/api-1
+    mockGitSuccess(); // worktree add
+
+    await createWorktree(baseInput);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["remote", "get-url", "origin"],
+      gitProbeOpts("/repo/api"),
+    );
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith(
+      "git",
+      ["fetch", "origin", "--quiet"],
+      gitOpts("/repo/api"),
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
+      gitOpts("/repo/api"),
+    );
   });
 
   it("waits for a valid metadata lock holder longer than five seconds", async () => {
@@ -449,7 +511,7 @@ describe("resolveRepoPathFromWorktree", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      { cwd: "/tmp/spur-worktrees/api/api-1" },
+      gitOpts("/tmp/spur-worktrees/api/api-1"),
     );
   });
 
@@ -459,6 +521,26 @@ describe("resolveRepoPathFromWorktree", () => {
     await expect(resolveRepoPathFromWorktree("/tmp/spur-worktrees/api/api-1")).resolves.toBe(
       undefined,
     );
+  });
+});
+
+describe("workspaceExists", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("accepts symlinks to directories", () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+
+    expect(workspaceExists("/repo-link")).toBe(true);
+  });
+
+  it("returns false when the workspace path is unavailable", () => {
+    mockStatSync.mockImplementation(() => {
+      throw new Error("missing");
+    });
+
+    expect(workspaceExists("/missing")).toBe(false);
   });
 });
 
@@ -495,6 +577,34 @@ branch refs/heads/main
 `);
 
     await expect(findWorktreePathForBranch("/repo/api", "feature/missing")).resolves.toBeNull();
+  });
+});
+
+describe("pruneRepoWorktrees", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("acquires the workspace lock and runs git worktree prune", async () => {
+    mockWorkspaceLockResolution();
+    mockGitSuccess();
+
+    await pruneRepoWorktrees("/repo/api");
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "prune", "--expire", "now"],
+      gitOpts("/repo/api"),
+    );
+  });
+
+  it("does not throw when git worktree prune fails", async () => {
+    mockWorkspaceLockResolution();
+    mockGitFailure("prune failed");
+
+    await expect(pruneRepoWorktrees("/repo/api")).resolves.toBeUndefined();
   });
 });
 
@@ -580,6 +690,120 @@ branch refs/heads/main
   });
 });
 
+describe("checkProjectWorkspace", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  const baseProjectInput = {
+    projectId: "api",
+    path: "/repo/api",
+    defaultBranch: "main",
+    worktree: true,
+  };
+
+  it("D1: reports a single failing check for a missing path and never touches git", async () => {
+    mockStatSync.mockImplementation(() => {
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    });
+
+    const checks = await checkProjectWorkspace(baseProjectInput);
+
+    expect(checks).toEqual([
+      expect.objectContaining({
+        id: "project-path-exists:api",
+        ok: false,
+        severity: "error",
+      }),
+    ]);
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+  });
+
+  it("D2: skips the git-repo check entirely when worktree mode is off", async () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+
+    const checks = await checkProjectWorkspace({ ...baseProjectInput, worktree: false });
+
+    expect(checks).toEqual([expect.objectContaining({ id: "project-path-exists:api", ok: true })]);
+    expect(checks.find((check) => check.id === "project-path-is-git-repo:api")).toBeUndefined();
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+  });
+
+  it("D3: reports a remote-only default branch as resolvable, without touching the workspace lock or worktree prune", async () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+    mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
+    mockGitFailure("missing local"); // branchRefsExist: refs/heads/main
+    mockGitSuccess(); // branchRefsExist: refs/remotes/origin/main
+
+    const checks = await checkProjectWorkspace(baseProjectInput);
+
+    expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
+      expect.objectContaining({ ok: true, severity: "error" }),
+    );
+    // D3 must be lock-free and read-only: exactly the 3 calls above (no
+    // workspace-lock resolution, no `git worktree prune`, no `worktree list`).
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
+  });
+
+  it("D3: reports a default branch resolvable neither locally nor remotely as an error, without touching the workspace lock or worktree prune", async () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+    mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
+    mockGitFailure("missing local"); // branchRefsExist: refs/heads/main
+    mockGitFailure("missing remote"); // branchRefsExist: refs/remotes/origin/main
+
+    const checks = await checkProjectWorkspace(baseProjectInput);
+
+    expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
+      expect.objectContaining({ ok: false, severity: "error" }),
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
+  });
+
+  // A git call that never settles (slow disk / heavy I/O) trips the 5s
+  // `withTimeout`. That is "could not determine", not a proven failure — it
+  // must warn, never a hard error that would exit non-zero on a healthy repo.
+  it("D2: reports warn (not error) when the git-repo check times out", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockExecFileAsync.mockReturnValueOnce(new Promise(() => {})); // isGitWorktree hangs
+      const pending = checkProjectWorkspace(baseProjectInput);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const checks = await pending;
+      expect(checks.find((check) => check.id === "project-path-is-git-repo:api")).toEqual(
+        expect.objectContaining({ ok: false, severity: "warn" }),
+      );
+      // The branch check must never run once the repo check is unresolved.
+      expect(
+        checks.find((check) => check.id === "project-default-branch-resolves:api"),
+      ).toBeUndefined();
+      expect(checks.some((check) => !check.ok && check.severity === "error")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("D3: reports warn (not error) when the branch lookup times out", async () => {
+    vi.useFakeTimers();
+    try {
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockGitSuccess(); // isGitWorktree: git rev-parse --git-dir
+      mockExecFileAsync.mockReturnValueOnce(new Promise(() => {})); // branchRefsExist hangs
+      const pending = checkProjectWorkspace(baseProjectInput);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const checks = await pending;
+      expect(checks.find((check) => check.id === "project-default-branch-resolves:api")).toEqual(
+        expect.objectContaining({ ok: false, severity: "warn" }),
+      );
+      expect(checks.some((check) => !check.ok && check.severity === "error")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("readDoctorBranchHint", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -626,7 +850,7 @@ describe("resolveDoctorRepoRoot", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["rev-parse", "--path-format=absolute", "--show-toplevel"],
-      { cwd: "/repo/api/packages/service" },
+      gitOpts("/repo/api/packages/service"),
     );
   });
 
@@ -634,5 +858,119 @@ describe("resolveDoctorRepoRoot", () => {
     mockGitFailure("not a git repo");
 
     await expect(resolveDoctorRepoRoot("/tmp/scratch")).resolves.toBe("/tmp/scratch");
+  });
+});
+
+describe("hasUncommittedChanges", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("returns true when git status reports changes", async () => {
+    mockGitSuccess(" M src/foo.ts");
+
+    await expect(hasUncommittedChanges("/wt")).resolves.toBe(true);
+  });
+
+  it("returns false when git status is empty", async () => {
+    mockGitSuccess("");
+
+    await expect(hasUncommittedChanges("/wt")).resolves.toBe(false);
+  });
+
+  it("forwards ignoredPaths as :(exclude) pathspecs", async () => {
+    mockGitSuccess("");
+
+    await hasUncommittedChanges("/wt", ["node_modules", "dist"]);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["status", "--short", "--", ".", ":(exclude)node_modules", ":(exclude)dist"],
+      gitOpts("/wt"),
+    );
+  });
+});
+
+describe("hasUnpushedCommits", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("returns false when HEAD is an ancestor of the upstream", async () => {
+    mockGitSuccess("origin/feat");
+    mockGitSuccess("");
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(false);
+  });
+
+  it("returns true when HEAD is not an ancestor of the upstream", async () => {
+    mockGitSuccess("origin/feat");
+    mockGitFailure("not ancestor", 1);
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(true);
+  });
+
+  it("returns true when there is no upstream and no remote contains HEAD", async () => {
+    mockGitFailure("no upstream", 128);
+    mockGitSuccess("");
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(true);
+  });
+
+  it("returns false when there is no upstream but a remote contains HEAD", async () => {
+    mockGitFailure("no upstream", 128);
+    mockGitSuccess("  origin/feat");
+
+    await expect(hasUnpushedCommits("/wt")).resolves.toBe(false);
+  });
+});
+
+describe("git read probes", () => {
+  const readOpts = gitProbeOpts("/wt");
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("bounds the branch probe with the short read timeout", async () => {
+    mockGitSuccess("feature/live");
+
+    await expect(readCurrentBranch("/wt")).resolves.toBe("feature/live");
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      readOpts,
+    );
+  });
+
+  it("reads every remote url in one bounded spawn", async () => {
+    mockGitSuccess(
+      "remote.origin.url git@github.com:acme/api.git\nremote.upstream.url https://github.com/base/api.git",
+    );
+
+    await expect(readRemoteUrls("/wt")).resolves.toEqual(
+      new Map([
+        ["origin", "git@github.com:acme/api.git"],
+        ["upstream", "https://github.com/base/api.git"],
+      ]),
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["config", "--get-regexp", "^remote\\..*\\.url$"],
+      readOpts,
+    );
+  });
+
+  it("reads no remotes when the probe fails", async () => {
+    mockGitFailure("not a git repository", 128);
+
+    await expect(readRemoteUrls("/wt")).resolves.toEqual(new Map());
   });
 });

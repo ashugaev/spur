@@ -1,6 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { loadConfig, loadProjectConfig } from "./config.js";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { expandHome, loadConfig, loadInstanceConfigReadOnly, loadProjectConfig } from "./config.js";
 import type { AppConfig, ProjectConfig } from "./types.js";
 
 const REGISTRY_FILE = "config-registry.json";
@@ -15,6 +23,11 @@ export interface UnconfiguredProjectEntry {
 export interface ConfigRegistryFile {
   configPaths: string[];
   unconfiguredProjects: UnconfiguredProjectEntry[];
+}
+
+export interface RegistryDiagnostic {
+  configPath: string;
+  message: string;
 }
 
 interface MergeOptions {
@@ -117,6 +130,62 @@ function mergeProjects(base: AppConfig, configs: AppConfig[]): AppConfig {
   };
 }
 
+// Comparison/dedupe key only — never stored. Falls back to the resolved
+// (non-realpath'd) path when the file does not exist, so a dead or
+// not-yet-created path still gets a stable key.
+export function canonicalConfigKey(configPath: string): string {
+  const resolved = resolve(configPath.trim());
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+// Separator-terminated containment: `<worktreeDir>-backup/spur.yaml` shares
+// the worktreeDir string prefix but is not inside it.
+export function isInsideWorktreeDir(configPath: string, worktreeDir: string): boolean {
+  const key = canonicalConfigKey(configPath);
+  const wt = canonicalConfigKey(worktreeDir);
+  return key === wt || key.startsWith(wt + sep);
+}
+
+// Shared existing-file check for read-only/in-memory reporting (doctor's
+// report). A non-file (missing, a directory, or any other stat failure)
+// reads as not-existing — dead-file removal itself belongs to
+// `ConfigRegistryScanner`, this is only for surfacing the fact.
+export function isExistingFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export function isExistingDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// Pure, read-only filter: drops blank entries and entries inside
+// `worktreeDir`. Dead-file pruning and canonical-alias dedupe belong to
+// `ConfigRegistryScanner` now — this filter only keeps a worktree-internal
+// config from ever being registered or merged; it never touches the
+// filesystem for writes.
+export function dropWorktreeInternalPaths(paths: string[], worktreeDir: string): string[] {
+  const filtered: string[] = [];
+  for (const raw of paths) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (isInsideWorktreeDir(trimmed, worktreeDir)) continue;
+    filtered.push(trimmed);
+  }
+  return filtered;
+}
+
 export function readConfigRegistryFile(dataDir: string): ConfigRegistryFile {
   const path = registryPath(dataDir);
   if (!existsSync(path)) {
@@ -147,20 +216,38 @@ export function readConfigRegistryFile(dataDir: string): ConfigRegistryFile {
   };
 }
 
+// Resolves the set of "other instance" dataDirs a doctor scan should treat
+// as foreign — used to reclassify a live agent whose session record is not
+// in the scanned dataDir but IS in another registered instance's dataDir
+// (isolated-daemon/sidecar case) as `foreign_instance` rather than a leak.
+//
+// Read-only: `loadInstanceConfigReadOnly` never bootstrap-writes. Any
+// resolution failure for one path (path gone, unparsable config) is skipped,
+// never thrown — a doctor check must degrade to "cannot confirm", not crash.
+//
+// Note on registered PROJECT configs: `loadInstanceConfigReadOnly` always
+// parses in "instance" mode (config.ts:2214), so a registered project-shaped
+// spur.yaml with no `dataDir` key resolves to the default dataDir per
+// config.ts's instance-mode dataDir rule, and then self-excludes here if
+// that equals the caller's own dataDir. Deliberate, not an oversight — see
+// spec spur-3fbd Revision 2, R2-10.
+export function resolveRegisteredDataDirs(dataDir: string): string[] {
+  const { configPaths } = readConfigRegistryFile(dataDir);
+  const foreign = new Set<string>();
+  for (const path of configPaths) {
+    const result = loadInstanceConfigReadOnly(path);
+    if (result.status !== "ok") continue;
+    foreign.add(result.config.dataDir);
+  }
+  foreign.delete(dataDir);
+  return [...foreign];
+}
+
 export function writeConfigRegistryFile(dataDir: string, file: ConfigRegistryFile): void {
   writeJsonFile(registryPath(dataDir), {
     configPaths: normalizeConfigPaths(file.configPaths),
     unconfiguredProjects: normalizeUnconfiguredProjects(file.unconfiguredProjects),
   } satisfies ConfigRegistryFile);
-}
-
-export function readConfigRegistry(dataDir: string): string[] {
-  const configPaths = readConfigRegistryFile(dataDir).configPaths;
-  const filtered = configPaths.filter((configPath) => existsSync(configPath));
-  if (filtered.length !== configPaths.length) {
-    writeConfigRegistry(dataDir, filtered);
-  }
-  return filtered;
 }
 
 export function writeConfigRegistry(dataDir: string, configPaths: string[]): void {
@@ -192,9 +279,12 @@ export function upsertConfigRegistryPath(dataDir: string, configPath: string): s
 }
 
 export function removeConfigRegistryPath(dataDir: string, configPath: string): string[] {
+  const targetKey = canonicalConfigKey(configPath);
   const next = mutateConfigRegistry(dataDir, (current) => ({
     ...current,
-    configPaths: current.configPaths.filter((registeredPath) => registeredPath !== configPath),
+    configPaths: current.configPaths.filter(
+      (registeredPath) => canonicalConfigKey(registeredPath) !== targetKey,
+    ),
   }));
   return next.configPaths;
 }
@@ -251,4 +341,281 @@ export function buildMergedConfig(
     config: mergeProjects(base, mergedConfigs),
     configPaths: normalizedPaths,
   };
+}
+
+export interface RegistryScanOptions {
+  bootstrapConfigPath: string | undefined;
+  configPaths: string[];
+  protectedPaths: string[];
+}
+
+export interface RegistryScanResult {
+  config: AppConfig;
+  configPaths: string[];
+  newDiagnostics: RegistryDiagnostic[];
+}
+
+type FileStamp = { mtimeMs: number; size: number; isFile: boolean };
+type ParentState = { kind: "present"; mtimeMs: number } | { kind: "enoent" } | { kind: "error" };
+type PathLoad =
+  | { kind: "loaded"; stamp: FileStamp; config: AppConfig }
+  | { kind: "invalid"; stamp: FileStamp; diagnostic: RegistryDiagnostic }
+  // Present on disk but not a regular file — a project directory registered
+  // instead of its spur.yaml. Never a config, so it carries no diagnostic.
+  | { kind: "notfile"; stamp: FileStamp }
+  | {
+      kind: "missing";
+      parentPath: string;
+      parentState: ParentState;
+      diagnostic: RegistryDiagnostic;
+    };
+
+interface RegistryScannerFs {
+  stat(path: string): FileStamp;
+  realpath(path: string): string;
+}
+
+const scannerFs: RegistryScannerFs = {
+  stat: (path) => {
+    const stat = statSync(path);
+    return { mtimeMs: stat.mtimeMs, size: stat.size, isFile: stat.isFile() };
+  },
+  realpath: (path) => realpathSync(path),
+};
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+  const code = error.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function sameStamp(left: FileStamp, right: FileStamp): boolean {
+  return left.mtimeMs === right.mtimeMs && left.size === right.size;
+}
+
+export class ConfigRegistryScanner {
+  private readonly loads = new Map<string, PathLoad>();
+  private readonly canonicalPaths = new Map<string, string>();
+  private readonly reported = new Set<string>();
+  private bootstrapStamp: FileStamp | undefined;
+
+  constructor(private readonly fs: RegistryScannerFs = scannerFs) {}
+
+  canonicalizePath(input: string): string {
+    const absolutePath = resolve(process.cwd(), expandHome(input.trim()));
+    const cached = this.canonicalPaths.get(absolutePath);
+    if (cached) return cached;
+
+    const canonicalPath = this.resolveCanonicalPath(absolutePath);
+    this.canonicalPaths.set(absolutePath, canonicalPath);
+    return canonicalPath;
+  }
+
+  invalidateRemovedPaths(previousPaths: string[], nextPaths: string[]): void {
+    const nextCanonicalPaths = new Set(
+      normalizeConfigPaths(nextPaths).map((path) => this.canonicalizePath(path)),
+    );
+    for (const path of normalizeConfigPaths(previousPaths)) {
+      const canonicalPath = this.canonicalizePath(path);
+      if (!nextCanonicalPaths.has(canonicalPath)) this.invalidateCanonicalPath(canonicalPath);
+    }
+  }
+
+  scan(options: RegistryScanOptions): RegistryScanResult {
+    const parentStates = new Map<string, ParentState>();
+    const newDiagnostics: RegistryDiagnostic[] = [];
+    const bootstrapPath = this.canonicalizePath(
+      options.bootstrapConfigPath ?? loadConfig(undefined).configPath,
+    );
+    const protectedPaths = new Set(
+      [bootstrapPath, ...options.protectedPaths].map((path) => this.canonicalizePath(path)),
+    );
+    const baseLoad = this.loadPath(bootstrapPath, undefined, parentStates);
+    if (baseLoad.kind === "notfile") {
+      throw new Error(`Config file not found: ${bootstrapPath} is not a file`);
+    }
+    if (baseLoad.kind !== "loaded") {
+      throw new Error(baseLoad.diagnostic.message);
+    }
+
+    if (this.bootstrapStamp && !sameStamp(this.bootstrapStamp, baseLoad.stamp)) {
+      this.loads.clear();
+      this.loads.set(bootstrapPath, baseLoad);
+    }
+    this.bootstrapStamp = baseLoad.stamp;
+
+    const base = baseLoad.config;
+    const mergedConfigs = [base];
+    const keptPaths = [bootstrapPath];
+    const seen = new Set(keptPaths);
+
+    for (const inputPath of normalizeConfigPaths(options.configPaths)) {
+      let canonicalPath = this.canonicalizePath(inputPath);
+      let cached = this.loads.get(canonicalPath);
+      if (cached?.kind === "missing") {
+        const parentState = this.statParent(cached.parentPath, parentStates);
+        if (!this.sameParentState(cached.parentState, parentState)) {
+          this.canonicalPaths.delete(resolve(process.cwd(), expandHome(inputPath.trim())));
+          canonicalPath = this.canonicalizePath(inputPath);
+          cached = this.loads.get(canonicalPath);
+        }
+      }
+      if (seen.has(canonicalPath)) continue;
+      seen.add(canonicalPath);
+
+      const load =
+        cached?.kind === "missing" &&
+        this.sameParentState(cached.parentState, this.statParent(cached.parentPath, parentStates))
+          ? cached
+          : this.loadPath(canonicalPath, base, parentStates);
+
+      if (load.kind === "missing" && load.parentState.kind === "enoent") {
+        if (!protectedPaths.has(canonicalPath)) {
+          this.invalidateCanonicalPath(canonicalPath);
+          continue;
+        }
+      }
+
+      // Drop silently like an orphan: a directory can never become a config,
+      // unlike a missing path with a live parent, which stays registered so a
+      // temporarily removed spur.yaml can return.
+      if (load.kind === "notfile") {
+        this.invalidateCanonicalPath(canonicalPath);
+        continue;
+      }
+
+      keptPaths.push(canonicalPath);
+      if (load.kind !== "loaded") {
+        this.reportOnce(load.diagnostic, newDiagnostics);
+        continue;
+      }
+
+      try {
+        mergeProjects(base, [...mergedConfigs, load.config]);
+        mergedConfigs.push(load.config);
+      } catch (error) {
+        this.reportOnce(
+          {
+            configPath: canonicalPath,
+            message: `Skipping registered config ${canonicalPath}: ${error instanceof Error ? error.message : String(error)}`,
+          },
+          newDiagnostics,
+        );
+      }
+    }
+
+    return {
+      config: mergeProjects(base, mergedConfigs),
+      configPaths: keptPaths,
+      newDiagnostics,
+    };
+  }
+
+  private loadPath(
+    path: string,
+    base: AppConfig | undefined,
+    parentStates: Map<string, ParentState>,
+  ): PathLoad {
+    let stamp: FileStamp;
+    try {
+      stamp = this.fs.stat(path);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") {
+        return {
+          kind: "missing",
+          parentPath: dirname(path),
+          parentState: { kind: "error" },
+          diagnostic: this.diagnostic(path, error),
+        };
+      }
+      const parentPath = dirname(path);
+      const parentState = this.statParent(parentPath, parentStates);
+      const missing: PathLoad = {
+        kind: "missing",
+        parentPath,
+        parentState,
+        diagnostic: this.diagnostic(path, new Error(`Config file not found: ${path}`)),
+      };
+      if (parentState.kind === "present") this.loads.set(path, missing);
+      return missing;
+    }
+
+    if (!stamp.isFile) {
+      return { kind: "notfile", stamp };
+    }
+
+    const cached = this.loads.get(path);
+    if (cached && cached.kind !== "missing" && sameStamp(cached.stamp, stamp)) return cached;
+
+    try {
+      const config = materializeProjectDefaults(
+        base ? loadProjectConfig(path, base) : loadConfig(path),
+      );
+      const loaded: PathLoad = { kind: "loaded", stamp, config };
+      this.loads.set(path, loaded);
+      return loaded;
+    } catch (error) {
+      const invalid: PathLoad = {
+        kind: "invalid",
+        stamp,
+        diagnostic: this.diagnostic(path, error),
+      };
+      this.loads.set(path, invalid);
+      return invalid;
+    }
+  }
+
+  private invalidateCanonicalPath(canonicalPath: string): void {
+    this.loads.delete(canonicalPath);
+    for (const [rawPath, cachedCanonicalPath] of this.canonicalPaths) {
+      if (cachedCanonicalPath === canonicalPath) this.canonicalPaths.delete(rawPath);
+    }
+  }
+
+  private resolveCanonicalPath(path: string): string {
+    let current = path;
+    const unresolved: string[] = [];
+    for (;;) {
+      try {
+        return join(this.fs.realpath(current), ...unresolved.reverse());
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") return path;
+        const parent = dirname(current);
+        if (parent === current) return path;
+        unresolved.push(basename(current));
+        current = parent;
+      }
+    }
+  }
+
+  private statParent(path: string, states: Map<string, ParentState>): ParentState {
+    const cached = states.get(path);
+    if (cached) return cached;
+    let state: ParentState;
+    try {
+      state = { kind: "present", mtimeMs: this.fs.stat(path).mtimeMs };
+    } catch (error) {
+      state = errorCode(error) === "ENOENT" ? { kind: "enoent" } : { kind: "error" };
+    }
+    states.set(path, state);
+    return state;
+  }
+
+  private sameParentState(left: ParentState, right: ParentState): boolean {
+    return left.kind === "present" && right.kind === "present" && left.mtimeMs === right.mtimeMs;
+  }
+
+  private diagnostic(path: string, error: unknown): RegistryDiagnostic {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      configPath: path,
+      message: `Skipping registered config ${path}: ${message}`,
+    };
+  }
+
+  private reportOnce(diagnostic: RegistryDiagnostic, into: RegistryDiagnostic[]): void {
+    if (this.reported.has(diagnostic.configPath)) return;
+    this.reported.add(diagnostic.configPath);
+    into.push(diagnostic);
+  }
 }

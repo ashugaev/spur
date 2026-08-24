@@ -20,7 +20,7 @@ function composer(overrides: Partial<SpawnComposerState>): SpawnComposerState {
     selfDestructConditions: "",
     startupAttachmentIds: [],
     steps: [],
-    workspaceMode: "default",
+    workspaceMode: "worktree",
     ...overrides,
   };
 }
@@ -39,6 +39,7 @@ describe("spawn composer payload builders", () => {
       projectId: "api",
       prompt: "Fix auth",
       agent: "claude",
+      overrides: { worktree: true },
     });
   });
 
@@ -46,7 +47,9 @@ describe("spawn composer payload builders", () => {
     expect(
       buildSpawnSessionPayload(
         composer({
-          attachments: [{ file: new File(["x"], "bad name.png"), preview: "data:image/png;base64,abc" }],
+          attachments: [
+            { file: new File(["x"], "bad name.png"), preview: "data:image/png;base64,abc" },
+          ],
           branch: "Feature: Auth!",
           defaultBranch: " main ",
           model: "opus",
@@ -79,7 +82,6 @@ describe("spawn composer payload builders", () => {
       buildRespawnSessionPayload(
         composer({
           agent: "codex",
-          kind: "respawn",
           model: "gpt-5.5",
           startupAttachmentIds: ["img-1"],
         }),
@@ -101,7 +103,6 @@ describe("spawn composer payload builders", () => {
         composer({
           agent: "cursor",
           branch: "helper/auth",
-          kind: "desk",
           model: "auto",
           planMode: true,
           steps: [{ id: 1, value: " test " }],

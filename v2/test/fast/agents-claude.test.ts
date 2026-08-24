@@ -26,6 +26,7 @@ import {
   ensureClaudeRestrictWritesSettings,
   findLatestSessionFile,
   findClaudeSessionId,
+  sessionFileForId,
 } from "../../src/agents/claude.js";
 
 const mockReaddir = readdir as ReturnType<typeof vi.fn>;
@@ -84,6 +85,11 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--dangerously-skip-permissions");
   });
 
+  it("includes configured reasoning effort", () => {
+    const plan = buildClaudePlan("prompt", { reasoningEffort: "medium" });
+    expect(plan.launchCommand).toContain("--effort medium");
+  });
+
   it("uses SPUR_CLAUDE_BIN override", () => {
     process.env["SPUR_CLAUDE_BIN"] = "/opt/claude-bin";
     const plan = buildClaudePlan("prompt");
@@ -94,6 +100,18 @@ describe("buildClaudePlan", () => {
   it("shell-escapes settingsPath with single quotes in the path", () => {
     const plan = buildClaudePlan("prompt", { settingsPath: "/path/with'quote/settings.json" });
     expect(plan.launchCommand).toContain("--settings '/path/with'\\''quote/settings.json'");
+  });
+
+  it("appends --mcp-config (escaped) and --strict-mcp-config when mcpConfigPath is provided", () => {
+    const plan = buildClaudePlan("prompt", { mcpConfigPath: "/tools/mcp-config.json" });
+    expect(plan.launchCommand).toContain("--mcp-config '/tools/mcp-config.json'");
+    expect(plan.launchCommand).toContain("--strict-mcp-config");
+  });
+
+  it("omits --mcp-config and --strict-mcp-config when no mcpConfigPath", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("--mcp-config");
+    expect(plan.launchCommand).not.toContain("--strict-mcp-config");
   });
 
   it("includes --model when model is provided", () => {
@@ -112,12 +130,87 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--disallowed-tools Write");
     expect(plan.launchCommand).not.toContain("--permission-mode plan");
   });
+
+  it("prepends CLAUDE_CONFIG_DIR when claudeConfigDir is provided", () => {
+    const plan = buildClaudePlan("prompt", { claudeConfigDir: "/home/user/claude-profile" });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/home/user/claude-profile'");
+    expect(plan.launchCommand.startsWith("CLAUDE_CONFIG_DIR=")).toBe(true);
+  });
+
+  it("omits CLAUDE_CONFIG_DIR when claudeConfigDir is absent", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("CLAUDE_CONFIG_DIR");
+  });
+
+  it("shell-escapes claudeConfigDir with spaces", () => {
+    const plan = buildClaudePlan("prompt", { claudeConfigDir: "/path with spaces/claude" });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/path with spaces/claude'");
+  });
+
+  it("pins the native session id with --session-id when sessionId is provided", () => {
+    const plan = buildClaudePlan("prompt", {
+      sessionId: "11111111-2222-3333-4444-555555555555",
+    });
+    expect(plan.launchCommand).toContain("--session-id '11111111-2222-3333-4444-555555555555'");
+  });
+
+  it("omits --session-id when sessionId is absent", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("--session-id");
+  });
 });
 
 describe("buildClaudeResumePlan model", () => {
   it("does not add --model", () => {
     const plan = buildClaudeResumePlan("session-123");
     expect(plan.launchCommand).not.toContain("--model");
+  });
+
+  it("resumes with --resume and never pins --session-id (mutually exclusive)", () => {
+    const plan = buildClaudeResumePlan("11111111-2222-3333-4444-555555555555");
+    expect(plan.launchCommand).toContain("--resume '11111111-2222-3333-4444-555555555555'");
+    expect(plan.launchCommand).not.toContain("--session-id");
+  });
+});
+
+describe("sessionFileForId", () => {
+  it("returns the <uuid>.jsonl path under the project dir when it exists", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockStat.mockResolvedValue({ mtimeMs: 1000 });
+
+    const result = await sessionFileForId("/worktree/path", "abc-123");
+    expect(result).toBe("/home/testuser/.claude/projects/-worktree-path/abc-123.jsonl");
+  });
+
+  it("returns null when the pinned transcript does not exist", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockStat.mockRejectedValue(new Error("ENOENT"));
+
+    const result = await sessionFileForId("/worktree/path", "missing-id");
+    expect(result).toBeNull();
+  });
+
+  it("tries the next candidate when the first has no matching transcript", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue([
+      "/worktree/path",
+      "/canonical/worktree/path",
+    ]);
+    mockStat.mockRejectedValueOnce(new Error("ENOENT")).mockResolvedValueOnce({ mtimeMs: 1 });
+
+    const result = await sessionFileForId("/worktree/path", "abc-123");
+    expect(result).toBe("/home/testuser/.claude/projects/-canonical-worktree-path/abc-123.jsonl");
+  });
+
+  it("maps two concurrent pinned ids in one worktree to their own transcripts", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/shared/worktree"]);
+    mockStat.mockResolvedValue({ mtimeMs: 1000 });
+
+    const first = await sessionFileForId("/shared/worktree", "id-one");
+    const second = await sessionFileForId("/shared/worktree", "id-two");
+
+    expect(first).toBe("/home/testuser/.claude/projects/-shared-worktree/id-one.jsonl");
+    expect(second).toBe("/home/testuser/.claude/projects/-shared-worktree/id-two.jsonl");
+    expect(first).not.toBe(second);
   });
 });
 
@@ -172,9 +265,49 @@ describe("buildClaudeResumePlan", () => {
     expect(plan.launchCommand).toContain("--permission-mode plan");
   });
 
+  it("includes --effort when reasoningEffort is provided", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", { reasoningEffort: "high" });
+    expect(plan.launchCommand).toContain("--effort high");
+  });
+
   it("does not include initialMessage", () => {
     const plan = buildClaudeResumePlan("session-123");
     expect(plan).not.toHaveProperty("initialMessage");
+  });
+
+  it("prepends CLAUDE_CONFIG_DIR when claudeConfigDir is provided", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", {
+      claudeConfigDir: "/home/user/claude-profile",
+    });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/home/user/claude-profile'");
+    expect(plan.launchCommand.startsWith("CLAUDE_CONFIG_DIR=")).toBe(true);
+    expect(plan.launchCommand).toContain("--resume 'session-123'");
+  });
+
+  it("omits CLAUDE_CONFIG_DIR when claudeConfigDir is absent", () => {
+    const plan = buildClaudeResumePlan("session-123");
+    expect(plan.launchCommand).not.toContain("CLAUDE_CONFIG_DIR");
+  });
+
+  it("shell-escapes claudeConfigDir with spaces", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", {
+      claudeConfigDir: "/path with spaces/claude",
+    });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/path with spaces/claude'");
+  });
+
+  it("appends --mcp-config and --strict-mcp-config when mcpConfigPath is provided", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", {
+      mcpConfigPath: "/tools/mcp-config.json",
+    });
+    expect(plan.launchCommand).toContain("--mcp-config '/tools/mcp-config.json'");
+    expect(plan.launchCommand).toContain("--strict-mcp-config");
+  });
+
+  it("omits --mcp-config and --strict-mcp-config when no mcpConfigPath", () => {
+    const plan = buildClaudeResumePlan("session-123");
+    expect(plan.launchCommand).not.toContain("--mcp-config");
+    expect(plan.launchCommand).not.toContain("--strict-mcp-config");
   });
 });
 

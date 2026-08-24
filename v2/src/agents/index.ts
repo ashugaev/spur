@@ -1,4 +1,6 @@
-import { basename } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import {
   buildClaudePlan,
   buildClaudeRestorePlan,
@@ -16,12 +18,14 @@ import {
   codexCommand,
   ensureCodexHooksConfig,
   findCodexSessionId,
+  readCodexTranscriptEntries,
   scanCodexRolloutForMessage,
 } from "./codex.js";
 import {
   buildCursorPlan,
   buildCursorRestorePlan,
   buildCursorResumePlan,
+  CURSOR_RESTRICT_WRITES_ENV,
   cursorCommand,
   cursorConfigDirForSession,
   ensureCursorRestrictWritesConfig,
@@ -29,20 +33,45 @@ import {
   findCursorSessionId,
 } from "./cursor.js";
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
-import type { AgentName } from "../types.js";
+import {
+  buildOpenCodePlan,
+  buildOpenCodeConfig,
+  buildOpenCodeRestorePlan,
+  buildOpenCodeResumePlan,
+  assertOpenCodeCompatibility,
+  captureOpenCodeSubmitBaseline,
+  findOpenCodeSessionId,
+  opencodeCommand,
+  readOpenCodeConversation,
+  scanOpenCodeExportForMessage,
+} from "./opencode.js";
+import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
+import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
+import type {
+  AgentName,
+  ProviderReasoningEffort,
+  TranscriptEntry,
+  SidecarMcpBinding,
+} from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 interface AgentPlanOptions {
   claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
+  claudeConfigDir?: string;
   codexHomePath?: string;
   codexArgs?: string[];
+  reasoningEffort?: ProviderReasoningEffort;
   cursorConfigDir?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   startupImagePaths?: string[];
   model?: string;
+  opencodeConfigContent?: string;
+  /** Pinned native session id (claude `--session-id <uuid>`). */
+  agentSessionId?: string;
 }
 
 interface AgentSessionLookupOptions {
@@ -55,7 +84,7 @@ interface AgentSessionConfig {
   planOptions?: AgentPlanOptions;
 }
 
-export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl";
+export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl" | "opencode";
 export type AgentSendMode = "default" | "bracketed_paste";
 
 // Submit-ack pacing. claude/codex submit reliably, so the ack window is long
@@ -66,10 +95,22 @@ const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
 const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CURSOR_SUBMIT_MAX_RESENDS = 12;
+// Launch-send pacing for claude. A claude TUI still rendering the pasted launch
+// message swallows the submit Enter, and nothing is submitted until another one
+// arrives, so the launch send scans in short windows instead of the mid-session
+// default. A healthy submit reaches the transcript within ~0.4s, so 5s is a
+// wide margin, and the resends land far before the next pipeline step could
+// overwrite the composer.
+const CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS = 5_000;
+const CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS = 2;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
   codexSessionsDir: string;
+  /** Pinned native session id, used to bind claude ack scanning by id. */
+  agentSessionId?: string;
+  /** Send goes to an agent that just launched and has no transcript yet. */
+  freshLaunch?: boolean;
 }
 
 export interface SubmitAckScanResult {
@@ -77,8 +118,19 @@ export interface SubmitAckScanResult {
   lastScannedFile: string | null;
 }
 
+export interface SubmitAckPacing {
+  windowMs: number;
+  maxResends: number;
+}
+
 export interface SubmitAckBinding {
   scan(text: string): Promise<SubmitAckScanResult>;
+}
+
+export interface ConversationReadContext {
+  worktreePath: string;
+  codexSessionsDir?: string;
+  agentSessionId?: string;
 }
 
 interface AgentAdapter {
@@ -95,19 +147,35 @@ interface AgentAdapter {
     options?: AgentPlanOptions,
   ): AgentResumePlan;
   findSessionId(worktreePath: string, options?: AgentSessionLookupOptions): Promise<string | null>;
+  readConversation(ctx: ConversationReadContext): Promise<TranscriptEntry[] | null>;
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
+    mcpBindings?: SidecarMcpBinding[];
     restrictWrites?: boolean;
     cursorConfigDir?: string;
-  }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }>;
-  sessionConfig?(args: { dataDir: string; sessionId: string }): AgentSessionConfig;
+    claudeConfigDir?: string;
+    modelsCacheHome?: string;
+  }): Promise<{
+    claudeSettingsPath?: string;
+    claudeMcpConfigPath?: string;
+    codexHomePath?: string;
+    opencodeConfigContent?: string;
+  }>;
+  sessionConfig?(args: {
+    dataDir: string;
+    sessionId: string;
+    restrictWrites?: boolean;
+  }): AgentSessionConfig;
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
+  sendsInterruptKey: boolean;
   waitsForSubmitAck: boolean;
   submitAckWindowMs: number;
   submitAckMaxResends: number;
+  /** Pacing for the launch send only, for an agent that needs its own. */
+  launchSubmitAck?: SubmitAckPacing;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
   /**
@@ -122,14 +190,22 @@ interface AgentAdapter {
 function claudePlanOptions(options?: AgentPlanOptions): {
   settingsPath?: string;
   planMode?: boolean;
+  mcpConfigPath?: string;
   restrictWrites?: boolean;
   model?: string;
+  claudeConfigDir?: string;
+  sessionId?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.claudeMcpConfigPath ? { mcpConfigPath: options.claudeMcpConfigPath } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.claudeConfigDir ? { claudeConfigDir: options.claudeConfigDir } : {}),
+    ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -139,6 +215,7 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   startupImagePaths?: string[];
   restrictWrites?: boolean;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
@@ -146,26 +223,99 @@ function codexPlanOptions(options?: AgentPlanOptions): {
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
 function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
-  restrictWrites?: boolean;
   model?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
-    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+  };
+}
+
+function openCodePlanOptions(options?: AgentPlanOptions): {
+  model?: string;
+  sessionId?: string;
+  configContent?: string;
+} {
+  return {
+    ...(options?.model ? { model: options.model } : {}),
+    ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
+    ...(options?.opencodeConfigContent ? { configContent: options.opencodeConfigContent } : {}),
   };
 }
 
 function defaultProcessMatchers(launchCommand: string, fallbackBinary: string): string[] {
   const binary = basename(extractCommandBinary(launchCommand, fallbackBinary));
   return binary ? [binary] : [];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readJsonFile(path: string): Promise<unknown> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+function mergeMcpServers(
+  target: Record<string, unknown>,
+  servers: unknown,
+): Record<string, unknown> {
+  if (!isPlainObject(servers)) {
+    return target;
+  }
+  for (const [name, value] of Object.entries(servers)) {
+    if (isPlainObject(value)) {
+      target[name] = value;
+    }
+  }
+  return target;
+}
+
+// Merges the same MCP server sources Claude itself loads (user < project <
+// local, later wins), so --strict-mcp-config only drops servers Claude
+// wouldn't have loaded anyway rather than every host/project MCP server.
+async function readHostClaudeMcpServers(args: {
+  worktreePath: string;
+  claudeConfigDir?: string;
+}): Promise<Record<string, unknown>> {
+  const merged: Record<string, unknown> = {};
+  const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
+  const userConfig = await readJsonFile(userConfigPath);
+  let localProject: unknown;
+  if (isPlainObject(userConfig)) {
+    mergeMcpServers(merged, userConfig.mcpServers);
+    const projects = userConfig.projects;
+    if (isPlainObject(projects)) {
+      localProject = projects[args.worktreePath];
+    }
+  }
+  const projectConfigPath = join(args.worktreePath, ".mcp.json");
+  const projectConfig = await readJsonFile(projectConfigPath);
+  if (isPlainObject(projectConfig)) {
+    mergeMcpServers(merged, projectConfig.mcpServers);
+  }
+  if (isPlainObject(localProject)) {
+    mergeMcpServers(merged, localProject.mcpServers);
+  }
+  return merged;
 }
 
 const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
@@ -177,26 +327,61 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async ({ sessionToolDir, restrictWrites }) =>
-      restrictWrites
-        ? { claudeSettingsPath: await ensureClaudeRestrictWritesSettings(sessionToolDir) }
-        : {},
+    readConversation: (ctx) => readClaudeTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
+    setup: async ({
+      worktreePath,
+      sessionToolDir,
+      mcpBindings,
+      restrictWrites,
+      claudeConfigDir,
+    }) => {
+      const result: { claudeSettingsPath?: string; claudeMcpConfigPath?: string } = {};
+      if (restrictWrites) {
+        result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
+      }
+      if (mcpBindings?.length) {
+        const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
+        const mcpServers = await readHostClaudeMcpServers({
+          worktreePath,
+          ...(claudeConfigDir ? { claudeConfigDir } : {}),
+        });
+        for (const binding of mcpBindings) {
+          mcpServers[binding.server] = { type: "http", url: binding.url };
+        }
+        const mcpConfig = { mcpServers };
+        await writeFile(mcpConfigPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf8");
+        result.claudeMcpConfigPath = mcpConfigPath;
+      }
+      return result;
+    },
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
+    sendsInterruptKey: true,
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
+    launchSubmitAck: {
+      windowMs: CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS,
+      maxResends: CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS,
+    },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
-      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath);
+      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
+        freshLaunch: ctx.freshLaunch === true,
+      });
       if (!baseline) {
         return null;
       }
       return {
         async scan(text) {
-          const found = await scanClaudeJsonlForMessage(baseline, text, ctx.worktreePath);
+          const found = await scanClaudeJsonlForMessage(
+            baseline,
+            text,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+          );
           return { found, lastScannedFile: baseline.file };
         },
       };
@@ -213,14 +398,27 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
-    setup: async ({ sessionToolDir, worktreePath, restrictWrites }) => ({
-      codexHomePath: restrictWrites
-        ? await ensureCodexHooksConfig(sessionToolDir, [worktreePath], { restrictWrites: true })
-        : await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
+    readConversation: (ctx) =>
+      ctx.codexSessionsDir
+        ? readCodexTranscriptEntries(ctx.codexSessionsDir)
+        : Promise.resolve(null),
+    setup: async ({
+      sessionToolDir,
+      worktreePath,
+      mcpBindings,
+      restrictWrites,
+      modelsCacheHome,
+    }) => ({
+      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
+        ...(restrictWrites ? { restrictWrites: true } : {}),
+        ...(mcpBindings?.length ? { mcpBindings } : {}),
+        ...(modelsCacheHome ? { modelsCacheHome } : {}),
+      }),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
+    sendsInterruptKey: true,
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -247,18 +445,20 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
+    readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (restrictWrites && cursorConfigDir) {
-        await ensureCursorRestrictWritesConfig(cursorConfigDir);
+        await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
       }
       return {};
     },
-    sessionConfig: ({ dataDir, sessionId }) => {
+    sessionConfig: ({ dataDir, sessionId, restrictWrites }) => {
       const cursorConfigDir = cursorConfigDirForSession(dataDir, sessionId);
       return {
         env: {
           CURSOR_CONFIG_DIR: cursorConfigDir,
+          ...(restrictWrites ? { [CURSOR_RESTRICT_WRITES_ENV]: "1" } : {}),
         },
         planOptions: {
           cursorConfigDir,
@@ -271,6 +471,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     },
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
+    sendsInterruptKey: false,
     waitsForSubmitAck: true,
     submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
@@ -289,6 +490,44 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       };
     },
   },
+  opencode: {
+    command: opencodeCommand,
+    buildLaunchPlan: (prompt, options) => buildOpenCodePlan(prompt, openCodePlanOptions(options)),
+    buildRestorePlan: (worktreePath, prompt, options) =>
+      buildOpenCodeRestorePlan(worktreePath, prompt, openCodePlanOptions(options)),
+    buildResumePlan: (agentSessionId, binary, options) =>
+      buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
+    findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
+    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
+    setup: async ({ mcpBindings, restrictWrites }) => {
+      await assertOpenCodeCompatibility();
+      const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
+      return configContent ? { opencodeConfigContent: configContent } : {};
+    },
+    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, opencodeCommand()),
+    stateStrategy: "opencode",
+    sendMode: "bracketed_paste",
+    sendsInterruptKey: true,
+    waitsForSubmitAck: true,
+    submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
+    busyQueuedSendAwaitsPrompt: false,
+    queuedSendPromptGraceMs: 15_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+      if (!baseline) {
+        throw new Error("OpenCode submit acknowledgment requires a pinned native session");
+      }
+      return {
+        async scan(text) {
+          return {
+            found: await scanOpenCodeExportForMessage(baseline, text),
+            lastScannedFile: null,
+          };
+        },
+      };
+    },
+  },
 };
 
 function agentAdapter(agent: AgentName): AgentAdapter {
@@ -296,7 +535,7 @@ function agentAdapter(agent: AgentName): AgentAdapter {
 }
 
 export function parseAgentName(agent: string): AgentName {
-  if (agent === "claude" || agent === "codex" || agent === "cursor") {
+  if (agent === "claude" || agent === "codex" || agent === "cursor" || agent === "opencode") {
     return agent;
   }
 
@@ -361,19 +600,34 @@ export async function findAgentSessionId(
   return agentAdapter(agent).findSessionId(worktreePath, options);
 }
 
+export async function readAgentConversation(
+  agent: AgentName,
+  ctx: ConversationReadContext,
+): Promise<TranscriptEntry[] | null> {
+  return agentAdapter(agent).readConversation(ctx);
+}
+
 export async function setupAgentHooks(args: {
   agent: AgentName;
   worktreePath: string;
   sessionToolDir: string;
+  mcpBindings?: SidecarMcpBinding[];
   restrictWrites?: boolean;
   cursorConfigDir?: string;
-}): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }> {
+  claudeConfigDir?: string;
+  modelsCacheHome?: string;
+}): Promise<{
+  claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
+  codexHomePath?: string;
+  opencodeConfigContent?: string;
+}> {
   return agentAdapter(args.agent).setup(args);
 }
 
 export function agentSessionConfig(
   agent: AgentName,
-  args: { dataDir: string; sessionId: string },
+  args: { dataDir: string; sessionId: string; restrictWrites?: boolean },
 ): AgentSessionConfig {
   return agentAdapter(agent).sessionConfig?.(args) ?? {};
 }
@@ -386,6 +640,10 @@ export function agentSendMode(agent: AgentName): AgentSendMode {
   return agentAdapter(agent).sendMode;
 }
 
+export function agentSendsInterruptKey(agent: AgentName): boolean {
+  return agentAdapter(agent).sendsInterruptKey;
+}
+
 export function agentProcessMatchers(agent: AgentName, launchCommand: string): string[] {
   return agentAdapter(agent).processMatchers(launchCommand);
 }
@@ -394,12 +652,24 @@ export function agentWaitsForSubmitAck(agent: AgentName): boolean {
   return agentAdapter(agent).waitsForSubmitAck;
 }
 
-export function agentSubmitAckWindowMs(agent: AgentName): number {
-  return agentAdapter(agent).submitAckWindowMs;
+export function agentSubmitAckPacing(
+  agent: AgentName,
+  options?: { freshLaunch?: boolean },
+): SubmitAckPacing {
+  const adapter = agentAdapter(agent);
+  if (options?.freshLaunch === true && adapter.launchSubmitAck) {
+    return adapter.launchSubmitAck;
+  }
+  return { windowMs: adapter.submitAckWindowMs, maxResends: adapter.submitAckMaxResends };
 }
 
-export function agentSubmitAckMaxResends(agent: AgentName): number {
-  return agentAdapter(agent).submitAckMaxResends;
+/**
+ * Whether the agent has launch-send pacing of its own, meaning its short window
+ * plus Enter resends are the launch send's whole recovery. Callers use this to
+ * scope launch-send handling to those agents instead of an agent name.
+ */
+export function agentHasLaunchSubmitAck(agent: AgentName): boolean {
+  return agentAdapter(agent).launchSubmitAck !== undefined;
 }
 
 export async function createAgentSubmitAckBinding(

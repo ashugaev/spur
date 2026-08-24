@@ -6,6 +6,7 @@ function session(overrides: Partial<SessionView>): SessionView {
   return {
     id: "api-1",
     project: "api",
+    workspaceId: "api-1",
     agent: "claude",
     prompt: "test",
     branch: "api-1",
@@ -33,6 +34,21 @@ describe("session-display", () => {
       session({ id: "api-3", state: "waiting" }),
       session({ id: "api-1", state: "needs_input" }),
       session({ id: "api-2", state: "error", status: "errored" }),
+    ]).map((entry) => entry.id);
+
+    expect(ordered).toEqual(["api-1", "api-2", "api-3"]);
+  });
+
+  it("ranks a stale-parked session between waiting and stopped", () => {
+    const ordered = sortSessionsForList([
+      session({ id: "api-3", state: "stopped", status: "stopped" }),
+      session({
+        id: "api-2",
+        state: "stale",
+        status: "stopped",
+        stopReason: "stale_timeout",
+      }),
+      session({ id: "api-1", state: "waiting" }),
     ]).map((entry) => entry.id);
 
     expect(ordered).toEqual(["api-1", "api-2", "api-3"]);

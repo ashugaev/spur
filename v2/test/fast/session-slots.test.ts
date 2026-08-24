@@ -10,9 +10,10 @@ import {
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
+  TODO_TOOL_NAME,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
-import { createTempDir } from "../helpers/common.js";
+import { createTempDir, findFreePort } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const PARAM_EXPANSION_OPEN = "$" + "{";
@@ -124,7 +125,18 @@ describe("session slots", () => {
     expect(prompt).toContain("describe the whole task end-to-end");
     expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
+    expect(prompt).toContain("spur agent-issue log");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
+  });
+
+  it("still injects helper instructions when the prompt asks for a tag by name without naming the CLI", () => {
+    const prompt = withSessionSlotInstructions(
+      "Run /code-review {{url}}.\nApply the `review` tag to this session.",
+      [{ name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" }],
+    );
+    expect(prompt).toContain(SLOT_TOOL_NAME);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("`review` — Reviewing a PR");
   });
 
   it("lists available tags in helper instructions when a catalog is provided", () => {
@@ -133,7 +145,10 @@ describe("session slots", () => {
       { name: "docs", description: "Documentation only", color: "hsl(120 62% 64%)" },
     ]);
     expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("Apply a tag only on a clear description match");
+    expect(prompt).toContain("apply none");
     expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --tag <name>');
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --list-tags');
     expect(prompt).toContain("`bug` — Fixing a defect");
     expect(prompt).toContain("`docs` — Documentation only");
   });
@@ -184,6 +199,9 @@ describe("session slots", () => {
     expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
       "exec \"$SCRIPT_DIR/spur\" self-destruct 'api-1' --json",
     );
+    const todoWrapper = readFileSync(join(toolDir, TODO_TOOL_NAME), "utf8");
+    expect(todoWrapper).toContain('exec "$SCRIPT_DIR/spur" todo "$@" --session \'api-1\'');
+    expect(todoWrapper).not.toContain("delete");
   });
 
   it("writes branch helpers when branch naming is configured", async () => {
@@ -206,7 +224,7 @@ describe("session slots", () => {
     expect(gitWrapper).toContain('"$SCRIPT_DIR/spur-branch" check "$branch"');
   });
 
-  it("writes spur-sidecar wrapper through the local spur helper", async () => {
+  it("writes spur-sidecar wrapper directly to the parent CLI", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
 
@@ -217,11 +235,33 @@ describe("session slots", () => {
     });
 
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
-    expect(sidecar).toContain('exec "$SCRIPT_DIR/spur" sidecar "$action" --session \'api-2\' "$@"');
+    expect(sidecar).toContain(
+      "--config '/tmp/spur.yaml' sidecar \"$action\" --session 'api-2' \"$@\"",
+    );
+    expect(sidecar).not.toContain("SCRIPT_DIR");
+    expect(sidecar).not.toContain('"$SCRIPT_DIR/spur"');
     expect(sidecar).toContain('action="start"');
     expect(sidecar).toContain(
-      `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" ]]`,
+      `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" || "${PARAM_EXPANSION_OPEN}1-}" == "ports" ]]`,
     );
+  });
+
+  it("forwards the ports action through to the CLI's sidecar group", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-2",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    const out = execFileSync(join(toolDir, "spur-sidecar"), ["ports", "--help"], {
+      encoding: "utf8",
+    });
+
+    expect(out).toContain("Print this session's reserved sidecar ports.");
+    expect(out).not.toContain("--clear-port");
   });
 
   it("blocks git push with global options when the current branch is invalid", async () => {
@@ -267,14 +307,24 @@ exit 42
     expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
   });
 
-  it("lets spur-sidecar follow an overwritten local spur wrapper", async () => {
+  it("keeps spur-sidecar isolated from an overwritten local spur wrapper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
+
+    // A real "spur.yaml" is used, not the shared "/tmp/spur.yaml": the
+    // wrapper below execs the real CLI, and "/tmp/spur.yaml" is the default
+    // instance config that a live daemon on this host (dev box or self-hosted
+    // CI runner) may already be listening on at its default port 4310. Point
+    // at a fresh port nothing is bound to so this stays a fast, isolated test
+    // instead of round-tripping whatever daemon happens to own the shared path.
+    const configPath = join(dataDir, "spur.yaml");
+    const port = await findFreePort();
+    writeFileSync(configPath, `server:\n  host: 127.0.0.1\n  port: ${port}\n`, "utf8");
 
     const toolDir = ensureSessionSlotTool({
       dataDir,
       sessionId: "api-3",
-      configPath: "/tmp/spur.yaml",
+      configPath,
     });
 
     const captureFile = join(dataDir, "captured-args.txt");
@@ -287,13 +337,17 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
       { encoding: "utf8", mode: 0o755 },
     );
 
-    execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-      env: { ...process.env },
-    });
+    expect(() =>
+      // SPUR_DISABLE_AUTOSTART=1 so the CLI throws immediately instead of
+      // auto-spawning a daemon on the free port above and waiting up to
+      // ~40s for it to come up, which would flake this test past the
+      // vitest timeout under load.
+      execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
+        env: { ...process.env, SPUR_DISABLE_AUTOSTART: "1" },
+      }),
+    ).toThrow();
 
-    expect(readFileSync(captureFile, "utf8")).toBe(
-      ["sidecar", "stop", "--session", "api-3", "--name", "isolated-ui", ""].join("\n"),
-    );
+    expect(() => readFileSync(captureFile, "utf8")).toThrow();
   });
 
   it("skips hook-state helper scripts for cursor sessions", async () => {

@@ -1,55 +1,87 @@
-import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { fileURLToPath, URL } from "node:url";
+import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
+import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
+import { assertConfigMayUseProdSlot } from "./config.js";
+import { deploySwitchStatePath, reconcileDeploySwitchState } from "./deploy-switch-state.js";
+import { startDeploySwitch } from "./deploy-switch.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
+  flushEventLogCollapse,
   logSpurEvent,
   setEventLogConfig,
   type SpurLogEntry,
 } from "./event-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_CONFIG,
+  appendUserAction,
+  buildUserActionRecord,
+  readSessionUserActions,
+  readUserActionLog,
+  setUserActionLogConfig,
+  type UserActionOrigin,
+} from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
-import { initializeGhPath } from "./gh.js";
+import { initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
-import { getReleases, isReleaseVersion } from "./releases-cache.js";
+import { getReleases } from "./releases-cache.js";
 import {
-  BacklogItemUnavailableError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
+  InvalidConfigPathError,
+  InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
+  InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  QueueDeliveryInFlightError,
+  SessionAdmissionDeniedError,
+  SessionNotReopenableError,
   SessionNotRestorableError,
+  SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
-import { version } from "./version.js";
-import type {
-  CompleteSessionRequest,
-  ConnectProjectConfigRequest,
-  CreateProjectRequest,
-  DisconnectProjectConfigRequest,
-  KillSessionRequest,
-  OpenPrAction,
-  PreflightRequest,
-  HandoffSessionRequest,
-  RespawnSessionRequest,
-  RunServiceRequest,
-  ScheduleSessionWakeRequest,
-  SendMessageRequest,
-  StartSidecarRequest,
-  SpawnSessionRequest,
-  TakeBacklogItemRequest,
-  UpdateProjectRequest,
-  UpdateSessionSlotsRequest,
+import { getVersion } from "./version.js";
+import {
+  SESSION_STATES,
+  isSessionState,
+  type AgentName,
+  type CompleteSessionRequest,
+  type ConnectProjectConfigRequest,
+  type CreateProjectRequest,
+  type DisconnectProjectConfigRequest,
+  type KillSessionRequest,
+  type OpenPrAction,
+  type PreflightRequest,
+  type HandoffSessionRequest,
+  type RespawnSessionRequest,
+  type RestoreSessionRequest,
+  type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type SourceReplyRequest,
+  type StartSidecarRequest,
+  type SpawnSessionRequest,
+  type SubscribeSessionStatesRequest,
+  type UpdateProjectRequest,
+  type UpdateSessionSlotsRequest,
+  type TodoActor,
+  type TodoMutationRequest,
 } from "./types.js";
+import {
+  InvalidTodoRequestError,
+  TodoLedgerCorruptError,
+  TodoOpenWorkError,
+  TodoTransitionConflictError,
+} from "./todo.js";
 
 interface JsonError {
   error: string;
@@ -64,6 +96,43 @@ class InvalidJsonBodyError extends Error {
   readonly statusCode = 400;
 }
 
+// Stashes the parsed request body on the IncomingMessage so the finally-block
+// user-action logger can decode params without re-reading the (already-consumed) stream.
+const BODY_SYMBOL = Symbol("spurParsedBody");
+
+function stashParsedBody(request: IncomingMessage, value: unknown): void {
+  (request as IncomingMessage & { [BODY_SYMBOL]?: unknown })[BODY_SYMBOL] = value;
+}
+
+function readParsedBody(request: IncomingMessage): unknown {
+  return (request as IncomingMessage & { [BODY_SYMBOL]?: unknown })[BODY_SYMBOL];
+}
+
+function parseOrigin(value: string | string[] | undefined): UserActionOrigin {
+  if (value === "cli" || value === "ui") return value;
+  return "unknown";
+}
+
+export async function resolveTodoMutationActor(args: {
+  origin: UserActionOrigin;
+  callerHeader: string | string[] | undefined;
+  targetSessionId: string;
+  lookup: (sessionId: string) => Promise<{ id: string; agent: AgentName }>;
+}): Promise<TodoActor> {
+  const { origin, callerHeader, targetSessionId, lookup } = args;
+  if (Array.isArray(callerHeader))
+    throw new InvalidTodoRequestError("Caller session header is invalid");
+  if (callerHeader) {
+    if (origin !== "cli") throw new InvalidTodoRequestError("Caller session requires CLI origin");
+    if (callerHeader !== targetSessionId)
+      throw new InvalidTodoRequestError("Caller session does not match ToDo owner");
+    const caller = await lookup(callerHeader);
+    return { kind: "agent", agent: caller.agent, sessionId: caller.id };
+  }
+  if (origin === "cli" || origin === "ui") return { kind: "human", origin };
+  throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
+}
+
 export type StartedServer = SessionService & {
   stop(): Promise<void>;
 };
@@ -72,14 +141,41 @@ const DEFAULT_LOGGER: ServiceLogger = {
   info: writeStderr,
   warn: writeStderr,
 };
+const SHUTDOWN_GRACE_MS = 5_000;
+
+// Total budget for a shutdown, measured from the signal to the last teardown step.
+// Every await inside shutdown() is bounded by what is left of it, so no single step
+// (source poller stop, trigger drain, connection close) can overrun the service
+// manager's stop timeout. The packaged systemd unit uses the default
+// TimeoutStopSec=90s; overrunning that means SIGKILL, which skips teardown entirely
+// and leaves half-written state behind. 45s leaves room for the slowest healthy
+// teardown observed in production (~17s) while keeping a wide margin under 90s.
+const SHUTDOWN_DEADLINE_MS = 45_000;
+
+// Hard backstop for the signal path: if teardown itself wedges past the budget (a step
+// that never yields back, a pending microtask chain), exit anyway and log the handles
+// still open. Sits above SHUTDOWN_DEADLINE_MS so the bounded path always wins the race
+// when it is working, and far below TimeoutStopSec so systemd never has to SIGKILL.
+const SHUTDOWN_FORCE_EXIT_MS = 60_000;
 
 // Upper bound on how long a reload waits for triggers.stop() to drain in-flight
 // deliveries. A blocked delivery (e.g. one awaiting a submit-ack that never matches)
 // would otherwise hang stop() forever and leave the daemon stuck on 503. The bound
 // exceeds a delivery's own ack timeout (~2 min observed) so natural completion wins
 // the race in the common case; pathological reloads unblock within an operator-
-// tolerable window.
+// tolerable window. Shutdown does NOT use this bound: it exceeds TimeoutStopSec, so
+// shutdown passes its own remaining budget instead.
 const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
+
+// Bound the shutdown drain of in-flight background spawns so teardown never hangs
+// on a spawn that fails to settle.
+const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
+
+// Sandbox flags for served HTML artifacts. allow-same-origin is deliberately absent:
+// scripts run, but in an opaque origin with no access to Spur's cookies or storage.
+// The web preview frames mirror this flag list in packages/web/src/lib/artifact-html.ts;
+// the server test above asserts the two stay identical.
+const ARTIFACT_HTML_SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals";
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
@@ -95,11 +191,15 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
 
   const body = Buffer.concat(chunks).toString("utf-8").trim();
   if (!body) {
-    return {} as T;
+    const empty = {} as T;
+    stashParsedBody(request, empty);
+    return empty;
   }
 
   try {
-    return JSON.parse(body) as T;
+    const parsed = JSON.parse(body) as T;
+    stashParsedBody(request, parsed);
+    return parsed;
   } catch {
     throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
@@ -151,6 +251,13 @@ function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   return request;
 }
 
+function parseSweepSidecarsRequest(raw: unknown): { reap: boolean } {
+  if (!isRecord(raw)) {
+    return { reap: false };
+  }
+  return { reap: raw["reap"] === true };
+}
+
 function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
   if (!isRecord(raw)) {
     return {};
@@ -186,7 +293,7 @@ function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeReque
   return request;
 }
 
-function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
+export function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
@@ -195,13 +302,64 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
+  const todoOverrideReason = raw["todoOverrideReason"];
+  if (
+    todoOverrideReason !== undefined &&
+    (typeof todoOverrideReason !== "string" || !todoOverrideReason.trim())
+  ) {
+    throw new Error("todoOverrideReason must be nonblank");
+  }
   return {
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
+    ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
+    ...(typeof todoOverrideReason === "string"
+      ? { todoOverrideReason: todoOverrideReason.trim() }
+      : {}),
   };
 }
 
-function parseKillSessionRequest(raw: unknown): KillSessionRequest {
+function parseTodoMutationRequest(raw: unknown): TodoMutationRequest {
+  if (!isRecord(raw)) throw new Error("ToDo request must be an object");
+  const action = raw["action"];
+  const allowed =
+    action === "add"
+      ? ["action", "text", "reason"]
+      : action === "resume"
+        ? ["action", "itemId"]
+        : action === "hold"
+          ? ["action", "itemId", "reason", "blocker", "requiredHumanAction"]
+          : ["action", "itemId", "reason"];
+  if (Object.keys(raw).some((key) => !allowed.includes(key)))
+    throw new Error("ToDo request contains unknown fields");
+  const required = (name: string): string => {
+    const value = raw[name];
+    if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be nonblank`);
+    return value.trim();
+  };
+  if (action === "add") return { action, text: required("text"), reason: required("reason") };
+  if (action === "complete" || action === "cancel")
+    return { action, itemId: required("itemId"), reason: required("reason") };
+  if (action === "resume") return { action, itemId: required("itemId") };
+  if (action === "hold") {
+    const blocker = raw["blocker"];
+    if (blocker !== "external" && blocker !== "human")
+      throw new Error("blocker must be external or human");
+    if (blocker === "external" && raw["requiredHumanAction"] !== undefined)
+      throw new Error("requiredHumanAction is valid only for a human blocker");
+    const requiredHumanAction = blocker === "human" ? required("requiredHumanAction") : undefined;
+    return {
+      action,
+      itemId: required("itemId"),
+      reason: required("reason"),
+      blocker,
+      ...(requiredHumanAction ? { requiredHumanAction } : {}),
+    };
+  }
+  throw new Error("Unsupported ToDo action");
+}
+
+export function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
@@ -214,7 +372,17 @@ function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   if (prAction) {
     request.prAction = prAction;
   }
+  if (raw["skipPrCheck"] === true) {
+    request.skipPrCheck = true;
+  }
   return request;
+}
+
+export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  return raw["force"] === true ? { force: true } : {};
 }
 
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
@@ -232,6 +400,31 @@ export async function stopTriggersBounded(
   } catch (error) {
     report(error instanceof Error ? error.message : String(error));
   }
+}
+
+// Counts the handles still keeping the event loop alive, grouped by resource kind
+// (e.g. { Timeout: 2, TCPSocketWrap: 7 }). Reported when the shutdown backstop fires so
+// a wedged teardown names what held it instead of just "timed out".
+export function summarizeActiveResources(): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const resource of process.getActiveResourcesInfo()) {
+    counts[resource] = (counts[resource] ?? 0) + 1;
+  }
+  return counts;
+}
+
+// Arms the last-resort exit for the signal path: `onForceExit` runs once `timeoutMs`
+// elapses without teardown reaching its disarm call. The timer is unref'd so arming it
+// can never be the thing that keeps a healthy process alive. Returns the disarm.
+export function armShutdownBackstop(
+  timeoutMs: number,
+  onForceExit: (activeResources: Record<string, number>) => void,
+): () => void {
+  const timer = setTimeout(() => {
+    onForceExit(summarizeActiveResources());
+  }, timeoutMs);
+  timer.unref();
+  return () => clearTimeout(timer);
 }
 
 export interface ReloadApplyHooks {
@@ -275,6 +468,69 @@ export async function applyReloadedConfig(hooks: ReloadApplyHooks): Promise<void
   }
 }
 
+function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionStatesRequest {
+  if (!isRecord(raw)) {
+    throw new InvalidSessionSubscriptionInputError("request body must be a JSON object");
+  }
+  const targetSessionId = raw["targetSessionId"];
+  if (typeof targetSessionId !== "string" || !targetSessionId.trim()) {
+    throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
+  }
+  const states = raw["states"];
+  if (!Array.isArray(states) || states.length === 0) {
+    throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
+  }
+  if (!states.every(isSessionState)) {
+    throw new InvalidSessionSubscriptionInputError(
+      `states must be one of: ${SESSION_STATES.join(", ")}`,
+    );
+  }
+  const message = raw["message"];
+  if (message !== undefined && typeof message !== "string") {
+    throw new InvalidSessionSubscriptionInputError("message must be a string");
+  }
+  return {
+    targetSessionId,
+    states,
+    ...(message !== undefined ? { message } : {}),
+  };
+}
+
+// A CLI spawn only ever sends one entry; this bounds direct API/MCP callers,
+// which can pass an arbitrary array. Each entry still does a requireSession
+// read on the spawn hot path (the writes are batched into one at the end).
+const MAX_SPAWN_STATE_SUBSCRIPTIONS = 20;
+
+function parseSpawnStateSubscriptions(raw: unknown): SubscribeSessionStatesRequest[] | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new InvalidSessionSubscriptionInputError("subscriptions must be an array");
+  }
+  if (raw.length > MAX_SPAWN_STATE_SUBSCRIPTIONS) {
+    throw new InvalidSessionSubscriptionInputError(
+      `subscriptions must not exceed ${MAX_SPAWN_STATE_SUBSCRIPTIONS} entries`,
+    );
+  }
+  const entries = raw.map((entry) => parseSubscribeSessionStatesRequest(entry));
+  const targetSessionIds = new Set<string>();
+  for (const entry of entries) {
+    if (targetSessionIds.has(entry.targetSessionId)) {
+      throw new InvalidSessionSubscriptionInputError(
+        `subscriptions must not repeat targetSessionId: ${entry.targetSessionId}`,
+      );
+    }
+    targetSessionIds.add(entry.targetSessionId);
+  }
+  return entries;
+}
+
+function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRequest {
+  const subscriptions = parseSpawnStateSubscriptions(body.subscriptions);
+  return { ...body, ...(subscriptions ? { subscriptions } : {}) };
+}
+
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
@@ -285,10 +541,20 @@ export async function startServer(
       `${ghPathState.message}; GitHub automation disabled until gh is available`,
     );
   }
-  const service = new SessionService(configPath);
-  setEventLogConfig(service.config.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
-  const bus = new EventBus();
+  assertConfigMayUseProdSlot(configPath);
+  const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
   let ready = false;
+  const switchStatePath = deploySwitchStatePath(service.config.dataDir);
+  // Re-applied on every config (re)load, not just boot, so disk-limit changes take
+  // effect without a full daemon restart.
+  const applyLogConfigs = (cfg: typeof service.config): void => {
+    setEventLogConfig(cfg.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
+    setUserActionLogConfig(cfg.userActionLog ?? DEFAULT_USER_ACTION_LOG_CONFIG);
+    setGhEventSink(cfg.dataDir);
+  };
+  applyLogConfigs(service.config);
+  service.startBackgroundLoops();
+  const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
   let backlogs: { stop(): void } | null = null;
@@ -314,6 +580,24 @@ export async function startServer(
           ...(logger.info ? { info: logger.info } : {}),
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
+        listSessions: async () =>
+          (await service.list({ view: "dashboard" })).map((session) => ({
+            id: session.id,
+            project: session.project,
+            agent: session.agent,
+            state: session.state,
+            ...(session.slots?.title ? { title: session.slots.title } : {}),
+          })),
+        spawnSession: async (request) => {
+          const session = await service.spawn(request);
+          return {
+            id: session.id,
+            project: session.project,
+            agent: session.agent,
+            state: session.state,
+            ...(session.slots?.title ? { title: session.slots.title } : {}),
+          };
+        },
       });
       const nextBacklogs = startConfiguredBacklogs({
         config: service.config,
@@ -338,12 +622,8 @@ export async function startServer(
     requestConfigPath: string,
     action: "connect" | "disconnect",
   ): Promise<void> => {
-    for (const message of preview.warnings) {
-      logEvent("daemon.registry.warning", {
-        level: "warn",
-        message,
-      });
-    }
+    // SessionService emits registry warnings while building the preview, so
+    // diagnostics still land when no reload is needed.
     if (!preview.changed) {
       return;
     }
@@ -352,7 +632,7 @@ export async function startServer(
     const previousConfig = service.config;
     const previousRegistryPaths = service.getRegistryPaths();
 
-    sources?.stop();
+    await sources?.stop();
     sources = null;
     backlogs?.stop();
     backlogs = null;
@@ -372,12 +652,17 @@ export async function startServer(
     }
 
     await applyReloadedConfig({
-      applyNext: () =>
+      applyNext: () => {
         service.applyConfig(preview.config, preview.registryPaths, {
           unconfiguredToRemove: preview.unconfiguredToRemove,
-        }),
+        });
+        applyLogConfigs(service.config);
+      },
       startAutomation,
-      applyPrevious: () => service.applyConfig(previousConfig, previousRegistryPaths),
+      applyPrevious: () => {
+        service.applyConfig(previousConfig, previousRegistryPaths);
+        applyLogConfigs(service.config);
+      },
       onReloaded: () =>
         logEvent("daemon.registry.reloaded", {
           level: "info",
@@ -419,8 +704,11 @@ export async function startServer(
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> => {
+    const startedAt = performance.now();
+    const origin = parseOrigin(request.headers["x-spur-origin"]);
     let method: string | undefined;
     let path: string | undefined;
+    let errorMessage: string | undefined;
     try {
       if (!request.method) {
         logEvent("http.request.failed", {
@@ -460,51 +748,174 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/headroom") {
+        sendJson(response, 200, await service.getHeadroom());
+        return;
+      }
+
       if (method === "GET" && path === "/deploy/versions") {
         const releases = await getReleases();
+        const autoUpdateFlag = readAutoUpdateFlag(service.config.configPath);
+        if (autoUpdateFlag.error) {
+          logEvent("daemon.auto_update.config_invalid", {
+            level: "warn",
+            message: autoUpdateFlag.error,
+          });
+        }
         sendJson(response, 200, {
-          current: version,
+          current: getVersion(),
           available: releases.entries,
+          autoUpdate: autoUpdateFlag.autoUpdate,
           ...(releases.stale ? { stale: true } : {}),
           ...(releases.error ? { registryError: releases.error } : {}),
         });
         return;
       }
 
+      if (method === "GET" && path === "/deploy/switch/status") {
+        sendJson(response, 200, reconcileDeploySwitchState(switchStatePath) ?? { phase: "idle" });
+        return;
+      }
+
       if (method === "POST" && path === "/deploy/switch") {
         const body = await readJsonBody<{ version?: unknown }>(request);
         const requestedVersion = typeof body.version === "string" ? body.version : "";
-        if (!isReleaseVersion(requestedVersion)) {
-          sendError(response, 400, "invalid version");
-          return;
-        }
-        // Guard: refuse to run when the daemon is executing from a source
-        // checkout (e.g. `tsx`/`node v2/dist/cli.js` outside `node_modules`).
-        // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
-        const here = fileURLToPath(new URL(".", import.meta.url));
-        const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
-        if (!forceSwitch && !here.includes("/node_modules/@shugaev/spur/")) {
-          sendError(response, 409, "running from source checkout");
-          return;
-        }
-        const releases = await getReleases();
-        if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
-          if (releases.entries.length === 0 && releases.error) {
+        const result = await startDeploySwitch({
+          version: requestedVersion,
+          statePath: switchStatePath,
+        });
+        switch (result.status) {
+          case "invalid_version":
+            sendError(response, 400, "invalid version");
+            return;
+          case "in_progress":
+            sendJson(response, 409, {
+              error: `deploy switch already in progress for ${result.version}`,
+              inProgress: true,
+              version: result.version,
+            });
+            return;
+          case "source_checkout":
+            sendError(response, 409, "running from source checkout");
+            return;
+          case "registry_unreachable":
             sendError(response, 503, "npm registry unreachable");
             return;
+          case "not_in_registry":
+            sendError(response, 400, "version not in registry");
+            return;
+          case "spawn_failed":
+            sendError(response, 500, result.message);
+            return;
+          case "accepted":
+          case "already_current": {
+            // Disarm on every accepted switch, spawned or already-current:
+            // the issue requires auto-update not to re-arm once a pinned
+            // version becomes current again. This never lives in
+            // `startDeploySwitch` — the auto path must not be able to
+            // disarm itself.
+            const disarmResult = writeAutoUpdateFlag(service.config.configPath, false);
+            if (!disarmResult.ok) {
+              logEvent("daemon.auto_update.disarm_failed", {
+                level: "warn",
+                details: { reason: disarmResult.reason, message: disarmResult.message },
+              });
+            }
+            const autoUpdateAfterDisarm = disarmResult.ok
+              ? disarmResult.autoUpdate
+              : readAutoUpdateFlag(service.config.configPath).autoUpdate;
+            sendJson(response, 202, {
+              accepted: true,
+              version: result.version,
+              autoUpdate: autoUpdateAfterDisarm,
+            });
+            return;
           }
-          sendError(response, 400, "version not in registry");
+        }
+      }
+
+      if (method === "POST" && path === "/deploy/auto-update") {
+        const body = await readJsonBody<{ enabled?: unknown }>(request);
+        if (typeof body.enabled !== "boolean") {
+          sendError(response, 400, "enabled must be a boolean");
           return;
         }
-        const helperPath = fileURLToPath(
-          new URL("../scripts/install-and-restart.sh", import.meta.url),
-        );
-        const child = spawn("bash", [helperPath, requestedVersion], {
-          detached: true,
-          stdio: "ignore",
+        const writeResult = writeAutoUpdateFlag(service.config.configPath, body.enabled);
+        if (writeResult.ok) {
+          sendJson(response, 200, { autoUpdate: writeResult.autoUpdate });
+          return;
+        }
+        switch (writeResult.reason) {
+          case "conflict":
+            sendError(response, 409, "config changed on disk");
+            return;
+          case "config_invalid":
+            sendError(response, 409, writeResult.message);
+            return;
+          case "not_mapping":
+            sendError(response, 409, "config is not a YAML mapping");
+            return;
+          case "missing":
+            sendError(response, 409, "config not found");
+            return;
+          case "invalid_output":
+          case "io":
+            sendError(response, 500, writeResult.message);
+            return;
+        }
+      }
+
+      if (method === "GET" && path === "/claude-accounts") {
+        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        return;
+      }
+
+      if (method === "POST" && path === "/claude-accounts/add") {
+        const body = await readJsonBody<{ label?: unknown }>(request);
+        const label = typeof body.label === "string" ? body.label.trim() : "";
+        const account = service.addClaudeAccount(label ? { label } : {});
+        const { loginTmuxSession } = await service.startAccountLogin(account.id);
+        // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
+        sendJson(response, 201, {
+          account: {
+            id: account.id,
+            label: account.label,
+            authenticated: false,
+            lastUsedAt: account.lastUsedAt,
+          },
+          loginTmuxSession,
         });
-        child.unref();
-        sendJson(response, 202, { accepted: true, version: requestedVersion });
+        return;
+      }
+
+      if (method === "POST" && path === "/claude-accounts/remove") {
+        const body = await readJsonBody<{ id?: unknown }>(request);
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        if (!id) {
+          sendJson(response, 400, { error: "id must be a non-empty string" });
+          return;
+        }
+        try {
+          service.removeClaudeAccount(id);
+        } catch (error) {
+          // In-use guard rejection is a client-correctable conflict, not a 500.
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 409, message);
+          return;
+        }
+        sendJson(response, 200, { removed: id });
+        return;
+      }
+
+      const finishLoginAccountId = path.match(/^\/claude-accounts\/([^/]+)\/finish-login$/)?.[1];
+      if (method === "POST" && finishLoginAccountId) {
+        sendJson(response, 200, await service.finishAccountLogin(finishLoginAccountId));
+        return;
+      }
+
+      const loginStatusAccountId = path.match(/^\/claude-accounts\/([^/]+)\/login-status$/)?.[1];
+      if (method === "GET" && loginStatusAccountId) {
+        sendJson(response, 200, await service.getAccountLoginStatus(loginStatusAccountId));
         return;
       }
 
@@ -528,12 +939,6 @@ export async function startServer(
         return;
       }
 
-      if (method === "POST" && path === "/backlog/take") {
-        const body = await readJsonBody<TakeBacklogItemRequest>(request);
-        sendJson(response, 201, await service.takeAvailableBacklog(body));
-        return;
-      }
-
       if (method === "GET" && path === "/models") {
         const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
         let agent;
@@ -543,18 +948,25 @@ export async function startServer(
           sendError(response, 400, `Unsupported agent: ${rawAgent}`);
           return;
         }
-        sendJson(response, 200, { models: await listAgentModels(agent) });
+        sendJson(response, 200, {
+          models: await listAgentModels(agent, { codexHomePath: service.config.models.codexHome }),
+        });
         return;
       }
 
       if (method === "POST" && path === "/projects") {
         const body = await readJsonBody<CreateProjectRequest>(request);
-        for (const field of ["displayName", "prefix", "path"] as const) {
+        for (const field of ["displayName", "prefix"] as const) {
           const value = body[field];
           if (typeof value !== "string" || !value.trim()) {
             sendError(response, 400, `${field} must be a non-empty string`);
             return;
           }
+        }
+        const rawPath = body.path;
+        if (rawPath !== undefined && (typeof rawPath !== "string" || !rawPath.trim())) {
+          sendError(response, 400, "path must be a non-empty string when provided");
+          return;
         }
         try {
           const result = service.createUnconfiguredProject(body);
@@ -693,6 +1105,20 @@ export async function startServer(
         return;
       }
 
+      const spawnDefaultsProjectId = path.match(/^\/projects\/([^/]+)\/spawn-defaults$/)?.[1];
+      if (method === "GET" && spawnDefaultsProjectId) {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, await service.spawnDefaults(spawnDefaultsProjectId, agent));
+        return;
+      }
+
       const branchExistsId = path.match(/^\/projects\/([^/]+)\/branches\/exists$/)?.[1];
       if (method === "GET" && branchExistsId) {
         const name = url.searchParams.get("name")?.trim() ?? "";
@@ -753,6 +1179,76 @@ export async function startServer(
         return;
       }
 
+      const sharedMemoryListMatch = path.match(/^\/sessions\/([^/]+)\/shared-memory\/([^/]+)$/);
+      if (method === "GET" && sharedMemoryListMatch?.[1] && sharedMemoryListMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.listSharedMemory(
+            decodeURIComponent(sharedMemoryListMatch[1]),
+            decodeURIComponent(sharedMemoryListMatch[2]),
+          ),
+        );
+        return;
+      }
+
+      const sharedMemoryEntryMatch = path.match(
+        /^\/sessions\/([^/]+)\/shared-memory\/([^/]+)\/([^/]+)$/,
+      );
+      if (
+        method === "GET" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        sendJson(
+          response,
+          200,
+          service.getSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+          ),
+        );
+        return;
+      }
+      if (
+        method === "POST" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          service.setSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+            body,
+          ),
+        );
+        return;
+      }
+      if (
+        method === "DELETE" &&
+        sharedMemoryEntryMatch?.[1] &&
+        sharedMemoryEntryMatch[2] &&
+        sharedMemoryEntryMatch[3]
+      ) {
+        sendJson(
+          response,
+          200,
+          service.removeSharedMemory(
+            decodeURIComponent(sharedMemoryEntryMatch[1]),
+            decodeURIComponent(sharedMemoryEntryMatch[2]),
+            decodeURIComponent(sharedMemoryEntryMatch[3]),
+          ),
+        );
+        return;
+      }
+
       const logsSessionId = path.match(/^\/sessions\/([^/]+)\/logs$/)?.[1];
       if (method === "GET" && logsSessionId) {
         const { readSessionEventLog } = await import("./event-log.js");
@@ -778,6 +1274,27 @@ export async function startServer(
         return;
       }
 
+      const userActionsSessionId = path.match(/^\/sessions\/([^/]+)\/user-actions$/)?.[1];
+      if (method === "GET" && userActionsSessionId) {
+        const limitValue = url.searchParams.get("limit");
+        const limit =
+          limitValue && /^\d+$/.test(limitValue) ? Number.parseInt(limitValue, 10) : 200;
+        sendJson(
+          response,
+          200,
+          readSessionUserActions(service.info().dataDir, userActionsSessionId, { limit }),
+        );
+        return;
+      }
+
+      if (method === "GET" && path === "/user-actions") {
+        const limitValue = url.searchParams.get("limit");
+        const limit =
+          limitValue && /^\d+$/.test(limitValue) ? Number.parseInt(limitValue, 10) : 200;
+        sendJson(response, 200, readUserActionLog(service.info().dataDir, { limit }));
+        return;
+      }
+
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
         sendJson(response, 200, await service.getConversation(conversationSessionId));
@@ -790,20 +1307,60 @@ export async function startServer(
         return;
       }
 
+      const subscriptionsSessionId = path.match(/^\/sessions\/([^/]+)\/subscriptions$/)?.[1];
+      if (method === "GET" && subscriptionsSessionId) {
+        sendJson(
+          response,
+          200,
+          service.listStateSubscriptions(decodeURIComponent(subscriptionsSessionId)),
+        );
+        return;
+      }
+      if (method === "POST" && subscriptionsSessionId) {
+        const body = parseSubscribeSessionStatesRequest(await readJsonBody<unknown>(request));
+        sendJson(
+          response,
+          200,
+          service.subscribeToSessionStates(decodeURIComponent(subscriptionsSessionId), body),
+        );
+        return;
+      }
+
+      const removeSubscriptionMatch = path.match(
+        /^\/sessions\/([^/]+)\/subscriptions\/([^/]+)\/remove$/,
+      );
+      if (method === "POST" && removeSubscriptionMatch?.[1] && removeSubscriptionMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.removeStateSubscription(
+            decodeURIComponent(removeSubscriptionMatch[1]),
+            decodeURIComponent(removeSubscriptionMatch[2]),
+          ),
+        );
+        return;
+      }
+
       const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
         const artifact = service.getArtifact(
           decodeURIComponent(artifactMatch[1]),
           decodeURIComponent(artifactMatch[2]),
         );
+        // An SVG opened as a top-level document runs its own scripts on Spur's origin,
+        // and browsers ignore a CSP sandbox on image documents, so hand it over as a
+        // download instead. <img> previews ignore content-disposition and still render.
+        const renderInline = artifact.kind !== "download" && artifact.mimeType !== "image/svg+xml";
         response.writeHead(200, {
           "content-type": artifact.mimeType,
           "content-length": String(artifact.size),
-          "content-disposition":
-            artifact.kind === "download"
-              ? `attachment; filename="${encodeURIComponent(artifact.name)}"`
-              : `inline; filename="${encodeURIComponent(artifact.name)}"`,
+          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(artifact.name)}"`,
           "cache-control": "no-store",
+          // Artifact HTML is agent-authored: render it in an opaque origin so it can
+          // never read Spur's storage or call the API with the operator's session.
+          ...(artifact.mimeType.startsWith("text/html")
+            ? { "content-security-policy": ARTIFACT_HTML_SANDBOX }
+            : {}),
         });
         const stream = createReadStream(artifact.path);
         stream.on("error", () => {
@@ -819,19 +1376,30 @@ export async function startServer(
 
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawn(body));
+        sendJson(response, 201, await service.spawn(mergeSpawnStateSubscriptions(body)));
         return;
       }
 
       if (method === "POST" && path === "/sessions/background") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnInBackground(body));
+        sendJson(
+          response,
+          201,
+          await service.spawnInBackground(mergeSpawnStateSubscriptions(body)),
+        );
         return;
       }
 
       if (method === "POST" && path === "/shepherd/spawn") {
-        const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnShepherd(body));
+        const body = await readJsonBody<{ prompt?: unknown; reportDisposition?: unknown }>(
+          request,
+          15_000_000,
+        );
+        const shepherd = await service.spawnShepherd(
+          typeof body.prompt === "string" ? { prompt: body.prompt } : {},
+        );
+        // Legacy callers (web /api/shepherd) still expect the session alone.
+        sendJson(response, 201, body.reportDisposition === true ? shepherd : shepherd.session);
         return;
       }
 
@@ -839,6 +1407,51 @@ export async function startServer(
       if (method === "POST" && sendSessionId) {
         const body = await readJsonBody<SendMessageRequest>(request, 15_000_000);
         sendJson(response, 200, await service.send(sendSessionId, body));
+        return;
+      }
+
+      const queueOpMatch = path.match(/^\/sessions\/([^/]+)\/queue\/(remove|flush)$/);
+      if (method === "POST" && queueOpMatch?.[1]) {
+        const body = await readJsonBody<{ message?: unknown }>(request);
+        // Forward the same trimmed value validation checks: a queued message
+        // is always trimmed at enqueue (send()'s prepareSendMessage and the
+        // web proxy's send route both trim before it ever reaches the
+        // queue), so an untrimmed value here can never match a real entry —
+        // validating trimmed but looking up raw would 404 a caller who
+        // padded the text, for no reason.
+        const message = typeof body.message === "string" ? body.message.trim() : "";
+        if (!message) {
+          sendError(response, 400, "message must be a non-empty string");
+          return;
+        }
+        const queueSessionId = queueOpMatch[1];
+        sendJson(
+          response,
+          200,
+          queueOpMatch[2] === "remove"
+            ? await service.removeQueuedMessage(queueSessionId, message)
+            : await service.flushQueuedMessage(queueSessionId, message),
+        );
+        return;
+      }
+
+      const answerSessionId = path.match(/^\/sessions\/([^/]+)\/answer$/)?.[1];
+      if (method === "POST" && answerSessionId) {
+        const body = await readJsonBody<{ optionIndex?: unknown }>(request);
+        const optionIndex = body.optionIndex;
+        if (typeof optionIndex !== "number" || !Number.isInteger(optionIndex) || optionIndex < 0) {
+          sendError(response, 400, "optionIndex must be a non-negative integer");
+          return;
+        }
+        await service.answerQuestion(answerSessionId, optionIndex);
+        sendJson(response, 200, { ok: true });
+        return;
+      }
+
+      const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
+      if (method === "POST" && sourceReplySessionId) {
+        const body = await readJsonBody<SourceReplyRequest>(request);
+        sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
         return;
       }
 
@@ -855,9 +1468,41 @@ export async function startServer(
         return;
       }
 
+      const openedSessionId = path.match(/^\/sessions\/([^/]+)\/opened$/)?.[1];
+      if (method === "POST" && openedSessionId) {
+        sendJson(response, 200, await service.markOpened(decodeURIComponent(openedSessionId)));
+        return;
+      }
+
       const pauseSessionId = path.match(/^\/sessions\/([^/]+)\/pause$/)?.[1];
       if (method === "POST" && pauseSessionId) {
         sendJson(response, 200, await service.pause(pauseSessionId));
+        return;
+      }
+
+      const todoSessionId = path.match(/^\/sessions\/([^/]+)\/todo$/)?.[1];
+      if (method === "GET" && todoSessionId) {
+        sendJson(response, 200, await service.readTodo(decodeURIComponent(todoSessionId)));
+        return;
+      }
+      if (method === "POST" && todoSessionId) {
+        const targetSessionId = decodeURIComponent(todoSessionId);
+        const callerHeader = request.headers["x-spur-caller-session"];
+        const actor = await resolveTodoMutationActor({
+          origin,
+          callerHeader,
+          targetSessionId,
+          lookup: (callerSessionId) => service.get(callerSessionId),
+        });
+        let body: TodoMutationRequest;
+        try {
+          body = parseTodoMutationRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          throw new InvalidTodoRequestError(
+            parseError instanceof Error ? parseError.message : "Invalid ToDo request",
+          );
+        }
+        sendJson(response, 200, await service.mutateTodo(targetSessionId, body, actor));
         return;
       }
 
@@ -874,12 +1519,18 @@ export async function startServer(
           );
           return;
         }
+        const todoOptions =
+          body.todoOverrideReason &&
+          !request.headers["x-spur-caller-session"] &&
+          (origin === "cli" || origin === "ui")
+            ? { todoActor: { kind: "human" as const, origin } }
+            : undefined;
         sendJson(
           response,
           200,
           body.scope === "desk"
-            ? await service.completeDesk(completeSessionId, body)
-            : await service.complete(completeSessionId, body),
+            ? await service.completeDesk(completeSessionId, body, todoOptions)
+            : await service.complete(completeSessionId, body, todoOptions),
         );
         return;
       }
@@ -899,7 +1550,15 @@ export async function startServer(
 
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
-        sendJson(response, 200, await service.restore(restoreSessionId));
+        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.restore(restoreSessionId, body));
+        return;
+      }
+
+      const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
+      if (method === "POST" && reopenSessionId) {
+        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.reopen(reopenSessionId, body));
         return;
       }
 
@@ -935,6 +1594,25 @@ export async function startServer(
         return;
       }
 
+      const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
+      if (method === "POST" && switchAuthSessionId) {
+        const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
+        const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+        if (!accountId) {
+          sendJson(response, 400, { error: "accountId must be a non-empty string" });
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await service.switchAuth(switchAuthSessionId, accountId, {
+            reason: "manual",
+            force: body.force === true,
+          }),
+        );
+        return;
+      }
+
       const slotsSessionId = path.match(/^\/sessions\/([^/]+)\/slots$/)?.[1];
       if (method === "POST" && slotsSessionId) {
         const body = await readJsonBody<UpdateSessionSlotsRequest>(request);
@@ -956,6 +1634,12 @@ export async function startServer(
           200,
           await service.stopSidecar(stopSidecarMatch[1], stopSidecarMatch[2]),
         );
+        return;
+      }
+
+      if (method === "POST" && path === "/sidecars/sweep") {
+        const { reap } = parseSweepSidecarsRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.sweepSidecarProcesses(reap));
         return;
       }
 
@@ -997,12 +1681,19 @@ export async function startServer(
       sendError(response, 404, `Route not found: ${method} ${path}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      errorMessage = message;
       if (
         error instanceof SessionResourceNotFoundError ||
-        error instanceof BacklogItemUnavailableError ||
         error instanceof InvalidClearPortError ||
+        error instanceof InvalidConfigPathError ||
+        error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
-        error instanceof InvalidJsonBodyError
+        error instanceof InvalidSessionSubscriptionInputError ||
+        error instanceof InvalidJsonBodyError ||
+        error instanceof SessionAdmissionDeniedError ||
+        error instanceof SessionRateLimitedError ||
+        error instanceof SessionNotReopenableError ||
+        error instanceof QueueDeliveryInFlightError
       ) {
         logEvent("http.request.failed", {
           level: "warn",
@@ -1028,6 +1719,32 @@ export async function startServer(
         sendJson(response, error.statusCode, error.payload);
         return;
       }
+      if (error instanceof TodoOpenWorkError) {
+        sendJson(response, error.statusCode, { code: error.code, sessions: error.sessions });
+        return;
+      }
+      if (error instanceof InvalidTodoRequestError) {
+        sendJson(response, error.statusCode, { code: error.code, error: error.message });
+        return;
+      }
+      if (error instanceof TodoTransitionConflictError) {
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          sessionId: error.sessionId,
+          itemId: error.itemId,
+          error: error.message,
+        });
+        return;
+      }
+      if (error instanceof TodoLedgerCorruptError) {
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          sessionId: error.sessionId,
+          error: error.message,
+          ...(error.line ? { line: error.line } : {}),
+        });
+        return;
+      }
       logEvent("http.request.failed", {
         level: "error",
         ...(method ? { method } : {}),
@@ -1035,6 +1752,25 @@ export async function startServer(
         message,
       });
       sendError(response, 500, message);
+    } finally {
+      try {
+        if (method && path) {
+          const record = buildUserActionRecord({
+            method,
+            path,
+            origin,
+            body: readParsedBody(request),
+            statusCode: response.statusCode,
+            ...(errorMessage ? { error: errorMessage } : {}),
+            latencyMs: Math.round(performance.now() - startedAt),
+          });
+          if (record) {
+            appendUserAction(service.info().dataDir, record);
+          }
+        }
+      } catch {
+        // User-action logging must never block request handling.
+      }
     }
   };
   const server = createServer((request, response) => {
@@ -1043,7 +1779,11 @@ export async function startServer(
 
   const closeServer = async (): Promise<void> => {
     await new Promise<void>((resolve) => {
+      // server.closeAllConnections() destroys every tracked socket, including
+      // in-flight requests, so a stuck handler can't block shutdown past the grace period.
+      const forceTimer = setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS);
       server.close(() => {
+        clearTimeout(forceTimer);
         resolve();
       });
     });
@@ -1092,6 +1832,38 @@ export async function startServer(
     });
   }
 
+  try {
+    const { enabled, cap, liveCount } = service.getAdmissionStartupSummary();
+    const atOrOverCap = liveCount >= cap.global;
+    logEvent("daemon.admission.startup", {
+      level: atOrOverCap ? "warn" : "info",
+      message: `Admission at boot: enabled=${enabled}, cap=${cap.global} (${cap.source}), live=${liveCount}`,
+      details: {
+        enabled,
+        cap: cap.global,
+        capSource: cap.source,
+        live: liveCount,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.admission.startup", {
+      level: "warn",
+      message: `Admission headroom check at boot failed: ${message}`,
+    });
+  }
+
+  const memoryCeilingWarning = service.getMemoryCeilingWarning();
+  if (memoryCeilingWarning) {
+    const message = `Spur fleet cgroup ${memoryCeilingWarning.cgroupPath} has unlimited memory.max and systemd-oomd is absent`;
+    logEvent("daemon.memory.unbounded", {
+      level: "warn",
+      message,
+      details: memoryCeilingWarning,
+    });
+    process.stderr.write(`${message}\n`);
+  }
+
   ready = true;
   logEvent("daemon.started", {
     level: "info",
@@ -1102,42 +1874,114 @@ export async function startServer(
     },
   });
 
-  let shuttingDown = false;
-  const shutdown = async (exitProcess: boolean) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    ready = false;
-    logEvent("daemon.stopping", {
-      level: "info",
-      message: "Stopping Spur daemon",
-    });
-    service.dispose();
-    const closePromise = closeServer();
-    sources?.stop();
-    backlogs?.stop();
-    runtimeLogs?.stop();
-    const triggerController = triggers;
-    if (triggerController) {
-      await triggerController.stop();
-    }
-    await closePromise;
-    logEvent("daemon.stopped", {
-      level: "info",
-      message: "Stopped Spur daemon",
-    });
-    if (exitProcess) {
-      process.exit(0);
-    }
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (exitProcess: boolean): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      ready = false;
+      logEvent("daemon.stopping", {
+        level: "info",
+        message: "Stopping Spur daemon",
+      });
+      const deadline = Date.now() + SHUTDOWN_DEADLINE_MS;
+      const remainingBudgetMs = (): number => Math.max(0, deadline - Date.now());
+      // Every teardown await goes through here: a step that never settles costs its
+      // slice of the budget and a warning, never the whole stop window.
+      const awaitBounded = async (
+        event: string,
+        label: string,
+        task: Promise<unknown>,
+        timeoutMs = remainingBudgetMs(),
+      ): Promise<void> => {
+        try {
+          await withTimeout(task, timeoutMs, `${label} timeout`);
+        } catch (error) {
+          logEvent(event, {
+            level: "warn",
+            message: `Shutdown step ${label} did not finish: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            details: { step: label, timeoutMs },
+          });
+        }
+      };
+      // Armed before the first await so a step that wedges inside its own bound still
+      // ends the process well under the service manager's stop timeout.
+      const disarmBackstop = exitProcess
+        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) => {
+            logEvent("daemon.shutdown.forced_exit", {
+              level: "error",
+              message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
+                activeResources,
+              )}`,
+              details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
+            });
+            process.exit(0);
+          })
+        : null;
+      try {
+        // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
+        // poll, sidecar reaper, session reaper, 2s dashboard tick — before the first
+        // await, so no tick can re-enter teardown or hold the loop open behind it.
+        // It also retires the per-session delivery loops, which park on their own
+        // poll sleep and would otherwise keep typing into panes after shutdown.
+        service.dispose();
+        const closePromise = closeServer();
+        const sourceController = sources;
+        if (sourceController) {
+          await awaitBounded(
+            "daemon.shutdown.sources_stop_timeout",
+            "sources.stop",
+            // SourceGroupController.stop() is sync-or-async by contract.
+            Promise.resolve(sourceController.stop()),
+          );
+        }
+        backlogs?.stop();
+        runtimeLogs?.stop();
+        const triggerController = triggers;
+        if (triggerController) {
+          await stopTriggersBounded(triggerController, remainingBudgetMs(), (message) =>
+            logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
+          );
+        }
+        await awaitBounded(
+          "daemon.shutdown.spawn_drain_timeout",
+          "settleBackgroundSpawns",
+          service.settleBackgroundSpawns(),
+          Math.min(BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS, remainingBudgetMs()),
+        );
+        await awaitBounded("daemon.shutdown.server_close_timeout", "server.close", closePromise);
+        flushEventLogCollapse(service.config.dataDir);
+        logEvent("daemon.stopped", {
+          level: "info",
+          message: "Stopped Spur daemon",
+        });
+      } finally {
+        // Reached even when a teardown step throws, so a failed cleanup costs the signal
+        // path nothing: it still exits here instead of waiting out the backstop or
+        // systemd's SIGKILL. Note the awaits above swallow their own failures by design —
+        // awaitBounded and stopTriggersBounded log and continue, because a best-effort
+        // teardown must not abandon the steps behind it. Only a synchronous throw
+        // (dispose(), the sync stops) escapes, and only programmatic stop() sees it.
+        disarmBackstop?.();
+        if (exitProcess) {
+          process.exit(0);
+        }
+      }
+    })();
+    return shutdownPromise;
   };
 
-  const onSigInt = () => {
+  // Registered with `on` (not `once`): a repeat SIGTERM/SIGINT arriving during the
+  // in-flight shutdown must re-enter `shutdown` and get the same shared promise
+  // rather than falling through to Node's default terminate-the-process action,
+  // which would cut off connection drain / trigger stop mid-teardown. Only the
+  // programmatic `stop()` path below removes these listeners.
+  const onShutdownSignal = () => {
     void shutdown(true);
   };
-  const onSigTerm = () => {
-    void shutdown(true);
-  };
-  process.on("SIGINT", onSigInt);
-  process.on("SIGTERM", onSigTerm);
+  process.on("SIGINT", onShutdownSignal);
+  process.on("SIGTERM", onShutdownSignal);
 
   // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
   try {
@@ -1152,8 +1996,8 @@ export async function startServer(
 
   return Object.assign(service, {
     async stop(): Promise<void> {
-      process.off("SIGINT", onSigInt);
-      process.off("SIGTERM", onSigTerm);
+      process.off("SIGINT", onShutdownSignal);
+      process.off("SIGTERM", onShutdownSignal);
       await shutdown(false);
     },
   });

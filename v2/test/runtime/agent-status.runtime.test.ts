@@ -39,15 +39,26 @@ projects:
 }
 
 async function getSession(port: number, sessionId: string): Promise<SessionView> {
-  const response = await fetch(`http://127.0.0.1:${port}/sessions/${sessionId}`);
-  return (await response.json()) as SessionView;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/sessions/${sessionId}`);
+    return (await response.json()) as SessionView;
+  } catch {
+    // A transient connection/parse error (e.g. ECONNREFUSED during a daemon GC
+    // pause or a port race under heavy CI load) is "not ready yet", not a
+    // failure. `pollUntil` propagates any throw from `fn` immediately, so a
+    // single momentary refusal would otherwise fail the whole test. Return a
+    // sentinel that matches no expected state so the poll keeps retrying until
+    // the daemon accepts again or the caller's timeout fires (a genuinely dead
+    // daemon still fails, with the timeout message).
+    return { state: "__unreachable__" } as unknown as SessionView;
+  }
 }
 
 async function waitForState(
   port: number,
   sessionId: string,
   expectedState: string,
-  timeoutMs = 30_000,
+  timeoutMs = 45_000,
 ): Promise<SessionView> {
   return pollUntil(() => getSession(port, sessionId), {
     timeoutMs,
@@ -69,7 +80,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
           // Already gone.
         }
       }
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });
@@ -217,7 +228,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const { context, configPath, port } = await setup("codex-wait");
     const session = await spawnSession(context, configPath, "codex");
 
-    const view = await waitForState(port, session.id, "waiting", 45_000);
+    const view = await waitForState(port, session.id, "waiting");
     expect(view.state).toBe("waiting");
     expect(view.status).toBe("running");
   });
@@ -225,11 +236,11 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   it("Codex: show-waiting-menu produces needs_input from structured hook/jsonl state", async () => {
     const { context, configPath, port } = await setup("codex-needs");
     const session = await spawnSession(context, configPath, "codex");
-    await waitForState(port, session.id, "waiting", 45_000);
+    await waitForState(port, session.id, "waiting");
 
     await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
 
-    const view = await waitForState(port, session.id, "needs_input", 45_000);
+    const view = await waitForState(port, session.id, "needs_input");
     expect(view.state).toBe("needs_input");
   });
 

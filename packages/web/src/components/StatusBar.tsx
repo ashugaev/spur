@@ -11,6 +11,8 @@ import {
 } from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
+import { ClaudeAccountsMenu } from "@/components/ClaudeAccountsMenu";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { VersionMenu } from "@/components/VersionMenu";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
@@ -279,7 +281,7 @@ export function StatusBar() {
     gitlabStatus === null || gitlabStatus.configured === true || providersInUse.has("gitlab");
 
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
+    <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] py-1 pl-[max(0.5rem,calc(env(safe-area-inset-left)_+_2px))] pr-[max(0.5rem,calc(env(safe-area-inset-right)_+_2px))] text-[10px] uppercase tracking-[0.08em] sm:pl-[max(1rem,calc(env(safe-area-inset-left)_+_2px))] sm:pr-[max(1rem,calc(env(safe-area-inset-right)_+_2px))]">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 sm:gap-x-6">
         <div
           ref={onlinePopover.containerRef}
@@ -354,7 +356,9 @@ export function StatusBar() {
         {showGitlab ? <PlatformStatusButton platform="gitlab" status={gitlabStatus} /> : null}
       </div>
 
-      <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">
+      <div className="ml-auto flex shrink-0 items-center gap-3 text-[var(--color-text-tertiary)]">
+        <ThemeToggle />
+        <ClaudeAccountsMenu />
         <VersionMenu />
       </div>
     </footer>

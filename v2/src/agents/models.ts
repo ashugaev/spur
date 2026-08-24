@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { listClaudeModels } from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
+import { opencodeCommand } from "./opencode.js";
+import { missingAgentExecutableMessage, resolveAgentExecutable } from "./executable.js";
 import type { AgentName } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -15,15 +17,6 @@ export interface AgentModel {
   isCurrent?: boolean;
 }
 
-const CLAUDE_MODELS: AgentModel[] = [
-  { id: "opus", label: "Opus" },
-  { id: "sonnet", label: "Sonnet", isDefault: true },
-  { id: "haiku", label: "Haiku" },
-  { id: "fable", label: "Fable" },
-];
-
-const CODEX_FALLBACK_MODELS: AgentModel[] = [{ id: "gpt-5.5", label: "GPT-5.5", isDefault: true }];
-
 const CURSOR_FALLBACK_MODELS: AgentModel[] = [{ id: "auto", label: "Auto", isDefault: true }];
 
 const CURSOR_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -34,10 +27,12 @@ interface CursorCacheEntry {
 }
 
 const cursorCache = new Map<string, CursorCacheEntry>();
-
-function codexHomeDir(opts?: { codexHomePath?: string }): string {
-  return opts?.codexHomePath ?? process.env["CODEX_HOME"] ?? join(homedir(), ".codex");
-}
+// Dedupes concurrent calls (e.g. /api/models and /api/projects/:id/spawn-
+// defaults firing near-simultaneously on a cold cache) onto a single
+// in-flight `cursor models` exec instead of running it twice in parallel.
+// Keyed the same as cursorCache; evicted on both success and failure so a
+// rejected call never poisons later callers.
+const cursorInFlight = new Map<string, Promise<AgentModel[]>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -48,10 +43,10 @@ function parseCodexModelsCache(raw: string): AgentModel[] {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return CODEX_FALLBACK_MODELS;
+    return [];
   }
   if (!isRecord(parsed) || !Array.isArray(parsed["models"])) {
-    return CODEX_FALLBACK_MODELS;
+    return [];
   }
   const models: AgentModel[] = [];
   for (const entry of parsed["models"]) {
@@ -69,16 +64,16 @@ function parseCodexModelsCache(raw: string): AgentModel[] {
     const label = typeof displayName === "string" && displayName.length > 0 ? displayName : slug;
     models.push({ id: slug, label });
   }
-  return models.length > 0 ? models : CODEX_FALLBACK_MODELS;
+  return models;
 }
 
-async function listCodexModels(opts?: { codexHomePath?: string }): Promise<AgentModel[]> {
-  const cachePath = join(codexHomeDir(opts), "models_cache.json");
+async function listCodexModels(codexHomePath: string): Promise<AgentModel[]> {
+  const cachePath = join(codexHomePath, "models_cache.json");
   let raw: string;
   try {
     raw = await readFile(cachePath, "utf8");
   } catch {
-    return CODEX_FALLBACK_MODELS;
+    return [];
   }
   return parseCodexModelsCache(raw);
 }
@@ -148,15 +143,19 @@ function normalizeCursorDefaultModel(models: AgentModel[]): AgentModel[] {
   }));
 }
 
-async function listCursorModels(): Promise<AgentModel[]> {
-  const cacheKey = cursorCommand();
-  const cached = cursorCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.models;
-  }
+async function execCursorModels(cacheKey: string): Promise<AgentModel[]> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(cursorCommand(), ["models"], { encoding: "utf8" }));
+    // Bounded so a hung `cursor` binary can't leave this (and the HTTP
+    // request that awaits it, e.g. /models or /projects/:id/spawn-defaults)
+    // unresolved indefinitely. Under the client-facing 8s spurRequest
+    // timeout (packages/web/src/lib/spur-daemon.ts) so a stall still
+    // resolves here first, into the same graceful fallback as "no cursor
+    // CLI", rather than the caller timing out on a still-running process.
+    ({ stdout } = await execFileAsync(cursorCommand(), ["models"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }));
   } catch {
     return CURSOR_FALLBACK_MODELS;
   }
@@ -166,16 +165,86 @@ async function listCursorModels(): Promise<AgentModel[]> {
   return resolved;
 }
 
+async function listCursorModels(): Promise<AgentModel[]> {
+  const cacheKey = cursorCommand();
+  const cached = cursorCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.models;
+  }
+  const inFlight = cursorInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+  const request = execCursorModels(cacheKey).finally(() => {
+    cursorInFlight.delete(cacheKey);
+  });
+  cursorInFlight.set(cacheKey, request);
+  return request;
+}
+
+export function parseOpenCodeModelsOutput(stdout: string): AgentModel[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((id) => /^[^\s/]+\/\S+$/.test(id))
+    .map((id) => ({ id, label: id }));
+}
+
+async function discoverOpenCodeModels(): Promise<AgentModel[]> {
+  const { stdout } = await execFileAsync(opencodeCommand(), ["models"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  return parseOpenCodeModelsOutput(stdout);
+}
+
+function missingOpenCodeExecutableError(error: unknown): Error | null {
+  if (resolveAgentExecutable("opencode").path) return null;
+  return new Error(missingAgentExecutableMessage("opencode"), { cause: error });
+}
+
+async function listOpenCodeModels(): Promise<AgentModel[]> {
+  try {
+    return await discoverOpenCodeModels();
+  } catch (error) {
+    const missingExecutable = missingOpenCodeExecutableError(error);
+    if (missingExecutable) throw missingExecutable;
+    throw new Error(`OpenCode model discovery failed using ${opencodeCommand()}`, { cause: error });
+  }
+}
+
+export async function validateOpenCodeModel(model: string): Promise<string> {
+  let models: AgentModel[];
+  try {
+    models = await discoverOpenCodeModels();
+  } catch (error) {
+    const missingExecutable = missingOpenCodeExecutableError(error);
+    if (missingExecutable) throw missingExecutable;
+    throw new Error(`Cannot validate OpenCode model "${model}": model list unavailable`, {
+      cause: error,
+    });
+  }
+  if (models.length === 0) {
+    throw new Error(`Cannot validate OpenCode model "${model}": model list is empty`);
+  }
+  if (!models.some((candidate) => candidate.id === model)) {
+    throw new Error(`OpenCode model "${model}" is not available`);
+  }
+  return model;
+}
+
 export async function listAgentModels(
   agent: AgentName,
   opts?: { codexHomePath?: string },
 ): Promise<AgentModel[]> {
   switch (agent) {
     case "claude":
-      return CLAUDE_MODELS;
+      return listClaudeModels();
     case "codex":
-      return listCodexModels(opts);
+      return opts?.codexHomePath ? listCodexModels(opts.codexHomePath) : [];
     case "cursor":
       return listCursorModels();
+    case "opencode":
+      return listOpenCodeModels();
   }
 }

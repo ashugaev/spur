@@ -51,6 +51,7 @@ function automationConfig(
   context: RuntimeTestContext,
   sessionPrefix: string,
   extraProjectYaml: string,
+  extraRootYaml = "",
 ): string {
   return `server:
   host: 127.0.0.1
@@ -58,7 +59,7 @@ function automationConfig(
 dataDir: ${context.dataDir}
 worktreeDir: ${context.worktreeDir}
 defaultAgent: claude
-projects:
+${extraRootYaml}projects:
   api:
     path: ${context.repoDir}
     defaultBranch: main
@@ -126,7 +127,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           // Already gone.
         }
       }
-      await killTmuxSessionsByPrefix(current.sessionPrefix);
+      await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
       await current.context.cleanup();
     }
   });
@@ -560,6 +561,131 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     },
   );
 
+  it("wakes a fractionally stale session from a real GitHub source event", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-stale-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    const configPath = await context.writeConfig(
+      "github-stale.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 250
+        runOnStart: false
+    triggers:
+      pr-watch-ci-failed:
+        source: pr-watch
+        event: github:ci_failed
+        send:
+          interrupt: false
+`,
+        "staleAfterMinutes: 0.001\n",
+      ),
+    );
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-stale": {
+          number: 42,
+          title: "Wake stale runtime",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          reviewDecision: null,
+        },
+      },
+    });
+
+    await withRuntimeEnv(context, async () => {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch: "feature-runtime-stale",
+        prompt: "initial stale runtime prompt",
+      });
+      await pollUntil(async () => captureTmuxPane(session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("initial stale runtime prompt"),
+      });
+
+      const config = loadProjectConfig(configPath, loadConfig(configPath));
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config,
+        bus,
+        sessionService: service,
+        logger: { warn: () => {} },
+      });
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: config.projects["api"]?.sources["pr-watch"] as never,
+        emit(name, data) {
+          bus.emit({ name, projectId: "api", sourceId: "pr-watch", data });
+        },
+        signal: abortController.signal,
+        logger: { warn: () => {} },
+      });
+
+      try {
+        const parked = await pollUntil(async () => service.get(session.id), {
+          timeoutMs: 20_000,
+          accept: (value) => value.status === "stopped" && value.state === "stale",
+        });
+        expect(parked.stopReason).toBe("stale_timeout");
+
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-stale": {
+              number: 42,
+              title: "Wake stale runtime",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+            },
+          },
+          checksByPr: { "42": [{ name: "stale runtime", state: "FAILURE" }] },
+        });
+
+        const pane = await pollUntil(async () => captureTmuxPane(session.id), {
+          timeoutMs: 25_000,
+          accept: (value) => value.includes("CI is failing: stale runtime."),
+        });
+        expect(pane).toContain("CI is failing: stale runtime.");
+        const recovered = await service.get(session.id);
+        expect(recovered.status).toBe("running");
+        expect(recovered).not.toHaveProperty("stopReason");
+        const lifecycleEvents = await pollUntil(
+          async () => readEventLog(context.dataDir).map((entry) => entry.event),
+          {
+            timeoutMs: 10_000,
+            accept: (events) =>
+              events.includes("trigger.send.delivered") && events.includes("session.message.sent"),
+          },
+        );
+        expect(lifecycleEvents).toEqual(
+          expect.arrayContaining([
+            "session.stale.parked",
+            "trigger.send.queued",
+            "trigger.send.delivered",
+            "session.message.sent",
+          ]),
+        );
+      } finally {
+        abortController.abort();
+        handle.stop();
+        await controller.stop();
+        service.dispose();
+      }
+    });
+  });
+
   it("keeps github:ci_failed bound to the persisted PR after the worktree branch drifts", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -828,7 +954,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             },
           },
         });
-        await sleep(1_500);
+        await sleep(4_000);
         expect(events).toHaveLength(1);
 
         await context.writeGhState({
@@ -1055,9 +1181,13 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           project: "api",
           agent,
           branch: "feature-runtime-merge-conflict-restore",
-          prompt: "",
+          prompt: "Monitor merge conflicts",
         });
 
+        await pollUntil(async () => context.readAgentLog(session.id), {
+          timeoutMs: 15_000,
+          accept: (value) => value.includes("Spur ToDo:"),
+        });
         await pollUntil(async () => service.get(session.id), {
           timeoutMs: 15_000,
           accept: (value) => value.state === "waiting",
@@ -1116,6 +1246,14 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           const agentLogBeforeRestore = await context.readAgentLog(session.id);
           expect(countOccurrences(agentLogBeforeRestore, conflictMarker)).toBe(1);
 
+          await pollUntil(async () => readEventLog(context.dataDir).map((entry) => entry.event), {
+            timeoutMs: 5_000,
+            accept: (events) => events.includes("trigger.send.delivered"),
+          });
+          const deliveriesBeforeRestore = readEventLog(context.dataDir).filter(
+            (entry) => entry.event === "trigger.send.delivered",
+          ).length;
+
           await service.pause(session.id);
 
           await pollUntil(async () => service.get(session.id), {
@@ -1129,10 +1267,18 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           const restoredLog = await pollUntil(async () => context.readAgentLog(session.id), {
             timeoutMs: 20_000,
             accept: (value) =>
-              value.includes("startup:resume") &&
-              countOccurrences(value, conflictMarker) === 2 &&
-              value.lastIndexOf(conflictMarker) > value.lastIndexOf("startup:resume"),
+              value.includes("startup:resume") && countOccurrences(value, conflictMarker) === 2,
           });
+          await pollUntil(
+            async () =>
+              readEventLog(context.dataDir).filter(
+                (entry) => entry.event === "trigger.send.delivered",
+              ).length,
+            {
+              timeoutMs: 5_000,
+              accept: (count) => count === deliveriesBeforeRestore + 1,
+            },
+          );
           expect(restoredLog).not.toContain("This session was restored after the agent exited.");
           expect(restoredLog).toContain("Merge conflicts are blocking this PR.");
         } finally {

@@ -1,18 +1,24 @@
-import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
-import { extractGithubErrorText, gh, isGitHubRateLimitError } from "../gh.js";
+import { extractGithubErrorText, gh, isGitHubRateLimitError, runGhPollCycle } from "../gh.js";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
+  reviewSnapshotBaseline,
   type GitHubCheck,
   type GitHubPrSummary,
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
+  type ReviewSnapshot,
   type WorkItemEventData,
 } from "../types.js";
-import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
+import {
+  isEligibleForSourcePoll,
+  type SourceHandle,
+  type SourceModule,
+  type SourceStartDeps,
+} from "./types.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
   deleteReviewSourceSnapshot,
@@ -25,8 +31,8 @@ import {
   removeLifecycleBaselinedSession,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
-import { reviewProvider } from "../review-providers/index.js";
-import { isGitWorktree } from "../workspace.js";
+import { hasRecentSessionUserAction } from "../user-action-log.js";
+import { collectGitHubSignalsBatch, hasTerminalSignal } from "../review-providers/github.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -44,6 +50,10 @@ export type { GitHubCheck, GitHubPrSummary };
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
 const RATE_LIMIT_BACKOFF_BASE_MS = 5 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
+const ADAPTIVE_ACTIVITY_ACTIONS = new Set(["session.send", "session.source_reply"]);
+// After this many consecutive poll failures for the same session, its failures stop
+// counting toward the CI-active hysteresis flag (see consecutiveSessionPollErrors).
+const CI_HYSTERESIS_ERROR_TOLERANCE = 3;
 
 interface GitHubSearchPrItem {
   number: number;
@@ -229,7 +239,7 @@ async function pollWorkItems(
     ...tokenizeSearchQuery(query),
     "--state",
     "open",
-    "--draft=false",
+    deps.config.draft === true ? "--draft=true" : "--draft=false",
     "--json",
     "number,title,url,repository",
     "--limit",
@@ -251,7 +261,6 @@ async function pollWorkItems(
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
-  const provider = reviewProvider("github");
   const snapshots = readReviewSourceSnapshots(
     deps.dataDir,
     "github",
@@ -266,7 +275,17 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.projectId,
     deps.sourceId,
   );
-  const deadWorktreeSessions = new Set<string>();
+  const adaptive = deps.config.adaptivePoll;
+  const attemptedSessionIds = new Set<string>();
+  // Tracks consecutive poll failures per session (catch-block errors or a failed CI
+  // checks fetch). A session erroring on *every* cycle (persistent 404/permission
+  // issue, not rate-limit/bad-creds — those are handled separately) would otherwise
+  // never produce a "clean" cycle, latching lastCycleCiActive true forever and
+  // defeating adaptivePoll source-wide. Past the tolerance, that session's failures
+  // stop counting toward the hysteresis flag (still logged, just excluded from it).
+  const consecutiveSessionPollErrors = new Map<string, number>();
+  let nextEligiblePollAtMs = 0;
+  let lastCycleCiActive = false;
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
@@ -277,6 +296,44 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   let authWarned = false;
 
   const shouldSkipGitHubCalls = (): boolean => authDisabled || Date.now() < cooldownUntilMs;
+
+  // Records a poll failure for a session and reports whether it should still count
+  // toward this cycle's CI-active hysteresis flag. Returns false once the session has
+  // failed more than CI_HYSTERESIS_ERROR_TOLERANCE cycles in a row, so a persistently
+  // erroring session can't wedge the flag true forever.
+  const countsTowardCiHysteresis = (sessionId: string): boolean => {
+    const count = (consecutiveSessionPollErrors.get(sessionId) ?? 0) + 1;
+    consecutiveSessionPollErrors.set(sessionId, count);
+    return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
+  };
+
+  const listPollableSessions = () =>
+    listSessions(deps.dataDir).filter((session) =>
+      isEligibleForSourcePoll(session, deps.projectId),
+    );
+
+  const shouldPollThisTick = (): boolean => {
+    if (!adaptive) return true;
+    if (Date.now() >= nextEligiblePollAtMs) return true;
+    if (lastCycleCiActive) return true;
+    for (const session of listPollableSessions()) {
+      const existing = snapshots.get(session.id);
+      if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number))
+        continue;
+      if (!attemptedSessionIds.has(session.id)) return true;
+      if (
+        hasRecentSessionUserAction(
+          deps.dataDir,
+          session.id,
+          ADAPTIVE_ACTIVITY_ACTIONS,
+          Date.now() - adaptive.activeGraceMs,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
 
   const handleGitHubSuppressionError = (error: unknown): boolean => {
     const message = extractGithubErrorText(error);
@@ -321,48 +378,38 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (stopped || deps.signal.aborted || polling || shouldSkipGitHubCalls()) return;
     polling = true;
     try {
-      const sessions = listSessions(deps.dataDir).filter(
-        (session) =>
-          session.project === deps.projectId &&
-          session.status === "running" &&
-          Boolean(session.worktreePath) &&
-          existsSync(session.worktreePath),
-      );
-      const currentSessionIds = new Set<string>();
+      const sessions = listPollableSessions();
+      const currentSessionIds = new Set(sessions.map((session) => session.id));
+      let cycleCiActive = false;
+      let cycleHadPollError = false;
+      const pollableSessions = [];
 
       for (const session of sessions) {
-        currentSessionIds.add(session.id);
-        // Skip sessions whose PR is already merged/closed: terminal state, no new
-        // signals possible, and re-polling them burns the shared gh rate limit. The
-        // snapshot key persists on disk and reloads at startup so the skip is sticky.
-        // Caveat: a CLOSED PR later reopened won't be re-detected until daemon restart
-        // (no `reopened` lifecycle kind exists). MERGED is unconditionally terminal.
+        // Skip only when the session is bound to a PR and the snapshot's terminal
+        // signal is *for that PR*: terminal state, no new signals possible, and
+        // re-polling burns the shared gh rate limit. Scoped by PR number so a
+        // rebind to a new PR (`spur slots --link pr=...`) is always polled again —
+        // a stale terminal snapshot from the PR the session used to be bound to
+        // must never mute it. Unbound sessions are always polled (the only local
+        // authority for "the current PR" is `session.pr`; see decision 2).
+        // The snapshot persists to disk and reloads at startup, so the skip is
+        // sticky across restarts: a CLOSED PR later reopened won't be re-detected
+        // while the session stays bound to that PR number (no `reopened` lifecycle
+        // kind exists). MERGED is unconditionally terminal.
         const existing = snapshots.get(session.id);
-        if (existing && (existing.has("merged") || existing.has("closed"))) {
+        if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
           continue;
         }
-        // Proactively skip sessions whose worktree is missing or no longer a git repo:
-        // shelling out to gh there just spams "not a git repository". The check is
-        // cheap (stat short-circuit + rev-parse) and self-healing — the moment the
-        // worktree is repaired the next poll clears the flag and resumes polling.
-        if (!(await isGitWorktree(session.worktreePath))) {
-          if (!deadWorktreeSessions.has(session.id)) {
-            deadWorktreeSessions.add(session.id);
-            deps.logger.warn?.(
-              `[source:${deps.projectId}/${deps.sourceId}] skipping ${session.id}: worktree missing or not a git repository (will retry when repaired)`,
-            );
-            logSpurEvent(deps.dataDir, {
-              event: "source.poll.dead_worktree",
-              level: "warn",
-              projectId: deps.projectId,
-              sourceId: deps.sourceId,
-              sessionId: session.id,
-              message: `Skipping ${deps.projectId}/${deps.sourceId}/${session.id}: worktree missing or not a git repository`,
-            });
-          }
-          continue;
-        }
-        deadWorktreeSessions.delete(session.id);
+        pollableSessions.push(session);
+      }
+
+      const collectedBySession = await collectGitHubSignalsBatch(
+        pollableSessions,
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+      );
+      for (const session of pollableSessions) {
         try {
           const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
             deps.dataDir,
@@ -370,12 +417,27 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             deps.sourceId,
             session.id,
           );
-          const collected = await provider.collectSignals(
-            session,
-            deps.dataDir,
-            deps.projectId,
-            deps.sourceId,
-          );
+          const batchResult = collectedBySession.get(session.id);
+          if (batchResult?.status !== "skipped" || batchResult.reason !== "capacity") {
+            attemptedSessionIds.add(session.id);
+          }
+          if (!batchResult || batchResult.status === "skipped") continue;
+          if (batchResult.status === "error") throw batchResult.error;
+          const collected = batchResult.collected;
+          if (collected?.ciActive) {
+            cycleCiActive = true;
+          }
+          // A failed CI-check fetch is not a clean observation: it must not count
+          // toward letting this cycle lower the CI-active hysteresis flag (see the
+          // cycleHadPollError comment below), even though collectSignals itself
+          // returned successfully. `!collected` (PR genuinely gone/not found) is a
+          // clean observation, not a failure — only a failed checks fetch resets the
+          // session's error streak below.
+          if (collected?.ciCheckFetchFailed) {
+            if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
+          } else {
+            consecutiveSessionPollErrors.delete(session.id);
+          }
           if (!collected) {
             snapshots.delete(session.id);
             deleteReviewSourceSnapshot(
@@ -396,21 +458,27 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             continue;
           }
 
-          const previous = snapshots.get(session.id);
+          const previous = reviewSnapshotBaseline(
+            snapshots.get(session.id),
+            collected.data.prNumber,
+          );
           const next = collected.snapshot;
           const changed = [...next.values()].filter((signal) => {
             const prior = previous?.get(signal.key);
             return !prior || prior.text !== signal.text;
           });
 
-          snapshots.set(session.id, next);
+          // Built once, handed to both the in-memory map and the on-disk write so
+          // the two copies cannot desync.
+          const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+          snapshots.set(session.id, nextSnapshot);
           writeReviewSourceSnapshot(
             deps.dataDir,
             "github",
             deps.projectId,
             deps.sourceId,
             session.id,
-            next,
+            nextSnapshot,
           );
 
           if (restoreReplayRequested) {
@@ -446,6 +514,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           }
         } catch (error) {
           if (handleGitHubSuppressionError(error)) return;
+          if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
           const message = extractGithubErrorText(error);
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
@@ -460,6 +529,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           });
         }
       }
+
+      // A per-session poll error means this cycle's CI observation is incomplete, not
+      // that CI stopped: only let the cycle *lower* the hysteresis flag to false when
+      // every session was actually observed cleanly. A freshly observed active check
+      // still raises it regardless.
+      lastCycleCiActive = cycleCiActive || (cycleHadPollError && lastCycleCiActive);
 
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
@@ -482,8 +557,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         }
       }
 
-      for (const sessionId of [...deadWorktreeSessions]) {
-        if (!currentSessionIds.has(sessionId)) deadWorktreeSessions.delete(sessionId);
+      for (const sessionId of [...attemptedSessionIds]) {
+        if (!currentSessionIds.has(sessionId)) attemptedSessionIds.delete(sessionId);
+      }
+
+      for (const sessionId of [...consecutiveSessionPollErrors.keys()]) {
+        if (!currentSessionIds.has(sessionId)) consecutiveSessionPollErrors.delete(sessionId);
       }
     } finally {
       polling = false;
@@ -525,19 +604,34 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const pollCycle = async (emitInitial: boolean): Promise<void> => {
     if (pollingCycle) return;
     pollingCycle = true;
+    // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
+    // already active going into this cycle, no real polling happened, so the
+    // adaptive deadline must not move — otherwise it silently consumes the
+    // slow window during an outage instead of resuming promptly once it lifts.
+    const skippedByCooldown = shouldSkipGitHubCalls();
+    const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
     try {
-      await pollSignals(emitInitial);
-      if (shouldSkipGitHubCalls()) return;
-      await syncWorkItems();
-      if (!shouldSkipGitHubCalls()) {
-        rateLimitFailures = 0;
-      }
+      await runGhPollCycle(
+        { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
+        async () => {
+          await pollSignals(emitInitial);
+          if (shouldSkipGitHubCalls()) return;
+          await syncWorkItems();
+          if (!shouldSkipGitHubCalls()) {
+            rateLimitFailures = 0;
+          }
+        },
+      );
     } finally {
+      if (adaptive && !skippedByCooldown && Date.now() >= adaptiveDeadlineAtStart) {
+        nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
+      }
       pollingCycle = false;
     }
   };
 
   const timer = startInterval(() => {
+    if (!shouldPollThisTick()) return;
     void pollCycle(false);
   }, deps.config.intervalMs);
 

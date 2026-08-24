@@ -3,6 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("@/lib/spur-daemon", () => ({
+  SpurDaemonError: class SpurDaemonError extends Error {
+    readonly status: number;
+
+    constructor(message: string, status: number) {
+      super(message);
+      this.name = "SpurDaemonError";
+      this.status = status;
+    }
+  },
+  isSpurDaemonError: (error: unknown) =>
+    error instanceof Error &&
+    error.name === "SpurDaemonError" &&
+    typeof (error as { status?: unknown }).status === "number",
   spurRequestJson: vi.fn(),
   spurRequest: vi.fn(),
   spurJsonInit: vi.fn((method: string, body?: unknown) => ({
@@ -40,7 +53,7 @@ vi.mock("node:child_process", () => ({
   ),
 }));
 
-import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
+import { SpurDaemonError, spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
@@ -52,30 +65,41 @@ import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
-import { POST as takeBacklog } from "@/app/api/backlog/take/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
+import { GET as getSessionTodo } from "@/app/api/sessions/[id]/todo/route";
+import { GET as getArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
-import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
+import { POST as diagnoseUpdate } from "@/app/api/diagnose-update/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as removeQueuedMessage } from "@/app/api/sessions/[id]/queue/remove/route";
+import { POST as flushQueuedMessage } from "@/app/api/sessions/[id]/queue/flush/route";
+import { POST as answerQuestion } from "@/app/api/sessions/[id]/answer/route";
+import { POST as markOpened } from "@/app/api/sessions/[id]/opened/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
+import { POST as reopenSession } from "@/app/api/sessions/[id]/reopen/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
 import { POST as handoffSession } from "@/app/api/sessions/[id]/handoff/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
+import { POST as postPrStatusBatch } from "@/app/api/pr-status/batch/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
 import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
 import { POST as createProject } from "@/app/api/projects/route";
+import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
+import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
+import { GET as getSpawnDefaults } from "@/app/api/projects/[id]/spawn-defaults/route";
+import { POST as postAutoUpdate } from "@/app/api/runtime/auto-update/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -142,9 +166,6 @@ describe("Spur web API routes", () => {
     resetGitLabStatusForTests();
     resetResourceMonitoringForTests();
     if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
-    delete process.env["DIRECT_TERMINAL_PORT"];
-    delete process.env["DIRECT_TERMINAL_BIND_PORT"];
-    delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
   });
 
   // ── GET /api/sessions ──────────────────────────────────────────────────
@@ -176,29 +197,22 @@ describe("Spur web API routes", () => {
           title: "Fix checkout",
           url: "https://jira.example.com/browse/WEB-17",
           fetchedAt: "2026-06-16T12:00:00.000Z",
+          position: 0,
         },
-      ])
-      .mockResolvedValueOnce({
-        tags: [{ name: "bug", description: "A defect", color: "hsl(0 62% 64%)" }],
-      });
+      ]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as {
       sessions: unknown[];
       backlog: unknown[];
       daemonAlive: boolean;
-      tags: Array<{ name: string }>;
     };
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
     expect(payload.backlog).toHaveLength(1);
     expect(payload.daemonAlive).toBe(true);
-    expect(payload.tags).toEqual([
-      { name: "bug", description: "A defect", color: "hsl(0 62% 64%)" },
-    ]);
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(3, "/backlog/available");
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(4, "/info");
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
       1,
       "/sessions?includeCompleted=1&view=dashboard",
@@ -218,8 +232,7 @@ describe("Spur web API routes", () => {
         }),
       ])
       .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce({ tags: [] });
+      .mockResolvedValueOnce([]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as { projects: Array<{ id: string; name: string }> };
@@ -238,6 +251,16 @@ describe("Spur web API routes", () => {
     expect(payload.error).toBe("Connection refused");
   });
 
+  it("GET /api/sessions preserves daemon validation status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("bad request", 400));
+
+    const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("bad request");
+  });
+
   // ── GET /api/sessions/:id ──────────────────────────────────────────────
 
   it("GET /api/sessions/:id URL-encodes the session id", async () => {
@@ -253,6 +276,101 @@ describe("Spur web API routes", () => {
     });
 
     expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
+  });
+
+  it("GET /api/sessions/:id/todo preserves typed daemon errors", async () => {
+    const payload = {
+      code: "todo_ledger_corrupt",
+      sessionId: "my/session 1",
+      error: "Ledger truncated",
+      line: 2,
+    };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(payload), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const response = await getSessionTodo(new Request("http://localhost"), {
+      params: Promise.resolve({ id: "my/session 1" }),
+    });
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual(payload);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201/todo");
+  });
+
+  it("GET /api/sessions/:id/todo rejects malformed successful daemon payloads", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ status: "resolved", items: [] }), { status: 200 }),
+    );
+
+    const response = await getSessionTodo(new Request("http://localhost"), {
+      params: Promise.resolve({ id: "api-1" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "Invalid ToDo response from Spur daemon",
+    });
+  });
+
+  // ── GET /api/sessions/:id/artifacts/:artifactId ────────────────────────
+
+  it("GET /api/sessions/:id/artifacts/:artifactId keeps the daemon sandbox on html artifacts", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("<h1>Report</h1>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "content-disposition": 'inline; filename="report.html"',
+          "content-security-policy": "sandbox allow-scripts",
+        },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/report.html"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "report.html" }) },
+    );
+
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/artifacts/report.html");
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(response.headers.get("content-disposition")).toBe('inline; filename="report.html"');
+    expect(response.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId sandboxes html a daemon served without a CSP", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("<h1>Report</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/report.html"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "report.html" }) },
+    );
+
+    expect(response.headers.get("content-security-policy")).toBe(
+      "sandbox allow-scripts allow-forms allow-popups allow-modals",
+    );
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId leaves non-html artifacts unsandboxed", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("png-bytes", {
+        status: 200,
+        headers: { "content-type": "image/png" },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+    );
+
+    expect(response.headers.get("content-security-policy")).toBeNull();
   });
 
   // ── POST /api/spawn ────────────────────────────────────────────────────
@@ -280,7 +398,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct", async () => {
+  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct, mode", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
@@ -295,6 +413,7 @@ describe("Spur web API routes", () => {
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
           selfDestruct: { enabled: true, conditions: "daemon trims this" },
+          mode: "manager",
         }),
       }),
     );
@@ -314,7 +433,23 @@ describe("Spur web API routes", () => {
       selfDestruct: { enabled: true, conditions: "daemon trims this" },
       steps: ["step 1", "step 2"],
       overrides: { worktree: true },
+      mode: "manager",
     });
+  });
+
+  it("POST /api/spawn omits mode when absent or blank", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Do work", agent: "claude", mode: "  " }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body).not.toHaveProperty("mode");
   });
 
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
@@ -378,6 +513,105 @@ describe("Spur web API routes", () => {
     expect(body).not.toHaveProperty("overrides");
   });
 
+  it("POST /api/spawn preserves daemon validation status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("branch name is invalid", 400));
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", branch: "!!bad" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("branch name is invalid");
+  });
+
+  // ── POST /api/diagnose-update ────────────────────────────────────────────
+
+  it("POST /api/diagnose-update returns 400 when target is missing", async () => {
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/diagnose-update returns 400 when target is blank", async () => {
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "   " }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/diagnose-update forwards prompt to /shepherd/spawn", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      disposition: "reused",
+      session: sessionFixture({ project: "spur-shepherd" }),
+    });
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/shepherd/spawn",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect(body.project).toBeUndefined();
+    expect(body.agent).toBeUndefined();
+    expect(body.prompt).toContain("1.5.0");
+    expect(body.prompt).toContain("~/.spur/logs/install-and-restart.log");
+    expect(body.reportDisposition).toBe(true);
+  });
+
+  it("POST /api/diagnose-update rejects an invalid daemon success body", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ id: "legacy-session-shape" });
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toContain("invalid diagnostic-session response");
+  });
+
+  it("POST /api/diagnose-update preserves daemon error status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("daemon unavailable", 503));
+
+    const response = await diagnoseUpdate(
+      new NextRequest("http://localhost:3000/api/diagnose-update", {
+        method: "POST",
+        body: JSON.stringify({ target: "1.5.0" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(503);
+    expect(payload.error).toBe("daemon unavailable");
+  });
+
   // ── POST /api/sessions/:id/send ────────────────────────────────────────
 
   it("POST /api/sessions/:id/send rejects empty messages", async () => {
@@ -390,7 +624,7 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
   });
 
   it("POST /api/sessions/:id/send rejects body with no message and no attachments", async () => {
@@ -406,7 +640,12 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/sessions/:id/send accepts attachments with empty message", async () => {
-    mockedSpurRequestJson.mockResolvedValue({ ok: true });
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
     const attachments = [{ name: "img.png", data: "base64data" }];
 
     const response = await sendMessage(
@@ -418,12 +657,209 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/send",
       expect.objectContaining({
         body: JSON.stringify({ message: "", attachments }),
       }),
     );
+  });
+
+  it("send forwards a 409 rate-limited body and status verbatim", async () => {
+    const conflict = { error: "Session api-a1 is rate limited" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await sendMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/send", {
+        method: "POST",
+        body: JSON.stringify({ message: "hello" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/send",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  // ── POST /api/sessions/:id/queue/remove, .../queue/flush ────────────────
+
+  it("POST /api/sessions/:id/queue/remove rejects an empty message", async () => {
+    const response = await removeQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        body: JSON.stringify({ message: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/queue/flush rejects a missing message", async () => {
+    const response = await flushQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("queue/remove forwards a 404 (not queued) body and status verbatim", async () => {
+    const notFound = { error: "Message not found in queue for api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(notFound), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await removeQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/remove", {
+        method: "POST",
+        body: JSON.stringify({ message: "gone" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual(notFound);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/queue/remove",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message: "gone" }),
+      }),
+    );
+  });
+
+  it("queue/flush forwards a 409 (delivery in flight) body and status verbatim", async () => {
+    const conflict = { error: "Delivery already in flight for api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await flushQueuedMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/queue/flush", {
+        method: "POST",
+        body: JSON.stringify({ message: "first" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/queue/flush",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message: "first" }),
+      }),
+    );
+  });
+
+  // ── POST /api/sessions/:id/answer ──────────────────────────────────────
+
+  it("POST /api/sessions/:id/answer rejects a non-integer optionIndex", async () => {
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 1.5 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/answer rejects a negative optionIndex", async () => {
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: -1 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/answer rejects a missing optionIndex", async () => {
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/answer proxies a valid optionIndex to the daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 2 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/answer",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 2 }),
+      }),
+    );
+  });
+
+  it("answer forwards a non-2xx status and body verbatim", async () => {
+    const conflict = { error: "Session is not running: api-a1" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await answerQuestion(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/answer", {
+        method: "POST",
+        body: JSON.stringify({ optionIndex: 0 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual(conflict);
   });
 
   // ── POST /api/sessions/:id/tags ────────────────────────────────────────
@@ -478,10 +914,12 @@ describe("Spur web API routes", () => {
     });
 
     const routes = [
+      [markOpened, "opened"],
       [pauseSession, "pause"],
       [completeSession, "complete"],
       [killSession, "kill"],
       [restoreSession, "restore"],
+      [reopenSession, "reopen"],
     ] as const;
 
     for (const [route, action] of routes) {
@@ -492,6 +930,10 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(200);
     }
 
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/opened",
+      expect.objectContaining({ method: "POST" }),
+    );
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions/api-a1/pause",
       expect.objectContaining({ method: "POST" }),
@@ -506,6 +948,32 @@ describe("Spur web API routes", () => {
     );
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/reopen",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("reopen forwards a 409 not-reopenable conflict body and status verbatim", async () => {
+    const conflict = { error: "Session api-a1 is running, not completed — use restore or respawn" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await reopenSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/reopen", { method: "POST" }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/reopen",
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -537,37 +1005,42 @@ describe("Spur web API routes", () => {
     );
   });
 
-  it("POST /api/backlog/take proxies unavailable status from daemon", async () => {
-    mockedSpurRequest.mockResolvedValue(
-      new Response(JSON.stringify({ error: "Backlog item is unavailable" }), {
-        status: 409,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+  it("POST /api/spawn forwards slots.links to /sessions/background", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
-    const response = await takeBacklog(
-      new NextRequest("http://localhost:3000/api/backlog/take", {
+    await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
         method: "POST",
         body: JSON.stringify({
           projectId: "api",
-          backlogId: "features",
-          externalId: "10001",
+          prompt: "Work on WEB-17",
+          slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
         }),
       }),
     );
 
-    expect(response.status).toBe(409);
-    expect(mockedSpurRequest).toHaveBeenCalledWith(
-      "/backlog/take",
-      expect.objectContaining({
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect(body.slots).toEqual({
+      links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+    });
+  });
+
+  it("POST /api/spawn omits slots when not provided", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
         method: "POST",
-        body: JSON.stringify({
-          projectId: "api",
-          backlogId: "features",
-          externalId: "10001",
-        }),
+        body: JSON.stringify({ projectId: "api", prompt: "hi" }),
       }),
     );
+
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("slots");
   });
 
   it("complete and kill forward PR actions and preserve daemon conflicts", async () => {
@@ -647,6 +1120,25 @@ describe("Spur web API routes", () => {
     );
   });
 
+  it("POST /api/sessions/:id/complete trims and forwards ToDo override reason", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture()), { status: 200 }),
+    );
+    await completeSession(
+      new NextRequest("http://localhost/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ todoOverrideReason: "  Operator accepted risk  " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({
+        body: JSON.stringify({ todoOverrideReason: "Operator accepted risk" }),
+      }),
+    );
+  });
+
   it("POST /api/sessions/:id/complete rejects invalid scope before proxying", async () => {
     const response = await completeSession(
       new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
@@ -710,7 +1202,7 @@ describe("Spur web API routes", () => {
         method: "POST",
         body: JSON.stringify({
           agent: "cursor",
-          model: "gpt-5.3-codex",
+          model: "codex-model-id",
           notes: "Continue UI polish",
         }),
       }),
@@ -725,7 +1217,7 @@ describe("Spur web API routes", () => {
     expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
       {
         agent: "cursor",
-        model: "gpt-5.3-codex",
+        model: "codex-model-id",
         notes: "Continue UI polish",
       },
     );
@@ -1019,57 +1511,6 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.branch).toBeNull();
-  });
-
-  // ── GET /api/runtime/terminal ──────────────────────────────────────────
-
-  it("GET /api/runtime/terminal returns the direct terminal port", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "14999";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14999" });
-  });
-
-  it("GET /api/runtime/terminal prefers public terminal port when configured", async () => {
-    process.env["DIRECT_TERMINAL_BIND_PORT"] = "14801";
-    process.env["DIRECT_TERMINAL_PUBLIC_PORT"] = "443";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "443" });
-  });
-
-  it("GET /api/runtime/terminal returns default port when no env vars are set", async () => {
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
-  });
-
-  it("GET /api/runtime/terminal ignores non-numeric DIRECT_TERMINAL_PORT", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "not-a-port";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
-  });
-
-  it("GET /api/runtime/terminal ignores out-of-range port", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "99999";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
   });
 
   // ── GET /api/runtime/voice ─────────────────────────────────────────────
@@ -1760,6 +2201,7 @@ describe("Spur web API routes", () => {
     afterEach(() => {
       vi.unstubAllGlobals();
       delete process.env["GITHUB_TOKEN"];
+      delete process.env["GITLAB_TOKEN"];
     });
 
     function makePrGql(overrides: Record<string, unknown> = {}) {
@@ -1839,6 +2281,78 @@ describe("Spur web API routes", () => {
       expect(typeof payload.fetchedAt).toBe("number");
     });
 
+    it("returns closed state for a closed draft GitLab MR (closed outranks draft)", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "closed",
+            draft: true,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/43",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("closed");
+    });
+
+    it("returns merged state for a merged draft GitLab MR (merged outranks draft and closed)", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "closed",
+            draft: true,
+            merged_at: "2026-01-01T00:00:00Z",
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/44",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("merged");
+    });
+
+    it("returns draft state for an open draft GitLab MR", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "opened",
+            draft: true,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(ghOk([]))
+        .mockResolvedValueOnce(ghOk([]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/45",
+        ),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("draft");
+    });
+
     it("returns 400 for a GitHub URL without a PR number", async () => {
       const response = await getPrStatus(
         new NextRequest("http://localhost:3000/api/pr-status?url=https://github.com/owner/repo"),
@@ -1891,6 +2405,30 @@ describe("Spur web API routes", () => {
       const payload = (await response.json()) as { state: string };
 
       expect(payload.state).toBe("closed");
+    });
+
+    it("returns closed state for a closed draft PR (closed outranks draft)", async () => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ state: "CLOSED", isDraft: true })));
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(payload.state).toBe("closed");
+    });
+
+    it("returns merged state for a merged draft PR (merged outranks draft and closed)", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(makePrGql({ state: "CLOSED", merged: true, isDraft: true })),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: string };
+
+      expect(payload.state).toBe("merged");
     });
 
     it("returns approved reviewDecision from GitHub without inferring it", async () => {
@@ -2292,7 +2830,6 @@ describe("Spur web API routes", () => {
       expect(payload.fetchedAt).toBeUndefined();
     });
 
-    // Rate-limit tests must run last: they set module-level rateLimitResetAt
     it("returns a soft error while rate-limit window is active", async () => {
       const resetAt = Math.floor((Date.now() + 30_000) / 1000);
       fetchMock.mockResolvedValueOnce({
@@ -2319,6 +2856,439 @@ describe("Spur web API routes", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.state).toBeNull();
       expect(payload.error).toContain("GitHub rate limit");
+    });
+
+    it("arms the rate-limit window from a GraphQL rate-limit error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ message: "API rate limit exceeded for user" }],
+        }),
+      );
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const firstPayload = (await first.json()) as { state: null; error: string };
+      expect(first.status).toBe(200);
+      expect(firstPayload.error).toContain("API rate limit exceeded for user");
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: null; error: string };
+
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.error).toContain("GitHub rate limit");
+    });
+
+    it("arms the rate-limit window from a structured RATE_LIMITED error type using the header's reset time", async () => {
+      const resetAt = Math.floor((Date.now() + 30_000) / 1000);
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "x-ratelimit-reset": String(resetAt) }),
+        json: async () => ({
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "RATE_LIMITED", message: "You have exceeded a quota" }],
+        }),
+        text: async () => "",
+      });
+
+      await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const match = payload.error.match(/retry in (\d+)s/);
+      expect(match).not.toBeNull();
+      const waitSeconds = Number(match?.[1]);
+      expect(waitSeconds).toBeLessThanOrEqual(30);
+    });
+
+    it("does not arm the rate-limit window for a non-rate-limit GraphQL error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }],
+        }),
+      );
+      fetchMock.mockResolvedValueOnce(ghOk(makePrGql()));
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload1 = (await first.json()) as { error: string };
+      const payload2 = (await second.json()) as { state: string };
+
+      expect(payload1.error).toBe("Could not resolve to a Repository");
+      expect(payload2.state).toBe("open");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps resolved PR data when GraphQL also reports a rate-limit error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          ...makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+          }),
+          errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }],
+        }),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        state: string;
+        ciStatus: string;
+        error: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBe("open");
+      expect(payload.ciStatus).toBe("success");
+      expect(payload.error).toContain("API rate limit exceeded");
+
+      // The window must also be armed on the data-bearing path: a subsequent
+      // request for a different PR should short-circuit without hitting the network.
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const secondPayload = (await second.json()) as { error: string };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(secondPayload.error).toContain("GitHub rate limit");
+    });
+
+    it("arms the rate-limit window and does not record a fake empty PR status for a message-less rate-limit error", async () => {
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "RATE_LIMITED" }],
+        }),
+      );
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const firstPayload = (await first.json()) as {
+        state: null;
+        error?: string;
+        fetchedAt?: number;
+      };
+      expect(firstPayload.state).toBeNull();
+      expect(firstPayload.error).toBe("GitHub GraphQL error");
+      expect(firstPayload.fetchedAt).toBeUndefined();
+
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const secondPayload = (await second.json()) as { error: string };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(secondPayload.error).toContain("GitHub rate limit");
+    });
+
+    it("joins every GraphQL error message into the payload error", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ message: "first failure" }, { message: "second failure" }],
+        }),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.error).toContain("first failure");
+      expect(payload.error).toContain("second failure");
+    });
+
+    it("caches a PR-present-with-error payload at the shorter error TTL, not the full success TTL", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk({
+          ...makePrGql(),
+          errors: [{ type: "NOT_FOUND", message: "partial data error" }],
+        }),
+      );
+
+      const url = nextPrUrl();
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const firstPayload = (await first.json()) as { error: string };
+      expect(firstPayload.error).toBe("partial data error");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + 70_000;
+        await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`));
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } finally {
+        Date.now = realNow;
+      }
+    });
+  });
+
+  describe("POST /api/pr-status/batch", () => {
+    const fetchMock = vi.fn();
+
+    // Use a counter to generate unique PR numbers, avoiding module-level cache hits
+    let prCounter = 9000;
+    function nextPrUrl() {
+      return `https://github.com/owner/repo/pull/${prCounter++}`;
+    }
+
+    function postBatch(urls: unknown) {
+      return postPrStatusBatch(
+        new NextRequest("http://localhost:3000/api/pr-status/batch", {
+          method: "POST",
+          body: JSON.stringify({ urls }),
+        }),
+      );
+    }
+
+    function makePrNode(overrides: Record<string, unknown> = {}) {
+      return {
+        state: "OPEN",
+        isDraft: false,
+        merged: false,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        reviewDecision: null,
+        reviewThreads: { nodes: [] },
+        commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+        ...overrides,
+      };
+    }
+
+    function aliasedGql(nodesByAlias: Record<string, unknown>) {
+      const data: Record<string, unknown> = {};
+      for (const [alias, node] of Object.entries(nodesByAlias)) {
+        data[alias] = { pullRequest: node };
+      }
+      return { data };
+    }
+
+    beforeEach(() => {
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockReset();
+      process.env["GITHUB_TOKEN"] = "test-token";
+      resetGitHubApiStateForTests();
+      const reset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof reset === "function") (reset as () => void)();
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete process.env["GITHUB_TOKEN"];
+    });
+
+    it("returns 400 when urls is not an array", async () => {
+      const response = await postBatch("not-an-array");
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 for more than 100 urls", async () => {
+      const urls = Array.from({ length: 101 }, () => nextPrUrl());
+      const response = await postBatch(urls);
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("omits an invalid URL from results without a 400", async () => {
+      const validUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+
+      const response = await postBatch([validUrl, "https://example.com/not-a-pr"]);
+      const payload = (await response.json()) as { results: Record<string, unknown> };
+
+      expect(response.status).toBe(200);
+      expect(Object.keys(payload.results)).toEqual([validUrl]);
+    });
+
+    it("issues zero fetch when every URL is already cached", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+      await postBatch([url]); // warms the cache
+      fetchMock.mockReset();
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null }>;
+      };
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(payload.results[url]?.state).toBe("open");
+    });
+
+    it("issues exactly one fetch with one alias per uncached PR on a partial cache miss", async () => {
+      const cachedUrl = nextPrUrl();
+      const missUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+      await postBatch([cachedUrl]); // warms cachedUrl
+      fetchMock.mockReset();
+
+      fetchMock.mockResolvedValueOnce(
+        ghOk(aliasedGql({ pr0: makePrNode({ state: "MERGED", merged: true }) })),
+      );
+
+      const response = await postBatch([cachedUrl, missUrl]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null }>;
+      };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+      const body = JSON.parse(init.body) as { query: string };
+      expect(body.query.match(/pr\d+: repository/g)).toHaveLength(1);
+      expect(payload.results[cachedUrl]?.state).toBe("open");
+      expect(payload.results[missUrl]?.state).toBe("merged");
+    });
+
+    it("returns a stale last-good snapshot with the rate-limit error per miss, issuing zero fetch", async () => {
+      vi.useFakeTimers();
+      try {
+        const readyUrl = nextPrUrl();
+        fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+        await postBatch([readyUrl]); // warms last-good + the short-lived response cache
+
+        vi.advanceTimersByTime(130_000); // expire the short-lived cache; last-good persists
+
+        const tripUrl = nextPrUrl();
+        const resetAt = Math.floor((Date.now() + 30_000) / 1000);
+        fetchMock.mockResolvedValueOnce({
+          ok: false,
+          status: 403,
+          headers: new Headers({
+            "x-ratelimit-reset": String(resetAt),
+            "x-ratelimit-remaining": "0",
+          }),
+          json: async () => ({ message: "rate limited" }),
+          text: async () => JSON.stringify({ message: "rate limited" }),
+        });
+        await postBatch([tripUrl]); // trips the shared rate-limit window
+
+        fetchMock.mockClear();
+        const response = await postBatch([readyUrl]);
+        const payload = (await response.json()) as {
+          results: Record<string, { state: string | null; stale?: boolean; error?: string }>;
+        };
+
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(payload.results[readyUrl]?.stale).toBe(true);
+        expect(payload.results[readyUrl]?.state).toBe("open");
+        expect(payload.results[readyUrl]?.error).toContain("GitHub rate limit");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves the successful alias and records the GraphQL error for the failed one on a partial error", async () => {
+      const okUrl = nextPrUrl();
+      const failUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { pr0: { pullRequest: makePrNode() }, pr1: { pullRequest: null } },
+          errors: [{ message: "Could not resolve to a PullRequest", path: ["pr1", "pullRequest"] }],
+        }),
+      );
+
+      const response = await postBatch([okUrl, failUrl]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[okUrl]?.state).toBe("open");
+      expect(payload.results[okUrl]?.error).toBeUndefined();
+      expect(payload.results[failUrl]?.state).toBeNull();
+      expect(payload.results[failUrl]?.error).toContain("Could not resolve to a PullRequest");
+    });
+
+    it("attaches a matching GraphQL error to a resolved node instead of dropping it", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { pr0: { pullRequest: makePrNode() } },
+          errors: [{ message: "partial data error", path: ["pr0", "pullRequest", "commits"] }],
+        }),
+      );
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[url]?.state).toBe("open");
+      expect(payload.results[url]?.error).toBe("partial data error");
+    });
+
+    it("maps a GraphQL error to only its own alias, leaving an unrelated null node genuinely absent", async () => {
+      const errorUrl = nextPrUrl();
+      const absentUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: { pr0: { pullRequest: null }, pr1: { pullRequest: null } },
+          errors: [{ message: "Could not resolve to a PullRequest", path: ["pr0", "pullRequest"] }],
+        }),
+      );
+
+      const response = await postBatch([errorUrl, absentUrl]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      // pr0 (errorUrl) carries the GraphQL error.
+      expect(payload.results[errorUrl]?.state).toBeNull();
+      expect(payload.results[errorUrl]?.error).toContain("Could not resolve to a PullRequest");
+      // pr1 (absentUrl) has no matching error entry — it's genuinely absent,
+      // not tainted by pr0's unrelated error message.
+      expect(payload.results[absentUrl]?.state).toBeNull();
+      expect(payload.results[absentUrl]?.error).toBeUndefined();
+    });
+
+    it("records a per-miss error and returns 200 for a non-rate-limit GitHub API failure", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(ghErr(500, { message: "Internal Server Error" }));
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[url]?.state).toBeNull();
+      expect(payload.results[url]?.error).toContain("GitHub API 500");
+    });
+
+    it("records a per-miss error and returns 200 when the GitHub fetch throws", async () => {
+      const url = nextPrUrl();
+      fetchMock.mockRejectedValueOnce(new Error("network unreachable"));
+
+      const response = await postBatch([url]);
+      const payload = (await response.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.results[url]?.state).toBeNull();
+      expect(payload.results[url]?.error).toContain("network unreachable");
     });
   });
 
@@ -2384,6 +3354,189 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(405);
       expect(payload.error).toBe("Not mergeable");
+    });
+  });
+
+  // ── Claude account rotation ────────────────────────────────────────────
+
+  describe("Claude account rotation", () => {
+    it("POST /api/sessions/:id/switch-auth forwards accountId to the daemon", async () => {
+      mockedSpurRequestJson.mockResolvedValue(
+        sessionFixture({ id: "api-a1", activeClaudeAccountId: "acc-2" }),
+      );
+
+      const response = await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "  acc-2  " }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/sessions/api-a1/switch-auth",
+        expect.objectContaining({ method: "POST" }),
+      );
+      const body = JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body);
+      expect(body).toEqual({ accountId: "acc-2" });
+    });
+
+    it("POST /api/sessions/:id/switch-auth forwards force when true", async () => {
+      mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+      await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "acc-2", force: true }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
+
+      const body = JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body);
+      expect(body).toEqual({ accountId: "acc-2", force: true });
+    });
+
+    it("POST /api/sessions/:id/switch-auth rejects a blank accountId", async () => {
+      const response = await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "   " }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/claude-accounts maps the daemon accounts shape", async () => {
+      const accounts = [
+        { id: "acc-1", label: "Work", authenticated: true, lastUsedAt: "2026-07-01T00:00:00.000Z" },
+        { id: "acc-2", authenticated: false },
+      ];
+      mockedSpurRequestJson.mockResolvedValue({ accounts });
+
+      const response = await listClaudeAccounts();
+      const payload = (await response.json()) as { accounts: unknown[] };
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/claude-accounts");
+      expect(payload.accounts).toEqual(accounts);
+    });
+
+    it("GET /api/claude-accounts returns 502 when the daemon fails", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new Error("daemon down"));
+
+      const response = await listClaudeAccounts();
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(502);
+      expect(payload.error).toBe("daemon down");
+    });
+
+    // ── GET /api/projects/:id/spawn-defaults ──────────────────────────────
+
+    it("GET /api/projects/:id/spawn-defaults forwards the agent to the daemon", async () => {
+      mockedSpurRequestJson.mockResolvedValue({ model: "sonnet", worktree: false });
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { model: string | null; worktree: boolean };
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/projects/api/spawn-defaults?agent=claude",
+        { timeoutMs: 8_000 },
+      );
+      expect(payload).toEqual({ model: "sonnet", worktree: false });
+    });
+
+    it("GET /api/projects/:id/spawn-defaults rejects an unsupported agent without calling the daemon", async () => {
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=nope"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/projects/:id/spawn-defaults surfaces the daemon's error status", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Unknown project: api", 404));
+
+      const response = await getSpawnDefaults(
+        new NextRequest("http://localhost:3000/api/projects/api/spawn-defaults?agent=claude"),
+        { params: Promise.resolve({ id: "api" }) },
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(404);
+      expect(payload.error).toBe("Unknown project: api");
+    });
+  });
+
+  // ── POST /api/runtime/auto-update ─────────────────────────────────────
+
+  describe("POST /api/runtime/auto-update", () => {
+    it("forwards enabled to the daemon", async () => {
+      mockedSpurRequest.mockResolvedValue(
+        new Response(JSON.stringify({ autoUpdate: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const response = await postAutoUpdate(
+        new NextRequest("http://localhost:3000/api/runtime/auto-update", {
+          method: "POST",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequest).toHaveBeenCalledWith(
+        "/deploy/auto-update",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+      await expect(response.json()).resolves.toEqual({ autoUpdate: true });
+    });
+
+    it("passes a 409 body and status through verbatim", async () => {
+      const conflict = { error: "config changed on disk" };
+      mockedSpurRequest.mockResolvedValue(
+        new Response(JSON.stringify(conflict), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const response = await postAutoUpdate(
+        new NextRequest("http://localhost:3000/api/runtime/auto-update", {
+          method: "POST",
+          body: JSON.stringify({ enabled: false }),
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual(conflict);
+    });
+
+    it("returns 400 on a malformed body", async () => {
+      const response = await postAutoUpdate(
+        new NextRequest("http://localhost:3000/api/runtime/auto-update", {
+          method: "POST",
+          body: "not json",
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequest).not.toHaveBeenCalled();
     });
   });
 });

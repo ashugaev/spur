@@ -2,15 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 import {
   isGitHubEventData,
   isServiceProblemEventData,
+  isTelegramMessageEventData,
   createSendBatchParser,
   restoreSendBatch,
 } from "../../src/send-batches.js";
-import type { GitHubSignal } from "../../src/types.js";
+import type { GitHubSignal, ReviewSnapshot } from "../../src/types.js";
 
 vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: vi.fn(),
   readReviewSourceSnapshot: vi.fn(),
 }));
+
+// Builds the on-disk/in-memory envelope shape the snapshot readers now return.
+function storedSnapshot(signals: GitHubSignal[], prNumber: number | null = 42): ReviewSnapshot {
+  return { prNumber, signals: new Map(signals.map((signal) => [signal.key, signal])) };
+}
 
 function githubEventData(overrides: Record<string, unknown> = {}) {
   return {
@@ -27,6 +33,19 @@ function serviceEventData(overrides: Record<string, unknown> = {}) {
     sessionId: "api-1",
     serviceId: "web",
     ruleId: "crash",
+    ...overrides,
+  };
+}
+
+function telegramEventData(overrides: Record<string, unknown> = {}) {
+  return {
+    sessionId: "api-1",
+    chatId: -100123,
+    messageThreadId: 42,
+    userId: 7,
+    username: "alek",
+    messageId: 99,
+    text: "fix the failing test",
     ...overrides,
   };
 }
@@ -80,6 +99,16 @@ describe("isServiceProblemEventData", () => {
   });
 });
 
+describe("isTelegramMessageEventData", () => {
+  it("returns true for valid data", () => {
+    expect(isTelegramMessageEventData(telegramEventData())).toBe(true);
+  });
+
+  it("returns false for missing fields", () => {
+    expect(isTelegramMessageEventData({ sessionId: "api-1" })).toBe(false);
+  });
+});
+
 describe("createSendBatchParser", () => {
   describe("github type", () => {
     it("produces a batch from valid github data", () => {
@@ -123,12 +152,82 @@ describe("createSendBatchParser", () => {
     });
   });
 
+  describe("telegram type", () => {
+    it("produces a batch from valid telegram data", () => {
+      const parse = createSendBatchParser("telegram", "proj", "src-1");
+      const batch = parse(telegramEventData());
+      expect(batch).not.toBeNull();
+      expect(requireBatch(batch, "expected telegram batch").sessionId).toBe("api-1");
+    });
+
+    it("returns null for non-telegram data", () => {
+      const parse = createSendBatchParser("telegram", "proj", "src-1");
+      expect(parse(serviceEventData())).toBeNull();
+    });
+  });
+
   describe("unknown type", () => {
     it("always returns null", () => {
       const parse = createSendBatchParser("cron", "proj", "src-1");
       expect(parse(githubEventData())).toBeNull();
       expect(parse(serviceEventData())).toBeNull();
     });
+  });
+});
+
+describe("Telegram batch", () => {
+  function makeBatch(prompt?: string) {
+    const parse = createSendBatchParser("telegram", "proj", "src-1", prompt);
+    return requireBatch(parse(telegramEventData()), "expected telegram batch");
+  }
+
+  it("format() includes chat, thread, sender, and text", () => {
+    const batch = makeBatch();
+    const formatted = batch.format();
+    expect(formatted).toContain("chat -100123 thread 42");
+    expect(formatted).toContain(
+      "Source: telegram. The requester only sees messages you send with:",
+    );
+    expect(formatted).toContain('spur source reply "<message>"');
+    expect(formatted).toContain(
+      "Your terminal output is invisible to them. Reply to the same Telegram thread when you need input and when the task completes, with a short result summary.",
+    );
+    expect(formatted).toContain("@alek: fix the failing test");
+  });
+
+  it("merge() appends messages", () => {
+    const batch = makeBatch();
+    const next = createSendBatchParser(
+      "telegram",
+      "proj",
+      "src-1",
+    )(
+      telegramEventData({
+        chatId: -100456,
+        messageThreadId: 7,
+        username: "maria",
+        text: "and rerun build",
+      }),
+    );
+    batch.merge(requireBatch(next, "expected telegram batch update"));
+    const formatted = batch.format();
+    expect(formatted).toContain("chat -100123 thread 42 @alek: fix the failing test");
+    expect(formatted).toContain("chat -100456 thread 7 @maria: and rerun build");
+    expect(formatted).toContain("@alek: fix the failing test");
+    expect(formatted).toContain("@maria: and rerun build");
+  });
+
+  it("format() with custom prompt uses the prompt", () => {
+    const batch = makeBatch("Answer this Telegram thread.");
+    const formatted = batch.format();
+    expect(formatted).toContain("Answer this Telegram thread.");
+    expect(formatted).toContain(
+      "Source: telegram. The requester only sees messages you send with:",
+    );
+    expect(formatted).toContain(
+      "Your terminal output is invisible to them. Reply to the same Telegram thread when you need input and when the task completes, with a short result summary.",
+    );
+    expect(formatted).not.toContain("Telegram message for this Spur session");
   });
 });
 
@@ -170,8 +269,7 @@ describe("GitHub batch", () => {
       ],
     });
 
-    const snapshot = new Map<string, GitHubSignal>();
-    snapshot.set("comment:1", { key: "comment:1", kind: "comment", text: "comment one" });
+    const snapshot = storedSnapshot([{ key: "comment:1", kind: "comment", text: "comment one" }]);
     mock.mockReturnValue(snapshot);
 
     batch.prune("/data");
@@ -191,7 +289,7 @@ describe("GitHub batch", () => {
 
   it("isEmpty() returns true after prune with no remaining signals", async () => {
     const { readGitHubSourceSnapshot } = await import("../../src/metadata.js");
-    vi.mocked(readGitHubSourceSnapshot).mockReturnValue(new Map());
+    vi.mocked(readGitHubSourceSnapshot).mockReturnValue(storedSnapshot([]));
 
     const batch = makeBatch();
     batch.prune("/data");
@@ -257,8 +355,7 @@ describe("GitLab batch", () => {
     const { readGitHubSourceSnapshot, readReviewSourceSnapshot } =
       await import("../../src/metadata.js");
     vi.mocked(readGitHubSourceSnapshot).mockReset().mockReturnValue(null);
-    const snapshot = new Map<string, GitHubSignal>();
-    snapshot.set("comment:1", { key: "comment:1", kind: "comment", text: "comment one" });
+    const snapshot = storedSnapshot([{ key: "comment:1", kind: "comment", text: "comment one" }]);
     vi.mocked(readReviewSourceSnapshot).mockReset().mockReturnValue(snapshot);
 
     const batch = makeBatch({
@@ -380,6 +477,20 @@ describe("restoreSendBatch", () => {
     expect(restored?.format()).toBe(batch.format());
   });
 
+  it("round-trips a multi-message telegram batch through serialize()", () => {
+    const parse = createSendBatchParser("telegram", "proj", "src-1");
+    const batch = requireBatch(parse(telegramEventData()), "expected telegram batch");
+    const next = requireBatch(
+      parse(telegramEventData({ messageId: 100, text: "one more thing" })),
+      "expected telegram batch update",
+    );
+    batch.merge(next);
+
+    const restored = restoreSendBatch(batch.serialize());
+    expect(restored).not.toBeNull();
+    expect(restored?.format()).toBe(batch.format());
+  });
+
   it("returns null for an unknown kind", () => {
     expect(restoreSendBatch({ kind: "spawn" })).toBeNull();
   });
@@ -435,6 +546,25 @@ describe("restoreSendBatch", () => {
         sessionId: "api-1",
         serviceId: "web",
         ruleIds: [1, 2],
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null for a telegram payload missing messages", () => {
+    expect(
+      restoreSendBatch({
+        kind: "telegram",
+        sessionId: "api-1",
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null for a telegram payload with an invalid message shape", () => {
+    expect(
+      restoreSendBatch({
+        kind: "telegram",
+        sessionId: "api-1",
+        messages: [{ sessionId: "api-1" }],
       }),
     ).toBeNull();
   });

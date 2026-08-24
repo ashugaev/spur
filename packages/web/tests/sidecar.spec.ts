@@ -1,14 +1,22 @@
 import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession, makeSessionWithSidecar } from "./fixtures.js";
+import { makeWorkingSession, makeSessionWithSidecar, mockTagCatalog } from "./fixtures.js";
 
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
-  return page.route(`**/api/sessions/${session.id}`, (route) => {
-    void route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(session),
-    });
-  });
+  return Promise.all([
+    mockTagCatalog(page),
+    page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    }),
+  ]);
+}
+
+async function gotoSessionDetail(page: Page, sessionId: string) {
+  await page.goto(`/sessions/${sessionId}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Sidecars").first()).toBeVisible();
 }
 
 // SC1: Sidecar terminal buttons
@@ -215,9 +223,6 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       tmuxSession: "spur-sc-click-1",
     });
     await mockSessionDetail(page, session);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
     await page.goto(`/sessions/${session.id}`);
 
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
@@ -249,6 +254,44 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(openLink).toHaveAttribute("href", "http://example.com:5601");
   });
 
+  test("starting one sidecar keeps other sidecar start buttons enabled", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "sc-per-sidecar-disable-1",
+      sidecars: [
+        { name: "dev", alive: false },
+        { name: "preview", alive: false },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/start`, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeWorkingSession({
+            id: session.id,
+            sidecars: [
+              { name: "dev", alive: true },
+              { name: "preview", alive: false },
+            ],
+          }),
+        ),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    const devStart = sidecarSection.getByRole("button", { name: "Start sidecar dev" });
+    const previewStart = sidecarSection.getByRole("button", { name: "Start sidecar preview" });
+
+    await devStart.click();
+    await expect(devStart).toBeDisabled();
+    await expect(previewStart).toBeEnabled();
+    await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
+    await expect(previewStart).toBeEnabled();
+  });
+
   test("start or stop sidecar action stays rightmost in the sidecar action cluster", async ({
     page,
   }) => {
@@ -261,7 +304,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       },
     });
     await mockSessionDetail(page, session);
-    await page.goto(`/sessions/${session.id}`);
+    await gotoSessionDetail(page, session.id);
 
     const actionNames = await page
       .locator("section")

@@ -4,9 +4,14 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
-import { SessionTags } from "@/components/SessionTags";
-import { formatRelativeTime, getSessionTitle } from "@/lib/format";
-import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
+import { TagEditor } from "@/components/TagEditor";
+import { formatRelativeTime, formatSidecarAge, getSessionTitle } from "@/lib/format";
+import {
+  isReviewLinkLabel,
+  isTrackerLinkLabel,
+  primePrInfo,
+  reviewProviderFromUrl,
+} from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
 import {
   canComplete,
@@ -166,24 +171,31 @@ function RunningSidecarIndicator({
             Running Sidecars
           </span>
           <span className="mt-1 flex min-w-0 flex-col gap-1 font-mono text-[var(--color-text-primary)]">
-            {sidecars.map((sidecar) =>
-              sidecar.url ? (
-                <a
-                  className="min-w-0 break-all text-[var(--color-status-ready)] underline-offset-2 hover:underline"
-                  href={sidecar.url}
-                  key={sidecar.name}
-                  rel="noreferrer"
-                  target="_blank"
-                  title={sidecar.url}
-                >
-                  {sidecar.name}
-                </a>
-              ) : (
-                <span className="min-w-0 break-all" key={sidecar.name}>
-                  {sidecar.name}
-                </span>
-              ),
-            )}
+            {sidecars.map((sidecar) => (
+              <span className="flex min-w-0 items-baseline gap-1.5" key={sidecar.name}>
+                {sidecar.url ? (
+                  <a
+                    className="min-w-0 break-all text-[var(--color-status-ready)] underline-offset-2 hover:underline"
+                    href={sidecar.url}
+                    rel="noreferrer"
+                    target="_blank"
+                    title={sidecar.url}
+                  >
+                    {sidecar.name}
+                  </a>
+                ) : (
+                  <span className="min-w-0 break-all">{sidecar.name}</span>
+                )}
+                {sidecar.ageSeconds !== undefined ? (
+                  <span
+                    className={`shrink-0 ${sidecar.ageWarn ? "text-[var(--color-status-attention)]" : "text-[var(--color-text-tertiary)]"}`}
+                    data-testid={`dashboard-sidecar-age-${sidecar.name}`}
+                  >
+                    {formatSidecarAge(sidecar.ageSeconds)}
+                  </span>
+                ) : null}
+              </span>
+            ))}
           </span>
         </span>
       ) : null}
@@ -196,7 +208,7 @@ interface SessionRowProps {
   deskMemberCount?: number;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  onCompleteSession: (session: DashboardSession) => Promise<unknown>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
@@ -216,11 +228,15 @@ export function SessionRow({
     (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
-  const trackerLink = session.links.find((l) => l.label === "tracker");
+  const trackerLink = session.links.find((l) => isTrackerLinkLabel(l.label));
   const prInfo = useSessionLinkPrInfo(prLink);
   const reviewProvider = prLink ? reviewProviderFromUrl(prLink.url) : null;
   const [mergedAfterMerge, setMergedAfterMerge] = useState(false);
-  const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
+  // merged and closed are disjoint (github-pr-status.ts discriminates on
+  // node.merged, not node.state), so both states can gate done alongside.
+  const showDone =
+    (prInfo.state === "merged" || prInfo.state === "closed" || mergedAfterMerge) &&
+    canComplete(session);
   const showMerge =
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
   const hasWake = Boolean(session.scheduledWake || session.intervalWake || session.dailyWake);
@@ -228,6 +244,13 @@ export function SessionRow({
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
+  const isAttentionState = session.state === "needs_input";
+  const hasSeenAttention = isAttentionState && session.hasUnseenAttention === false;
+  const attentionTextOpacity = hasSeenAttention ? "opacity-70" : "";
+  const titleColor =
+    isAttentionState && !hasSeenAttention
+      ? "text-[var(--color-text-primary)]"
+      : "text-[var(--color-text-secondary)]";
 
   const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
     setActivePopover((current) => (current === popover ? null : popover));
@@ -235,7 +258,9 @@ export function SessionRow({
 
   return (
     <DataRow>
-      <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
+      <span
+        className={`hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline ${attentionTextOpacity}`}
+      >
         {session.projectName}
       </span>
 
@@ -279,13 +304,11 @@ export function SessionRow({
       />
 
       <Link
-        className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
+        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)] hover:no-underline ${attentionTextOpacity}`}
         href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}
       </Link>
-
-      <SessionTags session={session} />
 
       {trackerLink ? (
         <span className="hidden sm:inline-flex">
@@ -299,7 +322,11 @@ export function SessionRow({
         </span>
       ) : null}
 
-      <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
+      <TagEditor session={session} variant="dots" />
+
+      <span
+        className={`hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline ${attentionTextOpacity}`}
+      >
         {session.branch}
       </span>
 

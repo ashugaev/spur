@@ -33,34 +33,65 @@ jobs:
       - name: Build web
         run: pnpm --dir packages/web build
       - name: Bundle web into v2
+        run: bash scripts/bundle-web.sh
+      - name: Verify packed tarball contents
         run: |
-          rm -rf v2/web
-          mkdir -p v2/web
-          # In a pnpm monorepo, Next emits standalone/<workspace-path>/server.js.
-          # Flatten so v2/web/server.js sits next to node_modules and .next.
-          cp -R packages/web/.next/standalone/packages/web/. v2/web/
-          mkdir -p v2/web/.next
-          cp -R packages/web/.next/static v2/web/.next/static
-          if [ -d packages/web/public ]; then
-            cp -R packages/web/public v2/web/public
-          fi
-          cp -R packages/web/dist-server v2/web/dist-server
-          # pnpm's standalone node_modules is a symlink farm into the pnpm
-          # store; npm pack silently drops symlinks. Materialize real deps.
-          rm -rf v2/web/node_modules
-          npm install --prefix v2/web --omit=dev --ignore-scripts --no-audit --no-fund
-          npm run install --prefix v2/web/node_modules/node-pty
+          cd v2
+          tgz="$(npm pack --pack-destination "$RUNNER_TEMP" 2>/dev/null | tail -1)"
+          tgz="$RUNNER_TEMP/$tgz"
+          bash "$GITHUB_WORKSPACE/scripts/verify-package-tarball.sh" "$tgz"
+          arch="$(node -p process.arch)"
+          tar -tzf "$tgz" | grep -q "package/web/node_modules/node-pty/prebuilds/linux-$arch/pty.node" || {
+            echo "packed tarball is missing node-pty/prebuilds/linux-$arch/pty.node"
+            exit 1
+          }
       - name: Verify bundled web boots
         run: |
-          HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
+          NODE_ENV=production WEB_HOST=127.0.0.1 PORT=41799 node v2/web/dist-server/web-server.js &
           web_pid=$!
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:41799/ || true)
             if [ "$code" = "200" ]; then break; fi
             sleep 1
           done
+          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; kill "$web_pid" || true; exit 1; }
+          # Terminal WS is served in-process on /ws (attachDirectTerminalWebSocket) —
+          # confirm the upgrade handshake succeeds (101), not a 404, via a raw socket.
+          node -e '
+            const net = require("node:net");
+            const crypto = require("node:crypto");
+            const key = crypto.randomBytes(16).toString("base64");
+            const socket = net.connect(41799, "127.0.0.1", () => {
+              socket.write(
+                "GET /ws?session=nonexistent HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:41799\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                `Sec-WebSocket-Key: ${key}\r\n` +
+                "Sec-WebSocket-Version: 13\r\n" +
+                "\r\n"
+              );
+            });
+            let data = "";
+            const done = (ok) => { socket.destroy(); process.exit(ok ? 0 : 1); };
+            socket.on("data", (chunk) => {
+              data += chunk.toString();
+              if (data.includes("\r\n\r\n")) {
+                const statusLine = data.split("\r\n")[0];
+                if (statusLine.includes("101")) {
+                  console.log("ws upgrade ok:", statusLine);
+                  done(true);
+                } else {
+                  console.error("ws upgrade failed:", statusLine);
+                  done(false);
+                }
+              }
+            });
+            socket.on("error", (err) => { console.error("ws socket error:", err.message); done(false); });
+            setTimeout(() => { console.error("ws upgrade timed out"); done(false); }, 10000);
+          ' && ws_rc=0 || ws_rc=1
           kill "$web_pid" || true
-          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; exit 1; }
+          [ "$ws_rc" -eq 0 ] || { echo "bundled web /ws upgrade did not return 101"; exit 1; }
       - name: Build v2
         env:
           SPUR_DISABLE_AUTOSTART: "1"

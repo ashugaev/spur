@@ -2,8 +2,16 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/components/DirectTerminal", () => ({
-  DirectTerminal: ({ onClose, title }: { onClose: () => void; title?: string }) => (
-    <div data-testid="direct-terminal" data-title={title}>
+  DirectTerminal: ({
+    onClose,
+    title,
+    model,
+  }: {
+    onClose: () => void;
+    title?: string;
+    model?: string;
+  }) => (
+    <div data-testid="direct-terminal" data-model={model} data-title={title}>
       <button onClick={onClose} type="button">
         close
       </button>
@@ -60,5 +68,23 @@ describe("TerminalModal", () => {
     render(<TerminalModal session={makeSession()} onClose={onClose} />);
     fireEvent.click(screen.getByRole("button", { name: "close" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the session model through to DirectTerminal", () => {
+    const session = { ...makeSession(), model: "claude-model-id" };
+    render(<TerminalModal session={session} onClose={() => undefined} />);
+    expect(screen.getByTestId("direct-terminal")).toHaveAttribute("data-model", "claude-model-id");
+  });
+
+  it("omits the model attribute when the session has no model", () => {
+    render(<TerminalModal session={makeSession()} onClose={() => undefined} />);
+    expect(screen.getByTestId("direct-terminal")).not.toHaveAttribute("data-model");
+  });
+
+  it("insets the fullscreen overlay top by the display safe area", () => {
+    render(<TerminalModal session={makeSession()} onClose={() => undefined} />);
+    const overlay = screen.getByRole("dialog");
+    expect(overlay.className).toContain("pt-[max(0.5rem,var(--safe-top))]");
+    expect(overlay.className).not.toMatch(/(^|\s)p-2(\s|$)/);
   });
 });

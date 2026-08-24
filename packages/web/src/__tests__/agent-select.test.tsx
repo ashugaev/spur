@@ -3,9 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentSelect } from "@/components/AgentSelect";
 
 describe("AgentSelect", () => {
-  it("renders the three agent options", () => {
+  it("renders all four agent options", () => {
     render(<AgentSelect value="claude" onChange={() => undefined} />);
-    expect(screen.getAllByRole("option")).toHaveLength(3);
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(screen.getByRole("option", { name: "opencode" })).toBeDefined();
   });
 
   it("marks the current value as selected", () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ATTENTION_ZONE_ORDER,
   getAttentionLevel,
+  isRestorable,
   toDashboardSession,
   type SpurSessionView,
 } from "@/lib/types.js";
@@ -79,6 +80,18 @@ describe("getAttentionLevel", () => {
     expect(getAttentionLevel(session)).toBe("respond");
   });
 
+  it("treats waiting sessions with a live shared workspace as pending", () => {
+    const session = toDashboardSession(
+      baseView({
+        worktree: false,
+        state: "waiting",
+        workspaceExists: true,
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("pending");
+  });
+
   it("keeps spawning needs_input sessions in needs response", () => {
     const session = toDashboardSession(
       baseView({
@@ -124,6 +137,19 @@ describe("getAttentionLevel", () => {
     );
 
     expect(getAttentionLevel(session)).toBe("error");
+  });
+
+  it("puts a stale-parked session in the stopped lane and keeps it restorable", () => {
+    const session = toDashboardSession(
+      baseView({
+        status: "stopped",
+        state: "stale",
+        runtimeAlive: false,
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("stopped");
+    expect(isRestorable(session)).toBe(true);
   });
 
   it("ranks the rate_limited zone directly under errors", () => {

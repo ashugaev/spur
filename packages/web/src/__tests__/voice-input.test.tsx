@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   VoiceButton,
@@ -45,6 +45,14 @@ describe("VoiceInput", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("uses motion-only voice busy status", () => {
+    render(<VoiceStatusHint voice={createVoice({ voiceBusy: "starting" })} />);
+
+    const status = screen.getByRole("status", { name: "Starting microphone" });
+    expect(status.querySelector(".voice-spinner")).not.toBeNull();
+    expect(screen.queryByText("Starting microphone...")).not.toBeInTheDocument();
+  });
+
   it("submits the confirmation modal with Cmd+Enter", () => {
     const voice = createVoice();
     const onInsert = vi.fn();
@@ -55,7 +63,7 @@ describe("VoiceInput", () => {
     expect(screen.getByRole("button", { name: /Insert/i })).toHaveTextContent("⌘ + ⏎");
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "placeholder",
-      "Review the transcription before inserting... Voice ⌘ + .",
+      "Edit transcription... Voice ⌘ + .",
     );
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Confirm voice input" }), {
       key: "Enter",
@@ -64,6 +72,38 @@ describe("VoiceInput", () => {
 
     expect(voice.confirmDraft).toHaveBeenCalledWith(onInsert);
     expect(onInsert).toHaveBeenCalledWith("terminal hotkey insert");
+  });
+
+  it("shows a spinner and disables Insert/Queue/Cancel while a send is in flight", () => {
+    const voice = createVoice({ voiceBusy: "sending" });
+
+    render(
+      <VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} onQueue={vi.fn()} voice={voice} />,
+    );
+
+    const insertButton = screen.getByRole("button", { name: "Inserting voice input" });
+    const queueButton = screen.getByRole("button", { name: "Queueing voice input" });
+    const cancelButton = screen.getByRole("button", { name: "Cancel" });
+
+    expect(insertButton.querySelector(".voice-spinner")).not.toBeNull();
+    expect(insertButton).toBeDisabled();
+    expect(within(queueButton).getByText("Queue")).toHaveClass("invisible");
+    expect(queueButton.querySelector(".voice-spinner")).not.toBeNull();
+    expect(queueButton).toBeDisabled();
+    expect(cancelButton).toBeDisabled();
+  });
+
+  it("ignores Cmd+Enter and Escape while a send is in flight", () => {
+    const voice = createVoice({ voiceBusy: "sending" });
+
+    render(<VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} voice={voice} />);
+
+    const dialog = screen.getByRole("dialog", { name: "Confirm voice input" });
+    fireEvent.keyDown(dialog, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(voice.confirmDraft).not.toHaveBeenCalled();
+    expect(voice.dismissModal).not.toHaveBeenCalled();
   });
 
   it("clears the voice draft from the corner button", () => {

@@ -46,7 +46,7 @@ function startBacklogPoller(
         config.dataDir,
         projectId,
         backlogId,
-        items.map((item) => ({
+        items.map((item, index) => ({
           provider: binding.provider,
           projectId,
           backlogId,
@@ -55,6 +55,7 @@ function startBacklogPoller(
           title: item.title,
           url: item.url,
           fetchedAt,
+          position: index,
         })),
       );
     } catch (error) {

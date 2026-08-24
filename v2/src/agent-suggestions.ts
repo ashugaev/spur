@@ -47,6 +47,14 @@ const CODEX_BUILTIN_COMMANDS = [
   command("status", "Show session details and IDs"),
 ] satisfies AgentSuggestionEntry[];
 
+const OPENCODE_BUILTIN_COMMANDS = [
+  command("compact", "Summarize the current conversation"),
+  command("help", "Show available commands"),
+  command("models", "Switch the active model"),
+  command("new", "Start a new session"),
+  command("sessions", "Open the session picker"),
+] satisfies AgentSuggestionEntry[];
+
 interface CacheEntry {
   expiresAt: number;
   value: AgentSuggestionsResponse;
@@ -119,12 +127,35 @@ async function loadSuggestions(context: SuggestionContext): Promise<AgentSuggest
   const value =
     context.agent === "claude"
       ? await loadClaudeSuggestions(context.projectPath)
-      : await loadCodexSuggestions(context.projectPath, context.codexHomePath);
+      : context.agent === "opencode"
+        ? {
+            agent: "opencode" as const,
+            commands: OPENCODE_BUILTIN_COMMANDS,
+            skills: [],
+            agents: [],
+          }
+        : await loadCodexSuggestions(context.projectPath, context.codexHomePath);
+  // CACHE_TTL_MS above is a freshness check on read only; without a sweep an
+  // expired entry for a worktree that is never queried again (e.g. a deleted
+  // session) stays resident forever. Sweep expired keys on every write,
+  // mirroring memoizedProbe's sweep-on-access pattern (runtime-tmux.ts).
+  const now = Date.now();
+  for (const [staleKey, entry] of cache) {
+    if (entry.expiresAt <= now) {
+      cache.delete(staleKey);
+    }
+  }
   cache.set(key, {
-    expiresAt: Date.now() + CACHE_TTL_MS,
+    expiresAt: now + CACHE_TTL_MS,
     value,
   });
   return value;
+}
+
+// Bounded-memory assertion mechanism, mirroring
+// _capturePaneCacheSizeForTests (runtime-tmux.ts).
+export function _suggestionsCacheSizeForTests(): number {
+  return cache.size;
 }
 
 async function loadClaudeSuggestions(projectPath: string): Promise<AgentSuggestionsResponse> {

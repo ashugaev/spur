@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "playwright/test";
+import { test, expect, type Locator, type Page } from "playwright/test";
+import { join } from "node:path";
 import { makeWorkingSession, mockSessions, type ProjectInfo } from "./fixtures.js";
 
 type WorkingSession = ReturnType<typeof makeWorkingSession>;
@@ -39,9 +40,7 @@ async function openSpawnModal(page: Page) {
 }
 
 function spawnModal(page: Page) {
-  return page.locator("div").filter({
-    has: page.getByRole("heading", { name: /^spawn session$/i }),
-  });
+  return page.getByRole("dialog", { name: /^spawn session$/i });
 }
 
 function mockSessionDetail(page: Page, session: WorkingSession) {
@@ -218,6 +217,10 @@ async function mockTerminal(page: Page) {
     const state = {
       sockets: [] as MockWebSocket[],
       sent: [] as SentInput[],
+      emitOutput(data: string) {
+        const socket = this.sockets.at(-1);
+        socket?.onmessage?.(new MessageEvent("message", { data }));
+      },
     };
 
     Object.defineProperty(window, "__scenarioTerminalState", {
@@ -265,6 +268,41 @@ async function terminalSentData(page: Page): Promise<string[]> {
   });
 }
 
+async function emitTerminalOutput(page: Page, data: string) {
+  await page.evaluate((output) => {
+    const windowWithState = window as unknown as {
+      __scenarioTerminalState?: { emitOutput: (value: string) => void };
+    };
+    windowWithState.__scenarioTerminalState?.emitOutput(output);
+  }, data);
+}
+
+async function captureTerminalLinksState(page: Page, name: string) {
+  const outputDir = process.env.SPUR_SESSION_ARTIFACTS_DIR ?? test.info().outputDir;
+  await page.screenshot({ path: join(outputDir, `terminal-links-${name}.png`) });
+}
+
+async function expectTerminalLinksWithinViewport(
+  page: Page,
+  terminal: Locator,
+  trigger: Locator,
+  panel: Locator,
+) {
+  const viewport = page.viewportSize();
+  const controlsBox = await terminal.getByTestId("direct-terminal-controls").boundingBox();
+  const triggerBox = await trigger.boundingBox();
+  const panelBox = await panel.boundingBox();
+  if (!viewport || !controlsBox || !triggerBox || !panelBox) {
+    throw new Error("Terminal links layout bounds unavailable");
+  }
+  expect(triggerBox.x).toBeGreaterThanOrEqual(controlsBox.x);
+  expect(triggerBox.x + triggerBox.width).toBeLessThanOrEqual(controlsBox.x + controlsBox.width);
+  expect(panelBox.x).toBeGreaterThanOrEqual(0);
+  expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width);
+  expect(panelBox.y).toBeGreaterThanOrEqual(0);
+  expect(panelBox.y + panelBox.height).toBeLessThanOrEqual(viewport.height);
+}
+
 test.describe("scenario migration E2E: spawn voice", () => {
   test("spawn recording can be cancelled without transcribing or changing prompt", async ({
     page,
@@ -282,9 +320,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await modal.getByRole("button", { name: /cancel voice recording/i }).click();
 
     await expect(modal.getByRole("button", { name: /start voice recording/i })).toBeVisible();
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
-      "",
-    );
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue("");
     expect(transcribeCalls).toBe(0);
   });
 
@@ -300,7 +336,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await modal.getByRole("button", { name: /start voice recording/i }).click();
     await modal.getByRole("button", { name: /stop voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue(
       "Spawn prompt from voice",
     );
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toHaveCount(0);
@@ -313,7 +349,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await openSpawnModal(page);
     const modal = spawnModal(page);
 
-    const textarea = page.getByLabel("Prompt for the new session...");
+    const textarea = page.getByLabel("Prompt...");
     await textarea.focus();
     await textarea.press("Meta+.");
     await expect(modal.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
@@ -350,7 +386,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     ).toBeVisible();
     await reopenedModal.getByRole("button", { name: /retry failed voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue(
       "Recovered spawn recording",
     );
   });
@@ -374,9 +410,7 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await expect(modal.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(
       0,
     );
-    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
-      "",
-    );
+    await expect(page.getByPlaceholder("Prompt... Voice ⌘ + .")).toHaveValue("");
   });
 });
 
@@ -394,7 +428,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await page.getByRole("button", { name: /start voice recording/i }).click();
     await page.getByRole("button", { name: /stop voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toHaveValue(
       "Message voice transcript",
     );
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toHaveCount(0);
@@ -414,9 +448,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await page.getByRole("button", { name: /start voice recording/i }).click();
     await page.getByRole("button", { name: /cancel voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent... Voice ⌘ + .")).toHaveValue(
-      "",
-    );
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toHaveValue("");
     await expect(page.getByRole("button", { name: /start voice recording/i })).toBeVisible();
     expect(transcribeCalls).toBe(0);
   });
@@ -439,7 +471,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toBeVisible();
     await page.getByRole("button", { name: /retry failed voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent... Voice ⌘ + .")).toHaveValue(
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toHaveValue(
       "Recovered message recording",
     );
   });
@@ -467,9 +499,7 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await mockVoiceTranscribe(page, "Message hotkey transcript");
 
     await page.goto(`/sessions/${session.id}`);
-    await expect(
-      page.getByPlaceholder("Message to the running agent... Voice ⌘ + ."),
-    ).toBeVisible();
+    await expect(page.getByPlaceholder("Message... Voice ⌘ + .")).toBeVisible();
     const textarea = page.locator("textarea").first();
     await textarea.focus();
     await textarea.press("Meta+.");
@@ -686,5 +716,140 @@ test.describe("scenario migration E2E: terminal voice", () => {
 
     await expect(textbox).toHaveValue("Existing draft Appended terminal voice");
     await expect(modal.getByRole("img", { name: "terminal-image.png" })).toBeVisible();
+  });
+});
+
+test.describe("scenario migration E2E: terminal links", () => {
+  test("discovers recent links and keeps the disclosure accessible at desktop and mobile", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "scenario-terminal-links", project: "my-project" });
+    const terminal = await openTerminal(page, session);
+    const trigger = terminal.getByRole("button", { name: "Open terminal links" });
+
+    await expect(trigger).toHaveCount(0);
+    await captureTerminalLinksState(page, "empty");
+
+    await emitTerminalOutput(page, "First https://one.example/path");
+    await expect(trigger).toHaveText("1");
+    await captureTerminalLinksState(page, "one");
+
+    const longUrl =
+      "https://long.example/projects/terminal-links/builds/2026-08-13/results?source=terminal&mode=responsive#latest-artifact";
+    await emitTerminalOutput(page, `\r\nLatest ${longUrl}`);
+    await expect(trigger).toHaveText("2");
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    const idleTriggerStyle = await trigger.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderColor: style.borderColor,
+        color: style.color,
+      };
+    });
+    await captureTerminalLinksState(page, "idle");
+
+    await trigger.hover();
+    await expect
+      .poll(async () => trigger.evaluate((element) => getComputedStyle(element).borderColor))
+      .not.toBe(idleTriggerStyle.borderColor);
+    await captureTerminalLinksState(page, "hover");
+    await page.mouse.move(0, 0);
+    await expect
+      .poll(async () => trigger.evaluate((element) => getComputedStyle(element).borderColor))
+      .toBe(idleTriggerStyle.borderColor);
+    await trigger.focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await expect(trigger).toBeFocused();
+    await expect
+      .poll(async () =>
+        trigger.evaluate((element, idleStyle) => {
+          const style = getComputedStyle(element);
+          return style.borderColor !== idleStyle.borderColor && style.color !== idleStyle.color;
+        }, idleTriggerStyle),
+      )
+      .toBe(true);
+    await captureTerminalLinksState(page, "focus");
+
+    await page.keyboard.press("Enter");
+    const panel = page.getByRole("region", { name: "Terminal links" });
+    await expect(panel).toBeVisible();
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect
+      .poll(async () =>
+        trigger.evaluate((element, idleStyle) => {
+          const style = getComputedStyle(element);
+          return (
+            style.backgroundColor !== idleStyle.backgroundColor &&
+            style.borderColor !== idleStyle.borderColor
+          );
+        }, idleTriggerStyle),
+      )
+      .toBe(true);
+    await expect(panel.getByRole("link")).toHaveCount(2);
+    await expect(panel.getByRole("link").nth(0)).toContainText("long.example");
+    await expect(panel.getByRole("link").nth(0)).toContainText(longUrl);
+    await expect(panel.getByRole("link").nth(1)).toContainText("one.example");
+    const newest = panel.getByRole("link").nth(0);
+    await expect(newest).toHaveAttribute("href", longUrl);
+    await expect(newest).toHaveAttribute("target", "_blank");
+    await expect(newest).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(page.getByRole("menu", { name: "Terminal links" })).toHaveCount(0);
+    await expect
+      .poll(async () =>
+        newest
+          .locator("span")
+          .nth(1)
+          .evaluate((element) => element.scrollWidth > element.clientWidth),
+      )
+      .toBe(true);
+    await expectTerminalLinksWithinViewport(page, terminal, trigger, panel);
+    await captureTerminalLinksState(page, "long-url");
+    const idleLinkStyle = await newest.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { backgroundColor: style.backgroundColor, outlineStyle: style.outlineStyle };
+    });
+    await page.keyboard.press("Tab");
+    await expect(newest).toBeFocused();
+    await expect
+      .poll(async () =>
+        newest.evaluate((element, idleStyle) => {
+          const style = getComputedStyle(element);
+          return (
+            style.backgroundColor !== idleStyle.backgroundColor &&
+            style.outlineStyle !== idleStyle.outlineStyle
+          );
+        }, idleLinkStyle),
+      )
+      .toBe(true);
+    await captureTerminalLinksState(page, "desktop-open");
+
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await terminal.getByTestId("direct-terminal-header").click();
+    await expect(panel).toHaveCount(0);
+
+    await trigger.click();
+    const popupPromise = page.waitForEvent("popup");
+    await panel.getByRole("link").nth(0).click();
+    const popup = await popupPromise;
+    await expect(panel).toHaveCount(0);
+    expect(await popup.evaluate(() => window.opener)).toBeNull();
+    await popup.close();
+
+    await page.setViewportSize({ width: 320, height: 844 });
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    await expectTerminalLinksWithinViewport(page, terminal, trigger, panel);
+    await captureTerminalLinksState(page, "mobile-open");
   });
 });

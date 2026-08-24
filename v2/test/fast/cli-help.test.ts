@@ -13,6 +13,8 @@ describe("spur help", () => {
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
     expect(help).toContain("doctor [options]");
+    expect(help).toContain("gc [options]");
+    expect(help).toContain("cache [options]");
     expect(help).toContain("init [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("shepherd [options] [prompt...]");
@@ -20,16 +22,33 @@ describe("spur help", () => {
     expect(help).toContain("send [options] <sessionId> <message...>");
     expect(help).toContain("pause [options] <sessionId>");
     expect(help).toContain("complete [options] <sessionId>");
+    expect(help).toContain("todo");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
+    expect(help).toContain("reopen [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
+    expect(help).toContain("memory <set|get|list|rm>");
     expect(help).toContain("service");
+    expect(help).toContain("source");
+    expect(help).toContain("subscribe [options] [targetSessionId]");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
-    expect(help).not.toContain("memory [options]");
     expect(help).not.toContain("internal");
+    expect(help).not.toContain("playwright");
+  });
+
+  it("exposes only the five ToDo mutations plus list", () => {
+    const todo = buildProgram().commands.find((command) => command.name() === "todo");
+    expect(todo?.commands.map((command) => command.name())).toEqual([
+      "list",
+      "add",
+      "complete",
+      "cancel",
+      "hold",
+      "resume",
+    ]);
   });
 
   it("documents the doctor scaffold flow and follow-up command path", () => {
@@ -43,11 +62,31 @@ describe("spur help", () => {
 
     const help = doctor.helpInformation();
 
-    expect(help).toContain("Check host install and scaffold a local Spur project config.");
+    expect(help).toContain("Check host install and project config health (read-only).");
     expect(help).toContain("--json");
-    expect(help).toContain("Checks npm/systemd host install");
+    expect(help).toContain("--scaffold");
+    expect(help).toContain("Read-only by default: checks npm/systemd host install");
     expect(help).toContain("Run `spur init` if host checks");
     expect(help).toContain("Run `spur list` or `spur spawn` next");
+  });
+
+  it("documents the cache command's dry-run default and flags", () => {
+    const program = buildProgram();
+    const cache = program.commands.find((command) => command.name() === "cache");
+
+    expect(cache).toBeDefined();
+    if (!cache) {
+      throw new Error("Expected cache command to be registered");
+    }
+
+    const help = cache.helpInformation();
+
+    expect(help).toContain("--json");
+    expect(help).toContain("--prune");
+    expect(help).toContain("--yes");
+    expect(help).toContain("Dry-run by default");
+    expect(help).toContain("never deletes");
+    expect(help).toContain("~/.spur");
   });
 
   it("renders subcommand help with compact sections and inherited globals", () => {
@@ -81,6 +120,33 @@ describe("spur help", () => {
     expect(help).not.toContain("help [command]");
   });
 
+  it("documents gc as dry-run-by-default with its safety guarantees", () => {
+    const program = buildProgram();
+    const gc = program.commands.find((command) => command.name() === "gc");
+
+    expect(gc).toBeDefined();
+    if (!gc) {
+      throw new Error("Expected gc command to be registered");
+    }
+
+    const help = gc.helpInformation();
+
+    expect(help).toContain("dry run unless --execute");
+    expect(help).toContain("--execute");
+    expect(help).toContain("--older-than <days>");
+    expect(help).toContain("--statuses <list>");
+    expect(help).toContain("--project <id>");
+    expect(help).toContain("--limit <number>");
+    expect(help).toContain("--no-sizes");
+    expect(help).toContain("--json");
+    expect(help).toContain("Nothing is touched without `--execute`.");
+    expect(help).toContain(
+      "Never collects a group with uncommitted changes, unpushed commits, an open PR",
+    );
+    expect(help).toContain("`git worktree remove`");
+    expect(help).toContain("can no longer be restored");
+  });
+
   it("documents spawn branch and current workspace flags", () => {
     const program = buildProgram();
     const spawn = program.commands.find((command) => command.name() === "spawn");
@@ -98,7 +164,10 @@ describe("spur help", () => {
     expect(help).toContain("--step <label>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
-    expect(help).toContain("Agent to start: claude, codex, or cursor");
+    expect(help).toContain("--subscribe-to <sessionId>");
+    expect(help).toContain("--subscribe-state <state>");
+    expect(help).toContain("--subscribe-message <message>");
+    expect(help).toContain("Agent to start: claude, codex, cursor, or opencode");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");
     expect(help).toContain("adds a planning-only prompt");
@@ -177,13 +246,29 @@ describe("spur help", () => {
     expect(help).toContain("--port <number>");
   });
 
+  it("documents source replies", () => {
+    const program = buildProgram();
+    const source = program.commands.find((command) => command.name() === "source");
+    const reply = source?.commands.find((command) => command.name() === "reply");
+
+    expect(source).toBeDefined();
+    expect(reply).toBeDefined();
+    if (!source || !reply) {
+      throw new Error("Expected source reply command to be registered");
+    }
+
+    expect(source.helpInformation()).toContain("Work with source-bound session messages.");
+    const help = reply.helpInformation();
+    expect(help).toContain("reply [options] <message...>");
+    expect(help).toContain("--session <id>");
+    expect(help).toContain("defaults to SPUR_SESSION");
+  });
+
   it("documents exact session-memory commands without aliases", () => {
     const program = buildProgram();
     const sessionMemory = program.commands.find((command) => command.name() === "session-memory");
-    const genericMemory = program.commands.find((command) => command.name() === "memory");
 
     expect(sessionMemory).toBeDefined();
-    expect(genericMemory).toBeUndefined();
     if (!sessionMemory) {
       throw new Error("Expected session-memory command to be registered");
     }
@@ -199,5 +284,23 @@ describe("spur help", () => {
     expect(help).toContain(
       "Session memory is daemon-managed and scoped to one existing session id.",
     );
+  });
+
+  it("documents the memory command with the required --scope option", () => {
+    const program = buildProgram();
+    const memory = program.commands.find((command) => command.name() === "memory");
+
+    expect(memory).toBeDefined();
+    if (!memory) {
+      throw new Error("Expected memory command to be registered");
+    }
+
+    expect(memory.aliases()).toEqual([]);
+
+    const help = memory.helpInformation();
+    expect(help).toContain("memory <set|get|list|rm> [key] [body] --scope <task|project|global>");
+    expect(help).toContain("--scope <scope>");
+    expect(help).toContain("--file <path>");
+    expect(help).toContain("--session <id>");
   });
 });

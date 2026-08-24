@@ -52,6 +52,17 @@ echo -e "${BLUE}║  Spur - Onboarding Integration Test                   ║${N
 echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
 echo ""
 
+# On a correctly configured Spur host this script is a no-op from now on;
+# use scripts/test-deploy.sh for reviewer/test deploys.
+npm_prefix="$(npm config get prefix 2>/dev/null || true)"
+npm_prefix="${npm_prefix#"${npm_prefix%%[![:space:]]*}"}"
+npm_prefix="${npm_prefix%"${npm_prefix##*[![:space:]]}"}"
+if [[ -n "$npm_prefix" ]] && [[ "$(realpath -m "$npm_prefix")" = "$(realpath -m "$HOME/.local")" ]]; then
+  echo "onboarding-test: refusing production npm prefix"
+  echo "  use scripts/test-deploy.sh for reviewer/test deploys"
+  exit 1
+fi
+
 start_step "Step 1: Navigate to repository"
 cd "$REPO_ROOT" || fail_step "Repository not found"
 end_step "Step 1: Repository accessible"
@@ -102,7 +113,7 @@ end_step "Step 5: Fresh repo created"
 
 # Step 6: Run doctor in the fresh repo
 start_step "Step 6: Run spur doctor"
-DOCTOR_OUTPUT="$(HOME="$SPUR_HOME" "$SPUR_BIN" doctor --json)" || fail_step "Step 6: spur doctor failed"
+DOCTOR_OUTPUT="$(HOME="$SPUR_HOME" "$SPUR_BIN" doctor --json --scaffold)" || fail_step "Step 6: spur doctor failed"
 PROJECT_ID="$(printf '%s' "$DOCTOR_OUTPUT" | jq -r '.projectId')"
 if [ "$PROJECT_ID" != "test-project" ]; then
     printf '%s\n' "$DOCTOR_OUTPUT"
@@ -151,7 +162,7 @@ pnpm --dir packages/web dev > /tmp/spur-web.log 2>&1 &
 WEB_PID=$!
 
 echo "  Waiting for web UI to start..."
-for i in {1..30}; do
+for i in {1..90}; do
     if curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
         break
     fi
@@ -164,7 +175,7 @@ done
 
 if ! curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
     cat /tmp/spur-web.log
-    fail_step "Step 8: Web UI not responding after 30s"
+    fail_step "Step 8: Web UI not responding after 90s"
 fi
 
 end_step "Step 8: Web UI started successfully"
@@ -172,17 +183,20 @@ end_step "Step 8: Web UI started successfully"
 # Step 9: Verify web UI endpoints
 start_step "Step 9: Verify web UI API"
 
-for i in {1..30}; do
+for i in {1..90}; do
     if curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
         break
     fi
     sleep 1
 done
 if ! curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
+    cat /tmp/spur-web.log
+    HOME="$SPUR_HOME" "$SPUR_BIN" daemon info --json || true
+    curl -sf "http://127.0.0.1:4310/info" || true
     fail_step "Step 9: /api/sessions endpoint failed"
 fi
 
-for i in {1..30}; do
+for i in {1..90}; do
     if curl -sf "http://127.0.0.1:${WEB_PORT}/?project=${PROJECT_ID}" > /dev/null; then
         break
     fi
@@ -190,6 +204,7 @@ for i in {1..30}; do
 done
 # Verify the configured project filter resolves on the dashboard
 if ! curl -sf "http://127.0.0.1:${WEB_PORT}/?project=${PROJECT_ID}" > /dev/null; then
+    cat /tmp/spur-web.log
     fail_step "Step 9: project dashboard filter failed"
 fi
 

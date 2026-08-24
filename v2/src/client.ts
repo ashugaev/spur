@@ -10,6 +10,7 @@ import {
   type PreflightRequest,
   type PreflightResponse,
   type RuntimeInfo,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrActionRequiredPayload,
   type SidecarPortConflictPayload,
 } from "./types.js";
@@ -51,7 +52,17 @@ async function fetchJson(
 }
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
-  const { response, payload } = await fetchJson(baseUrl, path, init);
+  const withOrigin: RequestInit = {
+    ...init,
+    headers: {
+      ...(init?.headers ?? {}),
+      "x-spur-origin": "cli",
+      ...(process.env["SPUR_SESSION"]
+        ? { "x-spur-caller-session": process.env["SPUR_SESSION"] }
+        : {}),
+    },
+  };
+  const { response, payload } = await fetchJson(baseUrl, path, withOrigin);
   if (!response.ok) {
     const message = formatDaemonError(response.status, payload, path);
     throw new Error(message);
@@ -85,6 +96,14 @@ function isOpenPrActionRequiredPayload(payload: unknown): payload is OpenPrActio
   );
 }
 
+function isGithubPrCheckUnavailablePayload(
+  payload: unknown,
+): payload is GithubPrCheckUnavailablePayload {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Partial<GithubPrCheckUnavailablePayload>;
+  return record.code === "github_pr_check_unavailable" && typeof record.sessionId === "string";
+}
+
 function openPrActionCommand(path: string, sessionId: string): string | null {
   const action = path.match(/^\/sessions\/[^/]+\/(complete|kill)$/)?.[1];
   if (!action) return null;
@@ -104,6 +123,16 @@ function formatDaemonError(status: number, payload: unknown, path: string): stri
       ? `Retry \`${command} --pr-action leave_open\` to keep it open or \`${command} --pr-action close\` to close it.`
       : "Retry with --pr-action leave_open to keep it open or --pr-action close to close it.";
     return `Open pull request action required for ${payload.sessionId}: ${payload.pr.url}. ${retry}`;
+  }
+  if (isGithubPrCheckUnavailablePayload(payload)) {
+    const command = openPrActionCommand(path, payload.sessionId);
+    const retry = command
+      ? `Retry \`${command} --skip-pr-check\` to skip it.`
+      : "Retry with --skip-pr-check to skip it.";
+    const cause = payload.rateLimited
+      ? "GitHub rate limit"
+      : "commonly gh missing, unauthenticated, or unreachable";
+    return `GitHub PR check unavailable for ${payload.sessionId}: ${cause}. ${retry}`;
   }
   if (typeof payload === "object" && payload !== null && "error" in payload) {
     return String(payload.error);
@@ -386,6 +415,15 @@ export async function postJson<T>(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export async function deleteJson<T>(
+  cliEntrypoint: string,
+  path: string,
+  configPath?: string,
+): Promise<T> {
+  const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  return requestJson<T>(baseUrl, path, { method: "DELETE" });
 }
 
 export async function postPreflight(

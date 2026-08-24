@@ -1,12 +1,12 @@
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import type { RuntimeInfo } from "../../src/types.js";
-import { createTempDir, execFileAsync, pollUntil } from "./common.js";
+import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
@@ -17,8 +17,14 @@ export const CLI_PATH = join(V2_DIR, "dist/cli.js");
 const TMUX_CONFIG_PATH = join(V2_DIR, "tmux.conf");
 const TMUX_BOOTSTRAP_SESSION = `spur-runtime-bootstrap-${process.pid}`;
 let tmuxBootstrapReady = false;
-let tmuxBootstrapCleanupRegistered = false;
 let activeTmuxSocketName: string | null = null;
+// Every socket this process has armed via setActiveTmuxSocketName, drained by
+// killTmuxServer. The single process.once("exit") net below iterates this
+// set, not just the first-registered socket — a per-context single-socket
+// capture (the prior design) only ever protects the FIRST context in a file;
+// every later context got no net at all.
+const liveTmuxSockets = new Set<string>();
+let tmuxExitNetRegistered = false;
 
 export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
@@ -26,6 +32,49 @@ export function setActiveTmuxSocketName(socketName: string | null): void {
     tmuxBootstrapReady = false;
   }
   activeTmuxSocketName = next;
+  if (next) {
+    liveTmuxSockets.add(next);
+  }
+  if (!tmuxExitNetRegistered) {
+    tmuxExitNetRegistered = true;
+    const sweep = (): void => {
+      for (const socket of liveTmuxSockets) {
+        spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+      }
+    };
+    process.once("exit", sweep);
+    // A vitest fork-pool worker is torn down by its parent sending SIGTERM,
+    // not by the worker's own event loop going idle — plain `process.once
+    // ("exit", ...)` alone never fires on that path (measured: a fixture that
+    // arms two sockets and returns normally still leaves both tmux servers
+    // alive after the whole `vitest run` invocation exits). Translating the
+    // signal into an explicit process.exit() makes the exit path uniform:
+    // the "exit" listener above still does the actual kill, this only
+    // ensures it gets invoked instead of the default signal disposition
+    // terminating the process without emitting "exit" at all. A prior
+    // listener for either signal (there is none installed in this test
+    // tree) would be overridden by design — teardown safety wins here.
+    process.once("SIGTERM", () => process.exit(0));
+    process.once("SIGINT", () => process.exit(0));
+  }
+}
+
+// Builds the `-L <socket> ...` argv this module always shapes tmux calls
+// with — the one place argv is built, so a test can assert it directly
+// instead of relying on "does not throw" (vacuous: killTmuxSessionsByPrefix's
+// catch swallows any error either way).
+export function buildTmuxSocketArgs(socketName: string, args: string[]): string[] {
+  return ["-L", socketName, ...args];
+}
+
+// Test-only: exercises the armed-socket tracking set directly.
+export const _liveTmuxSocketsForTests = liveTmuxSockets;
+
+// spawnSync + kill-server, then drop the socket from the tracked set so a
+// later exit-net pass never double-kills an already-torn-down server.
+export function killTmuxServer(socketName: string): void {
+  spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
+  liveTmuxSockets.delete(socketName);
 }
 
 export function withTmuxSocket(args: string[]): string[] {
@@ -34,7 +83,7 @@ export function withTmuxSocket(args: string[]): string[] {
       "no isolated tmux socket active; createRuntimeTestContext or setActiveTmuxSocketName must run first",
     );
   }
-  return ["-L", activeTmuxSocketName, ...args];
+  return buildTmuxSocketArgs(activeTmuxSocketName, args);
 }
 
 export interface FakeGhState {
@@ -105,6 +154,7 @@ export interface RuntimeTestContext {
   agentLogDir: string;
   ghStateFile: string;
   port: number;
+  tmuxSocketName: string;
   env: NodeJS.ProcessEnv;
   writeConfig(name: string, content: string): Promise<string>;
   execCli(
@@ -123,7 +173,14 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
+function fakeAgentScript(
+  agentName: "claude" | "codex" | "cursor",
+  options?: { hupResistant?: boolean },
+): string {
+  // Opt-in only: real agents don't ignore SIGHUP, and the terminate-then-
+  // confirm guard's own default grace windows assume it lands. This exists
+  // solely so a runtime test can force the SIGKILL path deterministically.
+  const hupTrap = options?.hupResistant ? "\ntrap '' HUP" : "";
   const header =
     agentName === "claude"
       ? "Claude Code"
@@ -149,8 +206,24 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
   fi
   exit 0
 fi
+# Real claude is a TUI that treats Ctrl-C as "cancel current input", not
+# "kill the process" — an interrupt-delivered trigger send (e.g. a restored
+# session's redelivered merge-conflict alert) relies on the agent surviving
+# the leading C-c in sendMessageToTmux. Without this trap the default SIGINT
+# action kills the script, so the interrupt drops the process instead of
+# just clearing its input line, and the send never reaches the read loop.
+trap '' INT${hupTrap}
 mode="launch"
 resume_id=""
+pinned_session_id=""
+args=("$@")
+for ((index = 0; index < \${#args[@]}; index++)); do
+  if [[ "\${args[$index]}" == "--session-id" ]]; then
+    next_index=$((index + 1))
+    pinned_session_id="\${args[$next_index]:-}"
+    break
+  fi
+done
 encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
 session_dir="$HOME/.claude/projects/$encoded_path"
 mkdir -p "$session_dir"
@@ -163,7 +236,19 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
-  session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  # Real claude names its transcript after --session-id when the caller pins
+  # one (Spur passes this on every launch); mirror that so sessionFileForId
+  # can find it by the pinned id instead of falling through to a fresh launch.
+  # pinned_session_id is parsed once above, before the resume/launch branch.
+  # Divergence to know about: this fake writes the file at launch, while real
+  # claude creates it only when it persists the first submitted message. That
+  # is why runtime tests never saw the launch send's missing submit ack, which
+  # loses pipeline step 1 whenever the claude TUI swallows the submit Enter.
+  if [[ -n "$pinned_session_id" ]]; then
+    session_uuid="$pinned_session_id"
+  else
+    session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  fi
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {
@@ -422,7 +507,7 @@ $extra"
   esac
 done`
       : agentName === "codex"
-        ? `trap '' INT
+        ? `trap '' INT${hupTrap}
 codex_paste_start=$'\\e[200~'
 codex_paste_end=$'\\e[201~'
 codex_buffer=""
@@ -573,9 +658,20 @@ emit_rollout_input_required() {
   fi
   printf '{"type":"event_msg","payload":{"type":"input_required","turn_id":"%s","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}\\n' "\${SPUR_SESSION:-no-session}-$hook_seq" >> "$session_rollout"
 }
+resolve_initial_todo() {
+  if [[ -z "\${SPUR_TODO_COMMAND:-}" ]]; then
+    return
+  fi
+  local todo_id
+  todo_id="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
+  if [[ -n "$todo_id" ]]; then
+    "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
+  fi
+}
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 printf '%s\n' "${header}"
 printf '%s\n' "${prompt}"
+resolve_initial_todo
 ${signalWaiting}
 ${readLoop}
 `;
@@ -596,6 +692,68 @@ function print(value) {
 
 function argValue(args, prefix) {
   return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+}
+
+function connection(nodes) {
+  return { nodes, pageInfo: { hasPreviousPage: false, startCursor: null } };
+}
+
+function prFromNumber(state, prNumber) {
+  return (
+    state.prsByNumber?.[String(prNumber)] ||
+    Object.values(state.prsByBranch || {}).find(
+      (value) => String(value?.number || "") === String(prNumber),
+    )
+  );
+}
+
+function pullRequestNode(state, pr) {
+  if (!pr) return null;
+  const prNumber = String(pr.number || "");
+  const checks = (state.checksByPr?.[prNumber] || []).map((check) => ({
+    name: check.name,
+    conclusion: check.state,
+    status: check.state === "PENDING" ? "IN_PROGRESS" : "COMPLETED",
+  }));
+  const issueComments = (state.commentsByPr?.[prNumber] || []).map((comment) => ({
+    databaseId: comment.id,
+    body: comment.body,
+    author: comment.user || null,
+  }));
+  const reviews = (state.reviewsByPr?.[prNumber] || []).map((review, index) => ({
+    databaseId: index + 1,
+    state: review.state || null,
+    body: "",
+    author: review.user || null,
+  }));
+  const reviewComments = (state.reviewCommentsByPr?.[prNumber] || []).map((comment) => ({
+    databaseId: comment.id,
+    body: comment.body,
+    path: comment.path || null,
+    line: comment.line || null,
+    author: comment.user || null,
+  }));
+  const reviewThreads = state.reviewThreadsByPr?.[prNumber] ||
+    (reviewComments.length > 0
+      ? [{ id: "THREAD_" + prNumber, isResolved: false, comments: connection(reviewComments) }]
+      : []);
+  return {
+    id: "PR_" + prNumber,
+    number: pr.number,
+    title: pr.title,
+    url: pr.url,
+    reviewDecision: pr.reviewDecision || null,
+    mergeable: pr.mergeable || "MERGEABLE",
+    mergeStateStatus: pr.mergeStateStatus || "CLEAN",
+    isDraft: false,
+    state: pr.state || "OPEN",
+    commits: {
+      nodes: [{ commit: { statusCheckRollup: { contexts: connection(checks) } } }],
+    },
+    reviewThreads: connection(reviewThreads),
+    reviews: connection(reviews),
+    comments: connection(issueComments),
+  };
 }
 
 const state = readState();
@@ -632,7 +790,37 @@ if (args[0] === "pr" && args[1] === "view") {
   process.exit(0);
 }
 
-if (args[0] === "api" && args[1] === "graphql") {
+if (args[0] === "api" && args.includes("graphql")) {
+  const query = argValue(args, "query=") || "";
+  const repository = {
+    nameWithOwner: (argValue(args, "owner=") || "acme") + "/" + (argValue(args, "name=") || "api"),
+    isFork: false,
+    parent: null,
+  };
+  for (const arg of args) {
+    const numberMatch = arg.match(/^n(\\d+)=(\\d+)$/);
+    if (numberMatch) {
+      repository["a" + numberMatch[1]] = pullRequestNode(
+        state,
+        prFromNumber(state, numberMatch[2]),
+      );
+      continue;
+    }
+    const branchMatch = arg.match(/^b(\\d+)=(.*)$/s);
+    if (branchMatch) {
+      const node = pullRequestNode(state, state.prsByBranch?.[branchMatch[2]]);
+      repository["a" + branchMatch[1]] = connection(node ? [node] : []);
+    }
+  }
+  if (/r\\s*:\\s*repository/.test(query)) {
+    print({
+      data: {
+        rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00.000Z" },
+        r: repository,
+      },
+    });
+    process.exit(0);
+  }
   const prNumber = argValue(args, "number=");
   print({
     data: {
@@ -675,21 +863,10 @@ process.exit(1);
 async function startTmuxServer(): Promise<void> {
   if (tmuxBootstrapReady) return;
 
-  if (!tmuxBootstrapCleanupRegistered) {
-    tmuxBootstrapCleanupRegistered = true;
-    const socketName = activeTmuxSocketName;
-    process.once("exit", () => {
-      // The bootstrap session lives on the isolated socket; tearing down the
-      // whole server is the safety net for any leaked context.
-      if (socketName) {
-        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
-      }
-    });
-  }
-
   try {
     await execFileAsync("tmux", withTmuxSocket(["has-session", "-t", TMUX_BOOTSTRAP_SESSION]));
     tmuxBootstrapReady = true;
+    if (activeTmuxSocketName) await recordTmuxServer(activeTmuxSocketName);
     return;
   } catch {
     // Fall through and create a bootstrap session when no server is live yet.
@@ -711,9 +888,36 @@ async function startTmuxServer(): Promise<void> {
       "sleep 3600",
     ]);
     tmuxBootstrapReady = true;
+    if (activeTmuxSocketName) await recordTmuxServer(activeTmuxSocketName);
   } catch {
     // Best effort only.
   }
+}
+
+// Appends {socketName, serverPid} to the per-run ledger at
+// SPUR_TEST_TMUX_LEDGER (armed by test/setup/tmux-ledger.ts's globalSetup on
+// the runtime/smoke configs; unset and a no-op on the fast tier). No `ps`, no
+// socket-name matching — only a live server this call itself just confirmed
+// gets its pid recorded, and the pid is used later only as an identity gate
+// before a kill, never as a signal target.
+export async function recordTmuxServer(socketName: string): Promise<void> {
+  const ledgerPath = process.env["SPUR_TEST_TMUX_LEDGER"];
+  if (!ledgerPath) return;
+  let serverPid: string;
+  try {
+    const { stdout } = await execFileAsync("tmux", [
+      "-L",
+      socketName,
+      "display-message",
+      "-p",
+      "#{pid}",
+    ]);
+    serverPid = stdout.trim();
+  } catch {
+    return;
+  }
+  if (!serverPid) return;
+  appendFileSync(ledgerPath, `${JSON.stringify({ socketName, serverPid })}\n`, "utf8");
 }
 
 export async function isTmuxAvailable(): Promise<boolean> {
@@ -752,9 +956,14 @@ export async function createTmuxSession(args: {
 
 export async function captureTmuxPane(sessionName: string, lines = 80): Promise<string> {
   try {
+    // `-J` joins soft-wrapped lines back into one logical line. Without it, a
+    // long prompt line that happens to wrap exactly mid-word (e.g. "This"
+    // splitting into "Thi\ns" at the pane's fixed column width) can break a
+    // plain `.includes()` match on assertion text that spans the wrap point —
+    // a false negative unrelated to whether the text is actually present.
     const { stdout } = await execFileAsync(
       "tmux",
-      withTmuxSocket(["capture-pane", "-t", sessionName, "-p", "-S", `-${lines}`]),
+      withTmuxSocket(["capture-pane", "-t", sessionName, "-p", "-J", "-S", `-${lines}`]),
     );
     return stdout;
   } catch {
@@ -791,19 +1000,59 @@ export async function sendKeysToTmux(sessionName: string, ...keys: string[]): Pr
   await execFileAsync("tmux", withTmuxSocket(["send-keys", "-t", sessionName, ...keys]));
 }
 
-export async function killTmuxSession(sessionName: string): Promise<void> {
+// Stops a daemon by pid and awaits its actual exit before returning. Teardown
+// must not fire-and-forget: the daemon's async shutdown can otherwise still hold
+// its port / write rootDir while the next test allocates a port, causing
+// order-dependent EADDRINUSE / info-poll flake. Bounded graceful window keeps us
+// under the afterEach hookTimeout, with SIGKILL escalation as a backstop.
+export async function stopDaemonByPid(pid?: number): Promise<void> {
+  if (!pid) return;
   try {
-    await execFileAsync("tmux", withTmuxSocket(["kill-session", "-t", sessionName]));
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const stillAlive = await pollUntil(() => processExists(pid), {
+    timeoutMs: 10_000,
+    intervalMs: 200,
+    accept: (alive) => alive === false,
+  });
+  if (stillAlive === false) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return;
+  }
+  const killed = await pollUntil(() => processExists(pid), {
+    timeoutMs: 5_000,
+    intervalMs: 200,
+    accept: (alive) => alive === false,
+  });
+  if (killed !== false) {
+    throw new Error(`stopDaemonByPid: pid ${pid} still alive after SIGKILL`);
+  }
+}
+
+// `socketName` optional: an explicit socket (used by killTmuxSessionsByPrefix)
+// targets that socket directly; omitted, it falls back to the armed global
+// via withTmuxSocket — every other call site in this test tree relies on
+// that implicit-global form.
+export async function killTmuxSession(sessionName: string, socketName?: string): Promise<void> {
+  try {
+    const args = socketName
+      ? buildTmuxSocketArgs(socketName, ["kill-session", "-t", sessionName])
+      : withTmuxSocket(["kill-session", "-t", sessionName]);
+    await execFileAsync("tmux", args);
   } catch {
     // Already gone.
   }
 }
 
-export async function killTmuxSessionsByPrefix(prefix: string): Promise<void> {
+export async function killTmuxSessionsByPrefix(prefix: string, socketName: string): Promise<void> {
   try {
     const { stdout } = await execFileAsync(
       "tmux",
-      withTmuxSocket(["list-sessions", "-F", "#{session_name}"]),
+      buildTmuxSocketArgs(socketName, ["list-sessions", "-F", "#{session_name}"]),
     );
     const sessions = stdout
       .trim()
@@ -811,7 +1060,7 @@ export async function killTmuxSessionsByPrefix(prefix: string): Promise<void> {
       .map((session) => session.trim())
       .filter((session) => session.startsWith(prefix));
     for (const session of sessions) {
-      await killTmuxSession(session);
+      await killTmuxSession(session, socketName);
     }
   } catch {
     // No tmux server or no matching sessions.
@@ -829,6 +1078,9 @@ export async function createGitRepo(): Promise<{ repoDir: string; originDir: str
   await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoDir });
   await execFileAsync("git", ["config", "user.name", "Spur Test"], { cwd: repoDir });
   await execFileAsync("git", ["remote", "add", "origin", originDir], { cwd: repoDir });
+  await execFileAsync("git", ["remote", "add", "upstream", "https://github.com/acme/api.git"], {
+    cwd: repoDir,
+  });
   await writeFile(join(repoDir, "README.md"), "# Spur Runtime Test\n", "utf8");
   await writeFile(join(repoDir, ".env"), "TEST_ENV=1\n", "utf8");
   await execFileAsync("git", ["add", "."], { cwd: repoDir });
@@ -844,7 +1096,7 @@ async function writeExecutable(path: string, content: string): Promise<void> {
 
 export async function createRuntimeTestContext(
   port: number,
-  options?: { useFakeTools?: boolean },
+  options?: { useFakeTools?: boolean; hupResistantAgents?: boolean },
 ): Promise<RuntimeTestContext> {
   _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
@@ -854,15 +1106,24 @@ export async function createRuntimeTestContext(
   const fakeBinDir = join(rootDir, "bin");
   const agentLogDir = join(rootDir, "agent-logs");
   const ghStateFile = join(rootDir, "gh-state.json");
+  const tmuxSocketName = `spur-${port}`;
   const useFakeTools = options?.useFakeTools ?? true;
+  const hupResistant = options?.hupResistantAgents ?? false;
   await mkdir(fakeBinDir, { recursive: true });
   await mkdir(agentLogDir, { recursive: true });
   await writeFile(join(rootDir, ".zshrc"), "# runtime test shell init\n", "utf8");
   if (useFakeTools) {
-    await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
-    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));
-    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor"));
-    await writeExecutable(join(fakeBinDir, "cursor-agent"), fakeAgentScript("cursor"));
+    const agentScriptOptions = { hupResistant };
+    await writeExecutable(
+      join(fakeBinDir, "claude"),
+      fakeAgentScript("claude", agentScriptOptions),
+    );
+    await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex", agentScriptOptions));
+    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor", agentScriptOptions));
+    await writeExecutable(
+      join(fakeBinDir, "cursor-agent"),
+      fakeAgentScript("cursor", agentScriptOptions),
+    );
     await writeExecutable(join(fakeBinDir, "gh"), FAKE_GH_SCRIPT);
     await writeFile(ghStateFile, "{}\n", "utf8");
   }
@@ -874,7 +1135,7 @@ export async function createRuntimeTestContext(
       ? {
           HOME: rootDir,
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
-          SPUR_TMUX_SOCKET_NAME: `spur-${port}`,
+          SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
           SPUR_CURSOR_BIN: join(fakeBinDir, "agent"),
@@ -889,12 +1150,20 @@ export async function createRuntimeTestContext(
   // spur-<port>` and never the host's default server. Only the fake-tools path
   // drives tmux, matching the SPUR_TMUX_SOCKET_NAME env above.
   if (useFakeTools) {
-    setActiveTmuxSocketName(`spur-${port}`);
+    setActiveTmuxSocketName(tmuxSocketName);
   }
 
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
-    await writeFile(configPath, content, "utf8");
+    await writeFile(
+      configPath,
+      `admission:
+  enabled: false
+  memoryGuard:
+    enforceFloors: false
+${content}`,
+      "utf8",
+    );
     return configPath;
   };
 
@@ -948,31 +1217,18 @@ export async function createRuntimeTestContext(
       {
         timeoutMs: 20_000,
         accept: (value): value is RuntimeInfo => value !== null,
+        label: "daemon info",
       },
     );
-    if (!info) {
-      throw new Error("Timed out waiting for daemon info");
-    }
-
-    return { child, stdout, info };
+    // pollUntil throws before returning null, so info is guaranteed non-null here.
+    return { child, stdout, info: info as RuntimeInfo };
   };
 
   const stopDaemon = async (
     child: ChildProcessByStdio<null, Readable, Readable>,
   ): Promise<void> => {
     if (child.exitCode !== null || child.killed) return;
-    child.kill("SIGTERM");
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        child.once("exit", () => resolve());
-      }),
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          child.kill("SIGKILL");
-          resolve();
-        }, 10_000);
-      }),
-    ]);
+    await stopDaemonByPid(child.pid);
   };
 
   const readAgentLog = async (sessionId: string): Promise<string> => {
@@ -989,7 +1245,7 @@ export async function createRuntimeTestContext(
     if (useFakeTools) {
       // Tear down the isolated tmux server and re-arm the guard so the next
       // context in this file must activate its own socket.
-      spawnSync("tmux", ["-L", `spur-${port}`, "kill-server"], { stdio: "ignore" });
+      killTmuxServer(tmuxSocketName);
       setActiveTmuxSocketName(null);
     }
     await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -1007,6 +1263,7 @@ export async function createRuntimeTestContext(
     agentLogDir,
     ghStateFile,
     port,
+    tmuxSocketName,
     env,
     writeConfig,
     execCli,

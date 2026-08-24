@@ -1,17 +1,20 @@
-import { execFile, type ExecFileOptionsWithStringEncoding } from "node:child_process";
+import {
+  execFile,
+  type ExecFileOptions,
+  type ExecFileOptionsWithStringEncoding,
+} from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
+import { opencodeCommand } from "./agents/opencode.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
-const execFileAsync = promisify(execFile);
 const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
 const PREFLIGHT_RM_RETRIES = 5;
@@ -42,11 +45,20 @@ async function runPreflightExec(
   label: string,
   command: string,
   args: string[],
-  options: Parameters<typeof execFileAsync>[2],
+  options: ExecFileOptions,
 ): Promise<string> {
   try {
-    const { stdout } = await execFileAsync(command, args, options);
-    return typeof stdout === "string" ? stdout : stdout.toString("utf8");
+    return await new Promise<string>((resolve, reject) => {
+      const child = execFile(command, args, options, (error, stdout, stderr) => {
+        if (error) {
+          Object.assign(error, { stdout, stderr });
+          reject(error);
+          return;
+        }
+        resolve(typeof stdout === "string" ? stdout : stdout.toString("utf8"));
+      });
+      child.stdin?.end();
+    });
   } catch (error) {
     if (!(error instanceof Error)) {
       throw new Error(`${label} preflight failed: ${String(error)}`, { cause: error });
@@ -69,6 +81,7 @@ export class PreflightBranchValidationError extends Error {
 }
 
 export interface SpawnPreflightResult {
+  noProjectBranchRequirements?: true;
   branch?: string;
 }
 
@@ -97,7 +110,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
   return [
     "You are running a Spur spawn preflight before worktree creation.",
     `Return exactly one line: either a git branch name or the exact token ${PREFLIGHT_DEFER_SENTINEL}.`,
-    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions define no branch-naming rules, OR when they do but this task gives you no information to construct a name that satisfies them; in those cases Spur uses its default naming. Otherwise return a branch name that satisfies the rules.`,
+    `Return ${PREFLIGHT_DEFER_SENTINEL} only when the project instructions define no branch-naming rules. Otherwise return a branch that satisfies the rules.`,
     "Do not include JSON, markdown, quotes, or prose.",
     "If you return a branch, return only the branch name.",
     "",
@@ -108,7 +121,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
           "",
           "Previous attempt feedback:",
           args.feedback,
-          "Return a corrected branch name, or defer if the project rules do not define one.",
+          `Return a corrected branch name. Use ${PREFLIGHT_DEFER_SENTINEL} only when the project defines no branch-naming rules.`,
         ]
       : []),
     "",
@@ -119,20 +132,10 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === PREFLIGHT_DEFER_SENTINEL) return {};
-  if (!/\s/.test(trimmed)) return { branch: trimmed };
-  // Salvage: the model put prose around the answer. Scan non-empty lines
-  // bottom-up (the answer is usually last) for a bare single-token git ref.
-  const lines = trimmed
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
-    if (!line) continue;
-    if (line === PREFLIGHT_DEFER_SENTINEL) return {};
-    if (isPlausibleGitRef(line)) return { branch: line };
+  if (trimmed === PREFLIGHT_DEFER_SENTINEL) {
+    return { noProjectBranchRequirements: true };
   }
+  if (isPlausibleGitRef(trimmed)) return { branch: trimmed };
   throw new Error(
     `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
   );
@@ -258,6 +261,14 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<string> 
   }
 }
 
+async function runOpenCodePreflight(prompt: string, cwd: string): Promise<string> {
+  return runPreflightExec("opencode", opencodeCommand(), ["run", "--agent", "build", prompt], {
+    cwd,
+    timeout: PREFLIGHT_TIMEOUT_MS,
+    maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+  });
+}
+
 export async function runSpawnPreflight(
   input: RunSpawnPreflightInput,
 ): Promise<SpawnPreflightResult> {
@@ -267,7 +278,9 @@ export async function runSpawnPreflight(
       ? await runClaudePreflight(prompt, input.project.path)
       : input.agent === "codex"
         ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
-        : await runCursorPreflight(prompt, input.project.path);
+        : input.agent === "cursor"
+          ? await runCursorPreflight(prompt, input.project.path)
+          : await runOpenCodePreflight(prompt, input.project.path);
   const result = parseSpawnPreflightResult(raw);
   if (result.branch && input.project.branchNaming) {
     const regex = input.project.branchNaming.regex;

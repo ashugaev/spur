@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { BusyContent } from "@/components/BusyContent";
 
 interface SwitchVersionDialogProps {
   current: string;
   pending: string;
   status: "idle" | "pending" | "error";
   errorMessage: string | null;
+  autoUpdate: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -19,6 +21,7 @@ export function SwitchVersionDialog({
   pending,
   status,
   errorMessage,
+  autoUpdate,
   onConfirm,
   onCancel,
 }: SwitchVersionDialogProps) {
@@ -92,6 +95,7 @@ export function SwitchVersionDialog({
           Switch from <span className="text-[var(--color-text-primary)]">{current || "?"}</span> to{" "}
           <span className="text-[var(--color-text-primary)]">{pending}</span>? The Spur daemon will
           restart. Refresh this page in about 10 seconds.
+          {autoUpdate ? " Auto update will be turned off." : null}
         </p>
         {status === "error" && errorMessage ? (
           <p
@@ -112,12 +116,14 @@ export function SwitchVersionDialog({
             Cancel
           </button>
           <button
+            aria-busy={status === "pending" || undefined}
+            aria-label={status === "pending" ? "Switching version" : undefined}
             className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={status === "pending"}
             type="button"
             onClick={onConfirm}
           >
-            {status === "pending" ? "Switching…" : "Switch"}
+            <BusyContent busy={status === "pending"}>Switch</BusyContent>
           </button>
         </div>
       </div>

@@ -5,24 +5,32 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import type {
-  AvailableBacklogItem,
-  PersistedPendingBatch,
-  ReviewProviderId,
-  ReviewSignal,
-  RuntimeLogCursorState,
-  SessionQueuedMessagesState,
-  ServiceInstanceRecord,
-  ServiceSourceState,
-  SessionPipelineState,
-  SessionRecord,
-  WorkItemLifecycleRecord,
-  WorkItemLifecycleState,
+import { dirname, join, relative, sep } from "node:path";
+import {
+  isSessionState,
+  type AvailableBacklogItem,
+  type PersistedPendingBatch,
+  type ReviewProviderId,
+  type ReviewSignal,
+  type ReviewSnapshot,
+  type RuntimeLogCursorState,
+  type SessionQueuedMessagesState,
+  type ServiceInstanceRecord,
+  type ServiceSourceState,
+  type SessionPipelineState,
+  type SessionRecord,
+  type SessionStateSubscription,
+  type SidecarProcessIdentity,
+  type TelegramBinding,
+  type TelegramReplyTarget,
+  type WorkItemLifecycleRecord,
+  type WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
+import { workspaceIdOf } from "./session-desk.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -30,6 +38,21 @@ function sessionFilePath(dataDir: string, projectId: string, sessionId: string):
 
 function sessionIndexFilePath(dataDir: string): string {
   return join(dataDir, "sessions", ".index.json");
+}
+
+// dataDir/sessions-archive/ is a sibling of dataDir/sessions/, never nested
+// inside it — findSessionFilePath's readdir of dataDir/sessions/ and
+// listSessions' scan of the same dir must never see archived records.
+function archivedSessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
+  return join(dataDir, "sessions-archive", projectId, `${sessionId}.json`);
+}
+
+function sessionShardDir(dataDir: string, sessionId: string): string {
+  return join(dataDir, "sessions", sessionId);
+}
+
+function archivedSessionShardDir(dataDir: string, projectId: string, sessionId: string): string {
+  return join(dataDir, "sessions-archive", projectId, sessionId);
 }
 
 function reviewSnapshotDir(
@@ -49,12 +72,12 @@ function availableBacklogFilePath(dataDir: string, projectId: string, backlogId:
   return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
 }
 
-function claimedBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
-  return join(dataDir, "source-state", "claimed-backlog", projectId, `${backlogId}.json`);
-}
-
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
+function reviewPaginationFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-review-pagination", projectId, `${sourceId}.json`);
 }
 
 function lifecycleBaselineRegistryFilePath(
@@ -85,6 +108,20 @@ function serviceInstanceFilePath(dataDir: string, sessionId: string, serviceId: 
 
 function serviceSourceStateDir(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "service", projectId, sourceId);
+}
+
+function telegramBindingFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, `${sourceId}.json`);
+}
+
+function telegramReplyTargetFilePath(dataDir: string, sessionId: string): string {
+  return join(
+    dataDir,
+    "source-state",
+    "telegram",
+    "reply-targets",
+    `${encodeURIComponent(sessionId)}.json`,
+  );
 }
 
 function runtimeLogCursorDir(dataDir: string, sessionId: string): string {
@@ -156,11 +193,33 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
-  return batch["kind"] === "review" || batch["kind"] === "service";
+  return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
 function isSessionRecord(value: unknown): value is SessionRecord {
   return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
+}
+
+// Distinguishes "file vanished between readdir and read" (a benign race with
+// a concurrent GC archive) from every other read failure, which must still
+// surface — a corrupt record on disk is a real problem, not a race.
+// readSessionFile wraps every failure from its inner try (including a
+// readFileSync ENOENT) in a fresh Error with `cause: error`, so the original
+// error code only survives on `cause`, never on the thrown error itself.
+function isEnoentCause(error: unknown): boolean {
+  const cause = error instanceof Error ? error.cause : undefined;
+  return isRecord(cause) && cause["code"] === "ENOENT";
+}
+
+function tryReadSessionFile(path: string): SessionRecord | null {
+  try {
+    return readSessionFileCached(path);
+  } catch (error) {
+    if (isEnoentCause(error)) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function readSessionFile(path: string): SessionRecord {
@@ -183,12 +242,117 @@ function readSessionFile(path: string): SessionRecord {
   return normalizedSession;
 }
 
+// listSessions() re-reads and re-parses every session file every call — on a
+// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
+// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// writeJsonFile always renames a freshly created inode (never edits in
+// place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
+// last read" fingerprint — cheaper and safer than an mtime-only key, which
+// can't distinguish two writes landing in the same millisecond. The cache is
+// internal to this module: no export changes, so callers and their tests are
+// unaffected except that unchanged records are now the SAME object across
+// calls (see the "no in-place mutation of a listed record" contract).
+interface FileFingerprint {
+  ino: number;
+  mtimeMs: number;
+  size: number;
+}
+
+interface CachedSessionFile extends FileFingerprint {
+  record: SessionRecord;
+}
+
+const sessionFileCache = new Map<string, CachedSessionFile>();
+
+function statFingerprint(path: string): FileFingerprint | null {
+  try {
+    return statSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function sameFingerprint(a: FileFingerprint, b: FileFingerprint): boolean {
+  return a.ino === b.ino && a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+function readSessionFileCached(path: string): SessionRecord {
+  // File vanished (or was never there) between readdir and this stat. Fall
+  // through to the raw read so the caller sees today's exact error.
+  const preStat = statFingerprint(path);
+  if (!preStat) {
+    return readSessionFile(path);
+  }
+
+  const cached = sessionFileCache.get(path);
+  if (cached && sameFingerprint(cached, preStat)) {
+    return cached.record;
+  }
+
+  const record = readSessionFile(path);
+
+  // Cache keyed on the PRE-read fingerprint. writeJsonFile (the only writer
+  // of session JSON) always writes to a tmp path and renameSync's it into
+  // place, which always yields a new inode — so if readSessionFile's
+  // legacy-PR self-heal rewrite (above) just fired, this entry's fingerprint
+  // is already stale the instant it's stored: the NEXT call's pre-read stat
+  // will miss it (new inode) and re-parse once, this time with no rewrite,
+  // and settle into a fingerprint that matches going forward.
+  sessionFileCache.set(path, {
+    ino: preStat.ino,
+    mtimeMs: preStat.mtimeMs,
+    size: preStat.size,
+    record,
+  });
+  return record;
+}
+
 function readServiceInstanceFile(path: string): ServiceInstanceRecord {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceInstanceRecord;
 }
 
 function readServiceSourceStateFile(path: string): ServiceSourceState {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
+}
+
+function readTelegramBindingKey(chatId: number, messageThreadId?: number): string {
+  return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
+function readTelegramStateFile(path: string): { bindings?: unknown; lastUpdateId?: unknown } {
+  return JSON.parse(readFileSync(path, "utf-8")) as {
+    bindings?: unknown;
+    lastUpdateId?: unknown;
+  };
+}
+
+function isTelegramBinding(value: unknown): value is TelegramBinding {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Partial<TelegramBinding>;
+  return (
+    typeof binding.chatId === "number" &&
+    Number.isInteger(binding.chatId) &&
+    (binding.messageThreadId === undefined ||
+      (typeof binding.messageThreadId === "number" && Number.isInteger(binding.messageThreadId))) &&
+    typeof binding.sessionId === "string" &&
+    binding.sessionId.trim().length > 0
+  );
+}
+
+function isTelegramReplyTarget(value: unknown): value is TelegramReplyTarget {
+  if (!isTelegramBinding(value)) return false;
+  const target = value as Partial<TelegramReplyTarget>;
+  return (
+    typeof target.projectId === "string" &&
+    target.projectId.trim().length > 0 &&
+    typeof target.sourceId === "string" &&
+    target.sourceId.trim().length > 0 &&
+    (target.statusMessageId === undefined ||
+      (typeof target.statusMessageId === "number" && Number.isInteger(target.statusMessageId))) &&
+    (target.lastInboundAt === undefined || typeof target.lastInboundAt === "string") &&
+    (target.lastReplyAt === undefined || typeof target.lastReplyAt === "string") &&
+    typeof target.updatedAt === "string"
+  );
 }
 
 function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
@@ -227,7 +391,8 @@ function isAvailableBacklogItem(value: unknown): value is AvailableBacklogItem {
     typeof value["key"] === "string" &&
     typeof value["title"] === "string" &&
     typeof value["url"] === "string" &&
-    typeof value["fetchedAt"] === "string"
+    typeof value["fetchedAt"] === "string" &&
+    typeof value["position"] === "number"
   );
 }
 
@@ -236,11 +401,13 @@ function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogIte
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
     if (!isRecord(parsed) || !Array.isArray(parsed["items"])) return new Map();
     const result = new Map<string, AvailableBacklogItem>();
-    for (const item of parsed["items"]) {
-      if (isAvailableBacklogItem(item)) {
-        result.set(item.externalId, item);
+    parsed["items"].forEach((raw: unknown, index: number) => {
+      const candidate =
+        isRecord(raw) && typeof raw["position"] !== "number" ? { ...raw, position: index } : raw;
+      if (isAvailableBacklogItem(candidate)) {
+        result.set(candidate.externalId, candidate);
       }
-    }
+    });
     return result;
   } catch {
     return new Map();
@@ -391,9 +558,25 @@ function writeJsonFile(path: string, value: unknown): void {
   renameSync(tmpPath, path);
 }
 
-function parseReviewSignals(path: string): Map<string, ReviewSignal> {
-  const signals = JSON.parse(readFileSync(path, "utf-8")) as ReviewSignal[];
-  return new Map(signals.map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]));
+// Discriminates the current envelope (`{prNumber, signals}`) from the legacy
+// on-disk shape (a bare `ReviewSignal[]`) purely on `Array.isArray` — no
+// `version` field, since nothing would ever read one. A legacy file carries
+// no PR identity, so it normalizes to `prNumber: null`, which by construction
+// matches no scoped terminal key and no fresh PR number: never a skip, always
+// a re-baseline on the next poll.
+function parseReviewSnapshot(path: string): ReviewSnapshot {
+  const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  const envelope = isRecord(parsed) ? parsed : null;
+  const signalsRaw = (Array.isArray(parsed) ? parsed : envelope?.signals) as
+    | ReviewSignal[]
+    | undefined;
+  const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
+  return {
+    prNumber,
+    signals: new Map(
+      (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
+    ),
+  };
 }
 
 function normalizePipelineState(pipeline: SessionPipelineState): SessionPipelineState {
@@ -420,12 +603,81 @@ function normalizeQueuedMessagesState(
   };
 }
 
+// Keeps only entries whose pid/pgid/starttime are finite positive integers —
+// a malformed entry (bad restore, hand-edited JSON) must never survive a
+// write, since it would be trusted as a real signal target later.
+function normalizeSidecarProcs(
+  sidecarProcs: Record<string, SidecarProcessIdentity> | undefined,
+): Record<string, SidecarProcessIdentity> | undefined {
+  if (!sidecarProcs) {
+    return undefined;
+  }
+  const isPositiveInt = (value: unknown): value is number =>
+    typeof value === "number" && Number.isInteger(value) && value > 0;
+  const normalized: Record<string, SidecarProcessIdentity> = {};
+  for (const [name, identity] of Object.entries(sidecarProcs)) {
+    if (
+      isRecord(identity) &&
+      isPositiveInt(identity["pid"]) &&
+      isPositiveInt(identity["pgid"]) &&
+      isPositiveInt(identity["starttime"])
+    ) {
+      normalized[name] = {
+        pid: identity["pid"],
+        pgid: identity["pgid"],
+        starttime: identity["starttime"],
+      };
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeStateSubscriptions(
+  subscriptions: SessionStateSubscription[] | undefined,
+): SessionStateSubscription[] | undefined {
+  if (!subscriptions || subscriptions.length === 0) {
+    return undefined;
+  }
+  const normalized = subscriptions
+    .filter(
+      (subscription) =>
+        typeof subscription.id === "string" &&
+        typeof subscription.targetSessionId === "string" &&
+        Array.isArray(subscription.states) &&
+        typeof subscription.createdAt === "string" &&
+        typeof subscription.updatedAt === "string",
+    )
+    .map((subscription) => ({
+      id: subscription.id,
+      targetSessionId: subscription.targetSessionId,
+      states: subscription.states.filter(isSessionState),
+      ...(subscription.message ? { message: subscription.message } : {}),
+      createdAt: subscription.createdAt,
+      updatedAt: subscription.updatedAt,
+      ...(subscription.lastDeliveredTransitionId
+        ? { lastDeliveredTransitionId: subscription.lastDeliveredTransitionId }
+        : {}),
+      ...(subscription.lastDeliveredAt ? { lastDeliveredAt: subscription.lastDeliveredAt } : {}),
+    }))
+    .filter((subscription) => subscription.states.length > 0);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
+  const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
+  const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
+    // Legacy on-disk records only have `deskId` (or neither field); this is
+    // where a pre-workspaceId record gets migrated in memory on every read.
+    // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
+    // stays written in exactly one place (session-desk.ts).
+    workspaceId: workspaceIdOf(normalizedSession),
     agent: normalizedSession.agent,
+    ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
+    ...(normalizedSession.mode !== undefined ? { mode: normalizedSession.mode } : {}),
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
@@ -438,6 +690,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     prompt: normalizedSession.prompt,
+    ...(normalizedSession.originalTaskPrompt
+      ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
+      : {}),
     ...(normalizedSession.startupAttachmentIds
       ? { startupAttachmentIds: normalizedSession.startupAttachmentIds }
       : {}),
@@ -452,11 +707,17 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
+    ...(normalizedSession.lastOpenedAt ? { lastOpenedAt: normalizedSession.lastOpenedAt } : {}),
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),
+    // deskId is legacy-read-only from here on (see the field's doc comment
+    // in types.ts): keep passing through an existing value so old records
+    // stay legible, but nothing writes a fresh one.
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
+    ...(sidecarProcs ? { sidecarProcs } : {}),
+    ...(normalizedSession.staleSidecars ? { staleSidecars: normalizedSession.staleSidecars } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
       : {}),
@@ -467,7 +728,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
+    ...(normalizedSession.claudeAccountId
+      ? { claudeAccountId: normalizedSession.claudeAccountId }
+      : {}),
+    ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
+    ...(normalizedSession.todoLedgerVersion === 1 ? { todoLedgerVersion: 1 as const } : {}),
   };
 }
 
@@ -493,20 +760,43 @@ export function writeSession(dataDir: string, session: SessionRecord): void {
   writeSessionIndexEntry(dataDir, session.id, path);
 }
 
+// Deletes cache entries under rootDir that weren't in this listing's visited
+// set — a real path-boundary check (trailing separator), not a raw string
+// prefix, so a sibling dir sharing rootDir as a string prefix (e.g.
+// "/data/sessions-old" vs "/data/sessions") is never mistaken for a child.
+function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedPath of sessionFileCache.keys()) {
+    if (cachedPath.startsWith(rootPrefix) && !visited.has(cachedPath)) {
+      sessionFileCache.delete(cachedPath);
+    }
+  }
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
-  if (!existsSync(rootDir)) return [];
+  if (!existsSync(rootDir)) {
+    pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    return [];
+  }
 
   const sessions: SessionRecord[] = [];
+  const visited = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
     for (const fileName of readdirSync(projectDir)) {
       if (!fileName.endsWith(".json")) continue;
       const filePath = join(projectDir, fileName);
-      sessions.push(readSessionFile(filePath));
+      visited.add(filePath);
+      const session = tryReadSessionFile(filePath);
+      if (session) {
+        sessions.push(session);
+      }
     }
   }
+
+  pruneStaleSessionFileCacheEntries(rootDir, visited);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
@@ -515,6 +805,50 @@ export function listSessions(dataDir: string): SessionRecord[] {
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
   return path ? readSessionFile(path) : null;
+}
+
+// Group-atomic archival for session GC: moves every member's record (and its
+// per-session log shard dir, if any) out of dataDir/sessions/ into the
+// sibling dataDir/sessions-archive/ tree, then rewrites the index once. Files
+// move first, the index second — a crash in between leaves stale index
+// entries that findSessionFilePath already self-heals (it deletes an
+// indexed-but-missing entry on its next lookup). Un-archiving is `mv` back
+// into sessions/<project>/<id>.json; the next findSessionFilePath scan or
+// writeSession repairs the index.
+export function archiveSessions(
+  dataDir: string,
+  members: readonly Pick<SessionRecord, "id" | "project">[],
+): { archivedIds: string[]; archiveDir: string } {
+  const archiveDir = join(dataDir, "sessions-archive");
+  const archivedIds: string[] = [];
+  for (const member of members) {
+    const sourcePath = sessionFilePath(dataDir, member.project, member.id);
+    if (!existsSync(sourcePath)) {
+      continue;
+    }
+    const targetPath = archivedSessionFilePath(dataDir, member.project, member.id);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    renameSync(sourcePath, targetPath);
+
+    const shardDir = sessionShardDir(dataDir, member.id);
+    if (existsSync(shardDir)) {
+      const targetShardDir = archivedSessionShardDir(dataDir, member.project, member.id);
+      mkdirSync(dirname(targetShardDir), { recursive: true });
+      renameSync(shardDir, targetShardDir);
+    }
+    archivedIds.push(member.id);
+  }
+
+  if (archivedIds.length > 0) {
+    const archivedIdSet = new Set(archivedIds);
+    const index = readSessionIndex(dataDir);
+    const nextIndex = Object.fromEntries(
+      Object.entries(index).filter(([id]) => !archivedIdSet.has(id)),
+    );
+    writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+  }
+
+  return { archivedIds, archiveDir };
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {
@@ -633,15 +967,15 @@ export function readReviewSourceSnapshots(
   providerId: ReviewProviderId,
   projectId: string,
   sourceId: string,
-): Map<string, Map<string, ReviewSignal>> {
+): Map<string, ReviewSnapshot> {
   const dir = reviewSnapshotDir(dataDir, providerId, projectId, sourceId);
   if (!existsSync(dir)) return new Map();
 
-  const snapshots = new Map<string, Map<string, ReviewSignal>>();
+  const snapshots = new Map<string, ReviewSnapshot>();
   for (const fileName of readdirSync(dir)) {
     if (!fileName.endsWith(".json")) continue;
     const sessionId = fileName.slice(0, -".json".length);
-    snapshots.set(sessionId, parseReviewSignals(join(dir, fileName)));
+    snapshots.set(sessionId, parseReviewSnapshot(join(dir, fileName)));
   }
   return snapshots;
 }
@@ -652,9 +986,9 @@ export function readReviewSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-): Map<string, ReviewSignal> | null {
+): ReviewSnapshot | null {
   const path = reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId);
-  return existsSync(path) ? parseReviewSignals(path) : null;
+  return existsSync(path) ? parseReviewSnapshot(path) : null;
 }
 
 export function writeReviewSourceSnapshot(
@@ -663,11 +997,12 @@ export function writeReviewSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-  snapshot: Map<string, ReviewSignal>,
+  snapshot: ReviewSnapshot,
 ): void {
-  writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), [
-    ...snapshot.values(),
-  ]);
+  writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
+    prNumber: snapshot.prNumber,
+    signals: [...snapshot.signals.values()],
+  });
 }
 
 export function deleteReviewSourceSnapshot(
@@ -686,7 +1021,7 @@ export function readGitHubSourceSnapshots(
   dataDir: string,
   projectId: string,
   sourceId: string,
-): Map<string, Map<string, ReviewSignal>> {
+): Map<string, ReviewSnapshot> {
   return readReviewSourceSnapshots(dataDir, "github", projectId, sourceId);
 }
 
@@ -695,7 +1030,7 @@ export function readGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-): Map<string, ReviewSignal> | null {
+): ReviewSnapshot | null {
   return readReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
 }
 
@@ -704,7 +1039,7 @@ export function writeGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-  snapshot: Map<string, ReviewSignal>,
+  snapshot: ReviewSnapshot,
 ): void {
   writeReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId, snapshot);
 }
@@ -760,14 +1095,6 @@ function readIdRegistry(path: string): Set<string> {
   }
 }
 
-function readClaimedBacklogRegistry(
-  dataDir: string,
-  projectId: string,
-  backlogId: string,
-): Set<string> {
-  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, backlogId));
-}
-
 export function readAvailableBacklogItems(
   dataDir: string,
   projectId: string,
@@ -775,10 +1102,9 @@ export function readAvailableBacklogItems(
 ): AvailableBacklogItem[] {
   const path = availableBacklogFilePath(dataDir, projectId, backlogId);
   if (!existsSync(path)) return [];
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
-  return [...readAvailableBacklogFile(path).values()]
-    .filter((item) => !claimed.has(item.externalId))
-    .sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+  return [...readAvailableBacklogFile(path).values()].sort(
+    (left, right) => left.position - right.position,
+  );
 }
 
 export function replaceAvailableBacklogItems(
@@ -787,31 +1113,9 @@ export function replaceAvailableBacklogItems(
   backlogId: string,
   items: readonly AvailableBacklogItem[],
 ): void {
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
   writeJsonFile(availableBacklogFilePath(dataDir, projectId, backlogId), {
-    items: items
-      .filter((item) => !claimed.has(item.externalId))
-      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+    items: [...items],
   });
-}
-
-export function claimAvailableBacklogItem(
-  dataDir: string,
-  projectId: string,
-  backlogId: string,
-  externalId: string,
-): AvailableBacklogItem | null {
-  const item = readAvailableBacklogFile(
-    availableBacklogFilePath(dataDir, projectId, backlogId),
-  ).get(externalId);
-  if (!item) return null;
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
-  if (claimed.has(externalId)) return null;
-  claimed.add(externalId);
-  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, backlogId), {
-    ids: [...claimed].sort(),
-  });
-  return item;
 }
 
 export function readWorkItemRegistry(
@@ -877,6 +1181,43 @@ export function readCommentSeenRegistry(
   sourceId: string,
 ): Set<string> {
   return readIdRegistry(commentSeenRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function readGitHubReviewPagination(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, string> {
+  const path = reviewPaginationFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function writeGitHubReviewPagination(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  cursors: ReadonlyMap<string, string>,
+): void {
+  const path = reviewPaginationFilePath(dataDir, projectId, sourceId);
+  if (cursors.size === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  writeJsonFile(
+    path,
+    Object.fromEntries([...cursors].sort(([left], [right]) => left.localeCompare(right))),
+  );
 }
 
 export function recordCommentSeen(
@@ -987,6 +1328,140 @@ export function deleteServiceSourceState(
   rmSync(serviceSourceStateFilePath(dataDir, projectId, sourceId, sessionId), {
     force: true,
   });
+}
+
+export function readTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, TelegramBinding> {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = readTelegramStateFile(path);
+    const values = Array.isArray(parsed.bindings) ? parsed.bindings : [];
+    return new Map(
+      values
+        .filter(isTelegramBinding)
+        .map((binding) => [
+          readTelegramBindingKey(binding.chatId, binding.messageThreadId),
+          binding,
+        ]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function readTelegramLastUpdateId(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): number | undefined {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = readTelegramStateFile(path);
+    return typeof parsed.lastUpdateId === "number" && Number.isInteger(parsed.lastUpdateId)
+      ? parsed.lastUpdateId
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  bindings: Iterable<TelegramBinding>,
+  options: {
+    lastUpdateId?: number;
+    preserveExisting?: boolean;
+    removeKeys?: Iterable<string>;
+  } = {},
+): void {
+  const existing = options.preserveExisting
+    ? readTelegramBindings(dataDir, projectId, sourceId)
+    : new Map<string, TelegramBinding>();
+  const removedKeys = new Set(options.removeKeys ?? []);
+  for (const key of removedKeys) {
+    existing.delete(key);
+  }
+  for (const binding of bindings) {
+    existing.set(readTelegramBindingKey(binding.chatId, binding.messageThreadId), binding);
+  }
+  const existingLastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
+  writeJsonFile(telegramBindingFilePath(dataDir, projectId, sourceId), {
+    bindings: [...existing.values()].sort((left, right) => {
+      const chatOrder = left.chatId - right.chatId;
+      if (chatOrder !== 0) return chatOrder;
+      return (left.messageThreadId ?? 0) - (right.messageThreadId ?? 0);
+    }),
+    ...(options.lastUpdateId !== undefined
+      ? { lastUpdateId: options.lastUpdateId }
+      : existingLastUpdateId !== undefined
+        ? { lastUpdateId: existingLastUpdateId }
+        : {}),
+  });
+}
+
+export function readTelegramReplyTarget(
+  dataDir: string,
+  sessionId: string,
+): TelegramReplyTarget | null {
+  const path = telegramReplyTargetFilePath(dataDir, sessionId);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    return isTelegramReplyTarget(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTelegramReplyTarget(
+  dataDir: string,
+  target: Omit<TelegramReplyTarget, "updatedAt">,
+): void {
+  writeJsonFile(telegramReplyTargetFilePath(dataDir, target.sessionId), {
+    ...target,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): void {
+  rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
+}
+
+export function deleteTelegramSourceStateForSession(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): void {
+  const dir = join(dataDir, "source-state", "telegram", projectId);
+  if (!existsSync(dir)) {
+    deleteTelegramReplyTarget(dataDir, sessionId);
+    return;
+  }
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const sourceId = entry.name.slice(0, -".json".length);
+    const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
+    if (remaining.length !== bindings.size) {
+      const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
+      writeTelegramBindings(
+        dataDir,
+        projectId,
+        sourceId,
+        remaining,
+        lastUpdateId === undefined ? {} : { lastUpdateId },
+      );
+    }
+  }
+  deleteTelegramReplyTarget(dataDir, sessionId);
 }
 
 export function listActiveServiceProblems(

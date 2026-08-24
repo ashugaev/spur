@@ -8,7 +8,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import type { SpawnOverrides } from "@/lib/types";
+import type { SpawnOverrides, WorkspaceMode } from "@/lib/types";
 
 type EncodedFileAttachment = ReturnType<typeof encodeFileAttachments>[number];
 
@@ -16,8 +16,6 @@ export interface SpawnComposerStep {
   id: number;
   value: string;
 }
-
-export type SpawnWorkspaceMode = "default" | "worktree" | "shared";
 
 export interface SpawnSessionPayload {
   projectId: string;
@@ -63,7 +61,7 @@ export interface SpawnComposerOpenDefaults {
   projectId?: string;
   prompt?: string;
   branch?: string;
-  workspaceMode?: SpawnWorkspaceMode;
+  workspaceMode?: WorkspaceMode;
   defaultBranch?: string;
   startupAttachmentIds?: string[];
 }
@@ -83,7 +81,7 @@ export interface SpawnComposerState {
   selfDestructConditions: string;
   startupAttachmentIds: string[];
   steps: SpawnComposerStep[];
-  workspaceMode: SpawnWorkspaceMode;
+  workspaceMode: WorkspaceMode;
 }
 
 export interface SpawnComposer extends SpawnComposerState {
@@ -108,7 +106,7 @@ export interface SpawnComposer extends SpawnComposerState {
   setSelfDestruct: (next: boolean) => void;
   setSelfDestructConditions: Dispatch<SetStateAction<string>>;
   setStartupAttachmentIds: Dispatch<SetStateAction<string[]>>;
-  setWorkspaceMode: (next: SpawnWorkspaceMode) => void;
+  setWorkspaceMode: (next: WorkspaceMode) => void;
   updateStep: (id: number, value: string) => void;
 }
 
@@ -117,15 +115,14 @@ function filteredSteps(steps: readonly SpawnComposerStep[]): string[] {
 }
 
 export function buildSpawnOverrides(
-  workspaceMode: SpawnWorkspaceMode,
+  workspaceMode: WorkspaceMode,
   defaultBranch: string,
-): SpawnOverrides | undefined {
+): SpawnOverrides {
   if (workspaceMode === "worktree") {
     const trimmed = defaultBranch.trim();
     return trimmed ? { worktree: true, defaultBranch: trimmed } : { worktree: true };
   }
-  if (workspaceMode === "shared") return { worktree: false };
-  return undefined;
+  return { worktree: false };
 }
 
 export function buildSpawnSessionPayload(composer: SpawnComposerState): SpawnSessionPayload {
@@ -150,8 +147,7 @@ export function buildSpawnSessionPayload(composer: SpawnComposerState): SpawnSes
   const steps = filteredSteps(composer.steps);
   if (steps.length > 0) payload.steps = steps;
 
-  const overrides = buildSpawnOverrides(composer.workspaceMode, composer.defaultBranch);
-  if (overrides) payload.overrides = overrides;
+  payload.overrides = buildSpawnOverrides(composer.workspaceMode, composer.defaultBranch);
   return payload;
 }
 
@@ -205,7 +201,7 @@ export function useSpawnComposer(kind: SpawnComposerKind, defaultAgent: AgentNam
   const [selfDestruct, setSelfDestruct] = useState(false);
   const [selfDestructConditions, setSelfDestructConditions] = useState("");
   const [steps, setSteps] = useState<SpawnComposerStep[]>([]);
-  const [workspaceMode, setWorkspaceMode] = useState<SpawnWorkspaceMode>("default");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("worktree");
   const [defaultBranch, setDefaultBranch] = useState("");
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [startupAttachmentIds, setStartupAttachmentIds] = useState<string[]>([]);
@@ -227,7 +223,7 @@ export function useSpawnComposer(kind: SpawnComposerKind, defaultAgent: AgentNam
       setSelfDestruct(false);
       setSelfDestructConditions("");
       setSteps([]);
-      setWorkspaceMode(defaults?.workspaceMode ?? "default");
+      setWorkspaceMode(defaults?.workspaceMode ?? "worktree");
       setDefaultBranch(defaults?.defaultBranch ?? "");
       setAttachments([]);
       setStartupAttachmentIds(defaults?.startupAttachmentIds ?? []);

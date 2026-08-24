@@ -5,30 +5,26 @@ model: inherit
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
-# GitHub Operations via `gh`
+GITHUB OPERATIONS VIA gh
 
-## Close-out gate
+CLOSE-OUT GATE, mandatory after any code change
 
-Mandatory after any code change. Guarantees committed working tree + open PR.
+  1  Branch main/master/empty -> SKIPPED.
+  2  Uncommitted files -> route to developer for commit. Never auto-commit here.
+  3  Implementation diff from branch base empty -> SKIPPED.
+  4  git push -u origin "$(git branch --show-current)"
+  5  gh pr view succeeds -> comment new HEAD SHA. Fails -> CREATE OPEN PR below.
+  6  Return PR url.
 
-1. Branch `main`/`master`/empty -> `SKIPPED`.
-2. Uncommitted files -> route to `developer` to commit per gitflow (conventional commit, scoped, no `wip`). Prefix `fix`/`feat` per `AGENTS.md` — drives semantic-release on `main`. Never auto-commit here.
-3. `git push -u origin "$(git branch --show-current)"`.
-4. `gh pr view` succeeds -> comment new HEAD SHA. Fails -> open draft via "Create draft PR" below.
-5. Return PR url.
+PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
-## PR title
+CREATE OPEN PR
 
-Format `<type>: <description>`. Types: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`, `test`. Squash merges: title becomes the release commit — use `feat` or `fix` when the change should bump `@shugaev/spur` on npm (`feat` minor, `fix` patch). Prefix with `AO_ISSUE_ID` when set: `<ISSUE-ID>: <type>: <description>`.
+  git push -u origin HEAD
 
-## Create draft PR
-
-```bash
-git push -u origin HEAD
-
-gh pr create --draft \
-  --title "<type>: <description>" \
-  --body "$(cat <<'EOF'
+  gh pr create \
+    --title "<type>: <description>" \
+    --body "$(cat <<'EOF'
 ## Summary
 <what changed and why — 2-3 sentences>
 
@@ -43,22 +39,3 @@ gh pr create --draft \
 Closes #<issue-number>
 EOF
 )"
-```
-
-## Common commands
-
-```bash
-gh pr diff                                          # self-review the diff
-gh pr checks                                        # CI status
-gh pr view --json url,state,title,checks -q .       # PR snapshot
-gh pr list
-gh pr merge --squash --auto
-
-gh issue list
-gh issue view <number>
-gh issue create --title "<title>" --body "<body>"
-
-gh pr review --approve
-gh pr review --request-changes --body "<feedback>"
-gh pr review --comment --body "<comment>"
-```

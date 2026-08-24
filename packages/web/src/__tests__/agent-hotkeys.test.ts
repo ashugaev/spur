@@ -17,8 +17,13 @@ describe("getAgentHotkeys", () => {
     expect(hotkeys.find((entry) => entry.id === "slash")).toBeDefined();
   });
 
+  it("returns hotkeys for opencode including the session picker", () => {
+    const hotkeys = getAgentHotkeys("opencode");
+    expect(hotkeys.find((entry) => entry.id === "sessions")).toBeDefined();
+  });
+
   it("gives every agent exactly one Tab (\\t) hotkey", () => {
-    for (const agent of ["claude", "codex", "cursor"] as const) {
+    for (const agent of ["claude", "codex", "cursor", "opencode"] as const) {
       const tabs = getAgentHotkeys(agent).filter((entry) => entry.sequence === "\t");
       expect(tabs, `${agent} tab count`).toHaveLength(1);
     }

@@ -14,6 +14,7 @@ export type SpurSessionState =
   | "waiting"
   | "needs_input"
   | "rate_limited"
+  | "stale"
   | "stopped"
   | "error"
   | "killed";
@@ -32,6 +33,14 @@ export interface AgentModel {
 
 export interface AgentModelsResponse {
   models: AgentModel[];
+}
+
+// What a spawn would resolve to for this project+agent if the request named
+// neither field. `model` is null when the agent has no configured or built-in
+// default.
+export interface SpawnDefaultsResponse {
+  model: string | null;
+  worktree: boolean;
 }
 
 export interface SpurServiceView {
@@ -59,6 +68,16 @@ export interface SpurTagDefinition {
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
+export interface SpurClaudeAccount {
+  id: string;
+  label?: string;
+  authenticated: boolean;
+}
+
+export interface ClaudeAccountSummary extends SpurClaudeAccount {
+  lastUsedAt?: string;
+}
+
 export interface SpurSessionArtifact {
   id: string;
   name: string;
@@ -85,10 +104,25 @@ export interface SpurSidecarPort {
   port: number;
 }
 
+// `tmuxSession` is the daemon's own name for the sidecar's pane — for a
+// desk-shared sidecar that is the desk anchor's, not this session's, so it
+// must never be reconstructed client-side.
+export interface SpurSessionSidecarView {
+  name: string;
+  alive: boolean;
+  ports?: SpurSidecarPort[];
+  tmuxSession: string;
+  /** Elapsed seconds since the recorded identity's process start; absent when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
+  ageWarn?: boolean;
+}
+
 export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SpurSidecarPortConflict {
@@ -237,8 +271,10 @@ export interface SpurSessionView {
   tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
+  hasUnseenAttention?: boolean;
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   lastActivityAt: string;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -247,12 +283,13 @@ export interface SpurSessionView {
   queuedMessages?: {
     messages: string[];
     awaitingPrompt: boolean;
+    pipelineMessages?: string[];
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
-  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars?: SpurSessionSidecarView[];
   runningSidecarNames?: string[];
   slots?: {
     title?: string;
@@ -261,13 +298,172 @@ export interface SpurSessionView {
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
+  // The workspace (shared worktree) this session lives in; equals its own id
+  // when it shares with nobody. `deskId` is the legacy alias for the same
+  // fact, still sent for one release.
+  workspaceId?: string;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
     conditions?: string;
   };
+}
+
+export type SpurTodoActor =
+  | { kind: "agent"; agent: AgentName; sessionId: string }
+  | { kind: "human"; origin: "cli" | "ui" }
+  | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
+
+export interface SpurTodoHistoryEvent {
+  eventId: string;
+  type: "item_added" | "item_completed" | "item_cancelled" | "item_held" | "item_resumed";
+  at: string;
+  actor: SpurTodoActor;
+  reason?: string;
+  blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
+}
+
+export interface SpurTodoProjection {
+  revision: string;
+  status: "active" | "held" | "resolved";
+  counts: { total: number; open: number; held: number; completed: number; cancelled: number };
+  items: Array<{
+    id: string;
+    text: string;
+    status: "open" | "held" | "completed" | "cancelled";
+    added: { reason: string; actor: SpurTodoActor; at: string };
+    latestTransition?: {
+      type: "completed" | "cancelled" | "held" | "resumed";
+      reason?: string;
+      blocker?: { kind: "external" } | { kind: "human"; requiredAction: string };
+      actor: SpurTodoActor;
+      at: string;
+    };
+    history: SpurTodoHistoryEvent[];
+  }>;
+  finishOverrides: Array<{
+    eventId: string;
+    type: "finish_override_recorded";
+    reason: string;
+    unfinishedItemIds: string[];
+    actor: SpurTodoActor;
+    at: string;
+  }>;
+}
+
+function todoRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function todoActor(value: unknown): value is SpurTodoActor {
+  if (!todoRecord(value)) return false;
+  if (value.kind === "agent") {
+    return (
+      (value.agent === "claude" ||
+        value.agent === "codex" ||
+        value.agent === "cursor" ||
+        value.agent === "opencode") &&
+      typeof value.sessionId === "string"
+    );
+  }
+  if (value.kind === "human") return value.origin === "cli" || value.origin === "ui";
+  return (
+    value.kind === "system" &&
+    (value.source === "spawn" || value.source === "legacy_migration" || value.source === "handoff")
+  );
+}
+
+function todoBlocker(value: unknown): boolean {
+  if (!todoRecord(value)) return false;
+  return (
+    value.kind === "external" ||
+    (value.kind === "human" && typeof value.requiredAction === "string")
+  );
+}
+
+function todoOptionalTransition(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    todoRecord(value) &&
+    (value.type === "completed" ||
+      value.type === "cancelled" ||
+      value.type === "held" ||
+      value.type === "resumed") &&
+    (value.reason === undefined || typeof value.reason === "string") &&
+    (value.blocker === undefined || todoBlocker(value.blocker)) &&
+    todoActor(value.actor) &&
+    typeof value.at === "string"
+  );
+}
+
+export function isSpurTodoProjection(value: unknown): value is SpurTodoProjection {
+  if (!todoRecord(value) || !todoRecord(value.counts)) return false;
+  const counts = value.counts;
+  const countKeys = ["total", "open", "held", "completed", "cancelled"] as const;
+  if (countKeys.some((key) => !Number.isInteger(counts[key]) || Number(counts[key]) < 0)) {
+    return false;
+  }
+  if (
+    typeof value.revision !== "string" ||
+    (value.status !== "active" && value.status !== "held" && value.status !== "resolved") ||
+    !Array.isArray(value.items) ||
+    !Array.isArray(value.finishOverrides)
+  ) {
+    return false;
+  }
+  const itemsValid = value.items.every(
+    (item) =>
+      todoRecord(item) &&
+      typeof item.id === "string" &&
+      typeof item.text === "string" &&
+      (item.status === "open" ||
+        item.status === "held" ||
+        item.status === "completed" ||
+        item.status === "cancelled") &&
+      todoRecord(item.added) &&
+      typeof item.added.reason === "string" &&
+      typeof item.added.at === "string" &&
+      todoActor(item.added.actor) &&
+      todoOptionalTransition(item.latestTransition) &&
+      Array.isArray(item.history) &&
+      item.history.every(
+        (event) =>
+          todoRecord(event) &&
+          typeof event.eventId === "string" &&
+          (event.type === "item_added" ||
+            event.type === "item_completed" ||
+            event.type === "item_cancelled" ||
+            event.type === "item_held" ||
+            event.type === "item_resumed") &&
+          typeof event.at === "string" &&
+          (event.reason === undefined || typeof event.reason === "string") &&
+          (event.blocker === undefined || todoBlocker(event.blocker)) &&
+          todoActor(event.actor),
+      ),
+  );
+  return (
+    itemsValid &&
+    value.finishOverrides.every(
+      (event) =>
+        todoRecord(event) &&
+        typeof event.eventId === "string" &&
+        event.type === "finish_override_recorded" &&
+        typeof event.reason === "string" &&
+        Array.isArray(event.unfinishedItemIds) &&
+        event.unfinishedItemIds.every((itemId) => typeof itemId === "string") &&
+        typeof event.at === "string" &&
+        todoActor(event.actor),
+    )
+  );
+}
+
+export interface SessionModeInfo {
+  skill: string;
+  default?: boolean;
 }
 
 export interface ProjectInfo {
@@ -277,12 +473,13 @@ export interface ProjectInfo {
   prefix: string;
   path: string;
   kind?: "project" | "shepherd";
+  modes?: Record<string, SessionModeInfo>;
 }
 
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;
-  path: string;
+  path?: string;
   createMissing?: boolean;
 }
 
@@ -321,7 +518,7 @@ export interface AgentSuggestionEntry {
 }
 
 export interface AgentSuggestionsResponse {
-  agent: "claude" | "codex";
+  agent: AgentName;
   commands: AgentSuggestionEntry[];
   skills: AgentSuggestionEntry[];
   agents: AgentSuggestionEntry[];
@@ -331,7 +528,6 @@ export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
-  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
@@ -346,11 +542,7 @@ export interface AvailableBacklogItem {
   title: string;
   url: string;
   fetchedAt: string;
-}
-
-export interface TakeBacklogItemResponse {
-  item: AvailableBacklogItem;
-  session: SpurSessionView;
+  position: number;
 }
 
 export type AttentionLevel =
@@ -372,6 +564,29 @@ export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "done",
 ];
 
+export interface AttentionLaneMeta {
+  label: string;
+  color: string;
+  dividerColor?: string;
+}
+
+// Single source of truth for lane label/color pairs — shared by the
+// AttentionZone section header and the Filters modal Status section so
+// renaming or recoloring a lane can't leave the two views disagreeing.
+export const ATTENTION_LANE_META: Record<AttentionLevel, AttentionLaneMeta> = {
+  error: { label: "Errors", color: "var(--color-status-error)" },
+  rate_limited: { label: "Rate Limited", color: "var(--color-status-attention)" },
+  respond: { label: "Needs Input", color: "var(--color-status-error)" },
+  working: { label: "Working", color: "var(--color-status-working)" },
+  pending: { label: "Waiting", color: "var(--color-status-attention)" },
+  stopped: {
+    label: "Stopped",
+    color: "var(--color-text-tertiary)",
+    dividerColor: "var(--color-border-subtle)",
+  },
+  done: { label: "Completed", color: "var(--color-status-ready)" },
+};
+
 export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
   let bestRank = ATTENTION_ZONE_ORDER.length;
   let result: AttentionLevel = "done";
@@ -388,6 +603,10 @@ export function worstAttentionLevel(levels: readonly AttentionLevel[]): Attentio
 export interface DashboardRunningSidecar {
   name: string;
   url?: string;
+  /** Elapsed seconds since the recorded identity's process start; absent when unresolvable. */
+  ageSeconds?: number;
+  /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
+  ageWarn?: boolean;
 }
 
 export interface DashboardSession {
@@ -405,8 +624,10 @@ export interface DashboardSession {
   tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
+  hasUnseenAttention?: boolean;
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   lastActivityAt: string;
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -416,11 +637,12 @@ export interface DashboardSession {
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
+    pipelineMessages?: string[];
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
-  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars: SpurSessionSidecarView[];
   runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   tags: string[];
@@ -429,6 +651,8 @@ export interface DashboardSession {
   deskId?: string;
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -441,6 +665,8 @@ export interface SpawnOverrides {
   defaultBranch?: string;
 }
 
+export type WorkspaceMode = "worktree" | "shared";
+
 export function toDashboardSession(
   session: SpurSessionView,
   projectName = session.project,
@@ -448,12 +674,25 @@ export function toDashboardSession(
   const links = session.slots?.links ?? [];
   const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
   const runningSidecarNames = session.runningSidecarNames ?? [];
+  const sidecarViewsByName = new Map((session.sidecars ?? []).map((sc) => [sc.name, sc]));
   const runningSidecars = runningSidecarNames.map((name) => {
     const url = sidecarLinkUrls.get(name);
-    return url ? { name, url } : { name };
+    const view = sidecarViewsByName.get(name);
+    return {
+      name,
+      ...(url ? { url } : {}),
+      ...(view?.ageSeconds !== undefined ? { ageSeconds: view.ageSeconds } : {}),
+      ...(view?.ageWarn !== undefined ? { ageWarn: view.ageWarn } : {}),
+    };
   });
   const tags = session.slots?.tags ?? [];
-  const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
+  const queuedMessages = {
+    messages: session.queuedMessages?.messages ?? [],
+    awaitingPrompt: session.queuedMessages?.awaitingPrompt ?? false,
+    ...(session.queuedMessages?.pipelineMessages !== undefined
+      ? { pipelineMessages: session.queuedMessages.pipelineMessages }
+      : {}),
+  };
   return {
     id: session.id,
     projectId: session.project,
@@ -469,8 +708,10 @@ export function toDashboardSession(
     tmuxSession: session.tmuxSession ?? null,
     status: session.status,
     state: session.state,
+    hasUnseenAttention: session.hasUnseenAttention,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    lastOpenedAt: session.lastOpenedAt,
     lastActivityAt: session.lastActivityAt,
     runtimeAlive: session.runtimeAlive,
     workspaceExists: session.workspaceExists,
@@ -487,9 +728,15 @@ export function toDashboardSession(
     tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
-    deskKey: session.deskId?.trim() || session.id,
+    // `workspaceId` is the daemon's own name for the group; `deskId` is the
+    // legacy alias it still sends for one release.
+    deskKey: session.workspaceId?.trim() || session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
+    ...(session.claudeAccounts ? { claudeAccounts: session.claudeAccounts } : {}),
+    ...(session.activeClaudeAccountId
+      ? { activeClaudeAccountId: session.activeClaudeAccountId }
+      : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
   };
@@ -552,6 +799,10 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+export function canReopen(session: DashboardSession): boolean {
+  return session.status === "completed" && !session.runtimeAlive;
+}
+
 export function canHandoff(session: DashboardSession): boolean {
   return (
     !isTerminalSession(session) &&
@@ -573,8 +824,29 @@ export interface ConversationMessage {
   timestampMs: number;
 }
 
+export type TranscriptEntry =
+  | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }
+  | {
+      kind: "tool";
+      name: string;
+      callId?: string;
+      inputSummary?: string;
+      output?: string;
+      timestampMs?: number;
+    }
+  | { kind: "reasoning"; text: string; timestampMs?: number }
+  | {
+      kind: "question";
+      header: string;
+      prompt: string;
+      options?: { label: string; index: number }[];
+      multiSelect?: boolean;
+      timestampMs?: number;
+    };
+
 export interface ConversationResponse {
   messages: ConversationMessage[];
+  entries: TranscriptEntry[];
   durationMs: number;
   state: SpurSessionState;
 }
@@ -639,13 +911,21 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
 
   const rows: DeskCollapsedRow[] = [];
   for (const [deskKey, members] of byDesk) {
+    const activeMembers = members.filter((m) => !isTerminalSession(m));
     const anchor =
+      activeMembers.sort((a, b) => {
+        const byActivity = b.lastActivityAt.localeCompare(a.lastActivityAt);
+        if (byActivity !== 0) return byActivity;
+        const byCreated = b.createdAt.localeCompare(a.createdAt);
+        if (byCreated !== 0) return byCreated;
+        return a.id.localeCompare(b.id);
+      })[0] ??
       members.find((m) => m.id === deskKey) ??
       [...members].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (!anchor) continue;
     rows.push({
       session: anchor,
-      deskMemberCount: members.length,
+      deskMemberCount: activeMembers.length,
       lane: worstAttentionLevel(members.map(getAttentionLevel)),
     });
   }

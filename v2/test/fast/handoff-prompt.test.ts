@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { extractBareUserTask, renderHandoffPrompt } from "../../src/handoff-prompt.js";
+import { withSelfDestructInstructions } from "../../src/self-destruct.js";
+import { withSharedMemoryInstructions } from "../../src/shared-memory.js";
 import { renderShepherdPrompt } from "../../src/shepherd.js";
 
 describe("extractBareUserTask", () => {
@@ -12,7 +14,7 @@ describe("extractBareUserTask", () => {
 
   it("extracts the task from a restore prompt", () => {
     const bare = extractBareUserTask(
-      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nShip CSV export\n\nSession metadata:\n- Set the session title",
+      'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nShip CSV export\n\nSession metadata:\n- Set the session title',
     );
     expect(bare).toBe("Ship CSV export");
   });
@@ -35,15 +37,18 @@ describe("extractBareUserTask", () => {
   });
 
   it("unwraps chained handoffs without accumulating screenshot boilerplate", () => {
-    const first = renderHandoffPrompt({
-      sourceSessionId: "shp-1",
-      sourceAgent: "cursor",
-      branch: "shp-1",
-      worktreePath: "/tmp/data/shepherd",
-      originalPrompt: "ping",
-      links: [],
-      terminalScreenshot: true,
-    });
+    const first = withSelfDestructInstructions(
+      renderHandoffPrompt({
+        sourceSessionId: "shp-1",
+        sourceAgent: "cursor",
+        branch: "shp-1",
+        worktreePath: "/tmp/data/shepherd",
+        originalPrompt: "ping",
+        links: [],
+        terminalScreenshot: true,
+      }),
+      { enabled: true },
+    );
     const second = renderHandoffPrompt({
       sourceSessionId: "shp-2",
       sourceAgent: "claude",
@@ -58,6 +63,36 @@ describe("extractBareUserTask", () => {
     expect(extractBareUserTask(second)).toBe("ping");
     expect(second.split("handoff-screenshot.txt").length - 1).toBe(1);
     expect(second).not.toContain("You are Spur Shepherd");
+    expect(second).not.toContain("Self-destruct:");
+  });
+
+  it("strips a trailing self-destruct section from a plain wrapped prompt", () => {
+    const prompt = withSelfDestructInstructions(
+      "Add agent handoff button" +
+        "\n\nSession metadata:\n- Set the session title" +
+        "\n\nSession artifacts:\n- Use $SPUR_SESSION_ARTIFACTS_DIR for scratch files.",
+      { enabled: true },
+    );
+
+    expect(extractBareUserTask(prompt)).toBe("Add agent handoff button");
+  });
+
+  it("strips a trailing shared memory section from a plain wrapped prompt", () => {
+    // Production order: slot/artifacts blocks are suppressed via idempotency
+    // markers, then shared memory is appended, then branch naming is
+    // appended last (session-service.ts composes shared memory before
+    // branch naming). Shared memory must precede branch naming here so the
+    // marker at handoff-prompt.ts's shared-memory section is what strips it.
+    const prompt =
+      withSharedMemoryInstructions(
+        "Add agent handoff button" +
+          "\n\nUses $SPUR_SLOT_COMMAND and SPUR_SESSION_ARTIFACTS_DIR already.",
+      ) + "\n\nBranch naming:\n- Use `spur-branch create <name>`.";
+
+    expect(extractBareUserTask(prompt)).toBe(
+      "Add agent handoff button" +
+        "\n\nUses $SPUR_SLOT_COMMAND and SPUR_SESSION_ARTIFACTS_DIR already.",
+    );
   });
 
   it("unwraps shepherd prompts nested inside handoff original tasks", () => {

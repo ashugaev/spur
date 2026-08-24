@@ -2,6 +2,53 @@ import { render, waitFor, act, screen, fireEvent } from "@testing-library/react"
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 let onBinaryCallback: ((data: string) => void) | null = null;
+let parsedWriteCallback: (() => void) | null = null;
+let terminalResizeCallback: (() => void) | null = null;
+let bufferChangeCallback: (() => void) | null = null;
+let activeBuffer: MockBuffer;
+let normalBuffer: MockBuffer;
+let alternateBuffer: MockBuffer;
+const discoveryDisposables = {
+  parsed: vi.fn(),
+  resize: vi.fn(),
+  buffer: vi.fn(),
+};
+
+interface MockBufferRow {
+  text: string;
+  isWrapped?: boolean;
+}
+
+interface MockBuffer {
+  type: "normal" | "alternate";
+  baseY: number;
+  rows: Array<MockBufferRow | undefined>;
+  length: number;
+  getLine: (index: number) => { isWrapped: boolean; translateToString: () => string } | undefined;
+}
+
+function createBuffer(
+  type: "normal" | "alternate",
+  rows: Array<MockBufferRow | undefined> = [],
+): MockBuffer {
+  return {
+    type,
+    baseY: 0,
+    rows,
+    get length() {
+      return this.rows.length;
+    },
+    getLine(index: number) {
+      const bufferRow = this.rows[index];
+      return bufferRow
+        ? {
+            isWrapped: bufferRow.isWrapped ?? false,
+            translateToString: () => bufferRow.text,
+          }
+        : undefined;
+    },
+  };
+}
 
 const mockTerminal = {
   loadAddon: vi.fn(),
@@ -19,14 +66,31 @@ const mockTerminal = {
     onBinaryCallback = cb;
     return { dispose: vi.fn() };
   }),
+  onWriteParsed: vi.fn((cb: () => void) => {
+    parsedWriteCallback = cb;
+    return { dispose: discoveryDisposables.parsed };
+  }),
+  onResize: vi.fn((cb: () => void) => {
+    terminalResizeCallback = cb;
+    return { dispose: discoveryDisposables.resize };
+  }),
   cols: 80,
   rows: 24,
-  buffer: { active: { type: "alternate", baseY: 0 } },
+  buffer: {
+    get active() {
+      return activeBuffer;
+    },
+    onBufferChange: vi.fn((cb: () => void) => {
+      bufferChangeCallback = cb;
+      return { dispose: discoveryDisposables.buffer };
+    }),
+  },
   element: document.createElement("div"),
   parser: {
     registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })),
     registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })),
   },
+  options: {},
 };
 
 const mockFit = { fit: vi.fn(), dispose: vi.fn() };
@@ -155,17 +219,26 @@ function sentInputPayloads(): string[] {
 
 beforeEach(() => {
   onBinaryCallback = null;
+  parsedWriteCallback = null;
+  terminalResizeCallback = null;
+  bufferChangeCallback = null;
+  normalBuffer = createBuffer("normal");
+  alternateBuffer = createBuffer("alternate");
+  activeBuffer = normalBuffer;
+  discoveryDisposables.parsed.mockClear();
+  discoveryDisposables.resize.mockClear();
+  discoveryDisposables.buffer.mockClear();
   wsSend.mockClear();
   wsInstances.length = 0;
   MockWebSocket.mockClear();
   mockTerminal.onBinary.mockClear();
   mockTerminal.onData.mockClear();
+  mockTerminal.onWriteParsed.mockClear();
+  mockTerminal.onResize.mockClear();
+  mockTerminal.buffer.onBufferChange.mockClear();
   mockTerminal.open.mockClear();
   vi.spyOn(global, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input.url;
-    if (url === "/api/runtime/terminal") {
-      return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-    }
     if (url === "/api/runtime/voice") {
       return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
     }
@@ -214,12 +287,14 @@ async function mountTerminal({
   sessionId = "test-session",
   agent = "claude",
   activity,
+  model,
   title,
   onClose,
 }: {
   sessionId?: string;
   agent?: "claude" | "codex" | "cursor";
   activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  model?: string;
   title?: string;
   onClose?: () => void;
 } = {}) {
@@ -230,6 +305,7 @@ async function mountTerminal({
       <DirectTerminal
         activity={activity}
         agent={agent}
+        model={model}
         onClose={onClose}
         sessionId={sessionId}
         title={title}
@@ -242,16 +318,250 @@ async function mountTerminal({
   return result;
 }
 
+describe("buildDirectTerminalWsUrl", () => {
+  it("uses ws on plain HTTP and preserves the host port", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "http:", host: "localhost:5555" }, "abc")).toBe(
+      "ws://localhost:5555/ws?session=abc",
+    );
+  });
+
+  it("upgrades to wss when the page is served over HTTPS", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "https:", host: "spur.example.com" }, "abc")).toBe(
+      "wss://spur.example.com/ws?session=abc",
+    );
+  });
+
+  it("encodes session ids that contain URL-significant characters", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "http:", host: "h" }, "a b/c?d&e")).toBe(
+      "ws://h/ws?session=a%20b%2Fc%3Fd%26e",
+    );
+  });
+});
+
 describe("DirectTerminal scroll integration", () => {
-  it("uses the runtime terminal port when opening the websocket", async () => {
+  it("opens the websocket on the same origin at /ws", async () => {
     await mountTerminal({ sessionId: "port-test" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
     });
 
-    expect(MockWebSocket).toHaveBeenCalledWith("ws://localhost:14801/ws?session=port-test");
-    expect(fetch).toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
+    expect(MockWebSocket).toHaveBeenCalledWith(`ws://${window.location.host}/ws?session=port-test`);
+    expect(fetch).not.toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
+  });
+
+  it("scans only the newest 100 active-buffer rows during initial setup", async () => {
+    normalBuffer.rows = [
+      { text: "https://excluded.example" },
+      ...Array.from({ length: 99 }, () => ({ text: "" })),
+      { text: "https://included.example" },
+    ];
+    const getLine = vi.spyOn(normalBuffer, "getLine");
+
+    await mountTerminal();
+
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+    expect(getLine).toHaveBeenCalledTimes(100);
+    expect(getLine).not.toHaveBeenCalledWith(0);
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getByRole("link", { name: /included\.example/i })).toHaveAttribute(
+      "href",
+      "https://included.example",
+    );
+    expect(screen.queryByText("https://excluded.example")).not.toBeInTheDocument();
+  });
+
+  it("refreshes links after parsed writes, resize, and active-buffer changes", async () => {
+    await mountTerminal();
+    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
+
+    normalBuffer.rows = [{ text: "https://parsed.example" }];
+    act(() => parsedWriteCallback?.());
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+
+    normalBuffer.rows = [{ text: "https://resized.example https://newest.example" }];
+    act(() => terminalResizeCallback?.());
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    const links = screen.getAllByRole("link");
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "https://newest.example",
+      "https://resized.example",
+    ]);
+
+    alternateBuffer.rows = [{ text: "https://alternate.example" }];
+    activeBuffer = alternateBuffer;
+    act(() => bufferChangeCallback?.());
+    expect(screen.getByRole("link", { name: /alternate\.example/i })).toBeInTheDocument();
+    expect(screen.queryByText("https://newest.example")).not.toBeInTheDocument();
+
+    activeBuffer = normalBuffer;
+    act(() => bufferChangeCallback?.());
+    expect(screen.getByRole("link", { name: /newest\.example/i })).toBeInTheDocument();
+  });
+
+  it("renders an accessible secure disclosure and closes it on activation or Escape", async () => {
+    normalBuffer.rows = [{ text: "https://example.com/path?q=1" }];
+    await mountTerminal();
+
+    const trigger = await screen.findByRole("button", { name: "Open terminal links" });
+    expect(trigger).toHaveAttribute("aria-controls", "terminal-links-panel");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).not.toHaveAttribute("aria-haspopup");
+    fireEvent.click(trigger);
+
+    const panel = screen.getByRole("region", { name: "Terminal links" });
+    expect(panel).toHaveAttribute("id", "terminal-links-panel");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /example\.com/i });
+    expect(link).toHaveAttribute("href", "https://example.com/path?q=1");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link).toHaveAttribute("title", "https://example.com/path?q=1");
+    fireEvent.keyDown(link, { key: "Escape" });
+    expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("link", { name: /example\.com/i }));
+    expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
+  });
+
+  it("closes and removes the disclosure when a scan becomes empty", async () => {
+    normalBuffer.rows = [{ text: "https://example.com" }];
+    await mountTerminal();
+    fireEvent.click(await screen.findByRole("button", { name: "Open terminal links" }));
+    expect(screen.getByRole("region", { name: "Terminal links" })).toBeInTheDocument();
+
+    normalBuffer.rows = [];
+    act(() => parsedWriteCallback?.());
+    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
+  });
+
+  it("rejoins a URL split across hard-wrapped (isWrapped: false) rows into one link", async () => {
+    const COLS = 80;
+    const full =
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88" +
+      "ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com";
+    const first = full.slice(0, COLS);
+    const second = full.slice(COLS);
+    normalBuffer.rows = [
+      { text: first, isWrapped: false },
+      { text: second, isWrapped: false },
+    ];
+
+    await mountTerminal();
+
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getByRole("link")).toHaveAttribute("href", full);
+  });
+
+  it("still rejoins a URL split across isWrapped: true rows into one link", async () => {
+    const COLS = 80;
+    const full =
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88" +
+      "ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com";
+    const first = full.slice(0, COLS);
+    const second = full.slice(COLS);
+    normalBuffer.rows = [
+      { text: first, isWrapped: false },
+      { text: second, isWrapped: true },
+    ];
+
+    await mountTerminal();
+
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getByRole("link")).toHaveAttribute("href", full);
+  });
+
+  it("rejoins a URL split across a TUI's hanging-gutter continuation row into one link", async () => {
+    // The component's mock does not pad translateToString output, so the
+    // fixtures below are pre-padded to xterm's own cols (80), matching what
+    // Terminal.buffer's real translateToString(false, 0, cols) returns.
+    const COLS = 80;
+    const prefix = "● https://example.com/";
+    const first = (prefix + "a".repeat(COLS - prefix.length)).padEnd(COLS, " ");
+    const gutter = "  ";
+    const tail = "b".repeat(20);
+    const second = (gutter + tail).padEnd(COLS, " ");
+    const full = prefix.slice(2) + "a".repeat(COLS - prefix.length) + tail;
+
+    normalBuffer.rows = [
+      { text: first, isWrapped: false },
+      { text: second, isWrapped: false },
+    ];
+
+    await mountTerminal();
+
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getByRole("link")).toHaveAttribute("href", full);
+  });
+
+  it("resets discovery ownership when the session identity changes", async () => {
+    normalBuffer.rows = [{ text: "https://session-a.example" }];
+    const result = await mountTerminal({ sessionId: "session-a" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open terminal links" }));
+    const staleParsedCallback = parsedWriteCallback;
+    const staleResizeCallback = terminalResizeCallback;
+    const staleBufferCallback = bufferChangeCallback;
+
+    normalBuffer.rows = [];
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+    const { Terminal } = await import("xterm");
+    const terminalConstructor = vi.mocked(Terminal);
+    const constructionCount = terminalConstructor.mock.calls.length;
+    terminalConstructor.mockImplementationOnce(() => {
+      throw new Error("session B terminal setup failed");
+    });
+    await act(async () => {
+      result.rerender(<DirectTerminal sessionId="session-b" />);
+    });
+    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
+    expect(discoveryDisposables.parsed).toHaveBeenCalledTimes(1);
+    expect(discoveryDisposables.resize).toHaveBeenCalledTimes(1);
+    expect(discoveryDisposables.buffer).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(terminalConstructor).toHaveBeenCalledTimes(constructionCount + 1);
+    });
+
+    normalBuffer.rows = [{ text: "https://session-a.example" }];
+    act(() => {
+      staleParsedCallback?.();
+      staleResizeCallback?.();
+      staleBufferCallback?.();
+    });
+    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      result.rerender(<DirectTerminal sessionId="session-c" />);
+    });
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toBeInTheDocument();
+  });
+
+  it("disposes every terminal-link listener on unmount", async () => {
+    const result = await mountTerminal();
+    result.unmount();
+
+    expect(discoveryDisposables.parsed).toHaveBeenCalledTimes(1);
+    expect(discoveryDisposables.resize).toHaveBeenCalledTimes(1);
+    expect(discoveryDisposables.buffer).toHaveBeenCalledTimes(1);
   });
 
   it("registers onBinary to forward mouse/scroll sequences to WebSocket", async () => {
@@ -548,9 +858,6 @@ describe("DirectTerminal scroll integration", () => {
     let sendPayload: unknown = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: true, language: "auto" }), {
           status: 200,
@@ -592,9 +899,6 @@ describe("DirectTerminal scroll integration", () => {
     let sendPayload: unknown = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: true, language: "auto" }), {
           status: 200,
@@ -670,6 +974,25 @@ describe("DirectTerminal scroll integration", () => {
     expect(titleElement.className).toContain("[-webkit-line-clamp:2]");
     expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
     expect(titleElement.className).toContain("overflow-hidden");
-    expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
+    expect(titleElement.parentElement?.className).toContain("items-center");
+  });
+
+  it("keeps the agent label on the title row, right-aligned and never truncated", async () => {
+    await mountTerminal({
+      model: "claude-model-id",
+      onClose: vi.fn(),
+      title: "Very long terminal header title for isolated sidecar sessions",
+    });
+
+    const titleElement = screen.getByTestId("direct-terminal-header-title");
+    const agentElement = screen.getByTestId("direct-terminal-header-agent");
+    // Same row as the title, pushed to the right edge next to the close button.
+    expect(agentElement.parentElement).toBe(titleElement.parentElement);
+    expect(agentElement.className).toContain("ml-auto");
+    // The title clamps instead; the agent label keeps its full width.
+    expect(agentElement.className).toContain("shrink-0");
+    expect(agentElement.className).toContain("whitespace-nowrap");
+    expect(agentElement.className).not.toContain("truncate");
+    expect(agentElement.className).toContain("text-[var(--color-text-tertiary)]");
   });
 });

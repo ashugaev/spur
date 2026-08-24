@@ -1,4 +1,11 @@
-import type { SourceConfig, SourceType } from "../types.js";
+import { existsSync } from "node:fs";
+import {
+  isStaleParked,
+  type AgentName,
+  type SessionRecord,
+  type SourceConfig,
+  type SourceType,
+} from "../types.js";
 
 export interface SpurEvent<T = unknown> {
   name: string;
@@ -12,19 +19,35 @@ export interface SourceLogger {
   warn?: (message: string) => void;
 }
 
+export interface SourceSessionListItem {
+  id: string;
+  project: string;
+  agent: string;
+  state: string;
+  title?: string;
+}
+
+export interface SourceSpawnSessionRequest {
+  project: string;
+  prompt?: string;
+  agent?: AgentName;
+}
+
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   sourceId: string;
   projectId: string;
   dataDir: string;
   config: TConfig;
   deferInitialSync?: boolean;
+  listSessions?(): Promise<SourceSessionListItem[]>;
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;
+  spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
 }
 
 export interface SourceHandle {
-  stop(): void;
+  stop(): void | Promise<void>;
   runOnStart?(): void;
 }
 
@@ -34,5 +57,22 @@ export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceGroupController {
-  stop(): void;
+  stop(): void | Promise<void>;
+}
+
+/**
+ * Whether a session is eligible for a per-project source poll: it belongs to
+ * the project, is either actively running or stale-parked (so a queued
+ * replay can still land on it), and its worktree still exists on disk.
+ */
+export function isEligibleForSourcePoll(
+  session: Pick<SessionRecord, "project" | "status" | "stopReason" | "worktreePath">,
+  projectId: string,
+): boolean {
+  return (
+    session.project === projectId &&
+    (session.status === "running" || isStaleParked(session)) &&
+    Boolean(session.worktreePath) &&
+    existsSync(session.worktreePath)
+  );
 }

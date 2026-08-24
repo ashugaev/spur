@@ -11,6 +11,11 @@ service_home="${MAIN_DEPLOY_SERVICE_HOME:-$HOME}"
 CURL="${SPUR_DEPLOY_CURL:-curl}"
 SS="${SPUR_DEPLOY_SS:-sudo ss}"
 LOCKFILE="${SPUR_DEPLOY_LOCKFILE:-$HOME/.spur/main-deploy.lock}"
+# Default matches deploy/spur-web.service: ExecStart runs `pnpm ui:start`,
+# which is `pnpm --dir packages/web start` -> serves $deploy_root/packages/web/.next.
+# A host hand-switched to the npm-package units serves a different .next; do
+# not repoint this default to accommodate that — it targets a different
+# deploy path (see docs/install-from-source.md), not this systemd-unit one.
 web_next_dir="${SPUR_DEPLOY_WEB_NEXT_DIR:-$deploy_root/packages/web/.next}"
 daemon_env_file="${MAIN_DEPLOY_DAEMON_ENV_FILE:-/etc/spur/daemon.env}"
 systemd_unit_dir="${MAIN_DEPLOY_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -33,31 +38,110 @@ systemctl_cmd() {
   "${cmd[@]}" "$@"
 }
 
-# Kill any process holding 127.0.0.1:4310 that is NOT under spur-daemon.service.
-# Such a process is an orphan from a prior run and would block systemd's restart
-# with EADDRINUSE, putting spur-daemon.service into a crash loop. Tmux sessions,
-# agents, and the isolated dev daemon never bind 4310, so they are unaffected.
+# Confines the exit-time restore to stops THIS run issued. An unconditional
+# handler would also fire on e.g. a flock-timeout exit, where another run may
+# hold the lock mid-build with web deliberately stopped — starting it there
+# would serve a half-written .next.
+web_restore_armed=false
+arm_web_restore() { web_restore_armed=true; }
+
+# Set by web_chunks_consistent; false means the body fetch failed so
+# consistency was never actually checked (see verify_and_heal).
+web_chunks_verified=true
+
+# Runs on every exit once armed (script exits, or INT/TERM below re-mapped to
+# an exit). Starts spur-web only if this run left it inactive; a failed start
+# warns instead of masking the original exit code under `set -e`.
+#
+# A build abort can land here after the build already did `rm -rf .next`
+# (BUILD_ID gone) — starting spur-web then is still the right call (a stopped
+# unit is worse than a crash-looping one), but silently reporting `active` on
+# a unit that is actually looping under Restart=always would hide the failure.
+# Warn loudly instead; this does not change the exit code or add a new
+# failure mode.
+restore_web_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$web_restore_armed" == true ]] && ! systemctl_cmd is-active --quiet spur-web.service; then
+    echo "main:deploy exiting rc=$rc with spur-web inactive — starting" >&2
+    if ! web_build_exists; then
+      echo "main:deploy WARNING: $web_next_dir has no BUILD_ID — the aborted build left it incomplete; spur-web will crash-loop under Restart=always until the next successful deploy" >&2
+    fi
+    systemctl_cmd start spur-web.service \
+      || echo "main:deploy WARNING: could not start spur-web on exit" >&2
+  fi
+  exit "$rc"
+}
+trap restore_web_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+listener_pid_on_daemon_port() {
+  local port=4310
+  local match pid
+  match=$($SS -tlnpH "sport = :$port" 2>/dev/null \
+    | grep -oE 'pid=[0-9]+' | head -n1) || true
+  pid="${match#pid=}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "$pid"
+}
+
+active_daemon_main_pid() {
+  systemctl_cmd is-active --quiet spur-daemon.service || return 0
+  local pid
+  pid=$(systemctl_cmd show -p MainPID --value spur-daemon.service 2>/dev/null) || true
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  printf '%s\n' "$pid"
+}
+
+# Success means the specific orphan pid we captured and killed is actually gone
+# (not merely that the port looks empty). `kill_rogue_daemon_on_port` runs while
+# spur-daemon.service is still active under Restart=always, so once the orphan
+# dies systemd can legitimately rebind :4310 with a fresh MainPID (RestartSec=3)
+# before the caller rechecks. Requiring an empty port would treat that healthy
+# rebind as failure. A new listener is only a failure if it is NOT the current
+# systemd MainPID for spur-daemon.service.
+port_released_from_orphan() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null && return 1 # orphan still alive
+  local listener main_pid
+  listener=$(listener_pid_on_daemon_port)
+  [[ -z "$listener" ]] && return 0 # port free
+  main_pid=$(active_daemon_main_pid)
+  [[ -n "$main_pid" && "$listener" == "$main_pid" ]] && return 0 # healthy rebind
+  return 1 # foreign new listener
+}
+
+# Kill any process holding 127.0.0.1:4310 unless it is the active systemd
+# MainPID for spur-daemon.service. A stale listener can remain in the unit
+# cgroup after the daemon main process changed; preserving by cgroup membership
+# would let that orphan block restart with EADDRINUSE.
 kill_rogue_daemon_on_port() {
   local port=4310
-  local pid
-  # `|| true` keeps a clean box (nothing on :4310) from tripping `set -o
-  # pipefail`: `grep` returns 1 when there is no match, which propagates
-  # through the pipeline and would otherwise abort the script.
-  pid=$(sudo ss -tlnpH "sport = :$port" 2>/dev/null \
-    | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2) || true
+  local pid main_pid
+  pid=$(listener_pid_on_daemon_port)
   [[ -z "$pid" ]] && return 0
 
-  local cg
-  cg=$(awk -F: '{print $3}' "/proc/$pid/cgroup" 2>/dev/null || true)
-  [[ "$cg" == */spur-daemon.service ]] && return 0
+  main_pid=$(active_daemon_main_pid)
+  [[ -n "$main_pid" && "$pid" == "$main_pid" ]] && return 0
 
-  echo "main:deploy killing rogue daemon pid=$pid cgroup=${cg:-unknown} on :$port"
+  echo "main:deploy killing stale daemon listener pid=$pid main_pid=${main_pid:-none} on :$port"
   kill "$pid" 2>/dev/null || true
+  wait_for_port_release "$pid" && return 0
+  kill -9 "$pid" 2>/dev/null || true
+  wait_for_port_release "$pid" && return 0
+  echo "main:deploy FATAL: :$port still held by non-MainPID listener after killing stale pid=$pid" >&2
+  exit 1
+}
+
+# Poll up to 5s for `port_released_from_orphan` to go true after a kill signal.
+wait_for_port_release() {
+  local pid="$1"
   for _ in 1 2 3 4 5; do
-    kill -0 "$pid" 2>/dev/null || return 0
+    port_released_from_orphan "$pid" && return 0
     sleep 1
   done
-  kill -9 "$pid" 2>/dev/null || true
+  return 1
 }
 
 services_are_active() {
@@ -75,16 +159,24 @@ web_is_healthy() {
 
 # Poll for the web terminal actually serving on :3012. Returns 0 when a listener
 # exists AND an HTTP request returns 200, within the retry budget.
+#
+# Budget is 30x1s (worst case 30s). Measured twice on the itest VM, a cold
+# `next start` took 13-20s; the previous 10x1s (10s) budget FATALed calls like
+# verify_and_heal's pre-check gate on a box that went on to serve healthily a
+# few seconds later. 30s covers the measured worst case with margin while
+# still failing loud, in bounded time, on a web that is genuinely never coming
+# up.
 web_is_serving() {
   local port=3012
   local code
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  local i
+  for i in $(seq 1 30); do
     if [[ -n "$($SS -tlnH "sport = :$port" 2>/dev/null)" ]]; then
       code=$($CURL -fsS -o /dev/null -w '%{http_code}' --max-time 3 \
         "http://127.0.0.1:$port/" 2>/dev/null) || code=""
       [[ "$code" == "200" ]] && return 0
     fi
-    sleep 1
+    sleep "${SPUR_DEPLOY_WEB_POLL_INTERVAL:-1}"
   done
   return 1
 }
@@ -94,13 +186,21 @@ web_is_serving() {
 # until spur-web restarts onto the fresh .next, served HTML points at deleted
 # chunks and the browser shows "Application error" (nginx still returns 200).
 # Returns 0 when every referenced /_next/static asset is present (or the HTML
-# references none), 1 on the first missing asset.
+# references none), 1 on the first missing asset. Sets web_chunks_verified to
+# false when the body fetch itself failed (so "consistent" via the `|| return
+# 0` swallow below can be told apart from an actual verified-consistent page);
+# true otherwise. web_is_healthy's fast-path use is unaffected — it only reads
+# the return code, never the flag.
 web_chunks_consistent() {
   local html refs ref
-  html=$($CURL -fsS --max-time 3 "http://127.0.0.1:3012/" 2>/dev/null) || return 0
+  web_chunks_verified=true
+  html=$($CURL -fsS --max-time 3 "http://127.0.0.1:3012/" 2>/dev/null) || { web_chunks_verified=false; return 0; }
   # `grep` exits 1 with no matches; under `set -e`/pipefail that would abort the
   # script, so `|| true` turns "no refs" into an empty list (treated consistent).
-  refs=$(printf '%s' "$html" | grep -oE '/_next/static/[^"'"'"' )]+' | sort -u) || true
+  # The bracket also excludes a trailing backslash: Next's RSC flight payload
+  # double-escapes quotes (`\"href\":\"...\"`), so without it every escaped ref
+  # yields a `\`-suffixed twin that no file on disk can ever satisfy.
+  refs=$(printf '%s' "$html" | grep -oE '/_next/static/[^"'"'"' )\\]+' | sort -u) || true
   [[ -z "$refs" ]] && return 0
   while IFS= read -r ref; do
     [[ -z "$ref" ]] && continue
@@ -113,8 +213,14 @@ web_chunks_consistent() {
 }
 
 # Post-restart verification with self-healing. Restart can leave a unit dead
-# (crash on boot) or stopped (spur-web Requires= propagates the daemon's stop
-# but not its start). Heal by starting, then hard-fail loudly if still broken.
+# (crash on boot) or stopped (this script's own stale-chunk stop/start, or an
+# operator's stop). Heal by starting, then hard-fail loudly if still broken.
+#
+# Worst-case wall time: the pre-check gate's web_is_serving call (30s) plus the
+# 10-attempt heal loop below — attempt 1's stop+sleep(2)+start (2s), one full
+# web_is_serving wait among the remaining 9 attempts (30s, at
+# unverified_streak==2), and 1s of sleep on each of the other 8 attempts (8s)
+# — 30 + 2 + 30 + 8 = 70s. Bounded, not unbounded.
 verify_and_heal() {
   if ! systemctl_cmd is-active --quiet spur-daemon.service; then
     echo "main:deploy spur-daemon inactive after restart — starting" >&2
@@ -127,8 +233,8 @@ verify_and_heal() {
 
   if ! systemctl_cmd is-active --quiet spur-web.service; then
     echo "main:deploy spur-web inactive after restart — starting" >&2
-    # start, NOT restart: Requires= propagates a stop, not a start, so the unit
-    # can be cleanly inactive and only needs to be brought up.
+    # start, NOT restart: the unit can be cleanly inactive (stopped, never
+    # started back) and only needs to be brought up.
     systemctl_cmd start spur-web.service
   fi
 
@@ -137,16 +243,30 @@ verify_and_heal() {
     exit 1
   fi
 
-  local attempt
+  local attempt unverified_streak=0
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if web_chunks_consistent; then
+    if web_chunks_consistent && [[ "$web_chunks_verified" == true ]]; then
       return 0
     fi
     if [[ "$attempt" == 1 ]]; then
       echo "main:deploy spur-web serving stale chunks — restarting" >&2
+      arm_web_restore
       systemctl_cmd stop spur-web.service
       sleep 2
       systemctl_cmd start spur-web.service
+    elif [[ "$web_chunks_verified" != true ]]; then
+      # Two unverified attempts in a row: give one poll the real patience of
+      # web_is_serving's 30-iteration wait, in case spur-web is just slow to
+      # come up. Otherwise keep the cheap cadence so a spur-web that never
+      # comes up doesn't pay that cost every attempt. Terminal failure is
+      # deferred to loop exhaustion below.
+      unverified_streak=$((unverified_streak + 1))
+      if [[ "$unverified_streak" == 2 ]]; then
+        web_is_serving || true
+      else
+        sleep 1
+      fi
+      continue
     elif ! web_is_serving; then
       sleep 1
       continue
@@ -155,8 +275,37 @@ verify_and_heal() {
     fi
   done
 
+  if [[ "$web_chunks_verified" != true ]]; then
+    print_build_id_mismatch_diagnostic
+    echo "main:deploy FATAL: spur-web not serving after chunk heal — consistency unverified" >&2
+    exit 1
+  fi
+
+  print_build_id_mismatch_diagnostic
   echo "main:deploy FATAL: spur-web serving stale chunks" >&2
+  echo "main:deploy sha stamp not advanced ($remote_head); re-run main:deploy to retry the same commit" >&2
   exit 1
+}
+
+# Diagnostic only — never changes the exit code or the FATAL wording above.
+# Compares the build id embedded in spur-web's served HTML (RSC flight payload
+# `\"b\":\"<id>\"`) against $web_next_dir/BUILD_ID on disk. A mismatch means
+# spur-web is serving out of an entirely different .next than $web_next_dir
+# (e.g. a host hand-switched to the npm-package tree), so "missing chunk"
+# refs are a serving-directory mismatch, not staleness this script can heal.
+# Prints nothing when either id can't be extracted or they match — never
+# fabricates a diagnosis from a partial read.
+print_build_id_mismatch_diagnostic() {
+  local html served_id disk_id
+  html=$($CURL -fsS --max-time 3 "http://127.0.0.1:3012/" 2>/dev/null) || return 0
+  served_id=$(printf '%s' "$html" | grep -oE '\\"b\\":\\"[A-Za-z0-9_-]+' | head -n1 \
+    | sed -E 's/.*\\"b\\":\\"//') || true
+  [[ -z "$served_id" ]] && return 0
+  [[ -f "$web_next_dir/BUILD_ID" ]] || return 0
+  disk_id=$(<"$web_next_dir/BUILD_ID")
+  [[ -z "$disk_id" ]] && return 0
+  [[ "$served_id" == "$disk_id" ]] && return 0
+  echo "main:deploy spur-web is serving build $served_id, but $web_next_dir/BUILD_ID is $disk_id — the missing refs are a serving-directory mismatch, not stale chunks" >&2
 }
 
 # Clear any orphan listener, restart both units, then verify/heal. Runs inside
@@ -239,28 +388,6 @@ print_cli_install_hint() {
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-print_direct_terminal_port_hint() {
-  local override=/etc/systemd/system/spur-web.service.d/override.conf
-  local unit=/etc/systemd/system/spur-web.service
-  local port=443
-  if [[ -f "$override" ]]; then
-    port=$(grep -E '^Environment=DIRECT_TERMINAL_PUBLIC_PORT=' "$override" \
-      | tail -n1 | cut -d= -f3) || true
-  elif [[ -f "$unit" ]]; then
-    port=$(grep -E '^Environment=DIRECT_TERMINAL_PUBLIC_PORT=' "$unit" \
-      | tail -n1 | cut -d= -f3) || true
-  fi
-  [[ -z "$port" ]] && port=443
-  printf '%s\n' \
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" \
-    "Web terminal external port: $port (assumes TLS terminator on :443)" \
-    "If your nginx is plain-HTTP on a different port, override:" \
-    "  sudo mkdir -p /etc/systemd/system/spur-web.service.d" \
-    "  printf '[Service]\\nEnvironment=DIRECT_TERMINAL_PUBLIC_PORT=<your-port>\\n' | sudo tee /etc/systemd/system/spur-web.service.d/override.conf" \
-    "  sudo systemctl daemon-reload && sudo systemctl restart spur-web.service" \
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-}
-
 # Serialize the ENTIRE deploy across overlapping runs: git fetch/reset, build,
 # restart, and verify/heal. The git mutation of the one shared deploy_root clone
 # is itself a race (two runs collide on .git/index.lock), so the lock must be
@@ -337,6 +464,7 @@ fi
 export CI=1
 if systemctl_cmd is-active --quiet spur-web.service; then
   echo "main:deploy stopping spur-web before build" >&2
+  arm_web_restore
   systemctl_cmd stop spur-web.service
 fi
 pnpm -C "$deploy_root" install --frozen-lockfile
@@ -352,4 +480,3 @@ restart_and_verify
 printf '%s\n' "$remote_head" >"$deployed_sha_file"
 echo "main deployed: $remote_head"
 print_cli_install_hint "$remote_head"
-print_direct_terminal_port_hint

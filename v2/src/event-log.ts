@@ -1,19 +1,6 @@
-import {
-  appendFileSync,
-  closeSync,
-  existsSync,
-  fstatSync,
-  mkdirSync,
-  openSync,
-  readSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { iterArchivedThenLive, iterLiveLines, parseJsonLine, tryRotate } from "./jsonl-log-io.js";
 import type { SessionLogScope } from "./types.js";
 
 export type SpurLogLevel = "info" | "warn" | "error";
@@ -32,24 +19,49 @@ export interface SpurLogEntry {
   details?: Record<string, unknown>;
 }
 
+export type UserInputKind =
+  | "spawn_prompt"
+  | "send_message"
+  | "trigger_send_prompt"
+  | "respawn_override_prompt";
+
+export interface UserInputAttachment {
+  id: string;
+  name: string;
+}
+
+export interface UserInputLogRequest {
+  sessionId: string;
+  projectId: string;
+  kind: UserInputKind;
+  source: string;
+  text: string;
+  attachments?: UserInputAttachment[];
+  sourceId?: string;
+  triggerId?: string;
+  details?: Record<string, unknown>;
+}
+
 const EVENT_LOG_FILE = "events.jsonl";
 const SESSIONS_DIR = "sessions";
-const READ_CHUNK = 1 << 16; // 64 KiB — keeps peak memory bounded regardless of file size.
 
-export const DEFAULT_EVENT_LOG_HOT_BYTES = 500 * 1024 * 1024;
-export const DEFAULT_EVENT_LOG_SHARD_HOT_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_EVENT_LOG_HOT_BYTES = 128 * 1024 * 1024;
+export const DEFAULT_EVENT_LOG_SHARD_HOT_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_EVENT_LOG_RETAIN_ARCHIVES = 5;
+export const DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS = 60_000;
 
 export interface EventLogConfig {
   hotBytes: number;
   shardHotBytes: number;
   retainArchives: number;
+  collapseWindowMs: number;
 }
 
 export const DEFAULT_EVENT_LOG_CONFIG: EventLogConfig = {
   hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
   shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
   retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  collapseWindowMs: DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
 };
 
 let eventLogConfig: EventLogConfig = DEFAULT_EVENT_LOG_CONFIG;
@@ -78,58 +90,6 @@ export function sessionEventLogPath(dataDir: string, sessionId: string): string 
   return join(sessionShardDir(dataDir, sessionId), EVENT_LOG_FILE);
 }
 
-function archivePath(path: string, index: number): string {
-  return `${path}.${index}.gz`;
-}
-
-// Single shared rotation helper. Crash-tolerant; callers wrap in try/catch so a
-// rotation failure never breaks the logging hot path.
-function maybeRotate(path: string, maxBytes: number, retainArchives: number): void {
-  if (!existsSync(path) || statSync(path).size <= maxBytes) {
-    return;
-  }
-  // Shift existing <path>.N.gz upward (descending) and prune beyond retainArchives.
-  for (let index = retainArchives; index >= 1; index -= 1) {
-    const current = archivePath(path, index);
-    if (!existsSync(current)) continue;
-    if (index >= retainArchives) {
-      unlinkSync(current);
-      continue;
-    }
-    renameSync(current, archivePath(path, index + 1));
-  }
-  // Move the live file aside, gzip it into .1.gz, drop the temp.
-  const temp = `${path}.1`;
-  renameSync(path, temp);
-  writeFileSync(archivePath(path, 1), gzipSync(readFileBytes(temp)), { mode: 0o600 });
-  unlinkSync(temp);
-}
-
-function readFileBytes(path: string): Buffer {
-  const fd = openSync(path, "r");
-  try {
-    const { size } = fstatSync(fd);
-    const buf = Buffer.alloc(size);
-    let offset = 0;
-    while (offset < size) {
-      const n = readSync(fd, buf, offset, size - offset, offset);
-      if (n <= 0) break;
-      offset += n;
-    }
-    return buf;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function tryRotate(path: string, maxBytes: number, retainArchives: number): void {
-  try {
-    maybeRotate(path, maxBytes, retainArchives);
-  } catch {
-    // Rotation must never block Spur runtime behavior.
-  }
-}
-
 export function appendEventLog(dataDir: string, entry: SpurLogEntryInput): void {
   mkdirSync(dataDir, { recursive: true });
   const record: SpurLogEntry = {
@@ -154,98 +114,150 @@ export function appendEventLog(dataDir: string, entry: SpurLogEntryInput): void 
   }
 }
 
+// Repeated warn/error events (e.g. a wake-retry loop) can dominate a shard.
+// Collapse keeps every occurrence accounted for without writing each one:
+// the first occurrence of a key writes immediately, repeats within
+// collapseWindowMs are counted but not written, and the first occurrence past
+// the window flushes a summary line (details.suppressedCount/suppressedSince)
+// before writing itself. info is never routed through this map. Sized for
+// ~300 terminal + running sessions x a handful of distinct warn/error events
+// each (measured hot set ~600-900 keys) — under FIFO eviction a key
+// surviving less than the collapse window degrades the mechanism toward a
+// no-op on a busy host.
+const EVENT_LOG_COLLAPSE_MAX_KEYS = 4096;
+
+interface CollapseEntry {
+  dataDir: string;
+  entry: SpurLogEntryInput;
+  firstAt: number;
+  suppressedCount: number;
+}
+
+const collapseState = new Map<string, CollapseEntry>();
+
+function collapseKey(entry: SpurLogEntryInput): string {
+  return `${entry.level}\0${entry.event}\0${entry.sessionId ?? ""}`;
+}
+
+// Writes the retained summary (if anything was actually suppressed) and
+// removes the entry. Never throws: called from the write hot path, the
+// reaper tick, and shutdown alike.
+function flushCollapseEntry(key: string, state: CollapseEntry): void {
+  collapseState.delete(key);
+  if (state.suppressedCount === 0) {
+    return;
+  }
+  const { timestamp: _timestamp, ...rest } = state.entry;
+  try {
+    appendEventLog(state.dataDir, {
+      ...rest,
+      details: {
+        ...(state.entry.details ?? {}),
+        suppressedCount: state.suppressedCount,
+        suppressedSince: new Date(state.firstAt).toISOString(),
+      },
+    });
+  } catch {
+    // A flush failure must never block the reaper tick or shutdown.
+  }
+}
+
+function collapseOrAppend(dataDir: string, entry: SpurLogEntryInput): void {
+  const windowMs = eventLogConfig.collapseWindowMs;
+  if (windowMs <= 0) {
+    appendEventLog(dataDir, entry);
+    return;
+  }
+  const key = collapseKey(entry);
+  const now = Date.now();
+  const existing = collapseState.get(key);
+  if (existing && now - existing.firstAt < windowMs) {
+    existing.suppressedCount += 1;
+    existing.entry = entry;
+    return;
+  }
+  if (existing) {
+    flushCollapseEntry(key, existing);
+  }
+  appendEventLog(dataDir, entry);
+  collapseState.set(key, { dataDir, entry, firstAt: now, suppressedCount: 0 });
+  if (collapseState.size > EVENT_LOG_COLLAPSE_MAX_KEYS) {
+    const oldestKey = collapseState.keys().next().value;
+    if (oldestKey !== undefined) {
+      const oldestState = collapseState.get(oldestKey);
+      if (oldestState) {
+        flushCollapseEntry(oldestKey, oldestState);
+      }
+    }
+  }
+}
+
+// Flushes every pending collapse summary written against `dataDir` and
+// clears those map entries. Called from the reaper tick and from
+// `shutdown()` right before the final `daemon.stopped` log, so a
+// mid-teardown warn spike is still counted before the process exits.
+export function flushEventLogCollapse(dataDir: string): void {
+  for (const [key, state] of [...collapseState.entries()]) {
+    if (state.dataDir === dataDir) {
+      flushCollapseEntry(key, state);
+    }
+  }
+}
+
+// Test-bleed guard only: clears pending collapse state without writing.
+export function resetEventLogCollapse(): void {
+  collapseState.clear();
+}
+
 export function logSpurEvent(dataDir: string, entry: SpurLogEntryInput): void {
   try {
+    if (entry.level === "warn" || entry.level === "error") {
+      collapseOrAppend(dataDir, entry);
+      return;
+    }
     appendEventLog(dataDir, entry);
   } catch {
     // Logging must never block Spur runtime behavior.
   }
 }
 
-// Split decoded string chunks into newline-delimited lines. The caller pushes chunks
-// via write(); flush() drains the trailing carry. Holds at most one pending line, so
-// it adds no memory beyond what the chunk source already keeps resident.
-function makeLineSplitter() {
-  let carry = "";
+export function buildUserInputLogEntry(input: UserInputLogRequest): SpurLogEntryInput | null {
+  const text = input.text.trim();
+  const attachments = (input.attachments ?? []).map((attachment) => ({
+    id: attachment.id,
+    name: attachment.name,
+  }));
+  if (!text && attachments.length === 0) {
+    return null;
+  }
   return {
-    *write(chunk: string): Generator<string> {
-      carry += chunk;
-      let idx = carry.indexOf("\n");
-      while (idx !== -1) {
-        yield carry.slice(0, idx);
-        carry = carry.slice(idx + 1);
-        idx = carry.indexOf("\n");
-      }
-    },
-    *flush(tail: string): Generator<string> {
-      carry += tail;
-      if (carry.length > 0) yield carry;
+    event: "session.input.received",
+    level: "info",
+    sessionId: input.sessionId,
+    projectId: input.projectId,
+    ...(input.sourceId ? { sourceId: input.sourceId } : {}),
+    ...(input.triggerId ? { triggerId: input.triggerId } : {}),
+    message: text || `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}`,
+    details: {
+      ...(input.details ?? {}),
+      inputKind: input.kind,
+      source: input.source,
+      text,
+      ...(attachments.length > 0 ? { attachments } : {}),
     },
   };
 }
 
-// Streams the live (uncompressed) log in 64 KiB readSync chunks — never loads the
-// whole file, keeping peak memory bounded regardless of file size.
-function* iterEventLogLines(path: string): Generator<string> {
-  if (!existsSync(path)) return;
-  const fd = openSync(path, "r");
-  try {
-    const { size } = fstatSync(fd);
-    const buf = Buffer.alloc(READ_CHUNK);
-    const decoder = new StringDecoder("utf8");
-    const splitter = makeLineSplitter();
-    let offset = 0;
-    while (offset < size) {
-      const n = readSync(fd, buf, 0, Math.min(READ_CHUNK, size - offset), offset);
-      if (n <= 0) break;
-      offset += n;
-      yield* splitter.write(decoder.write(buf.subarray(0, n)));
-    }
-    yield* splitter.flush(decoder.end());
-  } finally {
-    closeSync(fd);
-  }
-}
-
-// Transparent gzip read: decompress once, then iterate the decompressed buffer in
-// 64 KiB chunks. (gunzipSync materializes the full decompressed buffer — tracked as a
-// separate streaming-vs-gunzip review item.)
-function* iterGzipLogLines(path: string): Generator<string> {
-  if (!existsSync(path)) return;
-  const decompressed = gunzipSync(readFileBytes(path));
-  const decoder = new StringDecoder("utf8");
-  const splitter = makeLineSplitter();
-  let offset = 0;
-  while (offset < decompressed.length) {
-    const end = Math.min(offset + READ_CHUNK, decompressed.length);
-    yield* splitter.write(decoder.write(decompressed.subarray(offset, end)));
-    offset = end;
-  }
-  yield* splitter.flush(decoder.end());
-}
-
-// Archived shards oldest-first (highest index down to .1.gz), then the live path.
-function* iterArchivedThenLive(path: string, retainArchives: number): Generator<string> {
-  for (let index = retainArchives; index >= 1; index -= 1) {
-    yield* iterGzipLogLines(archivePath(path, index));
-  }
-  yield* iterEventLogLines(path);
-}
-
-function parseEntry(line: string): SpurLogEntry | null {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-  try {
-    return JSON.parse(trimmed) as SpurLogEntry;
-  } catch {
-    return null;
-  }
+export function logUserInputEvent(dataDir: string, input: UserInputLogRequest): void {
+  const entry = buildUserInputLogEntry(input);
+  if (!entry) return;
+  logSpurEvent(dataDir, entry);
 }
 
 export function readEventLog(dataDir: string): SpurLogEntry[] {
   const entries: SpurLogEntry[] = [];
   for (const line of iterArchivedThenLive(eventLogPath(dataDir), eventLogConfig.retainArchives)) {
-    const entry = parseEntry(line);
+    const entry = parseJsonLine<SpurLogEntry>(line);
     if (entry) entries.push(entry);
   }
   return entries;
@@ -260,7 +272,7 @@ export function readSessionEventLog(
   const cap = query.limit;
   const out: SpurLogEntry[] = [];
   const collect = (line: string): void => {
-    const entry = parseEntry(line);
+    const entry = parseJsonLine<SpurLogEntry>(line);
     if (!entry || entry.sessionId !== sessionId) return;
     if (!matchesSessionLogQuery(entry, query)) return;
     out.push(entry);
@@ -269,7 +281,7 @@ export function readSessionEventLog(
 
   const lines = existsSync(sessionShardDir(dataDir, sessionId))
     ? iterArchivedThenLive(sessionEventLogPath(dataDir, sessionId), eventLogConfig.retainArchives)
-    : iterEventLogLines(eventLogPath(dataDir));
+    : iterLiveLines(eventLogPath(dataDir));
   for (const line of lines) {
     collect(line);
   }

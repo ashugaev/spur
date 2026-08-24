@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
 
@@ -8,6 +9,7 @@ interface SpawnBody {
   prompt?: string;
   agent?: AgentName;
   model?: string;
+  mode?: string;
   attachments?: Array<{ name: string; data: string }>;
   branch?: string;
   planMode?: boolean;
@@ -16,6 +18,7 @@ interface SpawnBody {
   selfDestruct?: { enabled: boolean; conditions?: string };
   reuseWorkspaceSessionId?: string;
   bootstrap?: boolean;
+  slots?: { links?: Array<{ label: string; url: string }> };
 }
 
 export async function POST(request: NextRequest) {
@@ -43,6 +46,7 @@ export async function POST(request: NextRequest) {
     }
     if (body.agent) payload.agent = body.agent;
     if (body.model?.trim()) payload.model = body.model.trim();
+    if (body.mode?.trim()) payload.mode = body.mode.trim();
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
     if (body.selfDestruct) payload.selfDestruct = body.selfDestruct;
@@ -51,6 +55,9 @@ export async function POST(request: NextRequest) {
     const reuseId = body.reuseWorkspaceSessionId?.trim();
     if (reuseId) payload.reuseWorkspaceSessionId = reuseId;
     if (body.bootstrap === true) payload.bootstrap = true;
+    if (Array.isArray(body.slots?.links) && body.slots.links.length > 0) {
+      payload.slots = { links: body.slots.links };
+    }
 
     const session = await spurRequestJson<SpurSessionView>(
       "/sessions/background",
@@ -59,7 +66,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(session, { status: 201 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to spawn Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to spawn Spur session");
   }
 }

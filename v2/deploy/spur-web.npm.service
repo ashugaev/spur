@@ -2,19 +2,32 @@
 #
 # Pairs with spur-daemon.npm.service. The web bundle ships inside the
 # npm tarball under `<prefix>/lib/node_modules/@shugaev/spur/web` and serves
-# on 127.0.0.1. Install to ~/.config/systemd/user/spur-web.service.
+# on 127.0.0.1. Runs the custom production server (dist-server/web-server.js),
+# which attaches the terminal WebSocket in-process on `/ws` (same port as the
+# web UI) — no separate direct-terminal unit or port. Install to
+# ~/.config/systemd/user/spur-web.service.
 
 [Unit]
 Description=Spur web UI (npm install)
 After=network.target spur-daemon.service
-Requires=spur-daemon.service
+# Wants, never Requires: Requires propagates the daemon's stop to this unit, and
+# an explicit `systemctl stop spur-daemon` (unlike a restart or a crash
+# auto-restart) has no matching start job for the dependent — the web UI stays
+# dead until someone starts it by hand. This server never talks to the daemon at
+# startup, so it keeps serving while the daemon is down and the UI shows its
+# reconnect state instead.
+Wants=spur-daemon.service
 
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/lib/node_modules/@shugaev/spur/web
-Environment=PORT=4311
-Environment=HOSTNAME=127.0.0.1
-ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/server.js
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PORT=5555
+Environment=WEB_HOST=127.0.0.1
+Environment=NODE_ENV=production
+EnvironmentFile=-%h/.spur/daemon.env
+ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/dist-server/web-server.js
 Restart=always
 RestartSec=3
 
