@@ -1,9 +1,9 @@
 import { execFile, spawn } from "node:child_process";
 import { mkdtemp, open, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
+import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { SidecarMcpBinding, TranscriptEntry } from "../types.js";
 import {
@@ -25,7 +25,7 @@ export async function readOpenCodeJson(
   args: string[],
   options: { cwd?: string; timeoutMs: number },
 ): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "spur-opencode-"));
+  const directory = await mkdtemp(join(resolveTempDir(), "spur-opencode-"));
   const outputPath = join(directory, "out.json");
   try {
     const handle = await open(outputPath, "w");
