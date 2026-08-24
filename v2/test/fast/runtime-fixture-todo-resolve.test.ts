@@ -24,17 +24,29 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-type TodoStubMode = "succeed" | "fail" | "resolved-elsewhere";
+type TodoStubMode = "succeed" | "fail" | "resolved-elsewhere" | "list-fails-after-first";
 
 function writeTodoStub(dir: string, mode: TodoStubMode): string {
   const stubPath = join(dir, "spur-todo-stub.sh");
   const resolvedMarker = join(dir, "resolved-elsewhere.marker");
+  const listCallCounter = join(dir, "list-call-count");
   writeFileSync(
     stubPath,
     `#!/usr/bin/env bash
 set -euo pipefail
 case "\${1:-}" in
   list)
+    if [[ "${mode}" == "list-fails-after-first" ]]; then
+      count=0
+      [[ -f "${listCallCounter}" ]] && count="$(cat "${listCallCounter}")"
+      count=$((count + 1))
+      printf '%s' "$count" > "${listCallCounter}"
+      if [[ "$count" -gt 1 ]]; then
+        # Simulate list itself becoming unavailable (daemon hiccup, transient
+        # CLI cold-start failure) on every call after the initial lookup.
+        exit 1
+      fi
+    fi
     if [[ -f "${resolvedMarker}" ]]; then
       printf '{"items":[]}'
     else
@@ -49,10 +61,10 @@ case "\${1:-}" in
       touch "${resolvedMarker}"
       exit 1
     fi
-    if [[ "${mode}" == "fail" ]]; then
-      exit 1
+    if [[ "${mode}" == "succeed" ]]; then
+      exit 0
     fi
-    exit 0
+    exit 1
     ;;
   *)
     exit 1
@@ -153,5 +165,21 @@ describe("fakeAgentScript resolve_initial_todo (fixture race regression)", () =>
     expect(status).toBe(0);
     const transcriptFile = join(transcriptDir, "chat-fixture-session.jsonl");
     expect(existsSync(transcriptFile)).toBe(true);
+  });
+
+  it("never reads a transient list failure as resolved, and still fails loud", () => {
+    // complete always fails and list becomes unavailable after the initial
+    // lookup: a bare "empty means resolved" re-check would misread the
+    // first list failure as "resolved" and return success silently, leaving
+    // the seeded item open with no diagnostic — the exact swallow this
+    // fixture exists to eliminate.
+    const { status, logText, transcriptDir } = runCursorFixture({
+      todoStubMode: "list-fails-after-first",
+    });
+
+    expect(status).toBe(1);
+    expect(logText).toContain("resolve_initial_todo: failed to complete seeded todo item item-1");
+    const transcriptFile = join(transcriptDir, "chat-fixture-session.jsonl");
+    expect(existsSync(transcriptFile)).toBe(false);
   });
 });

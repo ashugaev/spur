@@ -695,9 +695,23 @@ resolve_initial_todo() {
     # this attempt's list and complete calls (e.g. a prior attempt landed on
     # the daemon before its own CLI process reported success/failure). Only
     # keep retrying, and only fail loudly, while the item is still open.
-    local still_open=""
-    still_open="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); wanted=sys.argv[1]; print(next((item["id"] for item in data["items"] if item["id"] == wanted and item["status"] == "open"), ""))' "$todo_id" 2>/dev/null || true)"
-    if [[ -z "$still_open" ]]; then
+    # This re-check must emit an explicit OPEN/RESOLVED/LIST_FAILED sentinel
+    # rather than "empty means resolved" - a transient list failure and a
+    # genuinely resolved item both used to read as an empty string, which
+    # let a single list hiccup end the retry loop after one attempt and
+    # leave the seeded item silently open: the exact swallow this replaced.
+    local todo_state
+    todo_state="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c '
+import json, sys
+wanted = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+    found = next((item for item in data["items"] if item["id"] == wanted), None)
+    print("RESOLVED" if found is None or found.get("status") != "open" else "OPEN")
+except Exception:
+    print("LIST_FAILED")
+' "$todo_id" 2>/dev/null)" || todo_state="LIST_FAILED"
+    if [[ "$todo_state" == "RESOLVED" ]]; then
       return
     fi
     sleep 0.1
