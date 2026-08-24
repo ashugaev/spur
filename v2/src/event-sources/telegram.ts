@@ -11,6 +11,7 @@ import {
 } from "../metadata.js";
 import {
   TELEGRAM_MESSAGE_EVENT,
+  type TelegramAutoSpawnConfig,
   type TelegramBinding,
   type TelegramMessageEventData,
   type TelegramSourceConfig,
@@ -591,11 +592,17 @@ async function unbindTelegramThread(
   return { deleted, binding };
 }
 
-function tryAcquireAutoSpawn(runtime: TelegramRuntime, key: string): "off" | "busy" | "acquired" {
-  if (runtime.deps.config.autoSpawn?.enabled !== true) return "off";
-  if (runtime.autoSpawnInFlight.has(key)) return "busy";
+type AutoSpawnAcquireResult =
+  | { status: "off" }
+  | { status: "busy" }
+  | { status: "acquired"; autoSpawn: TelegramAutoSpawnConfig };
+
+function tryAcquireAutoSpawn(runtime: TelegramRuntime, key: string): AutoSpawnAcquireResult {
+  const autoSpawn = runtime.deps.config.autoSpawn;
+  if (autoSpawn?.enabled !== true) return { status: "off" };
+  if (runtime.autoSpawnInFlight.has(key)) return { status: "busy" };
   runtime.autoSpawnInFlight.add(key);
-  return "acquired";
+  return { status: "acquired", autoSpawn };
 }
 
 async function runAutoSpawn(
@@ -605,12 +612,8 @@ async function runAutoSpawn(
   messageThreadId: number | undefined,
   text: string,
   key: string,
+  autoSpawn: TelegramAutoSpawnConfig,
 ): Promise<void> {
-  const autoSpawn = runtime.deps.config.autoSpawn;
-  if (!autoSpawn) {
-    runtime.autoSpawnInFlight.delete(key);
-    throw new Error("runAutoSpawn called without an autoSpawn config");
-  }
   try {
     await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, {
       project: autoSpawn.project,
@@ -868,7 +871,8 @@ async function handleTelegramText(
     binding = runtime.bindings.get(key);
   }
   if (!binding) {
-    switch (tryAcquireAutoSpawn(runtime, key)) {
+    const acquireResult = tryAcquireAutoSpawn(runtime, key);
+    switch (acquireResult.status) {
       case "busy":
         await ctx.reply("Spawn already in progress here.");
         return;
@@ -880,6 +884,7 @@ async function handleTelegramText(
           message.message_thread_id,
           message.text.trim(),
           key,
+          acquireResult.autoSpawn,
         );
         return;
       case "off":
@@ -890,7 +895,8 @@ async function handleTelegramText(
   }
   const session = await findSession(deps, binding.sessionId);
   if (!session) {
-    switch (tryAcquireAutoSpawn(runtime, key)) {
+    const acquireResult = tryAcquireAutoSpawn(runtime, key);
+    switch (acquireResult.status) {
       case "busy":
         await ctx.reply("Spawn already in progress here.");
         return;
@@ -903,6 +909,7 @@ async function handleTelegramText(
           message.message_thread_id,
           message.text.trim(),
           key,
+          acquireResult.autoSpawn,
         );
         return;
       case "off":

@@ -1171,9 +1171,7 @@ describe("telegramSourceModule", () => {
     await bot.emitText(textCtx);
 
     expect(spawnSession).toHaveBeenCalledTimes(1);
-    expect(textCtx.reply).not.toHaveBeenCalledWith(
-      expect.stringContaining("is gone. Unbound."),
-    );
+    expect(textCtx.reply).not.toHaveBeenCalledWith(expect.stringContaining("is gone. Unbound."));
     expect(textCtx.reply).toHaveBeenCalledWith("Spawned and bound: shp-3.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-3"');
@@ -1183,9 +1181,9 @@ describe("telegramSourceModule", () => {
   it("does not unbind while an auto-spawn is in flight", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
-    const listSessions = vi.fn().mockResolvedValue([
-      { id: "api-1", project: "api", agent: "codex", state: "waiting" },
-    ]);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
     let resolveSpawn: (value: unknown) => void = () => {};
     const spawnPromise = new Promise((resolve) => {
       resolveSpawn = resolve;
@@ -1245,6 +1243,8 @@ describe("telegramSourceModule", () => {
     expect(ctx1.reply).toHaveBeenCalledWith("Spawn failed: boom <telegram-token>");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).rejects.toThrow();
+    const replyTargetsDir = join(dataDir, "source-state", "telegram", "reply-targets");
+    await expect(readFile(join(replyTargetsDir, "shp-4.json"), "utf8")).rejects.toThrow();
 
     const ctx2 = telegramContext({ text: "second try" });
     await bot.emitText(ctx2);
