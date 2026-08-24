@@ -1,6 +1,6 @@
 import { createRef } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SpawnModal, type SpawnModalMode } from "@/components/SpawnModal";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
@@ -47,6 +47,7 @@ const respawnMode: SpawnModalMode = {
 
 const deskMode: SpawnModalMode = {
   kind: "desk",
+  model: { value: null, onChange: vi.fn() },
   branch: { value: "", onChange: vi.fn() },
   planMode: { value: false, onChange: vi.fn() },
   steps: { items: [], onUpdate: vi.fn(), onAdd: vi.fn(), onRemove: vi.fn() },
@@ -87,6 +88,15 @@ function renderModal(mode: SpawnModalMode, overrides: Record<string, unknown> = 
   return { onSubmit, onClose };
 }
 
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
 describe("SpawnModal", () => {
   it("spawn mode renders project, workspace, self-destruct, steps, and prompt", () => {
     renderModal(spawnMode);
@@ -109,9 +119,10 @@ describe("SpawnModal", () => {
     expect(screen.queryByRole("button", { name: "+ Step" })).not.toBeInTheDocument();
   });
 
-  it("desk mode renders agent + branch + plan + steps but no model or project", () => {
+  it("desk mode renders agent + model + branch + plan + steps but no project", () => {
     renderModal(deskMode);
     expect(screen.getByLabelText("Agent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Desk spawn model")).toBeInTheDocument();
     expect(screen.getByLabelText("branch name")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Spawn project")).not.toBeInTheDocument();

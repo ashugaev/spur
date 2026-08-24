@@ -17,18 +17,17 @@ import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
+import {
+  buildSpawnOverrides,
+  buildSpawnSessionPayload,
+  useSpawnComposer,
+} from "@/hooks/useSpawnComposer";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
-import {
-  encodeFileAttachments,
-  fileAttachmentsFromFiles,
-  type FileAttachment,
-} from "@/lib/file-attachments";
 import { JiraIcon } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
-import type { AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
   ATTENTION_ZONE_ORDER,
@@ -47,7 +46,6 @@ import {
   type OpenPrActionRequiredPayload,
   type ProjectInfo,
   type SpurSessionView,
-  type SpawnOverrides,
   type SpurSessionsResponse,
   type TakeBacklogItemResponse,
   type UpdateProjectRequest,
@@ -384,18 +382,6 @@ const BACKLOG_PROVIDER_LABELS: Record<AvailableBacklogItem["provider"], string> 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
   return window.location.search;
-}
-
-function buildSpawnOverrides(
-  workspaceMode: "default" | "worktree" | "shared",
-  defaultBranch: string,
-): SpawnOverrides | undefined {
-  if (workspaceMode === "worktree") {
-    const trimmed = defaultBranch.trim();
-    return trimmed ? { worktree: true, defaultBranch: trimmed } : { worktree: true };
-  }
-  if (workspaceMode === "shared") return { worktree: false };
-  return undefined;
 }
 
 function projectOptionLabel(project: ProjectInfo): string {
@@ -902,33 +888,44 @@ export function Dashboard() {
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [spawnProjectId, setSpawnProjectId] = useState("");
+  const spawnComposer = useSpawnComposer("spawn", "claude");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
-  const [spawnPrompt, setSpawnPrompt] = useState("");
-  const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
-  const [spawnModel, setSpawnModel] = useState<string | null>(null);
-  const [spawnBranch, setSpawnBranch] = useState("");
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
-  const [spawnPlanMode, setSpawnPlanMode] = useState(false);
-  const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
-  const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
-  const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
-    "default",
-  );
-  const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
-  const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
-  const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) =>
-      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+      spawnComposer.setPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
+  const spawnProjectId = spawnComposer.projectId;
+  const setSpawnProjectId = spawnComposer.setProjectId;
+  const spawnPrompt = spawnComposer.prompt;
+  const setSpawnPrompt = spawnComposer.setPrompt;
+  const spawnAgent = spawnComposer.agent;
+  const setSpawnAgent = spawnComposer.setAgent;
+  const spawnModel = spawnComposer.model;
+  const setSpawnModel = spawnComposer.setModel;
+  const spawnBranch = spawnComposer.branch;
+  const setSpawnBranch = spawnComposer.setBranch;
+  const spawnPlanMode = spawnComposer.planMode;
+  const setSpawnPlanMode = spawnComposer.setPlanMode;
+  const spawnSelfDestruct = spawnComposer.selfDestruct;
+  const setSpawnSelfDestruct = spawnComposer.setSelfDestruct;
+  const spawnSelfDestructConditions = spawnComposer.selfDestructConditions;
+  const setSpawnSelfDestructConditions = spawnComposer.setSelfDestructConditions;
+  const spawnSteps = spawnComposer.steps;
+  const spawnWorkspaceMode = spawnComposer.workspaceMode;
+  const setSpawnWorkspaceMode = spawnComposer.setWorkspaceMode;
+  const spawnDefaultBranch = spawnComposer.defaultBranch;
+  const setSpawnDefaultBranch = spawnComposer.setDefaultBranch;
+  const spawnAttachments = spawnComposer.attachments;
+  const setSpawnAttachments = spawnComposer.setAttachments;
+  const spawnOpen = spawnComposer.open;
+  const setSpawnOpen = spawnComposer.setOpen;
   const searchVoice = useVoiceInput({
     contextKey: "dashboard-search",
     onTranscribed: setSearchQuery,
@@ -1264,12 +1261,9 @@ export function Dashboard() {
     setLocationSearch(window.location.search);
   };
 
-  const addStep = () => {
-    setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
-  };
-  const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
-  const updateStep = (id: number, value: string) =>
-    setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
+  const addStep = spawnComposer.addStep;
+  const removeStep = spawnComposer.removeStep;
+  const updateStep = spawnComposer.updateStep;
 
   useEffect(() => {
     const project = spawnProjectId.trim();
@@ -1338,30 +1332,7 @@ export function Dashboard() {
     spawningRef.current = true;
     setSpawning(true);
     try {
-      const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
-      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-
-      const payload: Record<string, unknown> = {
-        projectId: nextProjectId,
-        prompt: nextPrompt,
-        agent: spawnAgent,
-      };
-      if (spawnModel !== null) payload.model = spawnModel;
-      const encodedAttachments = encodeFileAttachments(spawnAttachments);
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      const normalizedBranch = normalizeBranchName(spawnBranch);
-      if (normalizedBranch) payload.branch = normalizedBranch;
-      if (spawnPlanMode) payload.planMode = true;
-      if (spawnSelfDestruct) {
-        const conditions = spawnSelfDestructConditions.trim();
-        payload.selfDestruct = {
-          enabled: true,
-          ...(conditions ? { conditions } : {}),
-        };
-      }
-      if (filteredSteps.length > 0) payload.steps = filteredSteps;
-      if (overrides) payload.overrides = overrides;
-
+      const payload = buildSpawnSessionPayload(spawnComposer);
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1380,18 +1351,8 @@ export function Dashboard() {
           projects: current?.projects ?? [],
         };
       });
-      setSpawnPrompt("");
-      setSpawnModel(null);
-      setSpawnBranch("");
-      setSpawnPlanMode(false);
-      setSpawnSelfDestruct(false);
-      setSpawnSelfDestructConditions("");
-      setSpawnSteps([]);
-      setSpawnWorkspaceMode("default");
-      setSpawnDefaultBranch("");
-      setSpawnAttachments([]);
+      spawnComposer.resetAfterSubmit({ projectId: nextProjectId });
       setSpawnPinnedProjectId(null);
-      setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
     } catch (spawnError) {
       showErrorToast(errorMessage(spawnError, "Failed to spawn Spur session"));
@@ -1793,30 +1754,20 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
-    setSpawnProjectId(resolvePreferredSpawnProjectId());
-    setSpawnAttachments([]);
-    setSpawnOpen(true);
+    spawnComposer.openWithDefaults({ projectId: resolvePreferredSpawnProjectId() });
   };
 
   const openShepherdSpawnModal = () => {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnAgent("claude");
-    setSpawnModel(null);
-    setSpawnWorkspaceMode("default");
-    setSpawnDefaultBranch("");
-    setSpawnAttachments([]);
-    setSpawnOpen(true);
+    spawnComposer.openWithDefaults({
+      agent: "claude",
+      projectId: SHEPHERD_PROJECT_ID,
+      workspaceMode: "default",
+      defaultBranch: "",
+    });
   };
 
-  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setSpawnAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
+  const addSpawnFiles = spawnComposer.addFiles;
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -2191,10 +2142,7 @@ export function Dashboard() {
                 ) : null,
             }}
             onAddFiles={addSpawnFiles}
-            onAgentChange={(next) => {
-              setSpawnAgent(next);
-              setSpawnModel(null);
-            }}
+            onAgentChange={setSpawnAgent}
             onClose={() => setSpawnOpen(false)}
             onPromptChange={setSpawnPrompt}
             onRemoveAttachment={(index) =>

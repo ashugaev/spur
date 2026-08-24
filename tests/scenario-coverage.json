@@ -3607,7 +3607,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2: Actions bar",
-    "scenario": "Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn",
+    "scenario": "Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, model, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -5246,7 +5246,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/model-picker.spec.ts"],
@@ -5254,7 +5254,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
@@ -5262,7 +5262,15 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
+    "scenario": "Desk agent modal includes the same model picker and sends the selected model in the spawn request",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
@@ -5270,7 +5278,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
@@ -5278,7 +5286,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Typing in the search input filters the list by model id or label",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
@@ -5286,7 +5294,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Starring a model (favorite icon) pins it to the top of the list, persists to `spur:model-favorites` local storage, and stays pinned after reload",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/model-picker.spec.ts"],
@@ -5294,7 +5302,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Favorites are scoped per agent (`<agent>:<id>` key), so a claude favorite does not surface in the codex list",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
@@ -5302,7 +5310,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "Selecting a model updates the control label to that model's label; selecting `Default` clears the pick",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
@@ -5310,7 +5318,7 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D7c: Spawn/respawn model picker",
+    "section": "D7c: Spawn/respawn/desk model picker",
     "scenario": "If the current pick is absent from a freshly loaded list, the control falls back to `Default`",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],

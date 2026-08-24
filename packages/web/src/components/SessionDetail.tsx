@@ -25,6 +25,11 @@ import { SpawnModal } from "@/components/SpawnModal";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
+import {
+  buildDeskSpawnPayload,
+  buildRespawnSessionPayload,
+  useSpawnComposer,
+} from "@/hooks/useSpawnComposer";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
@@ -1383,32 +1388,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  const [respawnOpen, setRespawnOpen] = useState(false);
-  const [respawnPrompt, setRespawnPrompt] = useState("");
-  const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
-  const [respawnModel, setRespawnModel] = useState<string | null>(null);
-  const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
-  const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const respawnComposer = useSpawnComposer("respawn", "claude");
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
   const [handoffModel, setHandoffModel] = useState<string | null>(null);
-  const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
-  const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
-  const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
-  const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
-  const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
-  const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [deskSpawnAttachments, setDeskSpawnAttachments] = useState<FileAttachment[]>([]);
+  const deskSpawnComposer = useSpawnComposer("desk", "claude");
   const [deskSpawning, setDeskSpawning] = useState(false);
   const deskSpawningRef = useRef(false);
   const deskSpawnPromptRef = useRef<HTMLTextAreaElement>(null);
-  const deskSpawnStepIdRef = useRef(0);
   const deskSpawnHistory = useInputHistory(DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const deskSpawnVoice = useVoiceInput({
     contextKey: `desk-spawn:${sessionId}`,
     onTranscribed: (text) =>
-      setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+      deskSpawnComposer.setPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const respawningRef = useRef(false);
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
@@ -1416,7 +1409,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const respawnVoice = useVoiceInput({
     contextKey: `respawn:${sessionId}`,
     onTranscribed: (text) =>
-      setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+      respawnComposer.setPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const handoffNotesRef = useRef<HTMLTextAreaElement>(null);
   const handoffVoice = useVoiceInput({
@@ -1441,6 +1434,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
+  const respawnOpen = respawnComposer.open;
+  const setRespawnOpen = respawnComposer.setOpen;
+  const respawnPrompt = respawnComposer.prompt;
+  const setRespawnPrompt = respawnComposer.setPrompt;
+  const respawnAgent = respawnComposer.agent;
+  const setRespawnAgent = respawnComposer.setAgent;
+  const respawnModel = respawnComposer.model;
+  const setRespawnModel = respawnComposer.setModel;
+  const respawnAttachments = respawnComposer.attachments;
+  const respawnStartupAttachmentIds = respawnComposer.startupAttachmentIds;
+  const setRespawnStartupAttachmentIds = respawnComposer.setStartupAttachmentIds;
+  const deskSpawnOpen = deskSpawnComposer.open;
+  const setDeskSpawnOpen = deskSpawnComposer.setOpen;
+  const deskSpawnPrompt = deskSpawnComposer.prompt;
+  const setDeskSpawnPrompt = deskSpawnComposer.setPrompt;
+  const deskSpawnAgent = deskSpawnComposer.agent;
+  const setDeskSpawnAgent = deskSpawnComposer.setAgent;
+  const deskSpawnModel = deskSpawnComposer.model;
+  const deskSpawnBranch = deskSpawnComposer.branch;
+  const setDeskSpawnBranch = deskSpawnComposer.setBranch;
+  const deskSpawnPlanMode = deskSpawnComposer.planMode;
+  const setDeskSpawnPlanMode = deskSpawnComposer.setPlanMode;
+  const deskSpawnSteps = deskSpawnComposer.steps;
+  const deskSpawnAttachments = deskSpawnComposer.attachments;
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1702,15 +1719,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (respawningRef.current) return;
     const submitRespawn = async (forceKillSource: boolean) => {
       const nextPrompt = respawnPrompt.trim();
-      const payload: Record<string, unknown> = {
-        prompt: nextPrompt,
-        startupAttachmentIds: respawnStartupAttachmentIds,
-      };
-      const encodedAttachments = encodeFileAttachments(respawnAttachments);
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (forceKillSource) payload.forceKillSource = true;
-      if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
-      if (respawnModel !== null) payload.model = respawnModel;
+      if (!session) return;
+      const payload = buildRespawnSessionPayload(respawnComposer, session.agent, forceKillSource);
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1788,37 +1798,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const openDeskSpawn = () => {
     if (!session) return;
-    setDeskSpawnAgent(session.agent);
-    setDeskSpawnPrompt("");
-    setDeskSpawnBranch(session.branch ?? "");
-    setDeskSpawnPlanMode(false);
-    setDeskSpawnSteps([]);
-    setDeskSpawnAttachments([]);
-    setDeskSpawnOpen(true);
+    deskSpawnComposer.openWithDefaults({
+      agent: session.agent,
+      branch: session.branch ?? "",
+    });
   };
 
   const handleDeskSpawn = async () => {
     if (!session || deskSpawningRef.current) return;
     const nextPrompt = deskSpawnPrompt.trim();
-    const filteredSteps = deskSpawnSteps
-      .map((step) => step.value.trim())
-      .filter((step) => step.length > 0);
-    const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
     deskSpawningRef.current = true;
     setDeskSpawning(true);
     try {
-      const payload: Record<string, unknown> = {
-        projectId: session.projectId,
-        prompt: nextPrompt,
-        agent: deskSpawnAgent,
-        reuseWorkspaceSessionId: session.id,
-        overrides: { worktree: session.worktree },
-      };
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (deskSpawnBranch.trim()) payload.branch = deskSpawnBranch.trim();
-      if (deskSpawnPlanMode) payload.planMode = true;
-      if (filteredSteps.length > 0) payload.steps = filteredSteps;
-
+      const payload = buildDeskSpawnPayload(deskSpawnComposer, session);
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1902,32 +1894,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       .catch(() => {});
   };
 
-  const addRespawnFiles = (files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
-      .catch(() => {});
-  };
-
-  const addDeskSpawnFiles = (files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
-      .catch(() => {});
-  };
-
-  const addDeskSpawnStep = () => {
-    deskSpawnStepIdRef.current += 1;
-    setDeskSpawnSteps((current) => [...current, { id: deskSpawnStepIdRef.current, value: "" }]);
-  };
-
-  const removeDeskSpawnStep = (id: number) => {
-    setDeskSpawnSteps((current) => current.filter((step) => step.id !== id));
-  };
-
-  const updateDeskSpawnStep = (id: number, value: string) => {
-    setDeskSpawnSteps((current) =>
-      current.map((step) => (step.id === id ? { ...step, value } : step)),
-    );
-  };
+  const addRespawnFiles = respawnComposer.addFiles;
+  const addDeskSpawnFiles = deskSpawnComposer.addFiles;
+  const addDeskSpawnStep = deskSpawnComposer.addStep;
+  const removeDeskSpawnStep = deskSpawnComposer.removeStep;
+  const updateDeskSpawnStep = deskSpawnComposer.updateStep;
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
@@ -2142,13 +2113,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [session?.deskGroupMembers, showAllDeskMembers]);
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
-    setRespawnPrompt(session.prompt);
-    setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
-    setRespawnAttachments([]);
-    setRespawnAgent(session.agent);
-    setRespawnModel(session.model ?? null);
-    setRespawnOpen(true);
-  }, [session]);
+    respawnComposer.openWithDefaults({
+      agent: session.agent,
+      model: session.model ?? null,
+      prompt: session.prompt,
+      startupAttachmentIds: session.startupAttachmentIds ?? [],
+    });
+  }, [respawnComposer, session]);
 
   const respawnVoiceDismiss = respawnVoice.dismissModal;
   useEffect(() => {
@@ -3387,17 +3358,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 ) : null,
               }}
               onAddFiles={addRespawnFiles}
-              onAgentChange={(next) => {
-                setRespawnAgent(next);
-                setRespawnModel(null);
-              }}
+              onAgentChange={setRespawnAgent}
               onClose={() => setRespawnOpen(false)}
               onPromptChange={setRespawnPrompt}
-              onRemoveAttachment={(index) =>
-                setRespawnAttachments((current) =>
-                  current.filter((_, currentIndex) => currentIndex !== index),
-                )
-              }
+              onRemoveAttachment={respawnComposer.removeAttachment}
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
               promptMinHeightClass="min-h-[10rem]"
@@ -3428,6 +3392,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               history={{ entries: deskSpawnHistory.entries, onSelect: setDeskSpawnPrompt }}
               mode={{
                 kind: "desk",
+                model: { value: deskSpawnModel, onChange: deskSpawnComposer.setModel },
                 branch: { value: deskSpawnBranch, onChange: setDeskSpawnBranch },
                 planMode: { value: deskSpawnPlanMode, onChange: setDeskSpawnPlanMode },
                 steps: {
@@ -3441,11 +3406,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAgentChange={setDeskSpawnAgent}
               onClose={() => setDeskSpawnOpen(false)}
               onPromptChange={setDeskSpawnPrompt}
-              onRemoveAttachment={(index) =>
-                setDeskSpawnAttachments((current) =>
-                  current.filter((_, currentIndex) => currentIndex !== index),
-                )
-              }
+              onRemoveAttachment={deskSpawnComposer.removeAttachment}
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"

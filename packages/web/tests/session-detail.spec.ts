@@ -1010,6 +1010,15 @@ test.describe("S2: Actions bar", () => {
     const spawned = makeSpawningSession({ id: "detail-s2-desk-spawn-next" });
     await mockSessionDetail(page, session);
     await mockSessionDetail(page, spawned);
+    await page.route("**/api/models?agent=claude", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          models: [{ id: "claude-opus", label: "Claude Opus", isDefault: false }],
+        }),
+      });
+    });
     await page.route("**/api/spawn", async (route) => {
       spawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
       await route.fulfill({
@@ -1024,6 +1033,10 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "Desk spawn agent" })).toBeVisible();
+    const modelButton = page.getByRole("button", { name: "Desk spawn model" });
+    await expect(modelButton).toBeVisible();
+    await modelButton.click();
+    await page.getByRole("menuitem", { name: /Claude Opus/ }).click();
     await expect(page.getByRole("textbox", { name: "branch name" })).toHaveValue(
       "feature/current-session",
     );
@@ -1041,6 +1054,7 @@ test.describe("S2: Actions bar", () => {
       projectId: "fixed-project",
       prompt: "Spawn helper",
       agent: "claude",
+      model: "claude-opus",
       reuseWorkspaceSessionId: session.id,
       overrides: { worktree: true },
       branch: "feature/current-session",

@@ -70,6 +70,7 @@ export type SpawnModalMode =
     }
   | {
       kind: "desk";
+      model: FieldControl<string | null>;
       branch: FieldControl<string>;
       planMode: ToggleControl;
       steps: StepsControl;
@@ -254,6 +255,16 @@ function ModeFields({
     <>
       <div className="flex gap-2">
         <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
+        <div className="min-w-40 flex-1">
+          <ModelSelect
+            agent={agent}
+            ariaLabel="Desk spawn model"
+            onChange={mode.model.onChange}
+            value={mode.model.value}
+          />
+        </div>
+      </div>
+      <div className="flex gap-2">
         <input
           aria-label="branch name"
           className={`min-w-0 flex-1 ${INPUT_CLASS}`}

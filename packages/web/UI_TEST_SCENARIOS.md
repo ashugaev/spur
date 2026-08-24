@@ -234,10 +234,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
-### D7c: Spawn/respawn model picker
+### D7c: Spawn/respawn/desk model picker
 
 - Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen
 - Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`
+- Desk agent modal includes the same model picker and sends the selected model in the spawn request
 - Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option
 - Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent
 - Typing in the search input filters the list by model id or label
@@ -300,7 +301,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If Complete or Kill hits a GitHub PR check failure, modal shows the linked pull request and offers Skip PR check & proceed (always), Wait for reset & retry (only when rate limited), and Cancel; Skip resends the same action with skipPrCheck so it proceeds without any GitHub call
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
-- Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
+- Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, model, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
 - `Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available
 - Respawn modal footer matches the spawn modal footer: slash suggestions, input history, voice hint, and primary-hotkey submit share one row
 - Desk agent modal renders a single footer row with voice hint, slash suggestions, input history, cancel, and primary-hotkey submit
