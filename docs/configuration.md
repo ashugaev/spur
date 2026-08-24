@@ -280,7 +280,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
 - `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.
-- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`. `true` emits a repo's suppressed first-poll backlog, at most 10 per repo; suppressed items are recorded as seen either way.
+- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`. `true` emits a repo's first-poll backlog instead of suppressing it, at most 10 per repo; suppressed items are recorded as seen either way. Parsed but inert for `gitlab`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll`: optional for `github`. Enables slow-window polling; omitted entirely by default, which keeps the existing poll-every-tick cadence.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.slowIntervalMs`: optional, default `5 × intervalMs`. Must be greater than `intervalMs`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.activeGraceMs`: optional, default `600000`.
