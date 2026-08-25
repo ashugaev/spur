@@ -106,6 +106,7 @@ describe("createReviewSourceModule (generic review source)", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     const call = writeReviewSourceSnapshotMock.mock.calls[0];
@@ -132,6 +133,7 @@ describe("createReviewSourceModule (generic review source)", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(collectSignalsMock).toHaveBeenCalled();
@@ -151,6 +153,7 @@ describe("createReviewSourceModule (generic review source)", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(collectSignalsMock).not.toHaveBeenCalled();
@@ -188,6 +191,7 @@ describe("createReviewSourceModule (generic review source)", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     // First observation of #99: emitInitial is false (runOnStart:false), so nothing
@@ -232,6 +236,7 @@ describe("createReviewSourceModule (generic review source)", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(emit).toHaveBeenCalledWith(
@@ -261,6 +266,7 @@ describe("createReviewSourceModule (generic review source)", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(deleteReviewSourceSnapshotMock).toHaveBeenCalledWith(
@@ -301,6 +307,7 @@ describe("createReviewSourceModule (generic review source)", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();

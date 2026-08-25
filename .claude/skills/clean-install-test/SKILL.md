@@ -38,7 +38,7 @@ Upload the committed reset script over stdin so the box always runs the version 
   cat tests/itest/reset-vm.sh | ssh ... 'cat > ~/itest-reset.sh && chmod +x ~/itest-reset.sh'
   ssh ... 'bash ~/itest-reset.sh'
 
-`tests/itest/reset-vm.sh` never removes `~/.itest-harness`, `~/.claude/.credentials.json`, or `~/.config/cursor/auth.json` — the Claude harness node and both agents' credentials survive a reset by design.
+`tests/itest/reset-vm.sh` never removes `~/.itest-harness`, `~/.claude/.credentials.json`, or `~/.config/cursor/auth.json` — the Claude harness node and both agents' credentials survive a reset by design. It does clear system-scope `spur-*.service` units and `/etc/spur`, which the source-install deploy mode leaves behind: a stale system daemon holds 4310 across a reset and the next npm run reads it as its own. Its state table ends with `port-4310`, `harness`, and `harness-creds` — `BUSY` or `MISSING` there means stop and fix the box, not run the test.
 
 3 PLANT THE AGENTS (ITEST-ONLY HARNESS) — BOTH REQUIRED, OFF THE TESTED PATH
 
@@ -59,7 +59,7 @@ Claude Code ships a native binary: `~/.itest-harness/bin/claude` resolves to `li
   curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz | tar xJ -C ~/.itest-harness --strip-components=1
   PATH=$HOME/.itest-harness/bin:$PATH npm install -g --prefix $HOME/.itest-harness @anthropic-ai/claude-code
   cat ~/.claude/.credentials.json | ssh ... 'umask 077; mkdir -p ~/.claude; cat > ~/.claude/.credentials.json'
-  ssh ... 'node -e "const f=require(\"os\").homedir()+\"/.claude/settings.json\";const fs=require(\"fs\");const d=fs.existsSync(f)?JSON.parse(fs.readFileSync(f)):{};d.skipDangerousModePermissionPrompt=true;d.skipAutoPermissionPrompt=true;fs.writeFileSync(f,JSON.stringify(d,null,2))"'
+  ssh ... 'PATH=$HOME/.itest-harness/bin:$PATH node -e "const f=require(\"os\").homedir()+\"/.claude/settings.json\";const fs=require(\"fs\");const d=fs.existsSync(f)?JSON.parse(fs.readFileSync(f)):{};d.skipDangerousModePermissionPrompt=true;d.skipAutoPermissionPrompt=true;fs.writeFileSync(f,JSON.stringify(d,null,2))"'
 
 Launch with a sanitized environment so its child shells see the node-free box under test, never the harness node. Read the prompt from a file on the box (write it first — see 4 RUN THE TEST) instead of an ssh-local `"$PROMPT"`: the whole remote command sits inside one pair of local single quotes, so a local shell variable never expands there, it ships as its own three literal characters and the agent launches with an empty prompt.
 
@@ -94,7 +94,7 @@ cursor-agent stream-json event shapes, needed to parse a transcript at all:
   {"type":"assistant","message":{"content":[{"type":"text","text":...}]}}
   {"type":"result","subtype":"success","duration_ms":...,"result":"<final message>"}
 
-A transcript under 1 KB with no tool_call event is a harness failure, not a doc failure — read the last line for a plain-text agent-side error (account quota, expired credentials, unavailable model), report that agent's run as blocked, never add it to the friction list. The other agent's run still stands on its own. One agent blocked: report the cycle as partial and name which agent produced evidence — never report a pass or invent friction to fill the gap. Same check before trusting any run: confirm the transcript's first user event carries the real prompt text, not an empty string — an empty prompt is a harness failure too.
+Smoke-test each agent's credentials before the run (`-p "Reply with exactly one word: authok"`). cursor's planted `auth.json` expires and the operator's own copy expires with it — `Authentication required. Please run 'agent login' first` from the LOCAL `cursor-agent` means the operator must re-login, no VM-side fix exists. A transcript under 1 KB with no tool_call event is a harness failure, not a doc failure — read the last line for a plain-text agent-side error (account quota, expired credentials, unavailable model), report that agent's run as blocked, never add it to the friction list. The other agent's run still stands on its own. One agent blocked: report the cycle as partial and name which agent produced evidence — never report a pass or invent friction to fill the gap. Same check before trusting any run: confirm the transcript's first user event carries the real prompt text, not an empty string — an empty prompt is a harness failure too.
 
 Walk each tool_call with its result, each error, and the final result message. Look for steps the agent got wrong, retried, or did not infer from the docs (doc gap); anything it hard-blocked on versus correctly deferring to the user TODO; whether it chose the safe path (private/Tailscale, never public expose). Identity gates — agent login and `sudo tailscale up` — land in the final TODO as a pass, not friction, when reached cleanly with the user's action stated; real friction is anything the agent should have handled from the docs but didn't.
 

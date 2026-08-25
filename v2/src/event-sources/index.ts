@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { EventBus } from "../event-bus.js";
 import { logSpurEvent } from "../event-log.js";
+import { resolveWebBaseUrl } from "../ports.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubCiSourceModule } from "./github-ci.js";
@@ -71,6 +72,21 @@ export async function startConfiguredSources(
   const logger = deps.logger ?? {};
   const startedSources: StartedSource[] = [];
 
+  // Resolved lazily (only when a source calls it — voice transcription
+  // today), never at startup: an isolated daemon's own web UI port is
+  // genuinely unknown at this point (see resolveWebBaseUrl in ports.ts).
+  // Cached after the first SUCCESSFUL resolution only, shared by every
+  // source module started below, so a repeat failure (isolated-ui still not
+  // reserved) keeps retrying on the next call instead of latching closed
+  // forever, while a resolved instance doesn't re-shell out on every message.
+  let cachedWebBaseUrl: string | null = null;
+  const resolveWebBaseUrlCached = async (): Promise<string | null> => {
+    if (cachedWebBaseUrl !== null) return cachedWebBaseUrl;
+    const resolved = await resolveWebBaseUrl(deps.config.ui.port);
+    if (resolved !== null) cachedWebBaseUrl = resolved;
+    return resolved;
+  };
+
   try {
     for (const [projectId, project] of Object.entries(deps.config.projects)) {
       if (!existsSync(project.path)) {
@@ -120,6 +136,7 @@ export async function startConfiguredSources(
           },
           signal: abortController.signal,
           logger,
+          resolveWebBaseUrl: resolveWebBaseUrlCached,
         });
 
         logSpurEvent(deps.config.dataDir, {

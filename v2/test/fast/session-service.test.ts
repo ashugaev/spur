@@ -5297,6 +5297,59 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { agent: "claude", launchCommand: "claude --dangerously-skip-permissions", waits: true },
+    { agent: "cursor", launchCommand: "agent --force --sandbox disabled", waits: true },
+    {
+      agent: "codex",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      waits: false,
+    },
+  ] as const)(
+    "$agent submit acknowledgment with the codex-only skip override",
+    async ({ agent, launchCommand, waits }) => {
+      const previousSkipOverride = process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+      process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"] = "1";
+      const binding = { scan: vi.fn() };
+      createAgentSubmitAckBindingMock.mockResolvedValue(binding);
+
+      try {
+        const service = await createDisposedSessionService();
+        const waitForAckMock = vi
+          .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValue({ found: true, lastScannedFile: "/tmp/agent.jsonl" });
+
+        await sessionServiceInternals(service).sendAgentMessage(
+          {
+            id: "api-1",
+            tmuxSession: "api-1",
+            agent,
+            launchCommand,
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+          },
+          "follow up",
+        );
+
+        if (waits) {
+          expect(createAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+            agent,
+            expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+          );
+          expect(waitForAckMock).toHaveBeenCalledWith(binding, "follow up", expect.any(Number));
+        } else {
+          expect(createAgentSubmitAckBindingMock).not.toHaveBeenCalled();
+          expect(waitForAckMock).not.toHaveBeenCalled();
+        }
+      } finally {
+        if (previousSkipOverride === undefined) {
+          delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+        } else {
+          process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"] = previousSkipOverride;
+        }
+      }
+    },
+  );
+
   it("retries claude submit with a bare Enter and throws when the ack never arrives", async () => {
     const claudeScanMock = vi
       .fn()

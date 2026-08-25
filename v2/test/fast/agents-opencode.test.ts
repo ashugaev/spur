@@ -9,11 +9,14 @@ import {
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
   diffOpenCodeSessionIds,
+  hasNewOpenCodeUserMessage,
   isSupportedOpenCodeVersion,
   OPENCODE_RESTRICT_WRITES_CONFIG,
   parseOpenCodeExport,
   parseOpenCodeSessionListOutput,
   parseOpenCodeState,
+  waitForOpenCodeLaunchMessage,
+  parseOpenCodeUserMessageIds,
   withOpenCodeLaunchIdentityLock,
 } from "../../src/agents/opencode.js";
 
@@ -133,6 +136,25 @@ describe("OpenCode adapter", () => {
     ]);
   });
 
+  it("confirms delivery by user message id, not by the text OpenCode persisted", () => {
+    // OpenCode stores a slash-command prompt expanded, so the persisted text
+    // never equals what Spur sent; only the new id proves the prompt landed.
+    const exported = {
+      messages: [
+        { info: { role: "user", id: "msg_1" }, parts: [{ type: "text", text: "EXPANDED SKILL" }] },
+        { info: { role: "assistant", id: "msg_2" }, parts: [] },
+      ],
+    };
+    const ids = parseOpenCodeUserMessageIds(exported);
+    expect([...ids]).toEqual(["msg_1"]);
+    expect(hasNewOpenCodeUserMessage({ sessionId: "ses_1", userMessageIds: new Set() }, ids)).toBe(
+      true,
+    );
+    expect(
+      hasNewOpenCodeUserMessage({ sessionId: "ses_1", userMessageIds: new Set(["msg_1"]) }, ids),
+    ).toBe(false);
+  });
+
   it("classifies structured busy, completed, and error messages", () => {
     expect(parseOpenCodeState({ messages: [{ info: { role: "user" } }] })).toEqual({
       state: "working",
@@ -228,6 +250,32 @@ describe("OpenCode adapter", () => {
       vi.unstubAllEnvs();
       await rm(binDir, { recursive: true, force: true });
       await rm(worktree, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a launch prompt OpenCode persisted under expanded slash-command text", async () => {
+    const binDir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+    const binPath = join(binDir, "opencode");
+    await writeFile(
+      binPath,
+      [
+        "#!/usr/bin/env node",
+        "const exported = {",
+        "  messages: [",
+        '    { info: { role: "user", id: "msg_1" }, parts: [{ type: "text", text: "EXPANDED SKILL BODY" }] },',
+        "  ],",
+        "};",
+        "process.stdout.write(JSON.stringify(exported));",
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(binPath, 0o755);
+    vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+    try {
+      await expect(waitForOpenCodeLaunchMessage("ses_launch", 5_000)).resolves.toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(binDir, { recursive: true, force: true });
     }
   });
 });
