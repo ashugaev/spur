@@ -89,10 +89,16 @@ if ! grep -q -- "--user restart spur-daemon.service spur-web.service" "$LOG_FILE
   exit 1
 fi
 
-# Case 5: a failing restart propagates its exit code instead of masking it.
+# Case 5: a failing restart propagates its exit code instead of masking it, and
+# records install_unhealthy — this branch has no rollback, so the host is left
+# on the newly installed version and must never be auto-retried.
 rm -f "$LOG_FILE"
+STATUS_FILE5="$LOG_DIR/deploy-switch-5.json"
+rm -f "$STATUS_FILE5"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=false bash "$HELPER" 1.2.3
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE5" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=false \
+  bash "$HELPER" 1.2.3
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then
@@ -100,6 +106,9 @@ if [ "$rc" -eq 0 ]; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE5" ||
+  fail "case 5 status must record failureKind install_unhealthy: $(cat "$STATUS_FILE5")"
+grep -q '"initiator":"auto"' "$STATUS_FILE5" || fail "case 5 status lost the initiator"
 
 # Case 6: default user scope (SYSTEMCTL unset) with a resolvable spur binary
 # converges on `spur reinit` instead of the bare systemctl restart.
@@ -476,6 +485,60 @@ grep -q '"phase":"failed"' "$STATUS_FILE16" || fail "case 16 status must be phas
 grep -q '"initiator":"auto"' "$STATUS_FILE16" || fail "case 16 status lost the initiator"
 if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
   fail "case 16 must not restart anything after a failed install"
+fi
+
+# Case 17: package validation fails AND the rollback install fails too. Same
+# branch as case 9, opposite outcome: the previous version was not restored, so
+# the kind stays install_unhealthy and must not be upgraded to rolled_back.
+PREFIX_DIR17="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR" "$PREFIX_DIR9" "$PREFIX_DIR10" "$PREFIX_DIR11" "$PREFIX_DIR17"' EXIT
+PKG_DIR17="$PREFIX_DIR17/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR17="$PKG_DIR17/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR17" "$PKG_DIR17/deploy" "$PKG_DIR17/dist" "$PKG_DIR17/web/dist-server" "$PREFIX_DIR17/bin"
+cp "$HELPER" "$PKG_SCRIPTS_DIR17/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR17/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR17/required-package-files.txt"
+: >"$PKG_DIR17/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR17/deploy/spur-web.npm.service"
+: >"$PKG_DIR17/dist/cli.js"
+: >"$PKG_DIR17/spur.yaml.reference"
+printf '{"version":"1.2.3"}' >"$PKG_DIR17/package.json"
+cat >"$PREFIX_DIR17/bin/spur" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+EOF
+chmod +x "$PREFIX_DIR17/bin/spur"
+
+# Installs the target, refuses the rollback back to 1.2.3.
+FAKE_NPM17="$(mktemp)"
+cat >"$FAKE_NPM17" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+for arg in "$@"; do
+  if [ "$arg" = "@shugaev/spur@1.2.3" ]; then
+    exit 1
+  fi
+done
+exit 0
+EOF
+chmod +x "$FAKE_NPM17"
+
+STATUS_FILE17="$PREFIX_DIR17/deploy-switch.json"
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE17" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM="$FAKE_NPM17" \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR17/install-and-restart.sh" 1.3.0
+rc17=$?
+set -e
+rm -f "$FAKE_NPM17"
+[ "$rc17" -ne 0 ] || fail "case 17 expected a non-zero exit for a failed validation"
+grep -q "rollback install rc=1" "$LOG_FILE" ||
+  fail "case 17 log missing the failed rollback install line"
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE17" ||
+  fail "case 17 status must stay install_unhealthy: $(cat "$STATUS_FILE17")"
+if grep -q "rolled_back" "$STATUS_FILE17"; then
+  fail "case 17 must not claim a rollback that failed: $(cat "$STATUS_FILE17")"
 fi
 
 echo "install-and-restart.test.sh: OK"
