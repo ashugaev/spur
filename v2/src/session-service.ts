@@ -2600,6 +2600,7 @@ export class SessionService {
         start: (version) =>
           startDeploySwitch({
             version,
+            initiator: "auto",
             statePath: deploySwitchStatePath(this.config.dataDir),
           }),
         log: (event, entry) => this.logEvent(event, entry),

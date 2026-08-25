@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -435,8 +435,97 @@ describe("POST /deploy/switch", () => {
       spawnedChildren[0]?.emit("exit", 0);
       const status = await realFetch(`http://127.0.0.1:${port}/deploy/switch/status`);
       await expect(status.json()).resolves.toEqual(
-        expect.objectContaining({ phase: "succeeded", version: "0.2.0", exitCode: 0 }),
+        expect.objectContaining({
+          phase: "succeeded",
+          version: "0.2.0",
+          exitCode: 0,
+          initiator: "manual",
+        }),
       );
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("keeps the helper's failureKind after the daemon observes the child exit", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    fetchSpy.mockResolvedValue(registryResponse(["0.2.0", "0.1.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const configPath = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    const realFetch = originalFetch.bind(globalThis);
+    try {
+      const accepted = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(accepted.status).toBe(202);
+      const statePath = join(dirname(configPath), "data", "deploy-switch.json");
+
+      // The helper's EXIT trap runs before the process exits, so it writes
+      // this record first; the daemon's exit handler must leave it alone.
+      await writeFile(
+        statePath,
+        `${JSON.stringify({
+          phase: "failed",
+          version: "0.2.0",
+          pid: process.pid,
+          startedAt: "2026-08-24T15:17:00Z",
+          finishedAt: "2026-08-24T15:17:02Z",
+          exitCode: 1,
+          initiator: "manual",
+          failureKind: "rolled_back",
+        })}\n`,
+        "utf8",
+      );
+      spawnedChildren[0]?.emit("exit", 1);
+
+      const status = await realFetch(`http://127.0.0.1:${port}/deploy/switch/status`);
+      await expect(status.json()).resolves.toEqual(
+        expect.objectContaining({
+          phase: "failed",
+          version: "0.2.0",
+          exitCode: 1,
+          initiator: "manual",
+          failureKind: "rolled_back",
+        }),
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("writes its own terminal record with no failureKind when the helper wrote nothing", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    fetchSpy.mockResolvedValue(registryResponse(["0.2.0", "0.1.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const configPath = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    const realFetch = originalFetch.bind(globalThis);
+    try {
+      const accepted = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(accepted.status).toBe(202);
+
+      spawnedChildren[0]?.emit("exit", 7);
+
+      const status = await realFetch(`http://127.0.0.1:${port}/deploy/switch/status`);
+      const body: unknown = await status.json();
+      expect(body).toEqual(
+        expect.objectContaining({
+          phase: "failed",
+          version: "0.2.0",
+          exitCode: 7,
+          initiator: "manual",
+        }),
+      );
+      expect(body).not.toHaveProperty("failureKind");
     } finally {
       await server.stop();
     }

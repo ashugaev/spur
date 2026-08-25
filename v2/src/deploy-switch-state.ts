@@ -1,6 +1,20 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+// Who asked for this switch: the auto-update tick or a human press
+// (`POST /deploy/switch`, and later the `spur update` CLI). Required on both
+// arms so a record can never be mistaken for the other initiator.
+export type DeployInitiator = "auto" | "manual";
+
+// What the failed attempt did to the host, recorded by whichever process
+// took that branch and never re-derived from `exitCode` afterwards:
+//   install_failed    — the target never installed. Retryable.
+//   rolled_back       — the target installed, failed, previous version restored.
+//   install_unhealthy — the target installed, failed, NOT restored.
+// The last two are never auto-retried: the install already changed the host,
+// so another attempt repeats a real install plus a real rollback.
+export type DeployFailureKind = "install_failed" | "rolled_back" | "install_unhealthy";
+
 export type DeploySwitchState =
   | {
       phase: "running";
@@ -8,6 +22,7 @@ export type DeploySwitchState =
       pid: number;
       processStartTime: string;
       startedAt: string;
+      initiator: DeployInitiator;
     }
   | {
       phase: "succeeded" | "failed";
@@ -16,10 +31,20 @@ export type DeploySwitchState =
       startedAt: string;
       finishedAt: string;
       exitCode: number;
+      initiator: DeployInitiator;
+      failureKind?: DeployFailureKind;
     };
 
 export function deploySwitchStatePath(dataDir: string): string {
   return join(dataDir, "deploy-switch.json");
+}
+
+function isInitiator(value: unknown): value is DeployInitiator {
+  return value === "auto" || value === "manual";
+}
+
+function isFailureKind(value: unknown): value is DeployFailureKind {
+  return value === "install_failed" || value === "rolled_back" || value === "install_unhealthy";
 }
 
 function isState(value: unknown): value is DeploySwitchState {
@@ -30,7 +55,10 @@ function isState(value: unknown): value is DeploySwitchState {
     typeof state.pid !== "number" ||
     !Number.isInteger(state.pid) ||
     state.pid <= 0 ||
-    typeof state.startedAt !== "string"
+    typeof state.startedAt !== "string" ||
+    // No back-compat shim: a record written before `initiator` existed reads
+    // back as `null`, i.e. "no prior attempt", so it suppresses nothing.
+    !isInitiator(state.initiator)
   ) {
     return false;
   }
@@ -39,7 +67,8 @@ function isState(value: unknown): value is DeploySwitchState {
     (state.phase === "succeeded" || state.phase === "failed") &&
     typeof state.finishedAt === "string" &&
     typeof state.exitCode === "number" &&
-    Number.isInteger(state.exitCode)
+    Number.isInteger(state.exitCode) &&
+    (state.failureKind === undefined || isFailureKind(state.failureKind))
   );
 }
 

@@ -35647,7 +35647,7 @@ describe("SessionService", () => {
 
       expect(startDeploySwitchMock).toHaveBeenCalledTimes(1);
       expect(startDeploySwitchMock).toHaveBeenCalledWith(
-        expect.objectContaining({ version: "999.0.0" }),
+        expect.objectContaining({ version: "999.0.0", initiator: "auto" }),
       );
       expect(service.config.autoUpdate).toBe(false);
     });

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { runAutoUpdateTick, type RunAutoUpdateTickDeps } from "../../src/auto-update.js";
 import type { DeploySwitchResult } from "../../src/deploy-switch.js";
-import type { DeploySwitchState } from "../../src/deploy-switch-state.js";
+import type { DeployFailureKind, DeploySwitchState } from "../../src/deploy-switch-state.js";
 
 function baseDeps(overrides: Partial<RunAutoUpdateTickDeps> = {}): RunAutoUpdateTickDeps {
   return {
@@ -30,10 +30,15 @@ function runningState(version: string): DeploySwitchState {
     pid: 1234,
     processStartTime: "100",
     startedAt: "2026-01-01T00:00:00Z",
+    initiator: "auto",
   };
 }
 
-function terminalState(phase: "succeeded" | "failed", version: string): DeploySwitchState {
+function terminalState(
+  phase: "succeeded" | "failed",
+  version: string,
+  failureKind?: DeployFailureKind,
+): DeploySwitchState {
   return {
     phase,
     version,
@@ -41,6 +46,8 @@ function terminalState(phase: "succeeded" | "failed", version: string): DeploySw
     startedAt: "2026-01-01T00:00:00Z",
     finishedAt: "2026-01-01T00:05:00Z",
     exitCode: phase === "succeeded" ? 0 : 1,
+    initiator: "auto",
+    ...(failureKind ? { failureKind } : {}),
   };
 }
 

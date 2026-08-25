@@ -782,6 +782,7 @@ export async function startServer(
         const requestedVersion = typeof body.version === "string" ? body.version : "";
         const result = await startDeploySwitch({
           version: requestedVersion,
+          initiator: "manual",
           statePath: switchStatePath,
         });
         switch (result.status) {
