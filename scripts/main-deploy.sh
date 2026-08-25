@@ -213,8 +213,8 @@ web_chunks_consistent() {
 }
 
 # Post-restart verification with self-healing. Restart can leave a unit dead
-# (crash on boot) or stopped (spur-web Requires= propagates the daemon's stop
-# but not its start). Heal by starting, then hard-fail loudly if still broken.
+# (crash on boot) or stopped (this script's own stale-chunk stop/start, or an
+# operator's stop). Heal by starting, then hard-fail loudly if still broken.
 #
 # Worst-case wall time: the pre-check gate's web_is_serving call (30s) plus the
 # 10-attempt heal loop below — attempt 1's stop+sleep(2)+start (2s), one full
@@ -233,8 +233,8 @@ verify_and_heal() {
 
   if ! systemctl_cmd is-active --quiet spur-web.service; then
     echo "main:deploy spur-web inactive after restart — starting" >&2
-    # start, NOT restart: Requires= propagates a stop, not a start, so the unit
-    # can be cleanly inactive and only needs to be brought up.
+    # start, NOT restart: the unit can be cleanly inactive (stopped, never
+    # started back) and only needs to be brought up.
     systemctl_cmd start spur-web.service
   fi
 

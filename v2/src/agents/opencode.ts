@@ -331,10 +331,6 @@ function messageInfo(message: Record<string, unknown>): Record<string, unknown> 
   return isRecord(info) ? info : null;
 }
 
-function isUserMessageWithText(message: Record<string, unknown>, text: string): boolean {
-  return messageInfo(message)?.["role"] === "user" && textFromParts(message["parts"]) === text;
-}
-
 export function parseOpenCodeExport(value: unknown): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
   for (const message of openCodeMessages(value)) {
@@ -401,7 +397,27 @@ async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
 
 export interface OpenCodeSubmitBaseline {
   sessionId: string;
-  messageIds: Set<string>;
+  userMessageIds: Set<string>;
+}
+
+// OpenCode rewrites what it persists: a prompt that opens with a slash command
+// is stored expanded, so the delivered text never equals the text Spur sent.
+// Delivery is confirmed by a new user message id, never by matching text.
+export function parseOpenCodeUserMessageIds(value: unknown): Set<string> {
+  const ids = new Set<string>();
+  for (const message of openCodeMessages(value)) {
+    const info = messageInfo(message);
+    const id = info?.["id"];
+    if (info?.["role"] === "user" && typeof id === "string") ids.add(id);
+  }
+  return ids;
+}
+
+export function hasNewOpenCodeUserMessage(
+  baseline: OpenCodeSubmitBaseline,
+  current: Set<string>,
+): boolean {
+  return [...current].some((id) => !baseline.userMessageIds.has(id));
 }
 
 export async function captureOpenCodeSubmitBaseline(
@@ -409,51 +425,38 @@ export async function captureOpenCodeSubmitBaseline(
 ): Promise<OpenCodeSubmitBaseline | null> {
   if (!sessionId) return null;
   try {
-    const messageIds = new Set<string>();
-    for (const message of openCodeMessages(await exportOpenCodeSession(sessionId))) {
-      const id = messageInfo(message)?.["id"];
-      if (typeof id === "string") messageIds.add(id);
-    }
-    return { sessionId, messageIds };
+    return {
+      sessionId,
+      userMessageIds: parseOpenCodeUserMessageIds(await exportOpenCodeSession(sessionId)),
+    };
   } catch {
     return null;
   }
 }
 
-export async function scanOpenCodeExportForMessage(
+export async function scanOpenCodeForNewUserMessage(
   baseline: OpenCodeSubmitBaseline,
-  text: string,
 ): Promise<boolean> {
   try {
-    const candidates: Record<string, unknown>[] = [];
-    for (const message of openCodeMessages(await exportOpenCodeSession(baseline.sessionId))) {
-      const record = messageInfo(message);
-      const id = record?.["id"];
-      if (record?.["role"] === "user" && typeof id === "string" && !baseline.messageIds.has(id)) {
-        candidates.push(message);
-      }
-    }
-    return candidates.length === 1 && textFromParts(candidates[0]?.["parts"]) === text;
+    const current = parseOpenCodeUserMessageIds(await exportOpenCodeSession(baseline.sessionId));
+    return hasNewOpenCodeUserMessage(baseline, current);
   } catch {
     return false;
   }
 }
 
+// One `opencode export` costs 2-4s on a loaded host, so the launch check needs
+// the same budget as identity binding rather than a few polls' worth.
+const OPENCODE_LAUNCH_MESSAGE_WAIT_MS = 60_000;
+
 export async function waitForOpenCodeLaunchMessage(
   sessionId: string,
-  text: string,
-  timeoutMs = 10_000,
+  timeoutMs = OPENCODE_LAUNCH_MESSAGE_WAIT_MS,
 ): Promise<boolean> {
+  const baseline: OpenCodeSubmitBaseline = { sessionId, userMessageIds: new Set() };
   const deadline = Date.now() + timeoutMs;
   do {
-    try {
-      const messages = openCodeMessages(await exportOpenCodeSession(sessionId));
-      if (messages.some((message) => isUserMessageWithText(message, text))) {
-        return true;
-      }
-    } catch {
-      // The export may lag session creation briefly.
-    }
+    if (await scanOpenCodeForNewUserMessage(baseline)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   } while (Date.now() <= deadline);
   return false;

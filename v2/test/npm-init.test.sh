@@ -138,6 +138,15 @@ grep -qi "spur-direct-terminal\|14801" "$UNIT_DIR"/*.service &&
 grep -q '^Environment=WEB_HOST=127\.0\.0\.1$' "$UNIT_DIR/spur-web.service" ||
   fail "--no-tailscale must leave WEB_HOST on loopback only"
 
+# Requires= propagates the daemon's stop to spur-web with no matching start
+# job, so `systemctl stop spur-daemon` left the web UI dead until an operator
+# started it by hand. Ordering (After=) and a Wants= pull are all this unit
+# needs — it never talks to the daemon at startup.
+grep -q '^Requires=' "$UNIT_DIR/spur-web.service" &&
+  fail "spur-web.service must not Require spur-daemon.service (a daemon stop would strand it)"
+grep -q '^Wants=spur-daemon.service$' "$UNIT_DIR/spur-web.service" ||
+  fail "spur-web.service must Want spur-daemon.service"
+
 # The installed web unit must not gate boot on building node-pty (the
 # ExecStartPre that compiled it from source on first start took the whole
 # unit down on hosts without a C/C++ toolchain) — it must still run

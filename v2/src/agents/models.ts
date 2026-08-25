@@ -190,10 +190,14 @@ export function parseOpenCodeModelsOutput(stdout: string): AgentModel[] {
     .map((id) => ({ id, label: id }));
 }
 
+// `opencode models` takes 3-4s cold, so a 5s budget refuses valid models on a
+// loaded host and blocks the spawn. Match the other OpenCode CLI reads.
+const OPENCODE_MODELS_TIMEOUT_MS = 20_000;
+
 async function discoverOpenCodeModels(): Promise<AgentModel[]> {
   const { stdout } = await execFileAsync(opencodeCommand(), ["models"], {
     encoding: "utf8",
-    timeout: 5_000,
+    timeout: OPENCODE_MODELS_TIMEOUT_MS,
   });
   return parseOpenCodeModelsOutput(stdout);
 }

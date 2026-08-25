@@ -1176,7 +1176,7 @@ test.describe("S2: Actions bar", () => {
     });
   });
 
-  test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
+  test("Desk agent modal sends fixed session context with model, branch, plan, and steps", async ({
     page,
   }) => {
     let spawnBody: Record<string, unknown> | null = null;
@@ -1203,6 +1203,10 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "Desk spawn agent" })).toBeVisible();
+    const modelButton = page.getByRole("button", { name: "Desk spawn model" });
+    await expect(modelButton).toBeVisible();
+    await modelButton.click();
+    await page.getByRole("menuitem", { name: /^Opus(?:\(catalog default\))? opus$/ }).click();
     await expect(page.getByRole("textbox", { name: "branch name" })).toHaveValue(
       "feature/current-session",
     );
@@ -1220,6 +1224,7 @@ test.describe("S2: Actions bar", () => {
       projectId: "fixed-project",
       prompt: "Spawn helper",
       agent: "claude",
+      model: "opus",
       reuseWorkspaceSessionId: session.id,
       overrides: { worktree: true },
       branch: "feature/current-session",

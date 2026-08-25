@@ -59,6 +59,13 @@ const respawnMode: SpawnModalMode = {
 
 const deskMode: SpawnModalMode = {
   kind: "desk",
+  model: {
+    value: null,
+    onChange: vi.fn(),
+    spawnDefaults: { model: null, worktree: null, loading: false, error: null },
+    carry: null,
+    onResolvedChange: vi.fn(),
+  },
   branch: { value: "", onChange: vi.fn() },
   planMode: { value: false, onChange: vi.fn() },
   steps: { items: [], onUpdate: vi.fn(), onAdd: vi.fn(), onRemove: vi.fn() },
@@ -188,12 +195,13 @@ describe("SpawnModal", () => {
     expect(screen.queryByRole("button", { name: "+ Step" })).not.toBeInTheDocument();
   });
 
-  it("desk mode renders agent + branch + plan + steps but no model or project", () => {
+  it("desk mode renders agent + model + branch + plan + steps but no project", () => {
     renderModal(deskMode);
     expect(screen.getByLabelText("Agent")).toBeInTheDocument();
     expect(screen.getByLabelText("branch name")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+ Step" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Spawn project")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Desk spawn model")).toBeInTheDocument();
     expect(screen.queryByLabelText("Spawn model")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Respawn model")).not.toBeInTheDocument();
   });

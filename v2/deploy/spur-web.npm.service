@@ -10,7 +10,13 @@
 [Unit]
 Description=Spur web UI (npm install)
 After=network.target spur-daemon.service
-Requires=spur-daemon.service
+# Wants, never Requires: Requires propagates the daemon's stop to this unit, and
+# an explicit `systemctl stop spur-daemon` (unlike a restart or a crash
+# auto-restart) has no matching start job for the dependent — the web UI stays
+# dead until someone starts it by hand. This server never talks to the daemon at
+# startup, so it keeps serving while the daemon is down and the UI shows its
+# reconnect state instead.
+Wants=spur-daemon.service
 
 [Service]
 Type=simple

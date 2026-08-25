@@ -8266,10 +8266,7 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(
-              runningRecord.agentSessionId,
-              spawnInitialMessage,
-            )))
+            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -9267,10 +9264,7 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(
-              runningRecord.agentSessionId,
-              spawnInitialMessage,
-            )))
+            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -10242,7 +10236,8 @@ export class SessionService {
   ): Promise<AgentSendOutcome> {
     const freshLaunch = options?.freshLaunch === true;
     const shouldWaitForSubmitAck =
-      agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+      agentWaitsForSubmitAck(session.agent) &&
+      !(session.agent === "codex" && process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"]);
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
     const binding: SubmitAckBinding | null = shouldWaitForSubmitAck
       ? await createAgentSubmitAckBinding(session.agent, {
