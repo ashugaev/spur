@@ -348,7 +348,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         logger: {
           warn: () => {},
         },
-        webBaseUrl: null,
+        webBaseUrl: "http://127.0.0.1:5555",
       });
 
       try {
@@ -496,7 +496,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           logger: {
             warn: () => {},
           },
-          webBaseUrl: null,
+          webBaseUrl: "http://127.0.0.1:5555",
         });
 
         try {
@@ -633,7 +633,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         },
         signal: abortController.signal,
         logger: { warn: () => {} },
-        webBaseUrl: null,
+        webBaseUrl: "http://127.0.0.1:5555",
       });
 
       try {
@@ -779,7 +779,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         logger: {
           warn: () => {},
         },
-        webBaseUrl: null,
+        webBaseUrl: "http://127.0.0.1:5555",
       });
 
       try {
@@ -899,7 +899,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         logger: {
           warn: () => {},
         },
-        webBaseUrl: null,
+        webBaseUrl: "http://127.0.0.1:5555",
       });
 
       try {
@@ -1080,7 +1080,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           logger: {
             warn: () => {},
           },
-          webBaseUrl: null,
+          webBaseUrl: "http://127.0.0.1:5555",
         });
 
         try {
@@ -1227,7 +1227,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           logger: {
             warn: () => {},
           },
-          webBaseUrl: null,
+          webBaseUrl: "http://127.0.0.1:5555",
         });
 
         try {

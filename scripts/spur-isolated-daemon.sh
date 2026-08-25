@@ -10,6 +10,13 @@ source "$SCRIPT_DIR/spur-sidecar-common.sh"
 PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
 AGENT_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_DAEMON" "$PORT_START" "$PORT_END")
+# Reserved with the same helper spur-isolated-ui.sh uses for its own real bind
+# port (same env name and range), so the config this daemon boots from
+# already carries this instance's own web UI port instead of falling back to
+# config.ts's DEFAULT_UI_PORT (5555, the host's production spur-web).
+UI_PORT_START=${SPUR_SIDECAR_UI_PORT_START:-5600}
+UI_PORT_END=${SPUR_SIDECAR_UI_PORT_END:-5699}
+UI_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_UI" "$UI_PORT_START" "$UI_PORT_END")
 PROJECT_CONFIG_PATH="${SPUR_PROJECT_CONFIG_PATH:-$(realpath "$SCRIPT_DIR/../spur.yaml")}"
 USER_CONFIG_PATH="${SPUR_USER_CONFIG_PATH:-${SPUR_CONFIG:-$HOME/.spur/config.yaml}}"
 CURRENT_WORKTREE="$REPO_ROOT"
@@ -86,12 +93,13 @@ dataDir: "$CONFIG_DIR/data"
 worktreeDir: "$CONFIG_DIR/worktrees"
 tmux:
   socketName: "spur-$AGENT_PORT"
+ui:
+  port: $UI_PORT
 YAML
 
 cat > "$TOOL_DIR/spur" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
-export SPUR_WEB_URL=""
 mkdir -p "$CONFIG_DIR/data"
 registry_tmp="$CONFIG_DIR/data/config-registry.json.tmp.\$\$"
 cat > "\$registry_tmp" <<JSON
@@ -130,5 +138,4 @@ mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
 "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
-export SPUR_WEB_URL=""
 exec "$TOOL_DIR/spur" daemon start

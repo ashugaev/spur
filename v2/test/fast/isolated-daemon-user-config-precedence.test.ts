@@ -53,37 +53,57 @@ describe("spur-isolated-daemon USER_CONFIG_PATH precedence", () => {
 
 // An isolated daemon must never reach the host's production web UI on the
 // default port 5555 (spur.yaml can carry a live `telegram` source with a
-// real token). resolveWebBaseUrl() in v2/src/ports.ts treats
-// SPUR_WEB_URL="" as "voice transcription disabled for this instance", so
-// both places this script can launch a daemon from must export it empty:
-// the wrapper heredoc written to $TOOL_DIR/spur (client.ts's spawnDaemon
-// execs that wrapper with no explicit `env`, inheriting whatever the
-// invoking CLI process saw) and the launcher's own top-level
-// `exec "$TOOL_DIR/spur" daemon start`.
-describe("spur-isolated-daemon SPUR_WEB_URL guard", () => {
+// real token). config.ts falls back to DEFAULT_UI_PORT (5555, production
+// spur-web) whenever a config's `ui:` block is absent, so this launcher must
+// resolve and write its own instance's real `ui.port` into the config it
+// generates — via the same resolve_sidecar_port helper (same env name and
+// port range) spur-isolated-ui.sh uses for its own real bind port — before
+// ever exec'ing `spur daemon start`. There is no `SPUR_WEB_URL` (or any
+// other env var) guard any more: the config value itself is what
+// v2/src/event-sources/index.ts reads to build the webBaseUrl a Telegram
+// source posts voice audio to.
+describe("spur-isolated-daemon ui.port guard", () => {
   function scriptLines(): string[] {
     return readFileSync(SCRIPT_PATH, "utf8").split("\n");
   }
 
-  it('exports SPUR_WEB_URL="" inside the $TOOL_DIR/spur wrapper heredoc', () => {
+  function configHeredocBody(): string[] {
     const lines = scriptLines();
     const heredocStart = lines.findIndex((line) =>
-      line.includes('cat > "$TOOL_DIR/spur" <<WRAPPER'),
+      line.includes('cat > "$CONFIG_DIR/config.yaml" <<YAML'),
     );
-    const heredocEnd = lines.findIndex((line, index) => index > heredocStart && line === "WRAPPER");
+    const heredocEnd = lines.findIndex((line, index) => index > heredocStart && line === "YAML");
     if (heredocStart === -1 || heredocEnd === -1) {
-      throw new Error("$TOOL_DIR/spur wrapper heredoc not found in spur-isolated-daemon.sh");
+      throw new Error("$CONFIG_DIR/config.yaml heredoc not found in spur-isolated-daemon.sh");
     }
-    const heredocBody = lines.slice(heredocStart + 1, heredocEnd);
-    expect(heredocBody).toContain('export SPUR_WEB_URL=""');
+    return lines.slice(heredocStart + 1, heredocEnd);
+  }
+
+  it("resolves UI_PORT with the same helper and env/range convention as spur-isolated-ui.sh's UI_PORT", () => {
+    const source = readFileSync(SCRIPT_PATH, "utf8");
+    expect(source).toContain(
+      'UI_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_UI" "$UI_PORT_START" "$UI_PORT_END")',
+    );
   });
 
-  it('exports SPUR_WEB_URL="" before the launcher\'s own daemon exec', () => {
+  it("writes the resolved UI_PORT as ui.port into the generated config.yaml", () => {
+    const body = configHeredocBody();
+    expect(body).toContain("ui:");
+    expect(body).toContain("  port: $UI_PORT");
+  });
+
+  it("writes config.yaml before exec'ing the daemon", () => {
     const lines = scriptLines();
+    const heredocStart = lines.findIndex((line) =>
+      line.includes('cat > "$CONFIG_DIR/config.yaml" <<YAML'),
+    );
     const execIndex = lines.findIndex((line) => line === 'exec "$TOOL_DIR/spur" daemon start');
-    if (execIndex === -1) {
-      throw new Error('exec "$TOOL_DIR/spur" daemon start not found in spur-isolated-daemon.sh');
-    }
-    expect(lines[execIndex - 1]).toBe('export SPUR_WEB_URL=""');
+    expect(heredocStart).toBeGreaterThanOrEqual(0);
+    expect(execIndex).toBeGreaterThan(heredocStart);
+  });
+
+  it("never references SPUR_WEB_URL", () => {
+    const source = readFileSync(SCRIPT_PATH, "utf8");
+    expect(source).not.toContain("SPUR_WEB_URL");
   });
 });

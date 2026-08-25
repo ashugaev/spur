@@ -65,7 +65,7 @@ A voice note in a [Telegram source](configuration.md#events) chat becomes text. 
 
 The daemon posts the voice note to the web UI transcribe route. Requires `spur-web` up on the resolved [`ui.port`](configuration.md#field-reference). `voice.provider: openai_realtime` always fails that route with 502. Failure replies in the chat; nothing reaches the agent.
 
-Voice notes only: no `message:audio` files, video notes, or captions. Override the web UI base URL, or disable this per instance, with [`SPUR_WEB_URL`](configuration.md#field-reference).
+Voice notes only: no `message:audio` files, video notes, or captions.
 
 ## HTTPS
 

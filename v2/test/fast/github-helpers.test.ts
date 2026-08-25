@@ -1899,7 +1899,7 @@ describe("github source rearm", () => {
       },
       signal: controller.signal,
       logger: {},
-      webBaseUrl: null,
+      webBaseUrl: "http://127.0.0.1:5555",
     });
 
     try {
@@ -1952,7 +1952,7 @@ describe("github source rearm", () => {
       },
       signal: controller.signal,
       logger: {},
-      webBaseUrl: null,
+      webBaseUrl: "http://127.0.0.1:5555",
     });
 
     try {
@@ -2009,7 +2009,7 @@ describe("github source rearm", () => {
       },
       signal: controller.signal,
       logger: {},
-      webBaseUrl: null,
+      webBaseUrl: "http://127.0.0.1:5555",
     });
 
     try {
@@ -2043,7 +2043,7 @@ describe("github source rearm", () => {
       emit() {},
       signal: controller.signal,
       logger: {},
-      webBaseUrl: null,
+      webBaseUrl: "http://127.0.0.1:5555",
     });
 
     try {
