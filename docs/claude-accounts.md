@@ -14,7 +14,7 @@ The default `~/.claude` login auto-adopts as account `default` when its `.creden
 
 ## Per-session switch
 
-Claude only. Atomic credential swap in `<dataDir>/session-tools/<id>/claude-home/`, no kill or relaunch — the live process rereads credentials on its next request.
+Claude only. Credential swap in place, no kill or relaunch.
 
 Ready = credentials present + onboarding complete. A session predating the session-home layout relaunches once, as migration. A switch mid-work forces through regardless. `projects/` in the session home symlinks to `~/.claude/projects`, so `--resume <uuid>` keeps history across a rotation.
 

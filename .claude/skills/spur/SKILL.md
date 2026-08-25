@@ -16,8 +16,7 @@ WHAT SPUR IS
 INTERFACES
 
   CLI: `spur --help`, then `spur <command> --help`.
-  `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them.
-  Call each by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path — a login shell rebuilds `PATH` and drops the dir.
+  `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them. Call each as `"$SPUR_SESSION_TOOL_DIR/<tool>"`, never bare.
   Session variables: `env | grep '^SPUR_'`.
 
 SAFETY
@@ -33,10 +32,12 @@ SAFETY
 
 DOCS
 
-  Commands, daemon HTTP routes, session tools and variables: https://raw.githubusercontent.com/ashugaev/spur/main/docs/commands.md
-  Config fields: https://raw.githubusercontent.com/ashugaev/spur/main/docs/configuration.md
+  Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
+  Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
+  Commands, daemon HTTP routes, session tools and variables: docs/commands.md
+  Config fields: docs/configuration.md
 
 EDITING THIS FILE
 
-  Reader has no checkout. Each pointer above is a raw URL, never a relative path.
-  Context only. Mechanism, repo internals, and any command, config field, or workflow another doc owns stay out — link the doc.
+  Reader has no checkout; resolve every doc path through the rule above, never a relative link.
+  Context only, never mechanism, repo internals, or a command/config field/workflow another doc owns.
