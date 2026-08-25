@@ -39,6 +39,7 @@ async function start(emit: ReturnType<typeof vi.fn>, overrides: Partial<SentrySo
     emit,
     signal: new AbortController().signal,
     logger: { info: vi.fn(), warn: vi.fn() },
+    resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
   });
 }
 
