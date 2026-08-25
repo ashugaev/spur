@@ -6,8 +6,6 @@ hostInstall: true
 
 SPUR
 
-  SAFETY and above: Spur anywhere. Below: the Spur repo.
-
 WHAT SPUR IS
 
   CLI plus a local HTTP daemon, default `127.0.0.1:4310`, plus a web UI.
@@ -18,8 +16,9 @@ WHAT SPUR IS
 INTERFACES
 
   CLI: `spur --help`, then `spur <command> --help`.
-  `$SPUR_SESSION_TOOL_DIR` holds `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo`, plus `spur-branch` and a push-blocking `git` wrapper when `branchNaming.regex` is set.
-  Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path. Also set: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
+  `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them.
+  Call each by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path — a login shell rebuilds `PATH` and drops the dir.
+  Session variables: `env | grep '^SPUR_'`.
 
 SAFETY
 
@@ -34,18 +33,10 @@ SAFETY
 
 DOCS
 
-  Full command reference, incl. daemon HTTP routes: `docs/commands.md`.
-  Config field reference: `docs/configuration.md`.
+  Commands, daemon HTTP routes, session tools and variables: https://raw.githubusercontent.com/ashugaev/spur/main/docs/commands.md
+  Config fields: https://raw.githubusercontent.com/ashugaev/spur/main/docs/configuration.md
 
-SPUR REPO (https://github.com/ashugaev/spur)
+EDITING THIS FILE
 
-  Install from source       `docs/install-from-source.md`
-  HTTPS on a tailnet host   `docs/https-tailscale.md` (required for voice)
-  Claude account rotation   `references/claude-auth-rotation.md`
-
-  `pnpm --dir v2 test` — fast, run on each code change.
-  `pnpm --dir v2 test:runtime` — daemon, tmux, worktree.
-  `pnpm --dir v2 test:smoke` — real agent launch.
-  `pnpm --dir v2 build` — after any code change.
-
-  Test against `isolated-daemon`/`isolated-ui`, never the production daemon; launcher `scripts/spur-isolated-daemon.sh`.
+  Reader has no checkout. Each pointer above is a raw URL, never a relative path.
+  Context only. Mechanism, repo internals, and any command, config field, or workflow another doc owns stay out — link the doc.

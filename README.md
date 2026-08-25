@@ -28,6 +28,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior
 - [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output
+- [docs/claude-accounts.md](docs/claude-accounts.md) — claude account rotation and per-session credential switch
 - [docs/voice.md](docs/voice.md) — voice input setup
 - [docs/https-tailscale.md](docs/https-tailscale.md) — HTTPS on the tailnet hostname (required for voice)
 - [docs/install-from-npm.md](docs/install-from-npm.md) — install from npm (official)
