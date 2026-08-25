@@ -9,10 +9,24 @@ import {
   writeDeploySwitchState,
 } from "../../src/deploy-switch-state.js";
 
+async function newStatePath(): Promise<string> {
+  return join(await mkdtemp(join(tmpdir(), "spur-deploy-state-")), "deploy-switch.json");
+}
+
+// One terminal record, reused by the round-trip and the two rejection cases so
+// only the field under test differs between them.
+const TERMINAL = {
+  phase: "failed",
+  version: "0.67.2",
+  pid: 4242,
+  startedAt: "2026-08-24T15:17:00Z",
+  finishedAt: "2026-08-24T15:17:02Z",
+  exitCode: 1,
+} as const;
+
 describe("deploy switch state", () => {
   it("keeps a running record only while the exact process identity is alive", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-deploy-state-"));
-    const path = join(root, "deploy-switch.json");
+    const path = await newStatePath();
     const processStartTime = readProcessStartTime(process.pid);
     if (!processStartTime) throw new Error("current process has no Linux start time");
     writeDeploySwitchState(path, {
@@ -40,67 +54,24 @@ describe("deploy switch state", () => {
   });
 
   it("round-trips the initiator and the failure kind on a terminal record", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-deploy-state-"));
-    const path = join(root, "deploy-switch.json");
-    writeDeploySwitchState(path, {
-      phase: "failed",
-      version: "0.67.2",
-      pid: 4242,
-      startedAt: "2026-08-24T15:17:00Z",
-      finishedAt: "2026-08-24T15:17:02Z",
-      exitCode: 1,
-      initiator: "auto",
-      failureKind: "rolled_back",
-    });
+    const path = await newStatePath();
+    const record = { ...TERMINAL, initiator: "auto", failureKind: "rolled_back" } as const;
+    writeDeploySwitchState(path, record);
 
-    expect(readDeploySwitchState(path)).toEqual({
-      phase: "failed",
-      version: "0.67.2",
-      pid: 4242,
-      startedAt: "2026-08-24T15:17:00Z",
-      finishedAt: "2026-08-24T15:17:02Z",
-      exitCode: 1,
-      initiator: "auto",
-      failureKind: "rolled_back",
-    });
+    expect(readDeploySwitchState(path)).toEqual(record);
   });
 
   it("reads a legacy record without an initiator as no record at all", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-deploy-state-"));
-    const path = join(root, "deploy-switch.json");
-    await writeFile(
-      path,
-      `${JSON.stringify({
-        phase: "failed",
-        version: "0.67.2",
-        pid: 4242,
-        startedAt: "2026-08-24T15:17:00Z",
-        finishedAt: "2026-08-24T15:17:02Z",
-        exitCode: 1,
-      })}\n`,
-      "utf8",
-    );
+    const path = await newStatePath();
+    await writeFile(path, `${JSON.stringify(TERMINAL)}\n`, "utf8");
 
     expect(readDeploySwitchState(path)).toBeNull();
   });
 
   it("rejects a record whose failureKind is not one of the three kinds", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-deploy-state-"));
-    const path = join(root, "deploy-switch.json");
-    await writeFile(
-      path,
-      `${JSON.stringify({
-        phase: "failed",
-        version: "0.67.2",
-        pid: 4242,
-        startedAt: "2026-08-24T15:17:00Z",
-        finishedAt: "2026-08-24T15:17:02Z",
-        exitCode: 1,
-        initiator: "auto",
-        failureKind: "something_else",
-      })}\n`,
-      "utf8",
-    );
+    const path = await newStatePath();
+    const record = { ...TERMINAL, initiator: "auto", failureKind: "something_else" };
+    await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
 
     expect(readDeploySwitchState(path)).toBeNull();
   });

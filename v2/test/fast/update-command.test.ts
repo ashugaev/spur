@@ -56,16 +56,13 @@ import {
   runUpdate,
   type UpdateDeps,
 } from "../../src/update.js";
+import type { SpurLogEntry } from "../../src/event-log.js";
 import type { ProbeResult, ProbeTarget } from "../../src/update-health.js";
 import type { RollbackState } from "../../src/update-state.js";
 
 const EMPTY_STATE: RollbackState = { version: 1, lastKnownGood: null, inProgress: null };
 
-interface LoggedEvent {
-  event: string;
-  level: string;
-  details?: Record<string, unknown>;
-}
+type LoggedEvent = Omit<SpurLogEntry, "timestamp">;
 
 interface RunFake {
   deps: UpdateDeps;
@@ -120,11 +117,7 @@ function buildRunFake(opts: {
     unitActive: () => false,
     log: () => undefined,
     logEvent: (event, entry) => {
-      loggedEvents.push({
-        event,
-        level: entry.level,
-        ...(entry.details ? { details: entry.details } : {}),
-      });
+      loggedEvents.push({ event, ...entry });
       events.push(`event:${event}`);
     },
     acquireUpdateLock: () => {

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resetEventLogCollapse, type SpurLogEntry } from "../../src/event-log.js";
+import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
 import { findFreePort } from "../helpers/common.js";
 
@@ -94,12 +94,8 @@ async function setupConfig(port: number, autoUpdate?: boolean): Promise<string> 
   return configPath;
 }
 
-async function readLoggedEvents(configPath: string): Promise<SpurLogEntry[]> {
-  const raw = await readFile(join(dirname(configPath), "data", "events.jsonl"), "utf8");
-  return raw
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as SpurLogEntry);
+function dataDir(configPath: string): string {
+  return join(dirname(configPath), "data");
 }
 
 function registryResponse(versions: ReadonlyArray<string>): Response {
@@ -472,7 +468,7 @@ describe("POST /deploy/switch", () => {
       });
       expect(accepted.status).toBe(202);
 
-      const events = await readLoggedEvents(configPath);
+      const events = readEventLog(dataDir(configPath));
       expect(events).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -504,7 +500,7 @@ describe("POST /deploy/switch", () => {
       });
       expect(rejected.status).toBe(400);
 
-      const events = await readLoggedEvents(configPath);
+      const events = readEventLog(dataDir(configPath));
       expect(events).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -534,7 +530,7 @@ describe("POST /deploy/switch", () => {
         body: JSON.stringify({ version: "0.2.0" }),
       });
       expect(accepted.status).toBe(202);
-      const statePath = join(dirname(configPath), "data", "deploy-switch.json");
+      const statePath = join(dataDir(configPath), "deploy-switch.json");
 
       // The helper's EXIT trap runs before the process exits, so it writes
       // this record first; the daemon's exit handler must leave it alone.

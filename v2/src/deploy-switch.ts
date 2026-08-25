@@ -78,15 +78,16 @@ export async function startDeploySwitch(args: {
   if (child.pid === undefined) {
     return { status: "spawn_failed", message: "failed to start deploy switch" };
   }
+  const pid = child.pid;
   const startedAt = new Date().toISOString();
-  const processStartTime = readProcessStartTime(child.pid);
+  const processStartTime = readProcessStartTime(pid);
   if (!processStartTime) {
     return { status: "spawn_failed", message: "failed to identify deploy switch process" };
   }
   writeDeploySwitchState(statePath, {
     phase: "running",
     version,
-    pid: child.pid,
+    pid,
     processStartTime,
     initiator,
     startedAt,
@@ -99,7 +100,6 @@ export async function startDeploySwitch(args: {
   // exits, so this handler normally observes that record; overwriting it
   // would erase the kind and make a rolled-back version look retryable.
   const finishSwitch = (exitCode: number): void => {
-    const pid = child.pid ?? process.pid;
     const current = readDeploySwitchState(statePath);
     if (
       current &&

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runUpdateMonitor, type UpdateDeps } from "../../src/update.js";
+import type { SpurLogEntry } from "../../src/event-log.js";
 import type { DecisionConfig } from "../../src/update-decision.js";
 import type { ProbeResult, ProbeTarget, UnitState } from "../../src/update-health.js";
 import type { RollbackState } from "../../src/update-state.js";
@@ -12,11 +13,7 @@ const FAST_CFG: DecisionConfig = {
   refusedN: 3,
 };
 
-interface LoggedEvent {
-  event: string;
-  level: string;
-  details?: Record<string, unknown>;
-}
+type LoggedEvent = Omit<SpurLogEntry, "timestamp">;
 
 interface FakeControls {
   deps: UpdateDeps;
@@ -75,11 +72,7 @@ function makeFake(overrides: {
     unitActive: () => false,
     log: () => undefined,
     logEvent: (event, entry) => {
-      loggedEvents.push({
-        event,
-        level: entry.level,
-        ...(entry.details ? { details: entry.details } : {}),
-      });
+      loggedEvents.push({ event, ...entry });
     },
     acquireUpdateLock: () => () => undefined,
   };

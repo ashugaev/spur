@@ -389,7 +389,8 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
       deps.logEvent("cli.update.rolled_back", {
         level: "warn",
         details: {
-          ...(attempted ? { from: attempted.fromVersion, to: attempted.toVersion } : {}),
+          from: attempted?.fromVersion,
+          to: attempted?.toVersion,
           reason,
           failureKind,
         },

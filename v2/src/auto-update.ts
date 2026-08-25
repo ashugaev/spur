@@ -79,7 +79,7 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
         details: {
           version: candidate.tag,
           phase: state.phase,
-          ...(state.failureKind ? { failureKind: state.failureKind } : {}),
+          failureKind: state.failureKind,
           initiator: state.initiator,
           reason: state.phase === "succeeded" ? "succeeded_record" : "no_retry_kind",
         },
@@ -90,7 +90,7 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
       level: "info",
       details: {
         version: candidate.tag,
-        ...(state.failureKind ? { failureKind: state.failureKind } : {}),
+        failureKind: state.failureKind,
         previousExitCode: state.exitCode,
       },
     });
