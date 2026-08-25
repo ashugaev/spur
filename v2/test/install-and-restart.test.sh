@@ -273,11 +273,15 @@ wait "$holder_pid"
 # Case 15: detached deploy runs replace the durable running record with terminal status.
 STATUS_FILE="$PREFIX_DIR/deploy-switch.json"
 printf '%s\n' '{"phase":"running"}' >"$STATUS_FILE"
-SPUR_INSTALL_STATUS_FILE="$STATUS_FILE" SPUR_INSTALL_LOG_DIR="$LOG_DIR" \
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE" SPUR_DEPLOY_INITIATOR=auto SPUR_INSTALL_LOG_DIR="$LOG_DIR" \
   SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=echo \
   bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
 grep -q '"phase":"succeeded"' "$STATUS_FILE" || fail "helper did not persist success status"
 grep -q '"version":"1.2.3"' "$STATUS_FILE" || fail "helper status lost target version"
+grep -q '"initiator":"auto"' "$STATUS_FILE" || fail "helper status lost the initiator"
+if grep -q 'failureKind' "$STATUS_FILE"; then
+  fail "a succeeded status must carry no failureKind"
+fi
 
 # Case 9: install layout with required files missing -> non-zero exit, rollback
 # install logged, no spur reinit, no systemctl restart.
@@ -301,8 +305,13 @@ EOF
 chmod +x "$PREFIX_DIR9/bin/spur"
 
 rm -f "$LOG_FILE"
+# The status file is what carries failureKind, so this case must ask for one:
+# without SPUR_INSTALL_STATUS_FILE the EXIT trap writes nothing at all. No
+# daemon is here to write the "running" record, so the helper pays its 2s wait.
+STATUS_FILE9="$PREFIX_DIR9/deploy-switch.json"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE9" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
   env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR9/install-and-restart.sh" 1.3.0
 rc9=$?
 set -e
@@ -331,6 +340,11 @@ if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+# NPM=echo makes the rollback install return 0, and this branch never reinits,
+# so the previous version is restored: rolled_back, never auto-retried.
+grep -q '"failureKind":"rolled_back"' "$STATUS_FILE9" ||
+  fail "case 9 status must record failureKind rolled_back: $(cat "$STATUS_FILE9")"
+grep -q '"initiator":"auto"' "$STATUS_FILE9" || fail "case 9 status lost the initiator"
 
 # Case 10: all required files present, spur exits 1 -> health rollback: rollback
 # install of 1.0.0, second reinit, exit non-zero. Two spur reinit rc= log lines.
@@ -355,8 +369,10 @@ EOF
 chmod +x "$PREFIX_DIR10/bin/spur"
 
 rm -f "$LOG_FILE"
+STATUS_FILE10="$PREFIX_DIR10/deploy-switch.json"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE10" SPUR_DEPLOY_INITIATOR=manual \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
   env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR10/install-and-restart.sh" 1.1.0
 rc10=$?
 set -e
@@ -381,6 +397,11 @@ if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+# The spur stub exits 1 unconditionally, so the post-rollback reinit fails too:
+# installed, failed, and NOT restored -> install_unhealthy, not rolled_back.
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE10" ||
+  fail "case 10 status must record failureKind install_unhealthy: $(cat "$STATUS_FILE10")"
+grep -q '"initiator":"manual"' "$STATUS_FILE10" || fail "case 10 status lost the initiator"
 
 # Case 11: downgrade to a version whose tree lacks scripts/verify-package-files.sh.
 # The validator was copied from the current (pre-install) package into a temp dir
@@ -435,6 +456,26 @@ if grep -q "package validation failed" "$LOG_FILE"; then
   echo "FAIL: case 11 log must not contain package validation failed (pre-install copy should have been used)" >&2
   cat "$LOG_FILE" >&2
   exit 1
+fi
+
+# Case 16: a failed npm install records install_failed — nothing was installed,
+# so the daemon's tick may attempt this version again on the next tick.
+STATUS_FILE16="$LOG_DIR/deploy-switch-16.json"
+rm -f "$LOG_FILE" "$STATUS_FILE16"
+set +e
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE16" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=false SYSTEMCTL=echo \
+  bash "$HELPER" 1.4.0
+rc16=$?
+set -e
+[ "$rc16" -ne 0 ] || fail "case 16 expected a non-zero exit when npm install fails"
+grep -q "npm install failed" "$LOG_FILE" || fail "case 16 log missing the npm install failure line"
+grep -q '"failureKind":"install_failed"' "$STATUS_FILE16" ||
+  fail "case 16 status must record failureKind install_failed: $(cat "$STATUS_FILE16")"
+grep -q '"phase":"failed"' "$STATUS_FILE16" || fail "case 16 status must be phase failed"
+grep -q '"initiator":"auto"' "$STATUS_FILE16" || fail "case 16 status lost the initiator"
+if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
+  fail "case 16 must not restart anything after a failed install"
 fi
 
 echo "install-and-restart.test.sh: OK"

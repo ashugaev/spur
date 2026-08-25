@@ -22,6 +22,14 @@
 #   SPUR_INSTALL_LOCK_FILE — override the cross-process update lock (used by tests)
 #   SPUR_INSTALL_LOCK_WAIT_SECONDS — lock wait before giving up (default 600)
 #   SPUR_INSTALL_STATUS_FILE — durable deploy status written by the daemon
+#   SPUR_DEPLOY_INITIATOR — "auto" (the daemon's auto-update tick) or "manual"
+#     (a human press); echoed into the status record (default "manual")
+#
+# A failed run records WHICH branch failed in the status record's failureKind,
+# because only this script knows: install_failed (the target never installed,
+# safe to retry), rolled_back (installed, failed, previous version restored),
+# install_unhealthy (installed, failed, previous version NOT restored). The
+# daemon never re-derives the kind from the exit code.
 
 set -u
 
@@ -49,6 +57,7 @@ fi
 
 STATUS_FILE="${SPUR_INSTALL_STATUS_FILE:-}"
 STATUS_STARTED_AT="$(date -u +%FT%TZ)"
+STATUS_INITIATOR="${SPUR_DEPLOY_INITIATOR:-manual}"
 if [ -n "$STATUS_FILE" ]; then
   # Wait for the daemon's "running" record for this pid before arming the
   # terminal-status trap: a fast failure could otherwise write its terminal
@@ -68,15 +77,21 @@ fi
 # One EXIT trap for the whole run: the temp validator copy staged before the
 # install and, when the daemon asked for it, the terminal deploy status.
 _VALIDATOR_TMP=""
+STATUS_FAILURE_KIND=""
 on_exit() {
   status_rc=$?
   [ -z "$_VALIDATOR_TMP" ] || rm -rf "$_VALIDATOR_TMP"
   [ -n "$STATUS_FILE" ] || return
   status_phase="failed"
   [ "$status_rc" -eq 0 ] && status_phase="succeeded"
+  status_kind=""
+  if [ -n "$STATUS_FAILURE_KIND" ]; then
+    status_kind=",\"failureKind\":\"$STATUS_FAILURE_KIND\""
+  fi
   status_tmp="$STATUS_FILE.tmp.$$"
-  printf '{"phase":"%s","version":"%s","pid":%s,"startedAt":"%s","finishedAt":"%s","exitCode":%s}\n' \
-    "$status_phase" "$VERSION" "$$" "$STATUS_STARTED_AT" "$(date -u +%FT%TZ)" "$status_rc" >"$status_tmp"
+  printf '{"phase":"%s","version":"%s","pid":%s,"startedAt":"%s","finishedAt":"%s","exitCode":%s,"initiator":"%s"%s}\n' \
+    "$status_phase" "$VERSION" "$$" "$STATUS_STARTED_AT" "$(date -u +%FT%TZ)" "$status_rc" \
+    "$STATUS_INITIATOR" "$status_kind" >"$status_tmp"
   mv -f "$status_tmp" "$STATUS_FILE"
 }
 trap on_exit EXIT
@@ -145,6 +160,9 @@ fi
 rm -f "$install_output"
 if [ "$install_rc" -ne 0 ]; then
   echo "$(date -u +%FT%TZ) install-and-restart npm install failed rc=$install_rc"
+  # Nothing installed, nothing restarted, nothing rolled back: the host is
+  # exactly as it was, so this target is safe to attempt again.
+  STATUS_FAILURE_KIND="install_failed"
   exit "$install_rc"
 fi
 
@@ -152,11 +170,18 @@ if [ -n "$INSTALL_PREFIX" ] && [ -n "$_VALIDATOR_TMP" ]; then
   PKG_ROOT="$INSTALL_PREFIX/lib/node_modules/$PACKAGE"
   if ! bash "$_VALIDATOR_TMP/scripts/verify-package-files.sh" "$PKG_ROOT"; then
     echo "$(date -u +%FT%TZ) install-and-restart package validation failed"
+    # The target is installed and broken. Only a rollback install that
+    # actually returned 0 restores the previous version; anything else leaves
+    # the host on the bad one, and neither state may be auto-retried.
+    STATUS_FAILURE_KIND="install_unhealthy"
     if [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
       _rollback_args=(install -g --prefix "$INSTALL_PREFIX" "$PACKAGE@$PREVIOUS_VERSION")
       "$NPM" "${_rollback_args[@]}"
       _rollback_rc=$?
       echo "$(date -u +%FT%TZ) install-and-restart rollback install rc=$_rollback_rc"
+      if [ "$_rollback_rc" -eq 0 ]; then
+        STATUS_FAILURE_KIND="rolled_back"
+      fi
     fi
     exit 1
   fi
@@ -185,6 +210,9 @@ if { [ -z "$SYSTEMCTL_RAW" ] || [ "$SYSTEMCTL_RAW" = "systemctl --user" ]; } && 
   "$spur_bin" reinit
   reinit_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart spur reinit rc=$reinit_rc"
+  if [ "$reinit_rc" -ne 0 ]; then
+    STATUS_FAILURE_KIND="install_unhealthy"
+  fi
   if [ "$reinit_rc" -ne 0 ] && [ -n "$INSTALL_PREFIX" ] && [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     _rollback_args=(install -g --prefix "$INSTALL_PREFIX" "$PACKAGE@$PREVIOUS_VERSION")
     "$NPM" "${_rollback_args[@]}"
@@ -193,6 +221,11 @@ if { [ -z "$SYSTEMCTL_RAW" ] || [ "$SYSTEMCTL_RAW" = "systemctl --user" ]; } && 
     "$spur_bin" reinit
     _rollback_reinit_rc=$?
     echo "$(date -u +%FT%TZ) install-and-restart spur reinit rc=$_rollback_reinit_rc"
+    # Restored only when the reinstall AND its own reinit both returned 0; a
+    # half-done rollback leaves the host changed, same as none at all.
+    if [ "$_rollback_rc" -eq 0 ] && [ "$_rollback_reinit_rc" -eq 0 ]; then
+      STATUS_FAILURE_KIND="rolled_back"
+    fi
   fi
   exit "$reinit_rc"
 fi
@@ -202,6 +235,11 @@ if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
   "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service
   restart_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart systemctl restart rc=$restart_rc"
+  # This branch has no rollback at all, so a failed restart always leaves the
+  # host on the newly installed version.
+  if [ "$restart_rc" -ne 0 ]; then
+    STATUS_FAILURE_KIND="install_unhealthy"
+  fi
   exit "$restart_rc"
 fi
 
