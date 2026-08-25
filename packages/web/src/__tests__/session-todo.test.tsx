@@ -145,4 +145,47 @@ describe("SessionTodo", () => {
     expect(screen.getByText("Operator accepted risk")).toBeInTheDocument();
     expect(screen.getByLabelText("open")).toBeInTheDocument();
   });
+
+  it("hard-wraps a long unbroken item text and expanded reasons so they never overflow", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+    const overflowing: SpurTodoProjection = {
+      ...projection,
+      items: [
+        {
+          ...projection.items[0]!,
+          text: longToken,
+          latestTransition: {
+            type: "held",
+            reason: longToken,
+            blocker: { kind: "human", requiredAction: "Choose command name" },
+            actor: { kind: "agent", agent: "codex", sessionId: "api-1" },
+            at: "2026-08-20T10:01:00.000Z",
+          },
+          history: [
+            {
+              eventId: "event-1",
+              type: "item_held",
+              reason: longToken,
+              actor: { kind: "system", source: "spawn" },
+              at: "2026-08-20T10:00:00.000Z",
+            },
+          ],
+        },
+      ],
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(overflowing), { status: 200 }),
+    );
+    render(<SessionTodo sessionId="api-1" />);
+
+    const itemText = await screen.findByText(longToken, { selector: "span" });
+    expect(itemText).toHaveClass("min-w-0");
+    expect(itemText).toHaveClass("break-words");
+    expect(itemText).toHaveClass("[overflow-wrap:anywhere]");
+
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(longToken) }));
+    const reason = screen.getAllByText(longToken, { selector: "div" })[0] as HTMLElement;
+    expect(reason).toHaveClass("[overflow-wrap:anywhere]");
+    expect(reason).toHaveClass("whitespace-pre-wrap");
+  });
 });
