@@ -461,11 +461,16 @@ import {
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
-import { readAutoUpdateFlag } from "./auto-update-config.js";
+import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { runAutoUpdateTick } from "./auto-update.js";
 import { deploySwitchStatePath, reconcileDeploySwitchState } from "./deploy-switch-state.js";
 import { startDeploySwitch } from "./deploy-switch.js";
 import { getReleases } from "./releases-cache.js";
+import {
+  appendUpdateLedgerLine,
+  readUpdateLedger,
+  updateLedgerPath,
+} from "./update-ledger.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 // Not a message prefix (the message starts with "Session <id> ...") — a
@@ -2593,15 +2598,20 @@ export class SessionService {
       await runAutoUpdateTick({
         configPath: this.bootstrapConfigPath,
         statePath: deploySwitchStatePath(this.config.dataDir),
+        ledgerPath: updateLedgerPath(this.config.dataDir),
         currentVersion: getVersion(),
         readFlag: readAutoUpdateFlag,
         readState: reconcileDeploySwitchState,
+        readLedger: readUpdateLedger,
+        appendLedger: appendUpdateLedgerLine,
+        disarm: (path) => writeAutoUpdateFlag(path, false),
         getReleases,
         start: (version) =>
           startDeploySwitch({
             version,
             initiator: "auto",
             statePath: deploySwitchStatePath(this.config.dataDir),
+            ledgerPath: updateLedgerPath(this.config.dataDir),
           }),
         log: (event, entry) => this.logEvent(event, entry),
       });

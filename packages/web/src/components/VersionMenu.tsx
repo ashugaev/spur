@@ -7,6 +7,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { updateSeverity, type UpdateSeverity } from "@/lib/semver";
 import { AlertIcon } from "@/components/icons/AlertIcon";
+import { RollbackIcon } from "@/components/icons/RollbackIcon";
 import {
   isRuntimeInfoResponse,
   useVersionSwitch,
@@ -27,12 +28,23 @@ interface ReleaseEntry {
   publishedAt: string;
 }
 
+// Present while the daemon holds a failed switch record whose recorded kind
+// says the version installed and left the host changed. Cleared server-side by
+// the operator acting on the update path — re-arming Auto, or any Switch.
+type UpdateFailureKind = "rolled_back" | "install_unhealthy";
+
+interface UpdateFailure {
+  version: string;
+  failureKind: UpdateFailureKind;
+}
+
 interface RuntimeVersionsResponse {
   current: string;
   available: ReleaseEntry[];
   autoUpdate?: boolean;
   stale?: boolean;
   registryError?: string;
+  updateFailure?: UpdateFailure;
 }
 
 interface SwitchSuccess {
@@ -60,13 +72,38 @@ function isReleaseEntry(value: unknown): value is ReleaseEntry {
   );
 }
 
+function isUpdateFailure(value: unknown): value is UpdateFailure {
+  if (typeof value !== "object" || value === null) return false;
+  const failure = value as { version: unknown; failureKind: unknown };
+  return (
+    typeof failure.version === "string" &&
+    (failure.failureKind === "rolled_back" || failure.failureKind === "install_unhealthy")
+  );
+}
+
 function isRuntimeVersionsResponse(value: unknown): value is RuntimeVersionsResponse {
   if (typeof value !== "object" || value === null) return false;
-  const record = value as { current: unknown; available: unknown; autoUpdate?: unknown };
+  const record = value as {
+    current: unknown;
+    available: unknown;
+    autoUpdate?: unknown;
+    updateFailure?: unknown;
+  };
   if (typeof record.current !== "string") return false;
   if (!Array.isArray(record.available)) return false;
   if (record.autoUpdate !== undefined && typeof record.autoUpdate !== "boolean") return false;
+  if (record.updateFailure !== undefined && !isUpdateFailure(record.updateFailure)) return false;
   return record.available.every(isReleaseEntry);
+}
+
+function updateFailureMessage(failure: UpdateFailure, autoUpdateOn: boolean): string {
+  const outcome =
+    failure.failureKind === "rolled_back"
+      ? `Update to ${failure.version} failed, an automatic rollback happened`
+      : `Update to ${failure.version} failed and was not rolled back`;
+  // The suspension clause only when it is true: a `spur update` rollback on a
+  // host with Auto still armed did not suspend anything.
+  return autoUpdateOn ? `${outcome}.` : `${outcome}, auto-update is suspended.`;
 }
 
 function isSwitchSuccess(value: unknown): value is SwitchSuccess {
@@ -147,6 +184,10 @@ export function VersionMenu() {
     },
     staleTime: 60_000,
     refetchOnMount: true,
+    // The footer never unmounts, so without this nothing ever refetches: a
+    // daemon-side disarm and the rollback notice behind it would only show up
+    // after a reload.
+    refetchInterval: 60_000,
   });
 
   const switchMutation = useMutation<SwitchSuccess, Error, string>({
@@ -168,8 +209,11 @@ export function VersionMenu() {
       // 30 attempts the page never reloads (version-switch-context.tsx's
       // poll-exhaustion path), so the 60s-stale versions cache would
       // otherwise show a checked box against a daemon that already disarmed.
+      // Same reason drops `updateFailure`: the daemon supersedes the failed
+      // record with the `running` one for this switch, and the operator is
+      // owed the notice going away the moment they act on it.
       queryClient.setQueryData<RuntimeVersionsResponse>(["runtime", "versions"], (old) =>
-        old ? { ...old, autoUpdate: result.autoUpdate ?? false } : old,
+        old ? { ...old, autoUpdate: result.autoUpdate ?? false, updateFailure: undefined } : old,
       );
       startSwitch(result.version);
       setPending(null);
@@ -193,7 +237,15 @@ export function VersionMenu() {
     },
     onSuccess: (result) => {
       queryClient.setQueryData<RuntimeVersionsResponse>(["runtime", "versions"], (old) =>
-        old ? { ...old, autoUpdate: result.autoUpdate } : old,
+        old
+          ? {
+              ...old,
+              autoUpdate: result.autoUpdate,
+              // Re-arming is the operator answering the rollback, and the
+              // daemon clears the record on that same request.
+              ...(result.autoUpdate ? { updateFailure: undefined } : {}),
+            }
+          : old,
       );
     },
   });
@@ -210,6 +262,10 @@ export function VersionMenu() {
   const severity = updateSeverity(latest, current);
   const updateAvailable = severity !== "none";
   const autoUpdateOn = versionsQuery.data?.autoUpdate ?? false;
+  // Gated on the notice, never on severity: an install that failed and was not
+  // rolled back leaves the host running the newest release, i.e. severity
+  // "none", and that is exactly the state that must not stay invisible.
+  const updateFailure = versionsQuery.data?.updateFailure ?? null;
 
   const { dismiss } = popover;
   useEffect(() => {
@@ -252,23 +308,40 @@ export function VersionMenu() {
         aria-expanded={popover.open}
         aria-haspopup="true"
         aria-label={`Show Spur version information${
-          severity === "major"
-            ? ", major update available"
-            : severity === "update"
-              ? ", update available"
-              : ""
+          updateFailure
+            ? autoUpdateOn
+              ? ", update failed"
+              : ", update failed, auto-update is suspended"
+            : severity === "major"
+              ? ", major update available"
+              : severity === "update"
+                ? ", update available"
+                : ""
         }`}
         className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
         type="button"
         onClick={popover.toggle}
       >
         <span
-          className={severity === "none" ? undefined : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`}
+          className={
+            updateFailure
+              ? `font-bold ${SEVERITY_TEXT_CLASS.major}`
+              : severity === "none"
+                ? undefined
+                : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`
+          }
           data-severity={severity}
         >
           {triggerLabel}
         </span>
-        {severity === "none" ? null : (
+        {/* The notice wins the icon slot: one glyph, never two. The popover
+            still lists every release, so no severity information is lost. */}
+        {updateFailure ? (
+          <RollbackIcon
+            className={`h-3 w-3 ${SEVERITY_TEXT_CLASS.major}`}
+            data-testid="version-rollback-icon"
+          />
+        ) : severity === "none" ? null : (
           <AlertIcon
             aggressive={severity === "major"}
             className={`h-3 w-3 ${SEVERITY_TEXT_CLASS[severity]}`}
@@ -278,6 +351,14 @@ export function VersionMenu() {
       </button>
       {popover.open && switchPhase === "idle" ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+          {updateFailure ? (
+            <div
+              className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]"
+              data-testid="version-update-failure"
+            >
+              {updateFailureMessage(updateFailure, autoUpdateOn)}
+            </div>
+          ) : null}
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <div className="flex items-center gap-2">
               <span className="text-[var(--color-text-secondary)]">Spur</span>

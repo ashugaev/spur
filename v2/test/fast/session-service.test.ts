@@ -35647,7 +35647,12 @@ describe("SessionService", () => {
 
       expect(startDeploySwitchMock).toHaveBeenCalledTimes(1);
       expect(startDeploySwitchMock).toHaveBeenCalledWith(
-        expect.objectContaining({ version: "999.0.0", initiator: "auto" }),
+        expect.objectContaining({
+          version: "999.0.0",
+          initiator: "auto",
+          statePath: join(TEST_DATA_DIR, "deploy-switch.json"),
+          ledgerPath: join(TEST_DATA_DIR, "update-ledger.jsonl"),
+        }),
       );
       expect(service.config.autoUpdate).toBe(false);
     });

@@ -5,7 +5,12 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { loadInstanceConfigReadOnly } from "./config.js";
-import type { DeployFailureKind } from "./deploy-switch-state.js";
+import {
+  deploySwitchStatePath,
+  readDeploySwitchState,
+  writeDeploySwitchState,
+  type NoRetryFailureKind,
+} from "./deploy-switch-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
 import { writeStdout } from "./io.js";
@@ -30,6 +35,7 @@ import {
   type ServiceId,
   type UnitState,
 } from "./update-health.js";
+import { appendUpdateLedgerLine, updateLedgerPath } from "./update-ledger.js";
 import {
   defaultRollbackStatePath,
   isMonitorLive,
@@ -70,7 +76,45 @@ export interface UpdateDeps {
   unitActive(unit: string): boolean;
   log(message: string): void;
   logEvent(event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void;
+  recordDeployFailure(failure: ManualRollbackFailure): void;
   acquireUpdateLock(): () => void;
+}
+
+export interface ManualRollbackFailure {
+  version: string;
+  startedAt: string;
+  failureKind: NoRetryFailureKind;
+}
+
+// A rollback under `spur update` runs in a separate process and used to leave
+// nothing behind: the UI showed a host quietly running the old version with no
+// explanation, exactly the position an auto-rollback left the operator in. The
+// record feeds the popover notice, the ledger line keeps the version off the
+// auto path. `initiator: "manual"` is load-bearing — the tick's disarm reads it
+// and must never take `autoUpdate` down for an update the operator asked for.
+export function recordManualRollback(dataDir: string, failure: ManualRollbackFailure): void {
+  const statePath = deploySwitchStatePath(dataDir);
+  // A helper blocked on the same flock still owns its `running` record; do not
+  // overwrite an install that is about to continue.
+  if (readDeploySwitchState(statePath)?.phase === "running") return;
+  const at = new Date().toISOString();
+  writeDeploySwitchState(statePath, {
+    phase: "failed",
+    version: failure.version,
+    pid: process.pid,
+    startedAt: failure.startedAt,
+    finishedAt: at,
+    // Reuses the existing "no exit code observed" sentinel; no helper ran.
+    exitCode: -1,
+    initiator: "manual",
+    failureKind: failure.failureKind,
+  });
+  appendUpdateLedgerLine(updateLedgerPath(dataDir), {
+    kind: "blocked",
+    version: failure.version,
+    failureKind: failure.failureKind,
+    at,
+  });
 }
 
 export function acquireUpdateLock(home = homedir()): () => void {
@@ -246,6 +290,10 @@ export function createRealUpdateDeps(
       if (!dataDir) return;
       logSpurEvent(dataDir, { event, ...entry });
     },
+    recordDeployFailure: (failure) => {
+      if (!dataDir) return;
+      recordManualRollback(dataDir, failure);
+    },
     acquireUpdateLock: () => acquireUpdateLock(),
   };
 }
@@ -385,7 +433,7 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
     // it did to the host, classified the same way the deploy-switch helper
     // classifies its own branches.
     const attempted = state.inProgress;
-    const logRolledBack = (failureKind: DeployFailureKind): void => {
+    const recordRollback = (failureKind: NoRetryFailureKind): void => {
       deps.logEvent("cli.update.rolled_back", {
         level: "warn",
         details: {
@@ -395,10 +443,19 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
           failureKind,
         },
       });
+      // Surfaced to the operator exactly like an auto-rollback: same record,
+      // same notice, same never-retry rule. Nothing to name without the
+      // in-progress entry the monitor is acting on.
+      if (!attempted) return;
+      deps.recordDeployFailure({
+        version: attempted.toVersion,
+        startedAt: attempted.startedAt,
+        failureKind,
+      });
     };
     if (!good) {
       deps.log("No known-good version recorded; clearing update state without reinstalling.");
-      logRolledBack("install_unhealthy");
+      recordRollback("install_unhealthy");
       deps.writeState({ ...deps.readState(), inProgress: null });
       return;
     }
@@ -406,7 +463,7 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
       deps.log(
         `Installed version already matches known-good ${good.version}; nothing to reinstall.`,
       );
-      logRolledBack("rolled_back");
+      recordRollback("rolled_back");
       deps.writeState({ ...deps.readState(), inProgress: null });
       return;
     }
@@ -419,11 +476,11 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
       // failed (both throw: `execFileSync` in `installVersion`, `runNpmInit`
       // in `reinit`), so the host is not back on a working version. Worst
       // outcome of the five, and the one that must never be silent.
-      logRolledBack("install_unhealthy");
+      recordRollback("install_unhealthy");
       throw error;
     }
     await verifyRollback(deps, cfg);
-    logRolledBack("rolled_back");
+    recordRollback("rolled_back");
     deps.writeState({ ...deps.readState(), inProgress: null });
   } finally {
     releaseUpdateLock();

@@ -120,6 +120,9 @@ function buildRunFake(opts: {
       loggedEvents.push({ event, ...entry });
       events.push(`event:${event}`);
     },
+    recordDeployFailure: (failure) => {
+      events.push(`deploy-failure:${failure.version}:${failure.failureKind}`);
+    },
     acquireUpdateLock: () => {
       lockCounts.acquired += 1;
       return () => {

@@ -24,6 +24,8 @@
 #   SPUR_INSTALL_STATUS_FILE — durable deploy status written by the daemon
 #   SPUR_DEPLOY_INITIATOR — "auto" (the daemon's auto-update tick) or "manual"
 #     (a human press); echoed into the status record (default "manual")
+#   SPUR_UPDATE_LEDGER_FILE — append-only update-ledger.jsonl; a run that leaves
+#     the host changed appends one "blocked" line naming this version
 #
 # A failed run records WHICH branch failed in the status record's failureKind,
 # because only this script knows: install_failed (the target never installed,
@@ -56,6 +58,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 STATUS_FILE="${SPUR_INSTALL_STATUS_FILE:-}"
+LEDGER_FILE="${SPUR_UPDATE_LEDGER_FILE:-}"
 STATUS_STARTED_AT="$(date -u +%FT%TZ)"
 STATUS_INITIATOR="${SPUR_DEPLOY_INITIATOR:-manual}"
 if [ -n "$STATUS_FILE" ]; then
@@ -81,6 +84,16 @@ STATUS_FAILURE_KIND=""
 on_exit() {
   status_rc=$?
   [ -z "$_VALIDATOR_TMP" ] || rm -rf "$_VALIDATOR_TMP"
+  # A kind that installed something is permanent policy, not switch status:
+  # append it first and independently of the status file, so the never-retry
+  # memory survives a cleared status record and the race where the daemon's
+  # late "running" write buries this one.
+  if [ -n "$LEDGER_FILE" ] && \
+    { [ "$STATUS_FAILURE_KIND" = "rolled_back" ] || [ "$STATUS_FAILURE_KIND" = "install_unhealthy" ]; }; then
+    mkdir -p "$(dirname "$LEDGER_FILE")"
+    printf '{"kind":"blocked","version":"%s","failureKind":"%s","at":"%s"}\n' \
+      "$VERSION" "$STATUS_FAILURE_KIND" "$(date -u +%FT%TZ)" >>"$LEDGER_FILE"
+  fi
   [ -n "$STATUS_FILE" ] || return
   status_phase="failed"
   [ "$status_rc" -eq 0 ] && status_phase="succeeded"

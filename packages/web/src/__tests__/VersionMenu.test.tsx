@@ -227,6 +227,304 @@ describe("VersionMenu", () => {
     ).toHaveAccessibleName("Show Spur version information, major update available");
   });
 
+  it("keeps the severity triangle when no update failed", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.0" } },
+      versions: {
+        payload: {
+          current: "1.4.0",
+          available: [
+            { tag: "2.0.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.0", publishedAt: "2026-05-01T00:00:00.000Z" },
+          ],
+        },
+      },
+    });
+
+    render(<VersionMenu />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("version-alert-icon")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("version-rollback-icon")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Show Spur version information/ }));
+    expect(screen.queryByTestId("version-update-failure")).not.toBeInTheDocument();
+  });
+
+  describe("rollback notice", () => {
+    const AVAILABLE = [
+      { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+      { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+    ];
+
+    function mockWithFailure(options: {
+      autoUpdate: boolean;
+      failureKind: string;
+      current?: string;
+      available?: Array<{ tag: string; publishedAt: string }>;
+    }) {
+      const current = options.current ?? "1.4.2";
+      mockFetch({
+        info: { payload: { version: current } },
+        versions: {
+          payload: {
+            current,
+            autoUpdate: options.autoUpdate,
+            available: options.available ?? AVAILABLE,
+            updateFailure: { version: "1.5.0", failureKind: options.failureKind },
+          },
+        },
+      });
+    }
+
+    it("shows the rollback glyph instead of the severity triangle, and the notice above the version row", async () => {
+      mockWithFailure({ autoUpdate: false, failureKind: "rolled_back" });
+
+      render(<VersionMenu />);
+
+      const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
+      await waitFor(() => {
+        expect(screen.getByTestId("version-rollback-icon")).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("version-alert-icon")).not.toBeInTheDocument();
+      expect(screen.getByText("1.4.2")).toHaveAttribute("data-severity", "update");
+
+      fireEvent.click(trigger);
+      const notice = await screen.findByTestId("version-update-failure");
+      expect(notice).toHaveTextContent(
+        "Update to 1.5.0 failed, an automatic rollback happened, auto-update is suspended.",
+      );
+      // Above the current-version row, i.e. the popover's first child.
+      expect(notice.parentElement?.firstElementChild).toBe(notice);
+      expect(screen.getByRole("checkbox", { name: "Auto update" })).not.toBeChecked();
+    });
+
+    it("drops the suspension clause while auto-update is still on", async () => {
+      mockWithFailure({ autoUpdate: true, failureKind: "rolled_back" });
+
+      render(<VersionMenu />);
+
+      fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+      const notice = await screen.findByTestId("version-update-failure");
+      expect(notice).toHaveTextContent("Update to 1.5.0 failed, an automatic rollback happened.");
+      expect(notice.textContent).not.toContain("suspended");
+      expect(screen.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
+    });
+
+    it("says the install was not rolled back for install_unhealthy", async () => {
+      mockWithFailure({ autoUpdate: false, failureKind: "install_unhealthy" });
+
+      render(<VersionMenu />);
+
+      fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+      expect(await screen.findByTestId("version-update-failure")).toHaveTextContent(
+        "Update to 1.5.0 failed and was not rolled back, auto-update is suspended.",
+      );
+    });
+
+    it("preempts a major severity: one glyph, no aggressive triangle", async () => {
+      mockWithFailure({
+        autoUpdate: false,
+        failureKind: "rolled_back",
+        current: "1.4.2",
+        available: [
+          { tag: "2.0.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+          { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+        ],
+      });
+
+      render(<VersionMenu />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("version-rollback-icon")).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("version-alert-icon")).not.toBeInTheDocument();
+      expect(screen.getByText("1.4.2")).toHaveAttribute("data-severity", "major");
+      expect(
+        screen.getByRole("button", { name: /Show Spur version information/ }),
+      ).toHaveAccessibleName(
+        "Show Spur version information, update failed, auto-update is suspended",
+      );
+    });
+
+    it("renders the glyph and the notice when there is no newer release at all", async () => {
+      // The host installed a broken version that was not rolled back, so it is
+      // now running the newest release: severity "none", and the old
+      // severity-gated markup rendered nothing here.
+      mockWithFailure({
+        autoUpdate: false,
+        failureKind: "install_unhealthy",
+        current: "1.5.0",
+        available: [{ tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" }],
+      });
+
+      render(<VersionMenu />);
+
+      const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
+      await waitFor(() => {
+        expect(screen.getByTestId("version-rollback-icon")).toBeInTheDocument();
+      });
+      const label = screen.getByText("1.5.0");
+      expect(label).toHaveAttribute("data-severity", "none");
+      expect(label.className).toContain("font-bold");
+      expect(label.className).toContain("--color-status-error");
+
+      fireEvent.click(trigger);
+      expect(await screen.findByTestId("version-update-failure")).toBeInTheDocument();
+    });
+
+    it("never claims a suspension that is not in effect", async () => {
+      mockWithFailure({ autoUpdate: true, failureKind: "install_unhealthy" });
+
+      render(<VersionMenu />);
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole("button", { name: /Show Spur version information/ }),
+        ).toHaveAccessibleName("Show Spur version information, update failed");
+      });
+    });
+
+    it("rejects a payload whose failureKind is not one of the two kinds", async () => {
+      mockWithFailure({ autoUpdate: false, failureKind: "install_failed" });
+
+      render(<VersionMenu />);
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole("button", { name: /Show Spur version information/ }),
+        ).toHaveTextContent("1.4.2");
+      });
+      expect(screen.queryByTestId("version-rollback-icon")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Show Spur version information/ }));
+      expect(screen.queryByTestId("version-update-failure")).not.toBeInTheDocument();
+    });
+
+    it("picks up a daemon-side disarm and the notice on the next poll, with no reload", async () => {
+      let versionsFetchCount = 0;
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/info") {
+          return new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 });
+        }
+        if (url === "/api/runtime/versions") {
+          versionsFetchCount += 1;
+          const failed = versionsFetchCount > 1;
+          return new Response(
+            JSON.stringify({
+              current: "1.4.2",
+              autoUpdate: !failed,
+              available: AVAILABLE,
+              ...(failed
+                ? { updateFailure: { version: "1.5.0", failureKind: "rolled_back" } }
+                : {}),
+            }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<VersionMenu />);
+      fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+      expect(await screen.findByRole("checkbox", { name: "Auto update" })).toBeChecked();
+      expect(screen.queryByTestId("version-update-failure")).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId("version-rollback-icon")).toBeInTheDocument();
+      });
+      expect(screen.getByRole("checkbox", { name: "Auto update" })).not.toBeChecked();
+      expect(await screen.findByTestId("version-update-failure")).toBeInTheDocument();
+      expect(window.location.reload).not.toHaveBeenCalled();
+      expect(versionsFetchCount).toBe(2);
+    });
+
+    it("drops the notice the moment Auto is re-enabled, without waiting for a poll", async () => {
+      let versionsFetchCount = 0;
+      mockFetch({
+        info: { payload: { version: "1.4.2" } },
+        versions: {
+          payload: {
+            current: "1.4.2",
+            autoUpdate: false,
+            available: AVAILABLE,
+            updateFailure: { version: "1.5.0", failureKind: "rolled_back" },
+          },
+        },
+        autoUpdate: { payload: { autoUpdate: true } },
+        onVersionsFetch: () => {
+          versionsFetchCount += 1;
+        },
+      });
+
+      render(<VersionMenu />);
+      fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+      await screen.findByTestId("version-update-failure");
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto update" }));
+
+      await waitFor(() => {
+        expect(screen.queryByTestId("version-update-failure")).not.toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("version-rollback-icon")).not.toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
+      expect(versionsFetchCount).toBe(1);
+    });
+
+    it("drops the notice on an accepted switch, which never re-arms auto-update", async () => {
+      // No VersionSwitchProvider on purpose: the context default keeps the
+      // phase idle, so the popover can be reopened straight after the mutation
+      // and the cache write is observable without the 90s poll-exhaustion
+      // detour. The blocking overlay is a separate surface, unchanged here.
+      const autoUpdateCalls: unknown[] = [];
+      let versionsFetchCount = 0;
+      mockFetch({
+        info: { payload: { version: "1.4.2" } },
+        versions: {
+          payload: {
+            current: "1.4.2",
+            autoUpdate: false,
+            available: AVAILABLE,
+            updateFailure: { version: "1.5.0", failureKind: "rolled_back" },
+          },
+        },
+        switch: { status: 202, payload: { accepted: true, version: "1.5.0", autoUpdate: false } },
+        onAutoUpdate: (record) => autoUpdateCalls.push(record.body),
+        onVersionsFetch: () => {
+          versionsFetchCount += 1;
+        },
+      });
+
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false, staleTime: 0 } },
+      });
+      rtlRender(<VersionMenu />, {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+      await screen.findByTestId("version-update-failure");
+      fireEvent.click(screen.getByTestId("switch-version-1.5.0"));
+      fireEvent.click(await screen.findByRole("button", { name: "Switch", exact: true }));
+
+      await waitFor(() => {
+        expect(screen.queryByTestId("version-rollback-icon")).not.toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Show Spur version information/ }));
+      expect(screen.queryByTestId("version-update-failure")).not.toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Auto update" })).not.toBeChecked();
+      expect(autoUpdateCalls).toEqual([]);
+      expect(versionsFetchCount).toBe(1);
+    });
+  });
+
   it("renders the empty state when no releases are available", async () => {
     mockFetch({
       info: { payload: { version: "1.0.0" } },
@@ -643,20 +941,24 @@ describe("VersionMenu", () => {
     expect(dialog).not.toHaveTextContent("Auto update will be turned off.");
   });
 
-  it("reads the box unchecked on the next popover open after the poll-exhaustion failure path, with no versions refetch", async () => {
+  it("reads the box unchecked on the next popover open after the poll-exhaustion failure path", async () => {
     // AC 8: the confirmed (reload) path is the only one that actually
     // refetches — jsdom stubs window.location.reload, so it cannot be
     // observed here. The poll-exhaustion path is the one testable case with
     // no reload: it leaves switchPhase at "failed", dismissed explicitly via
     // the blocking overlay's Dismiss button, at which point the popover can
-    // reopen and must read the disarmed value already sitting in the cache.
+    // reopen and must read the disarmed value. The 30 x 3s poll outlives the
+    // 60s refetch interval, so the daemon answers here as it really does after
+    // an accepted switch: already disarmed. The optimistic cache write is
+    // covered where it is observable, in "drops the notice on an accepted
+    // switch, which never re-arms auto-update".
     let versionsFetchCount = 0;
     mockFetch({
       info: { payload: { version: "1.4.2" } },
       versions: {
         payload: {
           current: "1.4.2",
-          autoUpdate: true,
+          autoUpdate: false,
           available: [
             { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
             { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
@@ -697,6 +999,9 @@ describe("VersionMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: /Show Spur version information/ }));
     const checkbox = await screen.findByRole("checkbox", { name: "Auto update" });
     expect(checkbox).not.toBeChecked();
-    expect(versionsFetchCount).toBe(1);
+    // One mount fetch plus the 60s poll ticks inside the 90s wait: the footer
+    // never unmounts, so this interval is the only thing that keeps the box and
+    // the notice honest without a reload.
+    expect(versionsFetchCount).toBeGreaterThan(1);
   });
 });

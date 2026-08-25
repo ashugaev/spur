@@ -33,6 +33,7 @@ interface SpawnCall {
   command: string;
   args: ReadonlyArray<string>;
   detached: boolean;
+  env: NodeJS.ProcessEnv | undefined;
 }
 
 const spawnCalls: SpawnCall[] = [];
@@ -53,6 +54,7 @@ vi.mock("node:child_process", async () => {
         command,
         args: [...args],
         detached: options.detached === true,
+        env: options.env,
       });
       const fake = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
       fake.pid = process.pid;
@@ -256,6 +258,15 @@ describe("POST /deploy/switch", () => {
       expect(call.args).toHaveLength(2);
       expect(call.args[0]).toMatch(/scripts\/install-and-restart\.sh$/);
       expect(call.args[1]).toBe("0.2.0");
+      // The helper writes the status record and the ledger line itself, so
+      // both paths and the initiator have to reach it.
+      expect(call.env?.["SPUR_INSTALL_STATUS_FILE"]).toBe(
+        join(dataDir(configPath), "deploy-switch.json"),
+      );
+      expect(call.env?.["SPUR_UPDATE_LEDGER_FILE"]).toBe(
+        join(dataDir(configPath), "update-ledger.jsonl"),
+      );
+      expect(call.env?.["SPUR_DEPLOY_INITIATOR"]).toBe("manual");
       expect(unrefCount).toBe(1);
       const configText = await readFile(configPath, "utf8");
       expect(configText).toContain("autoUpdate: false");
@@ -289,6 +300,50 @@ describe("POST /deploy/switch", () => {
       expect(unrefCount).toBe(0);
       const configText = await readFile(configPath, "utf8");
       expect(configText).toContain("autoUpdate: false");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("clears the rollback notice when the requested version is already current", async () => {
+    // The one Switch branch that writes no record of its own: pinning back to
+    // the version the host is already running. Without the explicit clear the
+    // notice would survive the operator's answer to it.
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    currentVersion = "0.2.0";
+    fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0", "0.1.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const configPath = await setupConfig(port, true);
+    await mkdir(dataDir(configPath), { recursive: true });
+    const statePath = join(dataDir(configPath), "deploy-switch.json");
+    await writeFile(
+      statePath,
+      `${JSON.stringify({
+        phase: "failed",
+        version: "0.3.0",
+        pid: 4242,
+        startedAt: "2026-08-24T15:17:00Z",
+        finishedAt: "2026-08-24T15:17:02Z",
+        exitCode: 1,
+        initiator: "auto",
+        failureKind: "rolled_back",
+      })}\n`,
+      "utf8",
+    );
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(response.status).toBe(202);
+      expect(spawnCalls).toEqual([]);
+
+      const status = await realFetch(`http://127.0.0.1:${port}/deploy/switch/status`);
+      await expect(status.json()).resolves.toEqual({ phase: "idle" });
     } finally {
       await server.stop();
     }

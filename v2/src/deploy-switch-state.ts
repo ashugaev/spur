@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // Who asked for this switch: the auto-update tick or a human press
@@ -14,6 +14,18 @@ export type DeployInitiator = "auto" | "manual";
 // The last two are never auto-retried: the install already changed the host,
 // so another attempt repeats a real install plus a real rollback.
 export type DeployFailureKind = "install_failed" | "rolled_back" | "install_unhealthy";
+
+// The two kinds that say the install already changed the host. Named here, with
+// the record's shape, because three consumers ask the same question: the tick
+// (never retry), `GET /deploy/versions` (raise the operator notice), and the
+// clear below.
+export type NoRetryFailureKind = Exclude<DeployFailureKind, "install_failed">;
+
+export function isNoRetryFailureKind(
+  kind: DeployFailureKind | undefined,
+): kind is NoRetryFailureKind {
+  return kind === "rolled_back" || kind === "install_unhealthy";
+}
 
 export type DeploySwitchState =
   | {
@@ -87,6 +99,17 @@ export function writeDeploySwitchState(path: string, state: DeploySwitchState): 
   const temporary = `${path}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(temporary, `${JSON.stringify(state)}\n`, "utf8");
   renameSync(temporary, path);
+}
+
+// Removes the record behind the operator's rollback notice, and only that: a
+// `running` record keeps the in-progress 409 guard, and `succeeded` or
+// `install_failed` records keep driving the tick's retry decision. Never-retry
+// memory does not live here — it lives in update-ledger.jsonl, so clearing the
+// notice cannot re-arm a rolled-back version.
+export function clearFailedDeploySwitchRecord(path: string): void {
+  const state = readDeploySwitchState(path);
+  if (!state || state.phase !== "failed" || !isNoRetryFailureKind(state.failureKind)) return;
+  rmSync(path, { force: true });
 }
 
 export function readProcessStartTime(pid: number): string | null {

@@ -281,8 +281,10 @@ wait "$holder_pid"
 
 # Case 15: detached deploy runs replace the durable running record with terminal status.
 STATUS_FILE="$PREFIX_DIR/deploy-switch.json"
+LEDGER_FILE15="$PREFIX_DIR/update-ledger.jsonl"
 printf '%s\n' '{"phase":"running"}' >"$STATUS_FILE"
 SPUR_INSTALL_STATUS_FILE="$STATUS_FILE" SPUR_DEPLOY_INITIATOR=auto SPUR_INSTALL_LOG_DIR="$LOG_DIR" \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE15" \
   SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=echo \
   bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
 grep -q '"phase":"succeeded"' "$STATUS_FILE" || fail "helper did not persist success status"
@@ -290,6 +292,9 @@ grep -q '"version":"1.2.3"' "$STATUS_FILE" || fail "helper status lost target ve
 grep -q '"initiator":"auto"' "$STATUS_FILE" || fail "helper status lost the initiator"
 if grep -q 'failureKind' "$STATUS_FILE"; then
   fail "a succeeded status must carry no failureKind"
+fi
+if [ -e "$LEDGER_FILE15" ]; then
+  fail "a succeeded run must never block its own version: $(cat "$LEDGER_FILE15")"
 fi
 
 # Case 9: install layout with required files missing -> non-zero exit, rollback
@@ -318,8 +323,10 @@ rm -f "$LOG_FILE"
 # without SPUR_INSTALL_STATUS_FILE the EXIT trap writes nothing at all. No
 # daemon is here to write the "running" record, so the helper pays its 2s wait.
 STATUS_FILE9="$PREFIX_DIR9/deploy-switch.json"
+LEDGER_FILE9="$PREFIX_DIR9/update-ledger.jsonl"
 set +e
 SPUR_INSTALL_STATUS_FILE="$STATUS_FILE9" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE9" \
   SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
   env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR9/install-and-restart.sh" 1.3.0
 rc9=$?
@@ -354,6 +361,13 @@ fi
 grep -q '"failureKind":"rolled_back"' "$STATUS_FILE9" ||
   fail "case 9 status must record failureKind rolled_back: $(cat "$STATUS_FILE9")"
 grep -q '"initiator":"auto"' "$STATUS_FILE9" || fail "case 9 status lost the initiator"
+# The record can be cleared by the operator; the ledger line is what keeps this
+# version off the auto path for good.
+ledger_lines9="$(wc -l <"$LEDGER_FILE9")"
+[ "$ledger_lines9" -eq 1 ] ||
+  fail "case 9 must append exactly one ledger line, got $ledger_lines9: $(cat "$LEDGER_FILE9")"
+grep -q '{"kind":"blocked","version":"1.3.0","failureKind":"rolled_back"' "$LEDGER_FILE9" ||
+  fail "case 9 ledger line does not block 1.3.0 as rolled_back: $(cat "$LEDGER_FILE9")"
 
 # Case 10: all required files present, spur exits 1 -> health rollback: rollback
 # install of 1.0.0, second reinit, exit non-zero. Two spur reinit rc= log lines.
@@ -379,8 +393,10 @@ chmod +x "$PREFIX_DIR10/bin/spur"
 
 rm -f "$LOG_FILE"
 STATUS_FILE10="$PREFIX_DIR10/deploy-switch.json"
+LEDGER_FILE10="$PREFIX_DIR10/nested/update-ledger.jsonl"
 set +e
 SPUR_INSTALL_STATUS_FILE="$STATUS_FILE10" SPUR_DEPLOY_INITIATOR=manual \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE10" \
   SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
   env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR10/install-and-restart.sh" 1.1.0
 rc10=$?
@@ -411,6 +427,13 @@ fi
 grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE10" ||
   fail "case 10 status must record failureKind install_unhealthy: $(cat "$STATUS_FILE10")"
 grep -q '"initiator":"manual"' "$STATUS_FILE10" || fail "case 10 status lost the initiator"
+# Nested path on purpose: the daemon hands over a path under dataDir that may
+# not exist yet on a host that has never blocked a version.
+ledger_lines10="$(wc -l <"$LEDGER_FILE10")"
+[ "$ledger_lines10" -eq 1 ] ||
+  fail "case 10 must append exactly one ledger line, got $ledger_lines10: $(cat "$LEDGER_FILE10")"
+grep -q '{"kind":"blocked","version":"1.1.0","failureKind":"install_unhealthy"' "$LEDGER_FILE10" ||
+  fail "case 10 ledger line does not block 1.1.0 as install_unhealthy: $(cat "$LEDGER_FILE10")"
 
 # Case 11: downgrade to a version whose tree lacks scripts/verify-package-files.sh.
 # The validator was copied from the current (pre-install) package into a temp dir
@@ -470,9 +493,11 @@ fi
 # Case 16: a failed npm install records install_failed — nothing was installed,
 # so the daemon's tick may attempt this version again on the next tick.
 STATUS_FILE16="$LOG_DIR/deploy-switch-16.json"
-rm -f "$LOG_FILE" "$STATUS_FILE16"
+LEDGER_FILE16="$LOG_DIR/update-ledger-16.jsonl"
+rm -f "$LOG_FILE" "$STATUS_FILE16" "$LEDGER_FILE16"
 set +e
 SPUR_INSTALL_STATUS_FILE="$STATUS_FILE16" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE16" \
   SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=false SYSTEMCTL=echo \
   bash "$HELPER" 1.4.0
 rc16=$?
@@ -485,6 +510,9 @@ grep -q '"phase":"failed"' "$STATUS_FILE16" || fail "case 16 status must be phas
 grep -q '"initiator":"auto"' "$STATUS_FILE16" || fail "case 16 status lost the initiator"
 if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
   fail "case 16 must not restart anything after a failed install"
+fi
+if [ -e "$LEDGER_FILE16" ]; then
+  fail "case 16 must not block a version that never installed: $(cat "$LEDGER_FILE16")"
 fi
 
 # Case 17: package validation fails AND the rollback install fails too. Same
@@ -609,5 +637,20 @@ grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE18" ||
 if grep -q "rolled_back" "$STATUS_FILE18"; then
   fail "case 18 must not claim a rollback whose install failed: $(cat "$STATUS_FILE18")"
 fi
+
+# Case 19: the ledger line does not depend on the status file. Same fixture as
+# case 10, run with no SPUR_INSTALL_STATUS_FILE at all: the never-retry memory
+# still lands, so a lost or buried status record cannot re-arm this version.
+LEDGER_FILE19="$LOG_DIR/update-ledger-19.jsonl"
+rm -f "$LOG_FILE" "$LEDGER_FILE19"
+set +e
+SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE19" \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR10/install-and-restart.sh" 1.1.0
+rc19=$?
+set -e
+[ "$rc19" -ne 0 ] || fail "case 19 expected a non-zero exit when reinit fails"
+grep -q '{"kind":"blocked","version":"1.1.0","failureKind":"install_unhealthy"' "$LEDGER_FILE19" ||
+  fail "case 19 must append the ledger line with no status file: $(cat "$LEDGER_FILE19" 2>&1)"
 
 echo "install-and-restart.test.sh: OK"

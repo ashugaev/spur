@@ -33,8 +33,9 @@ export async function startDeploySwitch(args: {
   version: string;
   initiator: DeployInitiator;
   statePath: string;
+  ledgerPath: string;
 }): Promise<DeploySwitchResult> {
-  const { version, initiator, statePath } = args;
+  const { version, initiator, statePath, ledgerPath } = args;
   if (!isReleaseVersion(version)) {
     return { status: "invalid_version" };
   }
@@ -73,6 +74,7 @@ export async function startDeploySwitch(args: {
       ...process.env,
       SPUR_INSTALL_STATUS_FILE: statePath,
       SPUR_DEPLOY_INITIATOR: initiator,
+      SPUR_UPDATE_LEDGER_FILE: ledgerPath,
     },
   });
   if (child.pid === undefined) {

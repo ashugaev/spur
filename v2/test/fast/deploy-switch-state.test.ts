@@ -1,12 +1,15 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  clearFailedDeploySwitchRecord,
   readDeploySwitchState,
   readProcessStartTime,
   reconcileDeploySwitchState,
   writeDeploySwitchState,
+  type DeploySwitchState,
 } from "../../src/deploy-switch-state.js";
 
 async function newStatePath(): Promise<string> {
@@ -74,5 +77,50 @@ describe("deploy switch state", () => {
     await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
 
     expect(readDeploySwitchState(path)).toBeNull();
+  });
+
+  it("clears a failed record whose kind is a no-retry kind", async () => {
+    for (const failureKind of ["rolled_back", "install_unhealthy"] as const) {
+      const path = await newStatePath();
+      writeDeploySwitchState(path, { ...TERMINAL, initiator: "auto", failureKind });
+
+      clearFailedDeploySwitchRecord(path);
+
+      expect(existsSync(path)).toBe(false);
+      expect(readDeploySwitchState(path)).toBeNull();
+    }
+  });
+
+  it("leaves every record the notice is not derived from in place", async () => {
+    const processStartTime = readProcessStartTime(process.pid);
+    if (!processStartTime) throw new Error("current process has no Linux start time");
+    const records: DeploySwitchState[] = [
+      { ...TERMINAL, initiator: "auto", failureKind: "install_failed" },
+      { ...TERMINAL, initiator: "auto" },
+      { ...TERMINAL, phase: "succeeded", exitCode: 0, initiator: "auto" },
+      {
+        phase: "running",
+        version: "0.67.2",
+        pid: process.pid,
+        processStartTime,
+        startedAt: "2026-08-24T15:17:00Z",
+        initiator: "manual",
+      },
+    ];
+    for (const record of records) {
+      const path = await newStatePath();
+      writeDeploySwitchState(path, record);
+
+      clearFailedDeploySwitchRecord(path);
+
+      expect(readDeploySwitchState(path)).toEqual(record);
+    }
+  });
+
+  it("is a no-op when there is no record at all", async () => {
+    const path = await newStatePath();
+
+    expect(() => clearFailedDeploySwitchRecord(path)).not.toThrow();
+    expect(existsSync(path)).toBe(false);
   });
 });

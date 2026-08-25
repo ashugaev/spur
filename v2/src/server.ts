@@ -5,7 +5,13 @@ import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
-import { deploySwitchStatePath, reconcileDeploySwitchState } from "./deploy-switch-state.js";
+import {
+  clearFailedDeploySwitchRecord,
+  deploySwitchStatePath,
+  isNoRetryFailureKind,
+  readDeploySwitchState,
+  reconcileDeploySwitchState,
+} from "./deploy-switch-state.js";
 import { startDeploySwitch } from "./deploy-switch.js";
 import { EventBus } from "./event-bus.js";
 import {
@@ -49,6 +55,7 @@ import {
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import { updateLedgerPath } from "./update-ledger.js";
 import { getVersion } from "./version.js";
 import {
   SESSION_STATES,
@@ -545,6 +552,7 @@ export async function startServer(
   const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
+  const switchLedgerPath = updateLedgerPath(service.config.dataDir);
   // Re-applied on every config (re)load, not just boot, so disk-limit changes take
   // effect without a full daemon restart.
   const applyLogConfigs = (cfg: typeof service.config): void => {
@@ -762,12 +770,22 @@ export async function startServer(
             message: autoUpdateFlag.error,
           });
         }
+        // The operator's rollback notice rides the same payload as the flag,
+        // so an unchecked box and the notice can never disagree. Read, never
+        // reconciled: a polled GET writes nothing to disk, and reconciliation
+        // adds no `failureKind` anyway.
+        const lastSwitch = readDeploySwitchState(switchStatePath);
+        const updateFailure =
+          lastSwitch?.phase === "failed" && isNoRetryFailureKind(lastSwitch.failureKind)
+            ? { version: lastSwitch.version, failureKind: lastSwitch.failureKind }
+            : null;
         sendJson(response, 200, {
           current: getVersion(),
           available: releases.entries,
           autoUpdate: autoUpdateFlag.autoUpdate,
           ...(releases.stale ? { stale: true } : {}),
           ...(releases.error ? { registryError: releases.error } : {}),
+          ...(updateFailure ? { updateFailure } : {}),
         });
         return;
       }
@@ -784,6 +802,7 @@ export async function startServer(
           version: requestedVersion,
           initiator: "manual",
           statePath: switchStatePath,
+          ledgerPath: switchLedgerPath,
         });
         // The update-path timeline in events.jsonl has to read end to end for
         // every initiator. `user-actions.jsonl` records the press separately
@@ -824,6 +843,13 @@ export async function startServer(
             return;
           case "accepted":
           case "already_current": {
+            // Any Switch is the operator answering the rollback, so the notice
+            // goes. An accepted switch already superseded the record with a
+            // `running` one; `already_current` writes no record at all
+            // (deploy-switch.ts's early return), so it has to clear here.
+            if (result.status === "already_current") {
+              clearFailedDeploySwitchRecord(switchStatePath);
+            }
             // Disarm on every accepted switch, spawned or already-current:
             // the issue requires auto-update not to re-arm once a pinned
             // version becomes current again. This never lives in
@@ -857,6 +883,12 @@ export async function startServer(
         }
         const writeResult = writeAutoUpdateFlag(service.config.configPath, body.enabled);
         if (writeResult.ok) {
+          // Re-arming is the other operator answer to a rollback: one action
+          // both clears the notice and turns automatic updates back on. The
+          // version itself stays blocked by the ledger.
+          if (writeResult.autoUpdate) {
+            clearFailedDeploySwitchRecord(switchStatePath);
+          }
           sendJson(response, 200, { autoUpdate: writeResult.autoUpdate });
           return;
         }
