@@ -387,4 +387,28 @@ describe("client.ensureServer", () => {
       "GitHub PR check unavailable for api-1: GitHub rate limit. Retry `spur complete api-1 --skip-pr-check` to skip it.",
     );
   });
+
+  it("surfaces the open Spur ToDo item instead of a bare status on a todo_open_work 409", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "todo_open_work",
+            error:
+              "Resolve or explicitly override unfinished Spur ToDo items before completion: api-1 (open: item-1)",
+            sessions: [{ sessionId: "api-1", openItemIds: ["item-1"], heldItemIds: [] }],
+          }),
+          { status: 409 },
+        ),
+      );
+
+    const { postJson } = await loadClientModule();
+
+    await expect(
+      postJson("/tmp/dist/cli.js", "/sessions/api-1/complete", {}, "/tmp/spur.yaml"),
+    ).rejects.toThrow(
+      "Resolve or explicitly override unfinished Spur ToDo items before completion: api-1 (open: item-1)",
+    );
+  });
 });

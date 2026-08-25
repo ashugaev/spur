@@ -17,6 +17,7 @@ import {
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
+import { TodoOpenWorkError } from "../../src/todo.js";
 import type { SessionRecord, SessionView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
@@ -874,6 +875,65 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  it("returns an actionable error naming the open todo item on a todo_open_work 409", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalComplete = SessionService.prototype.complete;
+    SessionService.prototype.complete = async function mockComplete() {
+      throw new TodoOpenWorkError([
+        { sessionId: "demo-1", openItemIds: ["item-1"], heldItemIds: [] },
+      ]);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(409);
+      const payload = (await response.json()) as { code: string; error: string; sessions: unknown };
+      expect(payload.code).toBe("todo_open_work");
+      expect(payload.sessions).toEqual([
+        { sessionId: "demo-1", openItemIds: ["item-1"], heldItemIds: [] },
+      ]);
+      // The 409 body must name the blocking session and item, not a bare
+      // status — a client (CLI or web) falling back to `error` for its
+      // message must get something actionable, never "Request failed with
+      // status 409".
+      expect(payload.error).toContain("demo-1");
+      expect(payload.error).toContain("item-1");
+    } finally {
+      SessionService.prototype.complete = originalComplete;
       await server.stop();
     }
   });
