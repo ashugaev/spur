@@ -103,6 +103,7 @@ async function startSource(
     stop?: ReturnType<typeof vi.fn>;
     task?: ReturnType<typeof vi.fn>;
     webBaseUrl?: string | null;
+    resolveWebBaseUrl?: () => Promise<string | null>;
   } = {},
 ) {
   const listSessions =
@@ -152,7 +153,12 @@ async function startSource(
     logger,
     listSessions,
     spawnSession,
-    webBaseUrl: overrides.webBaseUrl !== undefined ? overrides.webBaseUrl : "http://127.0.0.1:5555",
+    resolveWebBaseUrl:
+      overrides.resolveWebBaseUrl ??
+      (() =>
+        Promise.resolve(
+          overrides.webBaseUrl !== undefined ? overrides.webBaseUrl : "http://127.0.0.1:5555",
+        )),
   });
   return { bot: botInstances[0], emit, handle, listSessions, logger, spawnSession, stop, task };
 }
@@ -1315,7 +1321,7 @@ describe("telegramSourceModule voice notes", () => {
       logger,
       listSessions,
       spawnSession,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
     const bot = botInstances[0];
     if (!bot) throw new Error("missing bot");
@@ -1582,7 +1588,7 @@ describe("telegramSourceModule voice notes", () => {
       logger: { info: vi.fn(), warn: vi.fn() },
       listSessions,
       spawnSession,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
     const bot = botInstances[0];
     if (!bot) throw new Error("missing bot");
@@ -1648,7 +1654,7 @@ describe("telegramSourceModule voice notes", () => {
       logger: { info: vi.fn(), warn: vi.fn() },
       listSessions,
       spawnSession,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
     const bot = botInstances[0];
     if (!bot) throw new Error("missing bot");

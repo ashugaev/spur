@@ -45,14 +45,17 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
   /**
-   * Base URL of this instance's own web UI (`http://127.0.0.1:<ui.port>`),
-   * used by voice transcription, or `null` when this instance has no known
-   * web UI port (`ui.port` is `0` — the isolated launcher's explicit sentinel
-   * for "no web sidecar reserved for this run", see
-   * scripts/spur-isolated-daemon.sh). Required so every source module reads
-   * the same resolved value — no source computes its own fallback.
+   * Resolves this instance's own web UI base URL, lazily — called at the
+   * moment a source actually needs it (voice transcription today), not at
+   * source start. Returns `null` when this instance's web UI port cannot yet
+   * be determined (an isolated daemon whose `isolated-ui` sidecar has no
+   * reservation yet — see `resolveWebBaseUrl` in `ports.ts`); a source must
+   * treat that as "disabled for now", never fall back to a guessed or
+   * default port. `event-sources/index.ts` caches the first successful
+   * resolution so every source module reads the same value and this isn't
+   * re-resolved on every call.
    */
-  webBaseUrl: string | null;
+  resolveWebBaseUrl(): Promise<string | null>;
 }
 
 export interface SourceHandle {

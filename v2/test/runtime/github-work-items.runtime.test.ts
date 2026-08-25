@@ -384,7 +384,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         },
         signal: abortController.signal,
         logger: { warn: () => {} },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       try {

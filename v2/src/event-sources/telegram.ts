@@ -1006,16 +1006,15 @@ async function transcribeAndRoute(
   statusMessageId: number | undefined,
 ): Promise<void> {
   const deps = runtime.deps;
-  const webBaseUrl = deps.webBaseUrl;
+  const webBaseUrl = await deps.resolveWebBaseUrl();
+  if (isAborted(deps)) return;
   if (webBaseUrl === null) {
-    if (!isAborted(deps)) {
-      await editOrReply(
-        ctx,
-        message.chat.id,
-        statusMessageId,
-        "Voice transcription is disabled for this Spur instance.",
-      );
-    }
+    await editOrReply(
+      ctx,
+      message.chat.id,
+      statusMessageId,
+      "Voice transcription is disabled for this Spur instance.",
+    );
     return;
   }
 

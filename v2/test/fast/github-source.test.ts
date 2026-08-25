@@ -234,7 +234,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
@@ -286,7 +286,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
@@ -340,7 +340,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
@@ -385,7 +385,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -422,7 +422,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -455,7 +455,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -479,7 +479,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -504,7 +504,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -534,7 +534,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -562,7 +562,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     // A non-classified error is retried on every poll: gh count grows each time.
@@ -619,7 +619,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(emit).not.toHaveBeenCalledWith("github:ci_failed", expect.anything());
@@ -660,7 +660,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(emit).toHaveBeenCalledWith(
@@ -720,7 +720,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(recordCommentSeenMock).not.toHaveBeenCalled();
@@ -775,7 +775,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(recordCommentSeenMock).not.toHaveBeenCalled();
@@ -821,7 +821,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(emit).toHaveBeenCalledWith(
@@ -867,7 +867,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
@@ -914,7 +914,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
   }
 
@@ -1543,7 +1543,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -1709,7 +1709,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     handle.runOnStart?.();
@@ -1865,7 +1865,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(recordWorkItemMock).toHaveBeenCalledWith(
@@ -1920,7 +1920,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger,
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(recordWorkItemMock).not.toHaveBeenCalled();
@@ -1949,7 +1949,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
@@ -1987,7 +1987,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
@@ -2018,7 +2018,7 @@ describe("github source", () => {
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
@@ -2067,7 +2067,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(recordWorkItemMock).toHaveBeenCalledWith(
@@ -2123,7 +2123,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(recordWorkItemMock).toHaveBeenCalledWith(
@@ -2171,7 +2171,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
@@ -2218,7 +2218,7 @@ describe("github source", () => {
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
-      webBaseUrl: "http://127.0.0.1:5555",
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
     expect(recordWorkItemMock).toHaveBeenCalledWith(
@@ -2331,7 +2331,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       // Seeded by the ungated startup poll in start().
@@ -2362,7 +2362,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2391,7 +2391,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2425,7 +2425,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2457,7 +2457,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2505,7 +2505,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2546,7 +2546,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger,
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2590,7 +2590,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger,
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2631,7 +2631,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger,
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2670,7 +2670,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger,
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);
@@ -2728,7 +2728,7 @@ describe("github source", () => {
         emit: vi.fn(),
         signal: new AbortController().signal,
         logger: { info: vi.fn(), warn: vi.fn() },
-        webBaseUrl: "http://127.0.0.1:5555",
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       expect(ghMock).toHaveBeenCalledTimes(5);

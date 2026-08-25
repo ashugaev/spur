@@ -43,51 +43,6 @@ if [[ -n "$CURRENT_BRANCH" ]]; then
   WRITE_CONFIG_ARGS+=(--branch "$CURRENT_BRANCH")
 fi
 
-# Reads this instance's real web UI port from the same authoritative source
-# spur-isolated-ui.sh itself binds from — the outer session's own reserved
-# sidecar ports, via "$TOOL_DIR/spur-sidecar ports" (session-slots.ts wraps
-# `spur sidecar ports --session <id>`, which reads the live daemon's
-# GET /sessions/:id, i.e. exactly the SPUR_RESERVED_PORT_UI value
-# session-service hands to the isolated-ui process — see
-# ensureSidecarReservation/startSidecarInternal in v2/src/session-service.ts).
-# `isolated-ui` depends on `isolated-daemon` (spur.yaml), so when both are
-# started together the caller reserves isolated-ui's port and launches this
-# daemon's own pane inside the very same request, before this script even
-# finishes sourcing spur-sidecar-common.sh — a short poll reliably observes
-# it. Never falls back to scanning the range itself: a second, independent
-# scan can pick a different port than the one isolated-ui actually binds,
-# which is exactly the guess this function exists to avoid. No reservation
-# shows up (isolated-ui was never requested for this run) prints "0" — an
-# explicit "no web UI for this instance" a caller must check for, never a
-# silently-omitted `ui:` block that config.ts would default to production's
-# port 5555.
-resolve_ui_port_from_sidecar_registry() {
-  local tool_dir="$1"
-  local attempts=6
-  local i
-  local line
-  local port
-
-  if [[ ! -x "$tool_dir/spur-sidecar" ]]; then
-    printf '0\n'
-    return 0
-  fi
-
-  for ((i = 0; i < attempts; i += 1)); do
-    line="$("$tool_dir/spur-sidecar" ports --name isolated-ui 2>/dev/null | grep -m1 "^isolated-ui$(printf '\t')" || true)"
-    if [[ -n "$line" ]]; then
-      port="$(printf '%s' "$line" | cut -f4)"
-      if [[ "$port" =~ ^[0-9]+$ ]]; then
-        printf '%s\n' "$port"
-        return 0
-      fi
-    fi
-    sleep 0.3
-  done
-
-  printf '0\n'
-}
-
 ensure_v2_build() {
   local oldest_output
   local output
@@ -123,8 +78,6 @@ cleanup() {
 trap cleanup EXIT
 rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.*
 
-UI_PORT=$(resolve_ui_port_from_sidecar_registry "$TOOL_DIR")
-
 cat > "$CONFIG_DIR/config.yaml" <<YAML
 server:
   host: 127.0.0.1
@@ -133,8 +86,6 @@ dataDir: "$CONFIG_DIR/data"
 worktreeDir: "$CONFIG_DIR/worktrees"
 tmux:
   socketName: "spur-$AGENT_PORT"
-ui:
-  port: $UI_PORT
 YAML
 
 cat > "$TOOL_DIR/spur" <<WRAPPER
