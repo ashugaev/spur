@@ -46,7 +46,7 @@ interface AutoUpdateCallRecord {
 
 interface MockResponses {
   info?: MockResponse | (() => MockResponse);
-  versions?: { status?: number; payload: unknown };
+  versions?: MockResponse | (() => MockResponse);
   switch?: { status?: number; payload: unknown };
   onSwitch?: (record: SwitchCallRecord) => void;
   autoUpdate?: { status?: number; payload: unknown };
@@ -55,18 +55,27 @@ interface MockResponses {
   autoUpdateDelay?: Promise<void>;
 }
 
+// A thunk answers each call separately, so one mock can serve a payload that
+// changes between polls.
+function resolveResponse(
+  response: MockResponse | (() => MockResponse) | undefined,
+  fallback: MockResponse,
+): MockResponse {
+  return (typeof response === "function" ? response() : response) ?? fallback;
+}
+
 function mockFetch(responses: MockResponses) {
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input.url;
     if (url === "/api/runtime/info") {
-      const info = (typeof responses.info === "function" ? responses.info() : responses.info) ?? {
-        payload: { version: "1.0.0" },
-      };
+      const info = resolveResponse(responses.info, { payload: { version: "1.0.0" } });
       return new Response(JSON.stringify(info.payload), { status: info.status ?? 200 });
     }
     if (url === "/api/runtime/versions") {
       responses.onVersionsFetch?.();
-      const versions = responses.versions ?? { payload: { current: "1.0.0", available: [] } };
+      const versions = resolveResponse(responses.versions, {
+        payload: { current: "1.0.0", available: [] },
+      });
       return new Response(JSON.stringify(versions.payload), { status: versions.status ?? 200 });
     }
     if (url === "/api/runtime/versions/switch") {
@@ -402,27 +411,23 @@ describe("VersionMenu", () => {
 
     it("picks up a daemon-side disarm and the notice on the next poll, with no reload", async () => {
       let versionsFetchCount = 0;
-      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-        const url = typeof input === "string" ? input : input.url;
-        if (url === "/api/runtime/info") {
-          return new Response(JSON.stringify({ version: "1.4.2" }), { status: 200 });
-        }
-        if (url === "/api/runtime/versions") {
+      mockFetch({
+        info: { payload: { version: "1.4.2" } },
+        // The second poll is the daemon answering after it disarmed itself.
+        versions: () => {
           versionsFetchCount += 1;
           const failed = versionsFetchCount > 1;
-          return new Response(
-            JSON.stringify({
+          return {
+            payload: {
               current: "1.4.2",
               autoUpdate: !failed,
               available: AVAILABLE,
               ...(failed
                 ? { updateFailure: { version: "1.5.0", failureKind: "rolled_back" } }
                 : {}),
-            }),
-            { status: 200 },
-          );
-        }
-        throw new Error(`Unexpected fetch: ${url}`);
+            },
+          };
+        },
       });
 
       vi.useFakeTimers({ shouldAdvanceTime: true });

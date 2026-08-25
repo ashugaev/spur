@@ -109,6 +109,17 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
   // tag inherits that tag's numbers and compares like an ordinary release.
   if (!(compareSemverDesc(candidate.tag, currentVersion) < 0)) return;
 
+  // The ledger outlives the record: re-arming `autoUpdate` and any manual
+  // Switch may clear the record behind the operator's notice, and neither is a
+  // reason to install a version that already failed on this host once.
+  if (ledger.blocked.has(candidate.tag)) {
+    log("daemon.auto_update.suppressed", {
+      level: "warn",
+      details: { version: candidate.tag, reason: "blocked_version" },
+    });
+    return;
+  }
+
   // Retry suppression, by recorded kind. A terminal record naming this exact
   // candidate suppresses it only when another attempt cannot help:
   // `succeeded` (install-and-restart.sh can exit 0 without restarting the
@@ -121,17 +132,6 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
   // A human press is unaffected either way: this branch lives in the tick,
   // not in `startDeploySwitch`. `state` is guaranteed terminal here (the
   // `phase === "running"` branch above already returned).
-  // The ledger outlives the record: re-arming `autoUpdate` and any manual
-  // Switch may clear the record behind the operator's notice, and neither is a
-  // reason to install a version that already failed on this host once.
-  if (ledger.blocked.has(candidate.tag)) {
-    log("daemon.auto_update.suppressed", {
-      level: "warn",
-      details: { version: candidate.tag, reason: "blocked_version" },
-    });
-    return;
-  }
-
   if (state && state.version === candidate.tag) {
     if (state.phase === "succeeded" || isNoRetryFailureKind(state.failureKind)) {
       log("daemon.auto_update.suppressed", {

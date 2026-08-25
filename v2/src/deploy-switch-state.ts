@@ -16,9 +16,8 @@ export type DeployInitiator = "auto" | "manual";
 export type DeployFailureKind = "install_failed" | "rolled_back" | "install_unhealthy";
 
 // The two kinds that say the install already changed the host. Named here, with
-// the record's shape, because three consumers ask the same question: the tick
-// (never retry), `GET /deploy/versions` (raise the operator notice), and the
-// clear below.
+// the record's shape, because the tick (never retry) and the notice below both
+// ask the same question of the same field.
 export type NoRetryFailureKind = Exclude<DeployFailureKind, "install_failed">;
 
 export function isNoRetryFailureKind(
@@ -101,14 +100,24 @@ export function writeDeploySwitchState(path: string, state: DeploySwitchState): 
   renameSync(temporary, path);
 }
 
-// Removes the record behind the operator's rollback notice, and only that: a
-// `running` record keeps the in-progress 409 guard, and `succeeded` or
-// `install_failed` records keep driving the tick's retry decision. Never-retry
-// memory does not live here — it lives in update-ledger.jsonl, so clearing the
-// notice cannot re-arm a rolled-back version.
-export function clearFailedDeploySwitchRecord(path: string): void {
+// The operator's rollback notice, derived from the record and nothing else so
+// no `dismissed` flag can go stale. Only a terminal record whose recorded kind
+// says the install changed the host raises it.
+export function readRollbackNotice(
+  path: string,
+): { version: string; failureKind: NoRetryFailureKind } | null {
   const state = readDeploySwitchState(path);
-  if (!state || state.phase !== "failed" || !isNoRetryFailureKind(state.failureKind)) return;
+  if (!state || state.phase !== "failed" || !isNoRetryFailureKind(state.failureKind)) return null;
+  return { version: state.version, failureKind: state.failureKind };
+}
+
+// Removes the record behind that notice, and only that: a `running` record
+// keeps the in-progress 409 guard, and `succeeded` or `install_failed` records
+// keep driving the tick's retry decision. Never-retry memory does not live here
+// — it lives in update-ledger.jsonl, so clearing the notice cannot re-arm a
+// rolled-back version.
+export function clearFailedDeploySwitchRecord(path: string): void {
+  if (!readRollbackNotice(path)) return;
   rmSync(path, { force: true });
 }
 

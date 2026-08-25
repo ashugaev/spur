@@ -466,11 +466,7 @@ import { runAutoUpdateTick } from "./auto-update.js";
 import { deploySwitchStatePath, reconcileDeploySwitchState } from "./deploy-switch-state.js";
 import { startDeploySwitch } from "./deploy-switch.js";
 import { getReleases } from "./releases-cache.js";
-import {
-  appendUpdateLedgerLine,
-  readUpdateLedger,
-  updateLedgerPath,
-} from "./update-ledger.js";
+import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./update-ledger.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 // Not a message prefix (the message starts with "Session <id> ...") — a
@@ -2594,11 +2590,15 @@ export class SessionService {
   // timer. `readAutoUpdateFlag` re-reads the flag from disk on every call,
   // never `this.config.autoUpdate` (rationale in auto-update-config.ts).
   private async runAutoUpdateTick(): Promise<void> {
+    // Resolved once: the tick's own reads and the switch it may start have to
+    // name the same two files even if the config reloads mid-tick.
+    const statePath = deploySwitchStatePath(this.config.dataDir);
+    const ledgerPath = updateLedgerPath(this.config.dataDir);
     try {
       await runAutoUpdateTick({
         configPath: this.bootstrapConfigPath,
-        statePath: deploySwitchStatePath(this.config.dataDir),
-        ledgerPath: updateLedgerPath(this.config.dataDir),
+        statePath,
+        ledgerPath,
         currentVersion: getVersion(),
         readFlag: readAutoUpdateFlag,
         readState: reconcileDeploySwitchState,
@@ -2607,12 +2607,7 @@ export class SessionService {
         disarm: (path) => writeAutoUpdateFlag(path, false),
         getReleases,
         start: (version) =>
-          startDeploySwitch({
-            version,
-            initiator: "auto",
-            statePath: deploySwitchStatePath(this.config.dataDir),
-            ledgerPath: updateLedgerPath(this.config.dataDir),
-          }),
+          startDeploySwitch({ version, initiator: "auto", statePath, ledgerPath }),
         log: (event, entry) => this.logEvent(event, entry),
       });
     } catch (error) {

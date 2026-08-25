@@ -8,8 +8,7 @@ import { assertConfigMayUseProdSlot } from "./config.js";
 import {
   clearFailedDeploySwitchRecord,
   deploySwitchStatePath,
-  isNoRetryFailureKind,
-  readDeploySwitchState,
+  readRollbackNotice,
   reconcileDeploySwitchState,
 } from "./deploy-switch-state.js";
 import { startDeploySwitch } from "./deploy-switch.js";
@@ -774,11 +773,7 @@ export async function startServer(
         // so an unchecked box and the notice can never disagree. Read, never
         // reconciled: a polled GET writes nothing to disk, and reconciliation
         // adds no `failureKind` anyway.
-        const lastSwitch = readDeploySwitchState(switchStatePath);
-        const updateFailure =
-          lastSwitch?.phase === "failed" && isNoRetryFailureKind(lastSwitch.failureKind)
-            ? { version: lastSwitch.version, failureKind: lastSwitch.failureKind }
-            : null;
+        const updateFailure = readRollbackNotice(switchStatePath);
         sendJson(response, 200, {
           current: getVersion(),
           available: releases.entries,
