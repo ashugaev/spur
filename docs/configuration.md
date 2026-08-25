@@ -296,7 +296,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.autoSpawn.enabled`: optional boolean, default `true`. `false` replies `No Spur session bound here. Use /watch or /spawn.` in an unbound chat.
 - `projects.<id>.sources.<sourceId>.autoSpawn.project`: optional, default `spur-shepherd`.
 - `projects.<id>.sources.<sourceId>.autoSpawn.agent`: optional `claude|codex|cursor|opencode`, default `opencode`.
-- `projects.<id>.sources.<sourceId>.autoSpawn.model`: optional; defaults to `google/gemini-3.7-flash` only when `agent` is omitted. Setting `model` without `agent` throws. Forwarded verbatim — an invalid model surfaces as a `Spawn failed: <cause>` reply.
+- `projects.<id>.sources.<sourceId>.autoSpawn.model`: optional, no default; requires `agent` to be set. Unset, the spawn falls through the normal model-resolution chain (`project.defaultModels[agent]`, then the agent's own default). Setting `model` without `agent` throws. Forwarded verbatim — an invalid model surfaces as a `Spawn failed: <cause>` reply.
 - `projects.<id>.sources.<sourceId>.autoSpawn.selfDestruct`: optional, default `{enabled: true}`. [selfDestruct](#selfdestruct-steps) shape.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.

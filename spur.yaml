@@ -69,6 +69,9 @@ projects:
         type: telegram
         token: ${TELEGRAM_BOT_TOKEN}
         allowedUsers: [444269670, 6211305103]
+        autoSpawn:
+          agent: opencode
+          model: google/gemini-3.7-flash
       itest-schedule:
         type: cron
         schedule: "0 3 */3 * *"

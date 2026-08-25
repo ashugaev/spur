@@ -1175,7 +1175,6 @@ projects:
         enabled: true,
         project: "spur-shepherd",
         agent: "opencode",
-        model: "google/gemini-3.7-flash",
         selfDestruct: { enabled: true },
       },
     });
@@ -1188,7 +1187,7 @@ projects:
     });
   });
 
-  it("materializes telegram autoSpawn defaults", async () => {
+  it("materializes telegram autoSpawn defaults with no model", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -1207,8 +1206,37 @@ projects:
         enabled: true,
         project: "spur-shepherd",
         agent: "opencode",
-        model: "google/gemini-3.7-flash",
         selfDestruct: { enabled: true },
+      },
+    });
+    expect(
+      (config.projects["backend"]?.sources["telegram"] as { autoSpawn?: { model?: string } })
+        .autoSpawn?.model,
+    ).toBeUndefined();
+  });
+
+  it("passes through a configured telegram autoSpawn model", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        autoSpawn:
+          agent: opencode
+          model: google/gemini-3.7-flash
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["telegram"]).toMatchObject({
+      autoSpawn: {
+        enabled: true,
+        agent: "opencode",
+        model: "google/gemini-3.7-flash",
       },
     });
   });

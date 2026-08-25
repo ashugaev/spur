@@ -871,8 +871,6 @@ function parseServiceSource(
   };
 }
 
-const DEFAULT_TELEGRAM_AUTOSPAWN_MODEL = "google/gemini-3.7-flash";
-
 function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnConfig {
   const autoSpawnLabel = `${label}.autoSpawn`;
   const obj = raw === undefined ? {} : asObject(raw, autoSpawnLabel);
@@ -880,12 +878,11 @@ function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnC
   const project =
     asOptionalString(obj["project"], `${autoSpawnLabel}.project`) ?? SHEPHERD_PROJECT_ID;
   const agentRaw = asOptionalAgent(obj["agent"], `${autoSpawnLabel}.agent`);
-  const modelRaw = asOptionalString(obj["model"], `${autoSpawnLabel}.model`);
-  if (modelRaw !== undefined && agentRaw === undefined) {
+  const model = asOptionalString(obj["model"], `${autoSpawnLabel}.model`);
+  if (model !== undefined && agentRaw === undefined) {
     throw new Error(`${autoSpawnLabel}.model requires ${autoSpawnLabel}.agent`);
   }
   const agent = agentRaw ?? "opencode";
-  const model = agentRaw === undefined ? DEFAULT_TELEGRAM_AUTOSPAWN_MODEL : modelRaw;
   let selfDestruct: SelfDestructConfig;
   try {
     selfDestruct = normalizeSelfDestructConfig(obj["selfDestruct"]) ?? { enabled: true };
