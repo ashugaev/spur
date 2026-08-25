@@ -541,4 +541,73 @@ if grep -q "rolled_back" "$STATUS_FILE17"; then
   fail "case 17 must not claim a rollback that failed: $(cat "$STATUS_FILE17")"
 fi
 
+# Case 18: the reinit branch's other half. Rollback install FAILS while the
+# post-rollback reinit SUCCEEDS — the only input that separates the two
+# conjuncts at install-and-restart.sh's `_rollback_rc -eq 0 &&
+# _rollback_reinit_rc -eq 0`. Previous version not reinstalled, so the kind
+# stays install_unhealthy no matter how well the reinit went.
+PREFIX_DIR18="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR" "$PREFIX_DIR9" "$PREFIX_DIR10" "$PREFIX_DIR11" "$PREFIX_DIR17" "$PREFIX_DIR18"' EXIT
+PKG_DIR18="$PREFIX_DIR18/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR18="$PKG_DIR18/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR18" "$PKG_DIR18/deploy" "$PKG_DIR18/dist" "$PKG_DIR18/web/dist-server" "$PREFIX_DIR18/bin"
+cp "$HELPER" "$PKG_SCRIPTS_DIR18/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR18/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR18/required-package-files.txt"
+: >"$PKG_DIR18/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR18/deploy/spur-web.npm.service"
+: >"$PKG_DIR18/dist/cli.js"
+: >"$PKG_DIR18/web/dist-server/web-server.js"
+: >"$PKG_DIR18/spur.yaml.reference"
+printf '{"version":"1.0.0"}' >"$PKG_DIR18/package.json"
+
+# First reinit (the new version) fails, the second one (after the rollback
+# install) succeeds.
+SPUR_COUNT18="$LOG_DIR/spur-count-18"
+rm -f "$SPUR_COUNT18"
+cat >"$PREFIX_DIR18/bin/spur" <<EOF
+#!/usr/bin/env bash
+echo "\$@"
+count=\$(cat "$SPUR_COUNT18" 2>/dev/null || echo 0)
+count=\$((count + 1))
+printf '%s' "\$count" >"$SPUR_COUNT18"
+[ "\$count" -eq 1 ] && exit 1
+exit 0
+EOF
+chmod +x "$PREFIX_DIR18/bin/spur"
+
+# Installs the new version, refuses the rollback back to 1.0.0.
+FAKE_NPM18="$(mktemp)"
+cat >"$FAKE_NPM18" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+for arg in "$@"; do
+  if [ "$arg" = "@shugaev/spur@1.0.0" ]; then
+    exit 1
+  fi
+done
+exit 0
+EOF
+chmod +x "$FAKE_NPM18"
+
+STATUS_FILE18="$PREFIX_DIR18/deploy-switch.json"
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE18" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM="$FAKE_NPM18" \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR18/install-and-restart.sh" 1.1.0
+rc18=$?
+set -e
+rm -f "$FAKE_NPM18"
+[ "$rc18" -ne 0 ] || fail "case 18 expected a non-zero exit when the first reinit fails"
+grep -q "rollback install rc=1" "$LOG_FILE" ||
+  fail "case 18 log missing the failed rollback install line"
+grep -q "spur reinit rc=0" "$LOG_FILE" ||
+  fail "case 18 expected the post-rollback reinit to succeed"
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE18" ||
+  fail "case 18 status must stay install_unhealthy: $(cat "$STATUS_FILE18")"
+if grep -q "rolled_back" "$STATUS_FILE18"; then
+  fail "case 18 must not claim a rollback whose install failed: $(cat "$STATUS_FILE18")"
+fi
+
 echo "install-and-restart.test.sh: OK"
