@@ -412,14 +412,16 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
     }
     try {
       deps.installVersion(good.version);
+      deps.reinit();
     } catch (error) {
-      // Classify at the point of occurrence, then rethrow: the reinstall of
-      // the known-good version failed, so the host is left on the bad one and
-      // this is the worst of the four outcomes to lose.
+      // Classify at the point of occurrence, then rethrow. Either the
+      // reinstall of the known-good version or the unit reinstall behind it
+      // failed (both throw: `execFileSync` in `installVersion`, `runNpmInit`
+      // in `reinit`), so the host is not back on a working version. Worst
+      // outcome of the five, and the one that must never be silent.
       logRolledBack("install_unhealthy");
       throw error;
     }
-    deps.reinit();
     await verifyRollback(deps, cfg);
     logRolledBack("rolled_back");
     deps.writeState({ ...deps.readState(), inProgress: null });

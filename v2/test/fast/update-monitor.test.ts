@@ -29,6 +29,7 @@ function makeFake(overrides: {
   probe?: (target: ProbeTarget) => ProbeResult;
   unitState?: (unit: string) => UnitState;
   installVersion?: (target: string) => void;
+  reinit?: () => void;
 }): FakeControls {
   let state = overrides.initialState;
   let installed = overrides.installed;
@@ -54,6 +55,7 @@ function makeFake(overrides: {
     },
     reinit: () => {
       counts.reinit += 1;
+      overrides.reinit?.();
     },
     currentVersion: "0.1.5",
     readInstalledVersion: () => installed,
@@ -218,6 +220,34 @@ describe("runUpdateMonitor", () => {
     });
     await runUpdateMonitor("/tmp/cli.js", fake.deps, FAST_CFG);
     expect(fake.installLog).toEqual([]);
+    expect(fake.loggedEvents).toEqual([
+      {
+        event: "cli.update.rolled_back",
+        level: "warn",
+        details: {
+          from: "0.1.5",
+          to: "0.2.0",
+          reason: expect.any(String),
+          failureKind: "install_unhealthy",
+        },
+      },
+    ]);
+  });
+
+  it("logs install_unhealthy and rethrows when the reinit behind the rollback install fails", async () => {
+    const fake = makeFake({
+      initialState: monitoringState("0.2.0", "0.1.5"),
+      installed: "0.2.0",
+      unitState: (unit) => (unit === "spur-daemon.service" ? "failed" : "active"),
+      probe: () => ({ ok: false, reason: "http-error" }),
+      reinit: () => {
+        throw new Error("npm init script not found");
+      },
+    });
+    await expect(runUpdateMonitor("/tmp/cli.js", fake.deps, FAST_CFG)).rejects.toThrow(
+      "npm init script not found",
+    );
+    expect(fake.installLog).toEqual(["0.1.5"]);
     expect(fake.loggedEvents).toEqual([
       {
         event: "cli.update.rolled_back",
