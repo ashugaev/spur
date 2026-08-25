@@ -64,7 +64,7 @@ async function makeGhStub(): Promise<GhStub> {
   const calledPath = join(binDir, "called");
   await writeFile(
     ghPath,
-    '#!/usr/bin/env sh\nprintf "called\\n" > "$GH_CALLED_PATH"\nexit "${GH_EXIT_CODE:-1}"\n',
+    '#!/usr/bin/env sh\nprintf "called\\n" > "$GH_CALLED_PATH"\nexit "$' + '{GH_EXIT_CODE:-1}"\n',
     "utf8",
   );
   await chmod(ghPath, 0o755);
@@ -75,7 +75,8 @@ async function makeStatusFailureStub(binDir: string): Promise<void> {
   const gitPath = join(binDir, "git");
   await writeFile(
     gitPath,
-    '#!/usr/bin/env sh\nif [ "$1" = "status" ]; then\n  exit 1\nfi\nPATH="${PATH#*:}" exec git "$@"\n',
+    '#!/usr/bin/env sh\nif [ "$1" = "status" ]; then\n  exit 1\nfi\nPATH="$' +
+      '{PATH#*:}" exec git "$@"\n',
     "utf8",
   );
   await chmod(gitPath, 0o755);
