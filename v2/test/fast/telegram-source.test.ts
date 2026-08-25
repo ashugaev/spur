@@ -102,7 +102,7 @@ async function startSource(
     listSessions?: ReturnType<typeof vi.fn>;
     stop?: ReturnType<typeof vi.fn>;
     task?: ReturnType<typeof vi.fn>;
-    webBaseUrl?: string;
+    webBaseUrl?: string | null;
   } = {},
 ) {
   const listSessions =
@@ -1455,6 +1455,29 @@ describe("telegramSourceModule voice notes", () => {
         expect.stringContaining("empty transcript"),
       ),
     );
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("A8: a null webBaseUrl (no ui.port known for this instance) replies unavailable and never fetches", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { webBaseUrl: null });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const voiceCtx = telegramVoiceContext();
+    await bot.emitVoice(voiceCtx);
+
+    await vi.waitFor(() =>
+      expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
+        -1001,
+        55,
+        "Voice transcription is disabled for this Spur instance.",
+      ),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
   });
 

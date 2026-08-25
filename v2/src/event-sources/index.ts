@@ -120,7 +120,10 @@ export async function startConfiguredSources(
           },
           signal: abortController.signal,
           logger,
-          webBaseUrl: `http://127.0.0.1:${deps.config.ui.port}`,
+          // ui.port 0 is the isolated launcher's explicit "no web UI known
+          // for this instance" sentinel (see scripts/spur-isolated-daemon.sh)
+          // — never treat it as a real port.
+          webBaseUrl: deps.config.ui.port > 0 ? `http://127.0.0.1:${deps.config.ui.port}` : null,
         });
 
         logSpurEvent(deps.config.dataDir, {

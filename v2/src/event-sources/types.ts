@@ -46,10 +46,13 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
   /**
    * Base URL of this instance's own web UI (`http://127.0.0.1:<ui.port>`),
-   * used by voice transcription. Required so every source module reads the
-   * same resolved value — no source computes its own fallback.
+   * used by voice transcription, or `null` when this instance has no known
+   * web UI port (`ui.port` is `0` — the isolated launcher's explicit sentinel
+   * for "no web sidecar reserved for this run", see
+   * scripts/spur-isolated-daemon.sh). Required so every source module reads
+   * the same resolved value — no source computes its own fallback.
    */
-  webBaseUrl: string;
+  webBaseUrl: string | null;
 }
 
 export interface SourceHandle {
