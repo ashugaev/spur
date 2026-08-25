@@ -124,7 +124,7 @@ With [`autoUpdate: true`](configuration.md#auto-update) the daemon self-updates 
 
 Pin first and the flag is still armed: within the next 5-minute tick the daemon sees a newer published version and moves the host straight off the pin. A CLI pin writes no deploy-switch status record, so it suppresses nothing on its own — clearing the flag is what stops the daemon.
 
-`spur update` writes `cli.update.started`, `cli.update.rolled_back`, and `cli.update.abandoned` to `<dataDir>/events.jsonl` — full event list in [configuration.md#auto-update](configuration.md#auto-update).
+`spur update` logs each attempt and its outcome — event names in [configuration.md#auto-update](configuration.md#auto-update).
 
 ## Security
 
