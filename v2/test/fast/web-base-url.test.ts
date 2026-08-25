@@ -22,10 +22,24 @@ describe("resolveWebBaseUrl", () => {
     expect(url).toBe("http://127.0.0.1:5555");
   });
 
-  it("falls back to config.ui.port when SPUR_SESSION_TOOL_DIR is set but has no spur-sidecar tool", async () => {
+  // SPUR_SESSION_TOOL_DIR set means this process is itself an isolated
+  // daemon: past that point config.ui.port (5555 here, indistinguishable
+  // from the host's real production port) must never come back out of this
+  // function again, on any path — missing or unusable registry tooling is
+  // exactly as "unknown" as every other failure below.
+  it("fails closed (never config.ui.port) when SPUR_SESSION_TOOL_DIR is set but has no spur-sidecar tool", async () => {
     const toolDir = await createTempDir("spur-tool-dir-empty-");
     const url = await resolveWebBaseUrl(5555, { SPUR_SESSION_TOOL_DIR: toolDir });
-    expect(url).toBe("http://127.0.0.1:5555");
+    expect(url).toBeNull();
+  });
+
+  it("fails closed (never config.ui.port) when spur-sidecar exists but is not executable", async () => {
+    const toolDir = await createTempDir("spur-tool-dir-not-exec-");
+    await writeFile(join(toolDir, "spur-sidecar"), "#!/usr/bin/env bash\nexit 0\n", {
+      mode: 0o644,
+    });
+    const url = await resolveWebBaseUrl(5555, { SPUR_SESSION_TOOL_DIR: toolDir });
+    expect(url).toBeNull();
   });
 
   it("reads the exact port the outer session's sidecar registry reports for isolated-ui — the SAME port isolated-ui actually binds", async () => {

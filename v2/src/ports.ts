@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, constants } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -69,9 +69,14 @@ export async function resolveWebBaseUrl(
     return `http://127.0.0.1:${uiPort}`;
   }
 
+  // Isolated context past this point: uiPort (config.ui.port) is never
+  // returned again, on any path — the outer session's registry is the only
+  // source of truth, and every failure to read it is null, same as below.
   const sidecarCli = join(toolDir, "spur-sidecar");
-  if (!existsSync(sidecarCli)) {
-    return `http://127.0.0.1:${uiPort}`;
+  try {
+    accessSync(sidecarCli, constants.X_OK);
+  } catch {
+    return null;
   }
 
   let stdout: string;
