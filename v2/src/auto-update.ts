@@ -14,7 +14,7 @@ import type { SpurLogEntry } from "./event-log.js";
 // would repeat a real install plus a real rollback, every tick, forever. A
 // kind that never installed anything — and a record with no kind at all — is
 // retried instead.
-export function isNoRetryKind(kind: DeployFailureKind | undefined): boolean {
+function isNoRetryKind(kind: DeployFailureKind | undefined): boolean {
   return kind === "rolled_back" || kind === "install_unhealthy";
 }
 
