@@ -446,7 +446,17 @@ Unit files here are templates. Source deployments apply them through [install-fr
 
 Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpdate: true`/`false` in `~/.spur/config.yaml`, re-read from disk every reaper tick — a hand edit takes effect on the next tick, no restart. Detection lag up to ~15 minutes (5-minute reaper tick plus the 10-minute registry cache), not immediate.
 
-An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release. A candidate already holding a terminal (`succeeded` or `failed`) status record is never retried. Events: `daemon.auto_update.started`, `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`.
+An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release.
+
+Retry rule, keyed on the `failureKind` the failed attempt recorded (`GET /deploy/switch/status` carries it, see [commands.md](commands.md#daemon-http-api)):
+
+- `install_failed` — the target never installed. Retried on every tick, no cap, no backoff.
+- no `failureKind` — nothing was installed either (lock timeout, spawn failure, a record written before this field existed). Retried the same way.
+- `rolled_back` — installed, failed, previous version reinstalled. Never auto-retried.
+- `install_unhealthy` — installed, failed, previous version not restored. Never auto-retried.
+- `succeeded` — never retried: the helper can exit 0 without restarting the daemon (systemctl absent), leaving a record for a version that is not running.
+
+Events: `daemon.auto_update.started`, `daemon.auto_update.retry`, `daemon.auto_update.suppressed` (with `reason` `succeeded_record` or `no_retry_kind`), `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`, `daemon.deploy_switch.started`, `daemon.deploy_switch.rejected`, `cli.update.started`, `cli.update.rolled_back`, `cli.update.abandoned`. All to `<dataDir>/events.jsonl`, never journald.
 
 Rollback reaches only failures the switch helper itself detects ([commands.md](commands.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
 
