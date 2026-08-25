@@ -98,6 +98,15 @@ describe("deploy switch state", () => {
       { ...TERMINAL, initiator: "auto", failureKind: "install_failed" },
       { ...TERMINAL, initiator: "auto" },
       { ...TERMINAL, phase: "succeeded", exitCode: 0, initiator: "auto" },
+      // The union admits a kind on a `succeeded` record even though no writer
+      // produces one: the phase, not the kind alone, decides.
+      {
+        ...TERMINAL,
+        phase: "succeeded",
+        exitCode: 0,
+        initiator: "auto",
+        failureKind: "rolled_back",
+      },
       {
         phase: "running",
         version: "0.67.2",

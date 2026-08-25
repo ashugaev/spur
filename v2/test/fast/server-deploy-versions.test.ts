@@ -12,7 +12,7 @@ interface DeployVersionsResponse {
   autoUpdate: boolean;
   stale?: boolean;
   registryError?: string;
-  updateFailure?: { version: string; failureKind: string };
+  updateFailure?: { version: string; failureKind: string; initiator: string };
 }
 
 function isDeployVersionsResponse(value: unknown): value is DeployVersionsResponse {
@@ -203,7 +203,11 @@ describe("GET /deploy/versions", () => {
     it("names the version and kind for a rolled-back record", async () => {
       const body = await readVersions({ ...TERMINAL, phase: "failed", failureKind: "rolled_back" });
 
-      expect(body.updateFailure).toEqual({ version: "0.67.2", failureKind: "rolled_back" });
+      expect(body.updateFailure).toEqual({
+        version: "0.67.2",
+        failureKind: "rolled_back",
+        initiator: "auto",
+      });
     });
 
     it("names the version and kind for an unhealthy install that was not rolled back", async () => {
@@ -213,7 +217,26 @@ describe("GET /deploy/versions", () => {
         failureKind: "install_unhealthy",
       });
 
-      expect(body.updateFailure).toEqual({ version: "0.67.2", failureKind: "install_unhealthy" });
+      expect(body.updateFailure).toEqual({
+        version: "0.67.2",
+        failureKind: "install_unhealthy",
+        initiator: "auto",
+      });
+    });
+
+    it("carries the initiator, so the UI can tell a disarm from a manual rollback", async () => {
+      const body = await readVersions({
+        ...TERMINAL,
+        initiator: "manual",
+        phase: "failed",
+        failureKind: "rolled_back",
+      });
+
+      expect(body.updateFailure).toEqual({
+        version: "0.67.2",
+        failureKind: "rolled_back",
+        initiator: "manual",
+      });
     });
 
     it("stays absent for a failure the tick will retry, a success, and no record at all", async () => {

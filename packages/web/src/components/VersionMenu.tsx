@@ -36,6 +36,7 @@ type UpdateFailureKind = "rolled_back" | "install_unhealthy";
 interface UpdateFailure {
   version: string;
   failureKind: UpdateFailureKind;
+  initiator: "auto" | "manual";
 }
 
 interface RuntimeVersionsResponse {
@@ -74,10 +75,11 @@ function isReleaseEntry(value: unknown): value is ReleaseEntry {
 
 function isUpdateFailure(value: unknown): value is UpdateFailure {
   if (typeof value !== "object" || value === null) return false;
-  const failure = value as { version: unknown; failureKind: unknown };
+  const failure = value as { version: unknown; failureKind: unknown; initiator: unknown };
   return (
     typeof failure.version === "string" &&
-    (failure.failureKind === "rolled_back" || failure.failureKind === "install_unhealthy")
+    (failure.failureKind === "rolled_back" || failure.failureKind === "install_unhealthy") &&
+    (failure.initiator === "auto" || failure.initiator === "manual")
   );
 }
 
@@ -96,14 +98,20 @@ function isRuntimeVersionsResponse(value: unknown): value is RuntimeVersionsResp
   return record.available.every(isReleaseEntry);
 }
 
+// The suspension clause only where it is true. The daemon disarms `autoUpdate`
+// for its own attempts only, and `autoUpdate` is off by default, so "off" alone
+// proves nothing: a manual rollback on a host that never armed it suspended
+// nothing, and an auto one the operator re-armed by hand is no longer suspended.
+function updateSuspended(failure: UpdateFailure, autoUpdateOn: boolean): boolean {
+  return failure.initiator === "auto" && !autoUpdateOn;
+}
+
 function updateFailureMessage(failure: UpdateFailure, autoUpdateOn: boolean): string {
   const outcome =
     failure.failureKind === "rolled_back"
       ? `Update to ${failure.version} failed, an automatic rollback happened`
       : `Update to ${failure.version} failed and was not rolled back`;
-  // The suspension clause only when it is true: a `spur update` rollback on a
-  // host with Auto still armed did not suspend anything.
-  return autoUpdateOn ? `${outcome}.` : `${outcome}, auto-update is suspended.`;
+  return updateSuspended(failure, autoUpdateOn) ? `${outcome}, auto-update is suspended` : outcome;
 }
 
 function isSwitchSuccess(value: unknown): value is SwitchSuccess {
@@ -309,9 +317,9 @@ export function VersionMenu() {
         aria-haspopup="true"
         aria-label={`Show Spur version information${
           updateFailure
-            ? autoUpdateOn
-              ? ", update failed"
-              : ", update failed, auto-update is suspended"
+            ? updateSuspended(updateFailure, autoUpdateOn)
+              ? ", update failed, auto-update is suspended"
+              : ", update failed"
             : severity === "major"
               ? ", major update available"
               : severity === "update"
@@ -325,7 +333,7 @@ export function VersionMenu() {
         <span
           className={
             updateFailure
-              ? `font-bold ${SEVERITY_TEXT_CLASS.major}`
+              ? "font-bold text-[var(--color-status-error)]"
               : severity === "none"
                 ? undefined
                 : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`
@@ -335,10 +343,12 @@ export function VersionMenu() {
           {triggerLabel}
         </span>
         {/* The notice wins the icon slot: one glyph, never two. The popover
-            still lists every release, so no severity information is lost. */}
+            still lists every release, so no severity information is lost.
+            The colour is the token, not SEVERITY_TEXT_CLASS: a rollback is not
+            a severity, so a recolour of `major` must not drag it along. */}
         {updateFailure ? (
           <RollbackIcon
-            className={`h-3 w-3 ${SEVERITY_TEXT_CLASS.major}`}
+            className="h-3 w-3 text-[var(--color-status-error)]"
             data-testid="version-rollback-icon"
           />
         ) : severity === "none" ? null : (
@@ -357,6 +367,17 @@ export function VersionMenu() {
               data-testid="version-update-failure"
             >
               {updateFailureMessage(updateFailure, autoUpdateOn)}
+            </div>
+          ) : null}
+          {/* The checkbox is the operator's way to clear the notice, so a
+              refused write cannot be silent: the box snaps back to the server
+              value and this says why. */}
+          {autoUpdateMutation.isError ? (
+            <div
+              className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]"
+              data-testid="version-auto-update-error"
+            >
+              {autoUpdateMutation.error.message}
             </div>
           ) : null}
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">

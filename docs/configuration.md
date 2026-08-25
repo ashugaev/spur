@@ -452,7 +452,7 @@ The daemon writes `autoUpdate: false` itself once one of its own attempts instal
 
 `<dataDir>/update-ledger.jsonl` is append-only, never pruned or rotated: one `blocked` line per version that installed and left the host changed, one `disarmed` line per disarm. A `blocked` version is never auto-attempted again on that host, even after the status record is gone — suppression logs `reason` `blocked_version`.
 
-The web version popover names that version — `rolled_back` or `install_unhealthy`, any initiator. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. Field: [`updateFailure`](commands.md#daemon-http-api).
+The web version popover names that version — `rolled_back` or `install_unhealthy`, any initiator — and says auto-update is suspended only where that is true, i.e. an auto-initiated failure with the flag now off. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. Field: [`updateFailure`](commands.md#daemon-http-api).
 
 Retry rule, keyed on the failed attempt's [`failureKind`](commands.md#daemon-http-api):
 

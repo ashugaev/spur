@@ -35656,5 +35656,55 @@ describe("SessionService", () => {
       );
       expect(service.config.autoUpdate).toBe(false);
     });
+
+    it("writes autoUpdate false to the config file and one disarmed line after an auto rollback", async () => {
+      // The wiring, not the decision: `runAutoUpdateTick` gets `disarm` from
+      // here, so only a real tick against a real config file proves the daemon
+      // turns the flag OFF rather than on, and marks the version once.
+      createSessionStore();
+      const configPath = join(TEST_DATA_DIR, "spur.yaml");
+      writeFileSync(configPath, "# keep me\nautoUpdate: true\n", "utf8");
+      // The tick disarms `bootstrapConfigPath`, i.e. the loaded config's own
+      // path, so it has to be the file this test can read back.
+      loadConfigMock.mockReturnValue({ ...baseConfig(), autoUpdate: true, configPath });
+      loadInstanceConfigReadOnlyMock.mockReturnValue({
+        status: "ok",
+        config: { autoUpdate: true },
+      });
+      getReleasesMock.mockResolvedValue({
+        entries: [{ tag: "999.0.0", publishedAt: "2026-01-01T00:00:00.000Z" }],
+        stale: false,
+        error: null,
+      });
+      writeFileSync(
+        join(TEST_DATA_DIR, "deploy-switch.json"),
+        `${JSON.stringify({
+          phase: "failed",
+          version: "998.0.0",
+          pid: 4242,
+          startedAt: "2026-03-18T09:00:00.000Z",
+          finishedAt: "2026-03-18T09:01:00.000Z",
+          exitCode: 1,
+          initiator: "auto",
+          failureKind: "rolled_back",
+        })}\n`,
+        "utf8",
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      service.startBackgroundLoops();
+
+      await vi.advanceTimersByTimeAsync(REAP_INTERVAL_MS);
+
+      expect(readFileSync(configPath, "utf8")).toBe("# keep me\nautoUpdate: false\n");
+      const ledger = readFileSync(join(TEST_DATA_DIR, "update-ledger.jsonl"), "utf8");
+      expect(ledger.trimEnd().split("\n")).toHaveLength(1);
+      expect(ledger).toContain('{"kind":"disarmed","version":"998.0.0"');
+      // The disarm tick attempts nothing: the flag is the decision.
+      expect(startDeploySwitchMock).not.toHaveBeenCalled();
+    });
   });
 });

@@ -103,12 +103,20 @@ export function writeDeploySwitchState(path: string, state: DeploySwitchState): 
 // The operator's rollback notice, derived from the record and nothing else so
 // no `dismissed` flag can go stale. Only a terminal record whose recorded kind
 // says the install changed the host raises it.
-export function readRollbackNotice(
-  path: string,
-): { version: string; failureKind: NoRetryFailureKind } | null {
+export function readRollbackNotice(path: string): {
+  version: string;
+  failureKind: NoRetryFailureKind;
+  initiator: DeployInitiator;
+} | null {
   const state = readDeploySwitchState(path);
   if (!state || state.phase !== "failed" || !isNoRetryFailureKind(state.failureKind)) return null;
-  return { version: state.version, failureKind: state.failureKind };
+  return {
+    version: state.version,
+    failureKind: state.failureKind,
+    // Carried because only an auto-initiated failure disarms the flag: the UI
+    // must not claim a suspension on a host that never had `autoUpdate` on.
+    initiator: state.initiator,
+  };
 }
 
 // Removes the record behind that notice, and only that: a `running` record
