@@ -915,7 +915,7 @@ async function routeTelegramPrompt(
           ctx,
           message.chat.id,
           message.message_thread_id,
-          message.text.trim(),
+          text,
           key,
           acquireResult.autoSpawn,
         );
@@ -940,7 +940,7 @@ async function routeTelegramPrompt(
           ctx,
           message.chat.id,
           message.message_thread_id,
-          message.text.trim(),
+          text,
           key,
           acquireResult.autoSpawn,
         );

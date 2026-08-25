@@ -1489,6 +1489,43 @@ describe("telegramSourceModule voice notes", () => {
     });
   });
 
+  it("A2b: auto-spawns a shepherd session from a voice note in an unbound chat", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "shp-1",
+      project: "spur-shepherd",
+      agent: "opencode",
+      state: "working",
+    });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      config: {
+        autoSpawn: {
+          enabled: true,
+          project: "spur-shepherd",
+          agent: "opencode",
+          selfDestruct: { enabled: true },
+        },
+      },
+    });
+    if (!bot) throw new Error("missing bot");
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    await bot.emitVoice(telegramVoiceContext());
+
+    await vi.waitFor(() => expect(spawnSession).toHaveBeenCalled());
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    expect(spawnSession).toHaveBeenCalledWith({
+      project: "spur-shepherd",
+      agent: "opencode",
+      selfDestruct: { enabled: true },
+      prompt: expect.stringContaining("fix the sidecar"),
+    });
+
+    const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
+    await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-1"');
+  });
+
   it("A3: a non-2xx transcribe response replies with failure and emits nothing", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
