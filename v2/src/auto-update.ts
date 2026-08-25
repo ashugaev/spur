@@ -1,7 +1,7 @@
 import { compareSemverDesc, type ReleasesResult } from "./releases-cache.js";
 import type { ReadAutoUpdateFlagResult } from "./auto-update-config.js";
 import type { DeploySwitchResult } from "./deploy-switch.js";
-import type { DeploySwitchState } from "./deploy-switch-state.js";
+import type { DeployFailureKind, DeploySwitchState } from "./deploy-switch-state.js";
 import type { SpurLogEntry } from "./event-log.js";
 
 // The auto-update decision, pure apart from injected deps — mirrors
@@ -9,6 +9,14 @@ import type { SpurLogEntry } from "./event-log.js";
 // without a daemon. Every guard `startDeploySwitch` owns is NOT repeated
 // here; this module only decides whether to call it and suppresses a
 // repeat attempt at the same candidate.
+
+// The kinds that say the install already changed the host: another attempt
+// would repeat a real install plus a real rollback, every tick, forever. A
+// kind that never installed anything — and a record with no kind at all — is
+// retried instead.
+export function isNoRetryKind(kind: DeployFailureKind | undefined): boolean {
+  return kind === "rolled_back" || kind === "install_unhealthy";
+}
 
 export interface RunAutoUpdateTickDeps {
   configPath: string;
@@ -52,16 +60,40 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
   // tag inherits that tag's numbers and compares like an ordinary release.
   if (!(compareSemverDesc(candidate.tag, currentVersion) < 0)) return;
 
-  // Retry suppression: any terminal record naming this exact candidate
-  // suppresses it, whether it succeeded or failed. `failed` alone is not
-  // enough — install-and-restart.sh can exit 0 without actually restarting
-  // the daemon (e.g. systemctl absent), leaving a `succeeded` record for a
-  // candidate that is still newer than the running version. A human press
-  // is unaffected: this branch lives in the tick, not in `startDeploySwitch`.
-  // `state` is guaranteed terminal here (the `phase === "running"` branch
-  // above already returned), so no further phase check is needed.
+  // Retry suppression, by recorded kind. A terminal record naming this exact
+  // candidate suppresses it only when another attempt cannot help:
+  // `succeeded` (install-and-restart.sh can exit 0 without restarting the
+  // daemon — e.g. systemctl absent — leaving a `succeeded` record for a
+  // candidate still newer than the running version), or a failure kind that
+  // says the package installed and left the host changed. A failure that
+  // installed nothing, or one with no recorded kind at all, is attempted
+  // again on every tick with no cap: the reported bug was a transient
+  // registry error stranding a host on the old version forever, silently.
+  // A human press is unaffected either way: this branch lives in the tick,
+  // not in `startDeploySwitch`. `state` is guaranteed terminal here (the
+  // `phase === "running"` branch above already returned).
   if (state && state.version === candidate.tag) {
-    return;
+    if (state.phase === "succeeded" || isNoRetryKind(state.failureKind)) {
+      log("daemon.auto_update.suppressed", {
+        level: "warn",
+        details: {
+          version: candidate.tag,
+          phase: state.phase,
+          ...(state.failureKind ? { failureKind: state.failureKind } : {}),
+          initiator: state.initiator,
+          reason: state.phase === "succeeded" ? "succeeded_record" : "no_retry_kind",
+        },
+      });
+      return;
+    }
+    log("daemon.auto_update.retry", {
+      level: "info",
+      details: {
+        version: candidate.tag,
+        ...(state.failureKind ? { failureKind: state.failureKind } : {}),
+        previousExitCode: state.exitCode,
+      },
+    });
   }
 
   const result = await start(candidate.tag);

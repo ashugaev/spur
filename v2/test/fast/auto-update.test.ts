@@ -130,22 +130,139 @@ describe("runAutoUpdateTick", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
-  it("does not call start when a terminal succeeded record already names the candidate", async () => {
+  it("suppresses a succeeded record and logs the reason", async () => {
     const start = vi.fn();
-    const deps = baseDeps({ readState: () => terminalState("succeeded", "1.1.0"), start });
+    const log = vi.fn();
+    const deps = baseDeps({ readState: () => terminalState("succeeded", "1.1.0"), start, log });
 
     await runAutoUpdateTick(deps);
 
     expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "warn",
+        details: {
+          version: "1.1.0",
+          phase: "succeeded",
+          initiator: "auto",
+          reason: "succeeded_record",
+        },
+      }),
+    );
   });
 
-  it("does not call start when a terminal failed record already names the candidate", async () => {
+  it("suppresses rolled_back and logs the reason", async () => {
     const start = vi.fn();
+    const log = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "rolled_back"),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "warn",
+        details: {
+          version: "1.1.0",
+          phase: "failed",
+          failureKind: "rolled_back",
+          initiator: "auto",
+          reason: "no_retry_kind",
+        },
+      }),
+    );
+  });
+
+  it("suppresses install_unhealthy and logs the reason", async () => {
+    const start = vi.fn();
+    const log = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_unhealthy"),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "warn",
+        details: expect.objectContaining({
+          failureKind: "install_unhealthy",
+          reason: "no_retry_kind",
+        }),
+      }),
+    );
+  });
+
+  it("retries a failed install_failed record", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_failed"),
+      start,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith("1.1.0");
+  });
+
+  it("retries a failed record with no failureKind", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
     const deps = baseDeps({ readState: () => terminalState("failed", "1.1.0"), start });
 
     await runAutoUpdateTick(deps);
 
-    expect(start).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith("1.1.0");
+  });
+
+  it("logs retry before starting a previously failed candidate", async () => {
+    const calls: string[] = [];
+    const start = vi.fn(async (version: string): Promise<DeploySwitchResult> => {
+      calls.push(`start:${version}`);
+      return { status: "accepted", version };
+    });
+    const log = vi.fn((event: string) => {
+      calls.push(`log:${event}`);
+    });
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_failed"),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.retry",
+      expect.objectContaining({
+        level: "info",
+        details: {
+          version: "1.1.0",
+          failureKind: "install_failed",
+          previousExitCode: 1,
+        },
+      }),
+    );
+    expect(calls).toEqual([
+      "log:daemon.auto_update.retry",
+      "start:1.1.0",
+      "log:daemon.auto_update.started",
+    ]);
   });
 
   it("does not suppress when a terminal record names a different version", async () => {
