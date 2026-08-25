@@ -103,7 +103,7 @@ ALWAYS-ON RULES
   Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
   Default close-out: push to the existing PR branch, or create a new PR with auto-merge enabled. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
   Use `Spur` in code, config, docs, and CLI surfaces.
-  Never hardcode a model version in source. A per-agent default model is a version-free alias declared with its agent (`opus`, `auto`) and registered in the one per-agent default map. A pinned version belongs in config, never in code.
+  Never hardcode a model version in source. A per-agent default model is a version-free alias (`opus`, `auto`) declared with its agent and registered in the one per-agent default map. Pin a version in config.
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.
   Never create new projects in, or otherwise interact with (deploy, start/stop, direct API calls), the main production Spur instance without the user's explicit instruction. Test only against local/sandbox instances (isolated-daemon, `spur-sidecar`); see `.agents/skills/spur/SKILL.md` Safety and In this repo for detail.
   Deploy for review or test with `scripts/test-deploy.sh`, never `npm install -g` by hand.
