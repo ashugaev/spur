@@ -17,13 +17,24 @@ rm -f "$HOME"/.config/systemd/user/default.target.wants/spur-*.service
 systemctl --user daemon-reload 2>/dev/null
 loginctl disable-linger "$USER" 2>/dev/null
 
+# System-scope units come from the source-install deploy mode, which shares this
+# box. Leaving them running holds 4310 and makes the next npm-install run read a
+# stale daemon as its own.
+sudo systemctl stop spur-web spur-daemon 2>/dev/null
+sudo systemctl disable spur-web spur-daemon 2>/dev/null
+sudo rm -f /etc/systemd/system/spur-*.service
+sudo rm -f /etc/systemd/system/multi-user.target.wants/spur-*.service
+sudo systemctl daemon-reload 2>/dev/null
+
 log "killing leftover spur processes and tmux servers"
 pkill -f 'spur/dist/cli.js' 2>/dev/null
+pkill -f 'dist/cli.js daemon' 2>/dev/null
 pkill -f 'web-server.js' 2>/dev/null
 tmux ls 2>/dev/null | cut -d: -f1 | while read -r s; do tmux kill-session -t "$s" 2>/dev/null; done
 
 log "removing spur package, data, npm pin"
 rm -rf "$HOME/.local/lib/node_modules/@shugaev" "$HOME/.spur" "$HOME/.npmrc"
+sudo rm -rf /etc/spur
 rm -f "$HOME/.local/bin/spur" "$HOME"/.local/bin/spur-*
 
 log "removing agent CLIs installed by the test"
@@ -41,11 +52,14 @@ sudo apt-get remove --purge -y tailscale >/dev/null 2>&1
 sudo rm -rf /var/lib/tailscale
 sudo rm -f /etc/apt/sources.list.d/tailscale.list
 
-log "removing nvm and the PATH lines the install doc tells the agent to add"
+# Restore the stock skeleton instead of sed-deleting lines: Ubuntu's own
+# ~/.profile ships a `.local/bin` stanza, so deleting every `.local/bin` line
+# left a dangling `fi` — a login-shell syntax error the tested agent then spent
+# a turn diagnosing and fixing. Harness damage reads as install friction.
+log "restoring stock shell profiles (drops nvm and install-added PATH lines)"
 rm -rf "$HOME/.nvm"
-for f in "$HOME/.bashrc" "$HOME/.profile"; do
-  [ -f "$f" ] && sed -i -e '/NVM_DIR/d' -e '/nvm\.sh/d' -e '/nvm bash_completion/d' -e '/\.local\/bin/d' "$f"
-done
+cp /etc/skel/.profile "$HOME/.profile"
+cp /etc/skel/.bashrc "$HOME/.bashrc"
 
 # ~/.claude/.credentials.json stays — the planted harness Claude runs `-p`
 # print mode only, verified working while authenticated but never onboarded.
@@ -78,7 +92,13 @@ printf '  %-14s %s\n' "units-user"    "$(ls "$HOME"/.config/systemd/user/spur-*.
 printf '  %-14s %s\n' "units-system"  "$(ls /etc/systemd/system/spur-*.service 2>/dev/null | wc -l)"
 apt_leftover=$(ls /etc/apt/sources.list.d/nodesource.* /etc/apt/sources.list.d/tailscale.list 2>/dev/null | tr '\n' ' ')
 printf '  %-14s %s\n' "apt-repos"     "$([ -n "$apt_leftover" ] && echo "leftover: $apt_leftover" || echo clean)"
-profile_leftover=$(grep -l 'NVM_DIR\|\.local/bin' "$HOME/.bashrc" "$HOME/.profile" 2>/dev/null | tr '\n' ' ')
+profile_leftover=$(grep -l 'NVM_DIR' "$HOME/.bashrc" "$HOME/.profile" 2>/dev/null | tr '\n' ' ')
+if [ -z "$profile_leftover" ] && ! diff -q /etc/skel/.profile "$HOME/.profile" >/dev/null 2>&1; then
+  profile_leftover="$HOME/.profile differs from skel"
+fi
 printf '  %-14s %s\n' "profile-lines" "$([ -n "$profile_leftover" ] && echo "leftover: $profile_leftover" || echo clean)"
+printf '  %-14s %s\n' "port-4310"     "$(ss -ltn 2>/dev/null | grep -q ':4310 ' && echo BUSY || echo free)"
 printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] && echo cursor-agent || echo none)"
+printf '  %-14s %s\n' "harness"       "$([ -x "$HOME/.itest-harness/bin/claude" ] && echo claude || echo MISSING)"
+printf '  %-14s %s\n' "harness-creds" "$([ -s "$HOME/.claude/.credentials.json" ] && echo present || echo MISSING)"
 log "done"
