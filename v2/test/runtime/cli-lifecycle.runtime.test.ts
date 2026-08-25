@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { toCursorProjectPath } from "../../src/cursor-jsonl-state.js";
 import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
 import { readSession, writeSession } from "../../src/metadata.js";
 import { listProcesses, readProcessEnvValue } from "../../src/process-tree.js";
@@ -1747,6 +1748,38 @@ projects:
       expect(spawned.branch).toBe(expectedBranch);
       expect(spawned.branchSource).toBe("preflight");
       expect(branch.stdout.trim()).toBe(expectedBranch);
+      if (agent === "cursor") {
+        expect(spawned.agentSessionId).toBeTruthy();
+        const chatId = spawned.agentSessionId as string;
+        const transcript = await readFile(
+          join(
+            context.rootDir,
+            ".cursor",
+            "projects",
+            toCursorProjectPath(spawned.worktreePath),
+            "agent-transcripts",
+            chatId,
+            `${chatId}.jsonl`,
+          ),
+          "utf8",
+        );
+        const records = transcript
+          .trim()
+          .split("\n")
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                role?: string;
+                message?: { content?: Array<{ type?: string; text?: string }> };
+              },
+          );
+        const submittedText = records
+          .find((record) => record.role === "user")
+          ?.message?.content?.find((block) => block.type === "text")?.text;
+        expect(submittedText?.split("\n\nSession metadata:\n")[0]).toBe(
+          "runtime preflight prompt for cursor",
+        );
+      }
     },
   );
 
