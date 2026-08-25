@@ -64,11 +64,21 @@ async function makeGhStub(): Promise<GhStub> {
   const calledPath = join(binDir, "called");
   await writeFile(
     ghPath,
-    '#!/usr/bin/env sh\nprintf "called\\n" > "$GH_CALLED_PATH"\nexit 1\n',
+    '#!/usr/bin/env sh\nprintf "called\\n" > "$GH_CALLED_PATH"\nexit "${GH_EXIT_CODE:-1}"\n',
     "utf8",
   );
   await chmod(ghPath, 0o755);
   return { binDir, calledPath };
+}
+
+async function makeStatusFailureStub(binDir: string): Promise<void> {
+  const gitPath = join(binDir, "git");
+  await writeFile(
+    gitPath,
+    '#!/usr/bin/env sh\nif [ "$1" = "status" ]; then\n  exit 1\nfi\nPATH="${PATH#*:}" exec git "$@"\n',
+    "utf8",
+  );
+  await chmod(gitPath, 0o755);
 }
 
 async function runAutoPushHook(args: string[], env: NodeJS.ProcessEnv): Promise<HookRun> {
@@ -200,6 +210,25 @@ describe("auto-push Stop hook", () => {
 
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Problems: uncommitted no-pr");
+    await expect(readFile(calledPath, "utf8")).resolves.toBe("called\n");
+  });
+
+  it("fails closed when worktree status cannot be read", async () => {
+    const repoDir = await makeCommittedRepo();
+    await setOriginHead(repoDir);
+    const { binDir, calledPath } = await makeGhStub();
+    await makeStatusFailureStub(binDir);
+
+    const result = await runAutoPushHook([], {
+      CLAUDE_PROJECT_DIR: repoDir,
+      GH_CALLED_PATH: calledPath,
+      GH_EXIT_CODE: "0",
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("Problems: uncommitted");
+    expect(result.stdout).not.toContain("no-pr");
     await expect(readFile(calledPath, "utf8")).resolves.toBe("called\n");
   });
 
