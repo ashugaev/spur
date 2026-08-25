@@ -448,11 +448,11 @@ Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpd
 
 An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release.
 
-The daemon writes `autoUpdate: false` itself after one of its own attempts installs a version and leaves the host changed (`failureKind` `rolled_back` or `install_unhealthy`), and logs `daemon.auto_update.paused`. At most once per version, ever — a hand edit back to `autoUpdate: true` holds, and every later tick leaves it alone. A manual update, `Switch` or [`spur update`](install-from-npm.md#upgrade), never disarms this way.
+The daemon writes `autoUpdate: false` itself once one of its own attempts installs a version and leaves the host changed (`failureKind` `rolled_back` or `install_unhealthy`), and logs `daemon.auto_update.paused`. At most once per version, ever: a hand edit back to `autoUpdate: true` holds. Only the daemon's own attempt disarms this way; [`spur update`](install-from-npm.md#upgrade) never touches the flag.
 
-`<dataDir>/update-ledger.jsonl` is append-only, never pruned or rotated: one line per version that installed and left the host changed, one per disarm. A version listed there is never auto-attempted again on that host, whatever happens to the status record — suppression logs `reason` `blocked_version`.
+`<dataDir>/update-ledger.jsonl` is append-only, never pruned or rotated: one `blocked` line per version that installed and left the host changed, one `disarmed` line per disarm. A `blocked` version is never auto-attempted again on that host, even after the status record is gone — suppression logs `reason` `blocked_version`.
 
-The web version popover names that version above the current-version row while the record stands. It clears when the operator acts on the update path: re-enable `Auto`, or press any `Switch`. A later rollback raises it again, naming the new version. Field: [`updateFailure`](commands.md#daemon-http-api).
+The web version popover names that version — `rolled_back` or `install_unhealthy`, any initiator. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. Field: [`updateFailure`](commands.md#daemon-http-api).
 
 Retry rule, keyed on the failed attempt's [`failureKind`](commands.md#daemon-http-api):
 
