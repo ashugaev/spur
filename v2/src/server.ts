@@ -785,6 +785,20 @@ export async function startServer(
           initiator: "manual",
           statePath: switchStatePath,
         });
+        // The update-path timeline in events.jsonl has to read end to end for
+        // every initiator. `user-actions.jsonl` records the press separately
+        // as the operator-action audit trail; this is the update timeline.
+        if (result.status === "accepted" || result.status === "already_current") {
+          logEvent("daemon.deploy_switch.started", {
+            level: "info",
+            details: { version: result.version, status: result.status, initiator: "manual" },
+          });
+        } else {
+          logEvent("daemon.deploy_switch.rejected", {
+            level: "warn",
+            details: { version: requestedVersion, status: result.status },
+          });
+        }
         switch (result.status) {
           case "invalid_version":
             sendError(response, 400, "invalid version");

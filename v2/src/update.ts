@@ -4,6 +4,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { loadInstanceConfigReadOnly } from "./config.js";
+import type { DeployFailureKind } from "./deploy-switch-state.js";
+import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
 import { writeStdout } from "./io.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
@@ -66,6 +69,7 @@ export interface UpdateDeps {
   pidAlive(pid: number): boolean;
   unitActive(unit: string): boolean;
   log(message: string): void;
+  logEvent(event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void;
   acquireUpdateLock(): () => void;
 }
 
@@ -199,6 +203,11 @@ export function createRealUpdateDeps(
 ): UpdateDeps {
   const scope = resolveSystemdScope(homedir());
   const installPrefix = resolveInstallPrefix(cliEntrypoint);
+  // The CLI has no daemon call and no config path of its own. An absent or
+  // invalid instance config yields no dataDir, so the events are dropped and
+  // `spur update` still runs — a default at the boundary, not in the flow.
+  const instanceConfig = loadInstanceConfigReadOnly();
+  const dataDir = instanceConfig.status === "ok" ? instanceConfig.config.dataDir : null;
   return {
     now: () => Date.now(),
     sleep: (ms) => delay(ms),
@@ -233,6 +242,10 @@ export function createRealUpdateDeps(
     pidAlive: (pid) => realPidAlive(pid),
     unitActive: (unit) => isActive(scope.ctl, unit),
     log: (message) => writeStdout(`${message}\n`),
+    logEvent: (event, entry) => {
+      if (!dataDir) return;
+      logSpurEvent(dataDir, { event, ...entry });
+    },
     acquireUpdateLock: () => acquireUpdateLock(),
   };
 }
@@ -336,6 +349,10 @@ export async function runUpdate(
     };
     deps.writeState({ version: 1, lastKnownGood, inProgress });
 
+    deps.logEvent("cli.update.started", {
+      level: "info",
+      details: { from: deps.currentVersion, to: target, force },
+    });
     deps.installVersion(target);
     deps.reinit();
 
@@ -364,8 +381,23 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
     if (state.inProgress) {
       deps.writeState({ ...state, inProgress: { ...state.inProgress, phase: "rolling-back" } });
     }
+    // A rollback left no durable trace at all. Every exit below records what
+    // it did to the host, classified the same way the deploy-switch helper
+    // classifies its own branches.
+    const attempted = state.inProgress;
+    const logRolledBack = (failureKind: DeployFailureKind): void => {
+      deps.logEvent("cli.update.rolled_back", {
+        level: "warn",
+        details: {
+          ...(attempted ? { from: attempted.fromVersion, to: attempted.toVersion } : {}),
+          reason,
+          failureKind,
+        },
+      });
+    };
     if (!good) {
       deps.log("No known-good version recorded; clearing update state without reinstalling.");
+      logRolledBack("install_unhealthy");
       deps.writeState({ ...deps.readState(), inProgress: null });
       return;
     }
@@ -373,12 +405,22 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
       deps.log(
         `Installed version already matches known-good ${good.version}; nothing to reinstall.`,
       );
+      logRolledBack("rolled_back");
       deps.writeState({ ...deps.readState(), inProgress: null });
       return;
     }
-    deps.installVersion(good.version);
+    try {
+      deps.installVersion(good.version);
+    } catch (error) {
+      // Classify at the point of occurrence, then rethrow: the reinstall of
+      // the known-good version failed, so the host is left on the bad one and
+      // this is the worst of the four outcomes to lose.
+      logRolledBack("install_unhealthy");
+      throw error;
+    }
     deps.reinit();
     await verifyRollback(deps, cfg);
+    logRolledBack("rolled_back");
     deps.writeState({ ...deps.readState(), inProgress: null });
   } finally {
     releaseUpdateLock();
@@ -434,6 +476,12 @@ export async function runUpdateMonitor(
     }
     if (decision.kind === "abandon") {
       deps.writeState({ ...deps.readState(), inProgress: null });
+      // Not a rollback: this version never stabilized and is still the one
+      // running. Logged so the outcome is not silent.
+      deps.logEvent("cli.update.abandoned", {
+        level: "warn",
+        details: { version: state.inProgress.toVersion, reason: "deadline" },
+      });
       deps.log("Update did not stabilize before the deadline; leaving it in place, no rollback.");
       return;
     }

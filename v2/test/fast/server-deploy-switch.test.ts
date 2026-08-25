@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetEventLogCollapse, type SpurLogEntry } from "../../src/event-log.js";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
 import { findFreePort } from "../helpers/common.js";
 
@@ -91,6 +92,14 @@ async function setupConfig(port: number, autoUpdate?: boolean): Promise<string> 
     "utf8",
   );
   return configPath;
+}
+
+async function readLoggedEvents(configPath: string): Promise<SpurLogEntry[]> {
+  const raw = await readFile(join(dirname(configPath), "data", "events.jsonl"), "utf8");
+  return raw
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as SpurLogEntry);
 }
 
 function registryResponse(versions: ReadonlyArray<string>): Response {
@@ -441,6 +450,69 @@ describe("POST /deploy/switch", () => {
           exitCode: 0,
           initiator: "manual",
         }),
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("logs daemon.deploy_switch.started with initiator manual", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    fetchSpy.mockResolvedValue(registryResponse(["0.2.0", "0.1.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const configPath = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const accepted = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(accepted.status).toBe(202);
+
+      const events = await readLoggedEvents(configPath);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "daemon.deploy_switch.started",
+            level: "info",
+            details: { version: "0.2.0", status: "accepted", initiator: "manual" },
+          }),
+        ]),
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("logs daemon.deploy_switch.rejected when the switch is refused", async () => {
+    // warn events are collapse-keyed on level+event only, not on dataDir, so
+    // an earlier rejection in this file would swallow this one.
+    resetEventLogCollapse();
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const configPath = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const rejected = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "not-a-version" }),
+      });
+      expect(rejected.status).toBe(400);
+
+      const events = await readLoggedEvents(configPath);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "daemon.deploy_switch.rejected",
+            level: "warn",
+            details: { version: "not-a-version", status: "invalid_version" },
+          }),
+        ]),
       );
     } finally {
       await server.stop();

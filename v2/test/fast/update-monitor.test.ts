@@ -12,10 +12,17 @@ const FAST_CFG: DecisionConfig = {
   refusedN: 3,
 };
 
+interface LoggedEvent {
+  event: string;
+  level: string;
+  details?: Record<string, unknown>;
+}
+
 interface FakeControls {
   deps: UpdateDeps;
   state: () => RollbackState;
   installLog: string[];
+  loggedEvents: LoggedEvent[];
   counts: { reinit: number; launch: number };
 }
 
@@ -24,11 +31,13 @@ function makeFake(overrides: {
   installed: string;
   probe?: (target: ProbeTarget) => ProbeResult;
   unitState?: (unit: string) => UnitState;
+  installVersion?: (target: string) => void;
 }): FakeControls {
   let state = overrides.initialState;
   let installed = overrides.installed;
   let clock = 0;
   const installLog: string[] = [];
+  const loggedEvents: LoggedEvent[] = [];
   const counts = { reinit: 0, launch: 0 };
   const deps: UpdateDeps = {
     now: () => clock,
@@ -39,6 +48,10 @@ function makeFake(overrides: {
     probe: (target) => Promise.resolve(overrides.probe?.(target) ?? { ok: true }),
     unitState: (unit) => Promise.resolve(overrides.unitState?.(unit) ?? "active"),
     installVersion: (target) => {
+      if (overrides.installVersion) {
+        overrides.installVersion(target);
+        return;
+      }
       installLog.push(target);
       installed = target;
     },
@@ -61,9 +74,16 @@ function makeFake(overrides: {
     pidAlive: () => false,
     unitActive: () => false,
     log: () => undefined,
+    logEvent: (event, entry) => {
+      loggedEvents.push({
+        event,
+        level: entry.level,
+        ...(entry.details ? { details: entry.details } : {}),
+      });
+    },
     acquireUpdateLock: () => () => undefined,
   };
-  return { deps, state: () => state, installLog, counts };
+  return { deps, state: () => state, installLog, loggedEvents, counts };
 }
 
 function monitoringState(installed: string, lastKnownGood: string | null): RollbackState {
@@ -165,5 +185,84 @@ describe("runUpdateMonitor", () => {
       version: "0.1.5",
       healthyAt: "2026-07-12T00:00:00.000Z",
     });
+    expect(fake.loggedEvents).toEqual([
+      {
+        event: "cli.update.abandoned",
+        level: "warn",
+        details: { version: "0.2.0", reason: "deadline" },
+      },
+    ]);
+  });
+
+  it("logs cli.update.rolled_back on rollback", async () => {
+    const fake = makeFake({
+      initialState: monitoringState("0.2.0", "0.1.5"),
+      installed: "0.2.0",
+      unitState: (unit) => (unit === "spur-daemon.service" ? "failed" : "active"),
+      probe: () => ({ ok: false, reason: "http-error" }),
+    });
+    await runUpdateMonitor("/tmp/cli.js", fake.deps, FAST_CFG);
+    expect(fake.loggedEvents).toEqual([
+      {
+        event: "cli.update.rolled_back",
+        level: "warn",
+        details: {
+          from: "0.1.5",
+          to: "0.2.0",
+          reason: expect.any(String),
+          failureKind: "rolled_back",
+        },
+      },
+    ]);
+  });
+
+  it("logs install_unhealthy when there is no known-good version to reinstall", async () => {
+    const fake = makeFake({
+      initialState: monitoringState("0.2.0", null),
+      installed: "0.2.0",
+      unitState: (unit) => (unit === "spur-daemon.service" ? "failed" : "active"),
+      probe: () => ({ ok: false, reason: "http-error" }),
+    });
+    await runUpdateMonitor("/tmp/cli.js", fake.deps, FAST_CFG);
+    expect(fake.installLog).toEqual([]);
+    expect(fake.loggedEvents).toEqual([
+      {
+        event: "cli.update.rolled_back",
+        level: "warn",
+        details: {
+          from: "0.1.5",
+          to: "0.2.0",
+          reason: expect.any(String),
+          failureKind: "install_unhealthy",
+        },
+      },
+    ]);
+  });
+
+  it("logs install_unhealthy and rethrows when the rollback install itself fails", async () => {
+    const fake = makeFake({
+      initialState: monitoringState("0.2.0", "0.1.5"),
+      installed: "0.2.0",
+      unitState: (unit) => (unit === "spur-daemon.service" ? "failed" : "active"),
+      probe: () => ({ ok: false, reason: "http-error" }),
+      installVersion: () => {
+        throw new Error("npm install failed");
+      },
+    });
+    await expect(runUpdateMonitor("/tmp/cli.js", fake.deps, FAST_CFG)).rejects.toThrow(
+      "npm install failed",
+    );
+    expect(fake.loggedEvents).toEqual([
+      {
+        event: "cli.update.rolled_back",
+        level: "warn",
+        details: {
+          from: "0.1.5",
+          to: "0.2.0",
+          reason: expect.any(String),
+          failureKind: "install_unhealthy",
+        },
+      },
+    ]);
   });
 });
