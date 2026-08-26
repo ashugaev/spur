@@ -143,8 +143,20 @@ export function checkHostSkillSymlinks(home: string): HostInstallCheck {
   const fixes: string[] = [];
   let hasConflict = false;
 
-  for (const name of skillNames) {
-    for (const root of [join(home, ".claude", "skills"), join(home, ".codex", "skills")]) {
+  // Never mkdir here — an absent agent host dir is a legitimate state, not
+  // a defect, and this check must stay read-only (see host-skills spec).
+  // Test each root once, outside the per-skill loop, so an absent root
+  // yields one line naming it instead of one indistinguishable-from-a-real-
+  // conflict "absent" line per skill.
+  for (const root of [join(home, ".claude", "skills"), join(home, ".codex", "skills")]) {
+    if (!existsSync(root)) {
+      details.push(
+        `${root}: host dir absent — Spur does not create it; run \`mkdir -p ${root} && spur reinit\` to link`,
+      );
+      continue;
+    }
+
+    for (const name of skillNames) {
       const link = join(root, name);
       // Read-only classification of one hostile host path (e.g. a file
       // where a parent dir should be) must never take down the other ~60

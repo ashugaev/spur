@@ -32,7 +32,7 @@ Two checks are `warn`/`info` only, so a low-disk host never flips the exit code:
 
 `opencode-executable` checks the `spur doctor` process PATH or `SPUR_OPENCODE_BIN`. Missing OpenCode reports `warn`, keeps `doctor` exit-zero when no other error exists, and names both fixes: install `opencode-ai` under `~/.local`, or set the [executable override](configuration.md#field-reference) to an absolute executable path.
 
-`skills-symlinks` (`warn`) reports each packaged Spur agent skill's symlink state under `~/.claude/skills` and `~/.codex/skills`; `detail` names the current link target for every skill/host-dir pair, including when `ok: true`. Inert (`ok: true`, `info`) when this install ships no packaged skills. Read-only — it classifies, never writes or creates a link. A conflicting file, directory, or foreign symlink is left untouched and the `fix` names the exact path to move or delete before `spur reinit`. See [Install from npm](install-from-npm.md).
+`skills-symlinks` (`warn`) reports each packaged Spur agent skill's symlink state under `~/.claude/skills` and `~/.codex/skills`; `detail` names the current link target for every skill/host-dir pair, including when `ok: true`. Inert (`ok: true`, `info`) when this install ships no packaged skills. Read-only — it never creates a missing `skills` dir, writes, or creates a link; an absent host dir reports `ok: true` with a detail line naming it, not a failure. A conflicting file, directory, or foreign symlink is left untouched and the `fix` names the exact path to move or delete before `spur reinit`. See [Install from npm](install-from-npm.md).
 
 ## gc
 

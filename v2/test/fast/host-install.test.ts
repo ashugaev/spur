@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -921,6 +921,17 @@ describe("checkHostSkillSymlinks", () => {
     checkHostSkillSymlinks(home);
     expect(existsSync(join(home, ".claude"))).toBe(false);
     expect(existsSync(join(home, ".codex"))).toBe(false);
+  });
+
+  it("T10-absent (AC7, AC8) a home with no agent dirs is ok:true, no fix, names both absent roots, creates nothing", async () => {
+    const check = checkHostSkillSymlinks(home);
+
+    expect(check.ok).toBe(true);
+    expect(check.fix).toBeUndefined();
+    expect(check.detail).toContain(join(home, ".claude", "skills"));
+    expect(check.detail).toContain(join(home, ".codex", "skills"));
+    expect(check.detail).toContain("host dir absent");
+    expect(readdirSync(home)).toEqual([]);
   });
 });
 

@@ -1,7 +1,9 @@
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readlinkSync,
   symlinkSync,
   writeFileSync,
@@ -10,7 +12,11 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { classifyHostSkillTarget, installHostSkills } from "../../src/host-skills.js";
+import {
+  classifyHostSkillTarget,
+  installHostSkills,
+  renderHostSkillWarnings,
+} from "../../src/host-skills.js";
 
 async function writeFakeInstallRoot(withCliJs = true): Promise<{
   root: string;
@@ -45,19 +51,50 @@ describe("host-skills", () => {
     }
   });
 
-  it("T1 (AC1) fresh home: both host dirs get a symlink at the packaged skill dir", async () => {
-    const { root, skillsDir, skillDir } = await writeFakeInstallRoot();
+  it("T1-new (AC1, AC2) fresh home with no agent dirs: nothing is created, everything is skipped", async () => {
+    const { root, skillsDir } = await writeFakeInstallRoot();
     cleanupRoots.push(root);
 
     const outcomes = installHostSkills({ home, skillsDir });
 
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+    expect(existsSync(join(home, ".codex"))).toBe(false);
+    expect(readdirSync(home)).toEqual([]);
     expect(outcomes).toHaveLength(2);
-    expect(outcomes.every((o) => o.status === "linked")).toBe(true);
-    for (const agentDir of [".claude", ".codex"]) {
-      const link = join(home, agentDir, "skills", "spur");
-      expect(lstatSync(link).isSymbolicLink()).toBe(true);
-      expect(readlinkSync(link)).toBe(skillDir);
-    }
+    expect(outcomes.every((o) => o.status === "skipped" && o.reason === "host-dir-absent")).toBe(
+      true,
+    );
+  });
+
+  it("T15 (AC4) only .claude/skills exists: links there, skips .codex", async () => {
+    const { root, skillsDir, skillDir } = await writeFakeInstallRoot();
+    cleanupRoots.push(root);
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+
+    const outcomes = installHostSkills({ home, skillsDir });
+
+    const claudeOutcome = outcomes.find((o) => o.dir === join(home, ".claude", "skills", "spur"));
+    expect(claudeOutcome?.status).toBe("linked");
+    expect(readlinkSync(join(home, ".claude", "skills", "spur"))).toBe(skillDir);
+    const codexOutcome = outcomes.find((o) => o.skill === "spur" && o.dir.includes(".codex"));
+    expect(codexOutcome?.status).toBe("skipped");
+    expect(codexOutcome?.reason).toBe("host-dir-absent");
+    expect(existsSync(join(home, ".codex"))).toBe(false);
+  });
+
+  it("T16 (AC5) a symlinked skills dir counts as present and gets the link", async () => {
+    const { root, skillsDir, skillDir } = await writeFakeInstallRoot();
+    cleanupRoots.push(root);
+    const realDir = await mkdtemp(join(tmpdir(), "spur-host-skills-symlinked-root-"));
+    cleanupRoots.push(realDir);
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    symlinkSync(realDir, join(home, ".claude", "skills"), "dir");
+
+    const outcomes = installHostSkills({ home, skillsDir });
+
+    const claudeOutcome = outcomes.find((o) => o.dir === join(home, ".claude", "skills", "spur"));
+    expect(claudeOutcome?.status).toBe("linked");
+    expect(readlinkSync(join(realDir, "spur"))).toBe(skillDir);
   });
 
   it("T2 (AC2) replaces a dangling Spur-owned link with zero warnings", async () => {
@@ -84,6 +121,8 @@ describe("host-skills", () => {
   it("T3 (AC3) an already-correct link yields unchanged", async () => {
     const { root, skillsDir, skillDir } = await writeFakeInstallRoot();
     cleanupRoots.push(root);
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    mkdirSync(join(home, ".codex", "skills"), { recursive: true });
 
     const outcomes1 = installHostSkills({ home, skillsDir });
     expect(outcomes1.every((o) => o.status === "linked")).toBe(true);
@@ -134,21 +173,23 @@ describe("host-skills", () => {
     expect(readlinkSync(link)).toBe(outsideDir);
   });
 
-  it("T6 (AC6) mkdirSync EACCES produces an error outcome and never throws", async () => {
+  it("T6-new (AC6) an existing but unwritable skills dir yields an error outcome, never throws", async () => {
     const { root, skillsDir } = await writeFakeInstallRoot();
     cleanupRoots.push(root);
 
-    // A file where a host agent dir should be: mkdirSync(..., {recursive:true})
-    // fails with ENOTDIR/EEXIST-family errors when a path segment is a file.
-    const claudeDir = join(home, ".claude");
-    mkdirSync(claudeDir, { recursive: true });
-    writeFileSync(join(claudeDir, "skills"), "not a directory");
+    const claudeSkills = join(home, ".claude", "skills");
+    mkdirSync(claudeSkills, { recursive: true });
+    chmodSync(claudeSkills, 0o555);
 
-    expect(() => installHostSkills({ home, skillsDir })).not.toThrow();
-    const outcomes = installHostSkills({ home, skillsDir });
-    const claudeOutcome = outcomes.find((o) => o.dir.startsWith(join(claudeDir, "skills")));
-    expect(claudeOutcome?.status).toBe("error");
-    expect(claudeOutcome?.error).toBeTruthy();
+    try {
+      expect(() => installHostSkills({ home, skillsDir })).not.toThrow();
+      const outcomes = installHostSkills({ home, skillsDir });
+      const claudeOutcome = outcomes.find((o) => o.dir === join(claudeSkills, "spur"));
+      expect(claudeOutcome?.status).toBe("error");
+      expect(claudeOutcome?.error).toBeTruthy();
+    } finally {
+      chmodSync(claudeSkills, 0o755);
+    }
   });
 
   it("T7b (AC7b) installHostSkillsForDaemonStart gates on the real default config path", async () => {
@@ -157,6 +198,8 @@ describe("host-skills", () => {
     // the module registry and re-import under the pinned HOME.
     const originalHome = process.env["HOME"];
     process.env["HOME"] = home;
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    mkdirSync(join(home, ".codex", "skills"), { recursive: true });
     vi.resetModules();
     try {
       const freshHostSkills = await import("../../src/host-skills.js");
@@ -189,6 +232,7 @@ describe("host-skills", () => {
     cleanupRoots.push(rootA.root);
     const rootB = await writeFakeInstallRoot();
     cleanupRoots.push(rootB.root);
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
 
     installHostSkills({ home, skillsDir: rootA.skillsDir });
     const link = join(home, ".claude", "skills", "spur");
@@ -207,6 +251,7 @@ describe("host-skills", () => {
     cleanupRoots.push(rootA.root);
     const rootB = await writeFakeInstallRoot();
     cleanupRoots.push(rootB.root);
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
 
     installHostSkills({ home, skillsDir: rootA.skillsDir });
     const link = join(home, ".claude", "skills", "spur");
@@ -228,6 +273,7 @@ describe("host-skills", () => {
     const rootA = await writeFakeInstallRoot();
     const rootB = await writeFakeInstallRoot();
     cleanupRoots.push(rootB.root);
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
 
     installHostSkills({ home, skillsDir: rootA.skillsDir });
     const link = join(home, ".claude", "skills", "spur");
@@ -242,6 +288,86 @@ describe("host-skills", () => {
     expect(readlinkSync(link)).toBe(rootB.skillDir);
     expect(claudeOutcome?.status).toBe("linked");
     expect(outcomes.some((o) => o.status === "conflict" || o.status === "error")).toBe(false);
+  });
+
+  it("T14 (AC3) renderHostSkillWarnings collapses N absent-root skips into 2 lines, one per root", async () => {
+    const { root, skillsDir } = await writeFakeInstallRoot();
+    cleanupRoots.push(root);
+    // Two packaged skills so the collapse (one line per ROOT, not per
+    // skill) is actually exercised — with a single skill, one-per-root and
+    // one-per-skill produce the same line count and the test proves nothing.
+    await mkdir(join(skillsDir, "second-skill"), { recursive: true });
+    await writeFile(
+      join(skillsDir, "second-skill", "SKILL.md"),
+      "---\nname: second-skill\n---\n",
+      "utf8",
+    );
+
+    const outcomes = installHostSkills({ home, skillsDir });
+    expect(outcomes).toHaveLength(4);
+
+    const lines = renderHostSkillWarnings(outcomes);
+
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(line).toContain("does not create it");
+      expect(line).toContain("spur reinit");
+    }
+    expect(lines.some((line) => line.includes(join(home, ".claude", "skills")))).toBe(true);
+    expect(lines.some((line) => line.includes(join(home, ".codex", "skills")))).toBe(true);
+  });
+
+  it("A1: an empty resolved HOME (relative) is rejected — nothing created anywhere, warned once", async () => {
+    const { root, skillsDir } = await writeFakeInstallRoot();
+    cleanupRoots.push(root);
+    const outcomes = installHostSkills({ home: "", skillsDir });
+
+    expect(outcomes.length).toBeGreaterThan(0);
+    expect(outcomes.every((o) => o.status === "skipped" && o.reason === "home-not-absolute")).toBe(
+      true,
+    );
+    // Nothing was created relative to process.cwd() either.
+    expect(existsSync(join(process.cwd(), ".claude"))).toBe(false);
+    expect(existsSync(join(process.cwd(), ".codex"))).toBe(false);
+
+    const lines = renderHostSkillWarnings(outcomes);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("not an absolute path");
+    expect(lines[0]).toContain("spur reinit");
+  });
+
+  it("A3: EACCES on a link's resolved target classifies foreign, not dangling — link is never touched", async () => {
+    const claudeSkills = join(home, ".claude", "skills");
+    mkdirSync(claudeSkills, { recursive: true });
+    const parent = await mkdtemp(join(tmpdir(), "spur-host-skills-eacces-parent-"));
+    // The resolved target's PARENT is itself named `skills`, matching the
+    // ownership pattern `<root>/skills/<name>` — this is the exact shape
+    // that a buggy `existsSync`-based check would misread as dangling and
+    // reclaim as Spur-owned once EACCES makes it read `false`.
+    const target = join(parent, "skills", "existing-target");
+    await mkdir(target, { recursive: true });
+    const link = join(claudeSkills, "spur");
+    symlinkSync(target, link, "dir");
+    chmodSync(parent, 0o000);
+
+    try {
+      expect(classifyHostSkillTarget(link)).toBe("foreign-symlink");
+
+      const { root, skillsDir } = await writeFakeInstallRoot();
+      cleanupRoots.push(root);
+      const outcomes = installHostSkills({ home, skillsDir });
+      const claudeOutcome = outcomes.find((o) => o.dir === link);
+
+      expect(claudeOutcome?.status).toBe("conflict");
+      expect(claudeOutcome?.conflictKind).toBe("foreign-symlink");
+      expect(readlinkSync(link)).toBe(target);
+
+      const lines = renderHostSkillWarnings(outcomes);
+      expect(lines.some((line) => line.includes(link) && line.includes("conflict"))).toBe(true);
+    } finally {
+      chmodSync(parent, 0o755);
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 });
 
