@@ -38,7 +38,7 @@ Upload the committed reset script over stdin so the box always runs the version 
   cat tests/itest/reset-vm.sh | ssh ... 'cat > ~/itest-reset.sh && chmod +x ~/itest-reset.sh'
   ssh ... 'bash ~/itest-reset.sh'
 
-`tests/itest/reset-vm.sh` never removes `~/.itest-harness`, `~/.claude/.credentials.json`, or `~/.config/cursor/auth.json` — the Claude harness node and both agents' credentials survive a reset by design. It does clear system-scope `spur-*.service` units and `/etc/spur`, which the source-install deploy mode leaves behind: a stale system daemon holds 4310 across a reset and the next npm run reads it as its own. Its state table ends with `port-4310`, `harness`, and `harness-creds` — `BUSY` or `MISSING` there means stop and fix the box, not run the test.
+`tests/itest/reset-vm.sh` never removes `~/.itest-harness`, `~/.claude/.credentials.json`, or `~/.config/cursor/auth.json` — the Claude harness node and both agents' credentials survive a reset by design. It does clear system-scope `spur-*.service` units and `/etc/spur`, which the source-install deploy mode leaves behind: a stale system daemon holds 4310 across a reset and the next npm run reads it as its own. It also wipes `~/.claude/skills` and `~/.codex` wholesale (never `~/.claude` itself) so a persistent box re-exercises the fresh-host branch of host-skills install every run. Its state table ends with `port-4310`, `harness`, `harness-creds`, and `agent-skills` — `BUSY`, `MISSING`, or `leftover` there means stop and fix the box, not run the test.
 
 3 PLANT THE AGENTS (ITEST-ONLY HARNESS) — BOTH REQUIRED, OFF THE TESTED PATH
 

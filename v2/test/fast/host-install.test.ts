@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -933,6 +933,30 @@ describe("checkHostSkillSymlinks", () => {
     expect(check.detail).toContain("host dir absent");
     expect(readdirSync(home)).toEqual([]);
   });
+
+  // chmod 000 grants root traversal regardless — this would go GREEN having
+  // exercised nothing under a root-uid CI lane.
+  it.skipIf(process.getuid?.() === 0)(
+    "T10-unreadable an EACCES root is a distinct 'unreadable' line, never the mkdir-p fix, still ok:true",
+    async () => {
+      const claudeDir = join(home, ".claude");
+      await mkdir(join(claudeDir, "skills"), { recursive: true });
+      chmodSync(claudeDir, 0o000);
+
+      try {
+        const check = checkHostSkillSymlinks(home);
+        expect(check.ok).toBe(true);
+        const claudeLine = check.detail
+          .split("\n")
+          .find((line) => line.startsWith(join(home, ".claude", "skills")));
+        expect(claudeLine).toContain("unreadable");
+        expect(claudeLine).not.toContain("mkdir -p");
+        expect(check.detail).toContain(join(home, ".codex", "skills"));
+      } finally {
+        chmodSync(claudeDir, 0o755);
+      }
+    },
+  );
 });
 
 describe("resolveSystemdScope", () => {

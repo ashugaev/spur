@@ -173,24 +173,30 @@ describe("host-skills", () => {
     expect(readlinkSync(link)).toBe(outsideDir);
   });
 
-  it("T6-new (AC6) an existing but unwritable skills dir yields an error outcome, never throws", async () => {
-    const { root, skillsDir } = await writeFakeInstallRoot();
-    cleanupRoots.push(root);
+  // `chmod` raises no EACCES for root (uid 0) — a permission-based test
+  // running under root would go GREEN having exercised nothing. Skip
+  // visibly rather than pass silently; see A3 below for the same guard.
+  it.skipIf(process.getuid?.() === 0)(
+    "T6-new (AC6) an existing but unwritable skills dir yields an error outcome, never throws",
+    async () => {
+      const { root, skillsDir } = await writeFakeInstallRoot();
+      cleanupRoots.push(root);
 
-    const claudeSkills = join(home, ".claude", "skills");
-    mkdirSync(claudeSkills, { recursive: true });
-    chmodSync(claudeSkills, 0o555);
+      const claudeSkills = join(home, ".claude", "skills");
+      mkdirSync(claudeSkills, { recursive: true });
+      chmodSync(claudeSkills, 0o555);
 
-    try {
-      expect(() => installHostSkills({ home, skillsDir })).not.toThrow();
-      const outcomes = installHostSkills({ home, skillsDir });
-      const claudeOutcome = outcomes.find((o) => o.dir === join(claudeSkills, "spur"));
-      expect(claudeOutcome?.status).toBe("error");
-      expect(claudeOutcome?.error).toBeTruthy();
-    } finally {
-      chmodSync(claudeSkills, 0o755);
-    }
-  });
+      try {
+        expect(() => installHostSkills({ home, skillsDir })).not.toThrow();
+        const outcomes = installHostSkills({ home, skillsDir });
+        const claudeOutcome = outcomes.find((o) => o.dir === join(claudeSkills, "spur"));
+        expect(claudeOutcome?.status).toBe("error");
+        expect(claudeOutcome?.error).toBeTruthy();
+      } finally {
+        chmodSync(claudeSkills, 0o755);
+      }
+    },
+  );
 
   it("T7b (AC7b) installHostSkillsForDaemonStart gates on the real default config path", async () => {
     // `config.ts` computes DEFAULT_INSTANCE_CONFIG_PATH from `homedir()` at
@@ -336,39 +342,76 @@ describe("host-skills", () => {
     expect(lines[0]).toContain("spur reinit");
   });
 
-  it("A3: EACCES on a link's resolved target classifies foreign, not dangling — link is never touched", async () => {
-    const claudeSkills = join(home, ".claude", "skills");
-    mkdirSync(claudeSkills, { recursive: true });
-    const parent = await mkdtemp(join(tmpdir(), "spur-host-skills-eacces-parent-"));
-    // The resolved target's PARENT is itself named `skills`, matching the
-    // ownership pattern `<root>/skills/<name>` — this is the exact shape
-    // that a buggy `existsSync`-based check would misread as dangling and
-    // reclaim as Spur-owned once EACCES makes it read `false`.
-    const target = join(parent, "skills", "existing-target");
-    await mkdir(target, { recursive: true });
-    const link = join(claudeSkills, "spur");
-    symlinkSync(target, link, "dir");
-    chmodSync(parent, 0o000);
+  // Same root-uid guard as T6-new: `chmod 000` grants root read/traverse
+  // regardless, so this test would go GREEN having exercised nothing.
+  it.skipIf(process.getuid?.() === 0)(
+    "A3: EACCES on a link's resolved target classifies foreign, not dangling — link is never touched",
+    async () => {
+      const claudeSkills = join(home, ".claude", "skills");
+      mkdirSync(claudeSkills, { recursive: true });
+      const parent = await mkdtemp(join(tmpdir(), "spur-host-skills-eacces-parent-"));
+      // The resolved target's PARENT is itself named `skills`, matching the
+      // ownership pattern `<root>/skills/<name>` — this is the exact shape
+      // that a buggy `existsSync`-based check would misread as dangling and
+      // reclaim as Spur-owned once EACCES makes it read `false`.
+      const target = join(parent, "skills", "existing-target");
+      await mkdir(target, { recursive: true });
+      const link = join(claudeSkills, "spur");
+      symlinkSync(target, link, "dir");
+      chmodSync(parent, 0o000);
 
-    try {
-      expect(classifyHostSkillTarget(link)).toBe("foreign-symlink");
+      try {
+        expect(classifyHostSkillTarget(link)).toBe("foreign-symlink");
 
-      const { root, skillsDir } = await writeFakeInstallRoot();
-      cleanupRoots.push(root);
-      const outcomes = installHostSkills({ home, skillsDir });
-      const claudeOutcome = outcomes.find((o) => o.dir === link);
+        const { root, skillsDir } = await writeFakeInstallRoot();
+        cleanupRoots.push(root);
+        const outcomes = installHostSkills({ home, skillsDir });
+        const claudeOutcome = outcomes.find((o) => o.dir === link);
 
-      expect(claudeOutcome?.status).toBe("conflict");
-      expect(claudeOutcome?.conflictKind).toBe("foreign-symlink");
-      expect(readlinkSync(link)).toBe(target);
+        expect(claudeOutcome?.status).toBe("conflict");
+        expect(claudeOutcome?.conflictKind).toBe("foreign-symlink");
+        expect(readlinkSync(link)).toBe(target);
 
-      const lines = renderHostSkillWarnings(outcomes);
-      expect(lines.some((line) => line.includes(link) && line.includes("conflict"))).toBe(true);
-    } finally {
-      chmodSync(parent, 0o755);
-      await rm(parent, { recursive: true, force: true });
-    }
-  });
+        const lines = renderHostSkillWarnings(outcomes);
+        expect(lines.some((line) => line.includes(link) && line.includes("conflict"))).toBe(true);
+      } finally {
+        chmodSync(parent, 0o755);
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Same root-uid guard: chmod 000 grants root traversal regardless.
+  it.skipIf(process.getuid?.() === 0)(
+    "an unreadable root (EACCES on a parent) is skipped as host-dir-unreadable, distinct from host-dir-absent — never sent to mkdir -p",
+    async () => {
+      const claudeDir = join(home, ".claude");
+      mkdirSync(join(claudeDir, "skills"), { recursive: true });
+      chmodSync(claudeDir, 0o000);
+
+      try {
+        const { root, skillsDir } = await writeFakeInstallRoot();
+        cleanupRoots.push(root);
+        const outcomes = installHostSkills({ home, skillsDir });
+
+        const claudeOutcome = outcomes.find((o) => o.dir.includes(join(".claude", "skills")));
+        expect(claudeOutcome?.status).toBe("skipped");
+        expect(claudeOutcome?.reason).toBe("host-dir-unreadable");
+        const codexOutcome = outcomes.find((o) => o.dir.includes(join(".codex", "skills")));
+        expect(codexOutcome?.status).toBe("skipped");
+        expect(codexOutcome?.reason).toBe("host-dir-absent");
+
+        const lines = renderHostSkillWarnings(outcomes);
+        const claudeLine = lines.find((line) => line.includes(join(home, ".claude", "skills")));
+        const codexLine = lines.find((line) => line.includes(join(home, ".codex", "skills")));
+        expect(claudeLine).toContain("permission denied");
+        expect(claudeLine).not.toContain("mkdir -p");
+        expect(codexLine).toContain("mkdir -p");
+      } finally {
+        chmodSync(claudeDir, 0o755);
+      }
+    },
+  );
 });
 
 describe("classifyHostSkillTarget", () => {
@@ -411,10 +454,14 @@ describe("classifyHostSkillTarget", () => {
     expect(classifyHostSkillTarget(link)).toBe("foreign-symlink");
   });
 
-  it("classifies a RELATIVE dangling link text as owned — the resolved path decides, not the raw text", async () => {
+  it("classifies a RELATIVE dangling link text as owned (self-referential ELOOP, proven) — the resolved path decides, not the raw text", async () => {
     // A relative dangling text like `spur` or `./spur` has no `skills`
     // component of its own; only the RESOLVED path (which does, because the
     // link itself lives under a `.../skills/` dir) may decide ownership.
+    // This link is self-referential (resolvedTarget === link), which is the
+    // ONE proven-dangling ELOOP shape — `statSync` raises ELOOP here, not
+    // ENOENT, so this test is what actually pins the ELOOP branch, even
+    // though its name predates that fact.
     const skillsSubdir = join(home, "some-root", "skills");
     await mkdir(skillsSubdir, { recursive: true });
     const link = join(skillsSubdir, "spur");
@@ -422,5 +469,39 @@ describe("classifyHostSkillTarget", () => {
     // `skills/` dir but never points at a real path.
     await symlink("spur", link);
     expect(classifyHostSkillTarget(link)).toBe("owned");
+  });
+
+  it("classifies a deep RESOLVABLE symlink chain (ELOOP from depth, not a loop) as foreign, never as dangling", async () => {
+    // Linux raises ELOOP once a chain exceeds ~40 hops even when every link
+    // resolves to something real at the end — this must NOT be inferred as
+    // proof of non-existence. Reproduces the reported shape exactly: the
+    // link's OWN immediate target (one hop, what `resolvedTarget` actually
+    // holds — `statSync` resolves the FULL chain, but the ownership check
+    // reads only this one hop) sits under a dir literally named `skills`,
+    // which is what a buggy "any ELOOP is dangling" branch would misread as
+    // Spur's own `<root>/skills/<name>` shape and reclaim. The chain then
+    // continues another 59 hops down to a real directory with content.
+    const claudeSkills = join(home, ".claude", "skills");
+    await mkdir(claudeSkills, { recursive: true });
+    const dotsSkills = join(home, "dots", "skills");
+    await mkdir(dotsSkills, { recursive: true });
+    const realTarget = join(home, "real-target");
+    await mkdir(realTarget, { recursive: true });
+    await writeFile(join(realTarget, "marker.txt"), "still here", "utf8");
+
+    let previous = realTarget;
+    for (let i = 59; i >= 1; i--) {
+      const hop = join(dotsSkills, `a${i}`);
+      await symlink(previous, hop, "dir");
+      previous = hop;
+    }
+    const link = join(claudeSkills, "spur");
+    await symlink(previous, link, "dir");
+
+    expect(classifyHostSkillTarget(link)).toBe("foreign-symlink");
+    // The real target and its content, and the chain head, must be
+    // untouched — proves this never got misread as owned-and-reclaimable.
+    expect(existsSync(join(realTarget, "marker.txt"))).toBe(true);
+    expect(readlinkSync(link)).toBe(join(dotsSkills, "a1"));
   });
 });

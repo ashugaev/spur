@@ -27,6 +27,7 @@ import {
 } from "./config.js";
 import { parseDfField } from "./disk-space.js";
 import {
+  classifyHostSkillRoot,
   classifyHostSkillTarget,
   installHostSkills,
   packagedSkillsDir,
@@ -149,10 +150,19 @@ export function checkHostSkillSymlinks(home: string): HostInstallCheck {
   // yields one line naming it instead of one indistinguishable-from-a-real-
   // conflict "absent" line per skill.
   for (const root of [join(home, ".claude", "skills"), join(home, ".codex", "skills")]) {
-    if (!existsSync(root)) {
+    // Absent and unreadable (EACCES on the root or a parent) are distinct:
+    // `existsSync` alone would read `false` for both, and `mkdir -p` cannot
+    // fix a permissions problem — never send the operator to a command that
+    // is guaranteed to fail.
+    const rootState = classifyHostSkillRoot(root);
+    if (rootState === "absent") {
       details.push(
         `${root}: host dir absent — Spur does not create it; run \`mkdir -p ${root} && spur reinit\` to link`,
       );
+      continue;
+    }
+    if (rootState === "unreadable") {
+      details.push(`${root}: host dir unreadable (permission denied) — cannot classify its links`);
       continue;
     }
 

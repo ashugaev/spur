@@ -24,11 +24,26 @@ export type HostSkillOutcome = {
   conflictPath?: string;
   conflictKind?: "file" | "directory" | "foreign-symlink";
   error?: string;
-  reason?: "host-dir-absent" | "home-not-absolute";
+  reason?: "host-dir-absent" | "host-dir-unreadable" | "home-not-absolute";
 };
 
 export function packagedSkillsDir(): string {
   return fileURLToPath(new URL("../skills", import.meta.url));
+}
+
+// Root existence gate, tri-state: `existsSync` alone reads `false` for
+// EACCES exactly like the target-side dangling check above, and sending an
+// operator whose `~/.claude` is unreadable to `mkdir -p ... && spur reinit`
+// hands them a command that fails with EEXIST/EACCES, not a fix. `statSync`
+// follows symlinks (same as `existsSync`), so a `skills` dir that is itself
+// a symlink to a real directory still classifies "present".
+export function classifyHostSkillRoot(root: string): "absent" | "unreadable" | "present" {
+  try {
+    statSync(root);
+    return "present";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
+  }
 }
 
 // Widened form of the `linkProjectsDir`/`ensureAccountProjectsLink` skeleton
@@ -70,21 +85,26 @@ export function classifyHostSkillTarget(
   const linkText = readlinkSync(link);
   const resolvedTarget = resolve(dirname(link), linkText);
 
-  // Reclaim ownership only on a PROVEN ENOENT (or ELOOP: a circular link
-  // chain — e.g. self-referential — never resolves to anything either, so
-  // it is dangling in effect, same as ENOENT). `existsSync` would also read
-  // `false` for EACCES (an unreadable parent — an unmounted volume, a
-  // not-yet-cloned dotfiles checkout, a stale NFS mount, a root-owned 0700
-  // directory), which would misclassify a live target the caller simply
-  // cannot see as dangling-and-Spur-owned and silently delete the user's
-  // link. Any other errno means "live, unknown" — foreign.
+  // Reclaim ownership only on a PROVEN ENOENT (or a PROVEN self-referential
+  // ELOOP — a link pointing at itself never resolves to anything either, so
+  // it is dangling in effect, same as ENOENT). Linux also raises ELOOP for a
+  // RESOLVABLE chain deeper than 40 hops — that is a live target Spur just
+  // can't see, not proof of nothing there, so it must never be inferred from
+  // the errno alone: only `resolvedTarget === link` (immediate self-loop)
+  // counts as proven. `existsSync` would also read `false` for EACCES (an
+  // unreadable parent — an unmounted volume, a not-yet-cloned dotfiles
+  // checkout, a stale NFS mount, a root-owned 0700 directory), which would
+  // misclassify a live target the caller simply cannot see as
+  // dangling-and-Spur-owned and silently delete the user's link. Any other
+  // errno, or an unproven ELOOP, means "live, unknown" — foreign.
   let targetIsDangling: boolean;
   try {
     statSync(resolvedTarget);
     targetIsDangling = false;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ELOOP") {
+    const provenDangling = code === "ENOENT" || (code === "ELOOP" && resolvedTarget === link);
+    if (!provenDangling) {
       return "foreign-symlink";
     }
     targetIsDangling = true;
@@ -145,16 +165,18 @@ export function installHostSkills(options?: {
 
   for (const root of hostRoots) {
     // Spur never creates a missing host skills dir — the dir itself, not
-    // the agent home, is the existence gate (see host-skills spec). A
-    // symlinked `skills` dir still counts as present: `existsSync` follows
-    // symlinks, `lstatSync` does not.
-    if (!existsSync(root)) {
+    // the agent home, is the existence gate (see host-skills spec). Absent
+    // and unreadable (EACCES on the root or a parent) are distinct: only
+    // "absent" gets the `mkdir -p` fix, since that command cannot repair a
+    // permissions problem.
+    const rootState = classifyHostSkillRoot(root);
+    if (rootState !== "present") {
       for (const name of skillNames) {
         outcomes.push({
           skill: name,
           dir: join(root, name),
           status: "skipped",
-          reason: "host-dir-absent",
+          reason: rootState === "absent" ? "host-dir-absent" : "host-dir-unreadable",
         });
       }
       continue;
@@ -240,6 +262,23 @@ export function renderHostSkillWarnings(outcomes: HostSkillOutcome[]): string[] 
   for (const [root, skills] of absentRoots) {
     lines.push(
       `spur: host skills not linked — ${root} does not exist and Spur does not create it (skipped: ${skills.join(", ")}). If this agent is installed here, run \`mkdir -p ${root} && spur reinit\`. Otherwise ignore.`,
+    );
+  }
+
+  // Unreadable roots get their own line — no `mkdir -p`, that command fails
+  // on a permissions problem, it does not fix one.
+  const unreadableRoots = new Map<string, string[]>();
+  for (const outcome of outcomes) {
+    if (outcome.status === "skipped" && outcome.reason === "host-dir-unreadable") {
+      const root = dirname(outcome.dir);
+      const skills = unreadableRoots.get(root) ?? [];
+      skills.push(outcome.skill);
+      unreadableRoots.set(root, skills);
+    }
+  }
+  for (const [root, skills] of unreadableRoots) {
+    lines.push(
+      `spur: host skills not linked — ${root} is unreadable (permission denied), so Spur cannot tell whether it exists (skipped: ${skills.join(", ")}). Check its permissions and its parent directories', then run \`spur reinit\`.`,
     );
   }
 
