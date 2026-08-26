@@ -1641,7 +1641,17 @@ projects:
     );
 
     const completed = JSON.parse(
-      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "complete",
+          spawned.id,
+          "--todo-override-reason",
+          "Runtime fixture completes before recording any ToDo step",
+          "--json",
+        ])
+      ).stdout,
     ) as SessionView;
     expect(completed.status).toBe("completed");
     expect(completed.workspaceExists).toBe(false);
@@ -1849,7 +1859,15 @@ projects:
     ) as SessionView;
     expect(spawned.branch).toBe(occupiedBranch);
 
-    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+    await context.execCli([
+      "--config",
+      configPath,
+      "complete",
+      spawned.id,
+      "--todo-override-reason",
+      "Runtime fixture completes before recording any ToDo step",
+      "--json",
+    ]);
 
     const occupiedWorktreePath = join(context.rootDir, "occupied-respawn-branch");
     await execFileAsync("git", ["worktree", "add", occupiedWorktreePath, occupiedBranch], {
@@ -2418,14 +2436,23 @@ projects:
       ).stdout,
     ) as SessionView;
 
-    const initial = JSON.parse(
-      (
-        await context.execCli(
-          ["--config", configPath, "todo", "list", "--session", spawned.id, "--json"],
-          humanCli,
-        )
-      ).stdout,
-    ) as TodoProjection;
+    const initial = await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli(
+              ["--config", configPath, "todo", "list", "--session", spawned.id, "--json"],
+              humanCli,
+            )
+          ).stdout,
+        ) as TodoProjection,
+      {
+        timeoutMs: 20_000,
+        accept: (projection) => Boolean(projection.items[0]?.latestTransition),
+        label: "fixture agent to record and resolve its first Spur ToDo item",
+      },
+    );
+    expect(initial.items[0]?.added?.actor).toMatchObject({ kind: "agent" });
     expect(initial.items[0]?.latestTransition?.actor).toEqual({
       kind: "agent",
       agent: spawned.agent,
@@ -2666,6 +2693,32 @@ projects:
         ])
       ).stdout,
     ) as SessionView;
+
+    // The fixture agent records and resolves its first Spur ToDo item during
+    // startup, before it signals waiting. Wait for that here so the later
+    // interactive complete ('c') does not race a pane pause into an empty
+    // ledger, which the daemon now refuses.
+    await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli([
+              "--config",
+              configPath,
+              "todo",
+              "list",
+              "--session",
+              spawned.id,
+              "--json",
+            ])
+          ).stdout,
+        ) as TodoProjection,
+      {
+        timeoutMs: 20_000,
+        accept: (projection) => Boolean(projection.items[0]?.latestTransition),
+        label: "fixture agent to record and resolve its first Spur ToDo item",
+      },
+    );
 
     const controllerSessionName = `${sessionPrefix}-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -3005,7 +3058,15 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
-    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+    await context.execCli([
+      "--config",
+      configPath,
+      "complete",
+      spawned.id,
+      "--todo-override-reason",
+      "Runtime fixture completes before recording any ToDo step",
+      "--json",
+    ]);
     expect(existsSync(artifactDir)).toBe(false);
 
     const missing = await fetch(
@@ -4411,7 +4472,15 @@ projects:
         ])
       ).stdout,
     ) as SessionView;
-    await context.execCli(["--config", configPath, "complete", target.id, "--json"]);
+    await context.execCli([
+      "--config",
+      configPath,
+      "complete",
+      target.id,
+      "--todo-override-reason",
+      "Runtime fixture completes before recording any ToDo step",
+      "--json",
+    ]);
 
     const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
     const respawned = JSON.parse(

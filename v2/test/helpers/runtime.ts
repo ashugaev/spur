@@ -658,12 +658,12 @@ emit_rollout_input_required() {
   fi
   printf '{"type":"event_msg","payload":{"type":"input_required","turn_id":"%s","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}\\n' "\${SPUR_SESSION:-no-session}-$hook_seq" >> "$session_rollout"
 }
-resolve_initial_todo() {
+record_fixture_todo() {
   if [[ -z "\${SPUR_TODO_COMMAND:-}" ]]; then
     return
   fi
   local todo_id
-  todo_id="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
+  todo_id="$("$SPUR_TODO_COMMAND" add --text "Fixture step" --reason "Runtime agent fixture step" --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
   if [[ -n "$todo_id" ]]; then
     "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
   fi
@@ -671,7 +671,7 @@ resolve_initial_todo() {
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 printf '%s\n' "${header}"
 printf '%s\n' "${prompt}"
-resolve_initial_todo
+record_fixture_todo
 ${signalWaiting}
 ${readLoop}
 `;
