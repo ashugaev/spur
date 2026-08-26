@@ -14812,6 +14812,119 @@ describe("SessionService", () => {
     );
   });
 
+  it("self-destruct clears the telegram binding under the source project", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "shp-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "shp-1",
+      project: "spur-shepherd",
+      agent: "opencode",
+      prompt: "hello",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/spur-shepherd/shp-1",
+      tmuxSession: "shp-1",
+      launchCommand: "opencode --auto",
+      status: "running",
+      selfDestruct: { enabled: true },
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("shp-1");
+
+    expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "shp-1",
+    );
+    expect(deleteTelegramSourceStateForSessionMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "spur-shepherd",
+      "shp-1",
+    );
+  });
+
+  it("self-destruct keeps an ephemeral telegram topic open", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "shp-2",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "shp-2",
+      project: "spur-shepherd",
+      agent: "opencode",
+      prompt: "hello",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/spur-shepherd/shp-2",
+      tmuxSession: "shp-2",
+      launchCommand: "opencode --auto",
+      status: "running",
+      selfDestruct: { enabled: true },
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("shp-2");
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      "Session shp-2 finished (completed). This chat is unbound.",
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    expect(closeTelegramTopicMock).not.toHaveBeenCalled();
+
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    await service.complete("api-1");
+
+    expect(closeTelegramTopicMock).toHaveBeenCalledWith(expect.any(Object), -1001, 22);
+  });
+
   it("enriches desk members with status, state, runtime, and filters killed sessions", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", sessionRecord({ id: "api-1" }));
@@ -20208,6 +20321,56 @@ describe("SessionService", () => {
     expect(sendOrder).toBeDefined();
     expect(deleteOrder).toBeDefined();
     expect(sendOrder as number).toBeLessThan(deleteOrder as number);
+  });
+
+  it("keeps an ephemeral telegram topic open and clears the binding under the source project on kill", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "shp-3",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "shp-3",
+      project: "spur-shepherd",
+      agent: "opencode",
+      prompt: "hello",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/spur-shepherd/shp-3",
+      tmuxSession: "shp-3",
+      launchCommand: "opencode --auto",
+      status: "running",
+      selfDestruct: { enabled: true },
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("shp-3");
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      "Session shp-3 finished (killed). This chat is unbound.",
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    expect(closeTelegramTopicMock).not.toHaveBeenCalled();
+    expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "shp-3",
+    );
+    expect(deleteTelegramSourceStateForSessionMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "spur-shepherd",
+      "shp-3",
+    );
   });
 
   it("still unbinds when the farewell send throws on kill", async () => {
@@ -28659,6 +28822,30 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("shepherd spawn with selfDestruct carries both blocks", async () => {
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-selfdestruct-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-sd-1");
+
+      await service.spawn({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+        agent: "opencode",
+        model: "google/gemini-3.7-flash",
+        selfDestruct: { enabled: true },
+      });
+
+      await vi.waitFor(() => {
+        expect(buildAgentLaunchPlanMock).toHaveBeenCalled();
+      });
+      const initialMessage = buildAgentLaunchPlanMock.mock.calls[0]?.[1] as string;
+      expect(initialMessage).toContain("You are Spur Shepherd");
+      expect(initialMessage).toContain("\nSelf-destruct:\n-");
+      service.dispose();
+    });
+
     it("spawn() honors an explicit cursor agent override for Shepherd", async () => {
       mockCursorJsonlState("waiting");
       const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-cursor-data");
@@ -28804,6 +28991,36 @@ describe("SessionService", () => {
         "shp-1",
         expect.stringContaining("Diagnose update"),
         { agent: "claude", interrupt: false },
+      );
+      service.dispose();
+    });
+
+    it("spawnShepherd skips a telegram-bound shepherd session", async () => {
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-telegram-bound-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const sessions = createSessionStore();
+      seedRunningShepherdSession(sessions);
+      readTelegramReplyTargetMock.mockReturnValue({
+        sessionId: "shp-1",
+        projectId: "api",
+        sourceId: "agentChat",
+        chatId: -1001,
+        messageThreadId: 22,
+        updatedAt: "2026-03-18T10:02:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-new-1");
+
+      const result = await service.spawnShepherd({ prompt: "Diagnose update" });
+
+      expect(result.disposition).toBe("spawned");
+      expect(result.session.id).toBe("shp-new-1");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Diagnose update"),
+        expect.any(Object),
       );
       service.dispose();
     });

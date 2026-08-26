@@ -11,6 +11,14 @@ async function lint(source: string, filePath: string) {
 }
 
 describe("visible wait text lint rule", () => {
+  // ESLint resolves the flat config (typescript-eslint's strict ruleset, prettier compat, the
+  // custom plugin) lazily on the first lintText call. That resolution is a fixed one-time cost
+  // independent of how many tests run; warm it here so it doesn't get attributed to whichever
+  // `it` happens to run first and blow past the per-test timeout under load.
+  beforeAll(async () => {
+    await lint("export function Warm() { return null; }", "packages/web/src/probe.tsx");
+  }, 20000);
+
   it.each([
     "Loading",
     "Loading...",

@@ -11,6 +11,7 @@ import {
 } from "../metadata.js";
 import {
   TELEGRAM_MESSAGE_EVENT,
+  type TelegramAutoSpawnConfig,
   type TelegramBinding,
   type TelegramMessageEventData,
   type TelegramSourceConfig,
@@ -104,6 +105,7 @@ interface TelegramRuntime {
   lastUpdateId?: number;
   botUsername?: string;
   pendingSpawns: Map<string, TelegramPendingSpawn>;
+  autoSpawnInFlight: Set<string>;
   persistBindings(options?: { removeKeys?: string[] }): Promise<void>;
   drainWrites(): Promise<void>;
 }
@@ -466,14 +468,16 @@ async function requestSpawnPrompt(
   await ctx.reply(`Send task prompt for new ${agent} Spur agent.`);
 }
 
+type TelegramSpawnRequest = Omit<SourceSpawnSessionRequest, "project"> & { project?: string };
+
 async function spawnTelegramSession(
   runtime: TelegramRuntime,
-  request: Omit<SourceSpawnSessionRequest, "project">,
+  request: TelegramSpawnRequest,
 ): Promise<SourceSessionListItem | null> {
   if (!runtime.deps.spawnSession) return null;
   return runtime.deps.spawnSession({
-    project: runtime.deps.projectId,
     ...request,
+    project: request.project ?? runtime.deps.projectId,
   });
 }
 
@@ -509,7 +513,7 @@ async function bindSpawnedSession(
   ctx: Pick<TelegramTextContext, "reply" | "api">,
   chatId: number,
   messageThreadId: number | undefined,
-  request: Omit<SourceSpawnSessionRequest, "project">,
+  request: TelegramSpawnRequest,
 ): Promise<void> {
   const deps = runtime.deps;
   const status = await ctx.reply(`Spawning ${request.agent} agent...`);
@@ -598,6 +602,41 @@ async function unbindTelegramThread(
     deleteTelegramReplyTarget(deps.dataDir, binding.sessionId);
   }
   return { deleted, binding };
+}
+
+type AutoSpawnAcquireResult =
+  | { status: "off" }
+  | { status: "busy" }
+  | { status: "acquired"; autoSpawn: TelegramAutoSpawnConfig };
+
+function tryAcquireAutoSpawn(runtime: TelegramRuntime, key: string): AutoSpawnAcquireResult {
+  const autoSpawn = runtime.deps.config.autoSpawn;
+  if (autoSpawn?.enabled !== true) return { status: "off" };
+  if (runtime.autoSpawnInFlight.has(key)) return { status: "busy" };
+  runtime.autoSpawnInFlight.add(key);
+  return { status: "acquired", autoSpawn };
+}
+
+async function runAutoSpawn(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  text: string,
+  key: string,
+  autoSpawn: TelegramAutoSpawnConfig,
+): Promise<void> {
+  try {
+    await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, {
+      project: autoSpawn.project,
+      agent: autoSpawn.agent,
+      ...(autoSpawn.model !== undefined ? { model: autoSpawn.model } : {}),
+      ...(autoSpawn.selfDestruct !== undefined ? { selfDestruct: autoSpawn.selfDestruct } : {}),
+      prompt: text,
+    });
+  } finally {
+    runtime.autoSpawnInFlight.delete(key);
+  }
 }
 
 async function handleTelegramCallback(
@@ -865,11 +904,50 @@ async function routeTelegramPrompt(
     binding = runtime.bindings.get(key);
   }
   if (!binding) {
+    const acquireResult = tryAcquireAutoSpawn(runtime, key);
+    switch (acquireResult.status) {
+      case "busy":
+        await ctx.reply("Spawn already in progress here.");
+        return;
+      case "acquired":
+        await runAutoSpawn(
+          runtime,
+          ctx,
+          message.chat.id,
+          message.message_thread_id,
+          text,
+          key,
+          acquireResult.autoSpawn,
+        );
+        return;
+      case "off":
+        break;
+    }
     await ctx.reply("No Spur session bound here. Use /watch or /spawn.");
     return;
   }
   const session = await findSession(deps, binding.sessionId);
   if (!session) {
+    const acquireResult = tryAcquireAutoSpawn(runtime, key);
+    switch (acquireResult.status) {
+      case "busy":
+        await ctx.reply("Spawn already in progress here.");
+        return;
+      case "acquired":
+        await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
+        await runAutoSpawn(
+          runtime,
+          ctx,
+          message.chat.id,
+          message.message_thread_id,
+          text,
+          key,
+          acquireResult.autoSpawn,
+        );
+        return;
+      case "off":
+        break;
+    }
     await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
     await ctx.reply(`Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`);
     return;
@@ -1102,6 +1180,7 @@ async function startTelegramSource(
     bindings,
     ...(lastUpdateId !== undefined ? { lastUpdateId } : {}),
     pendingSpawns: new Map(),
+    autoSpawnInFlight: new Set(),
     persistBindings(options: { removeKeys?: string[] } = {}): Promise<void> {
       const removedKeys = new Set(options.removeKeys ?? []);
       const next = writeQueue.then(() =>
