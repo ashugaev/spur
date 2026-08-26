@@ -432,7 +432,9 @@ import {
   ensureTodoLedger,
   mutateTodo as applyTodoMutation,
   recordTodoFinishOverride,
+  TodoEmptyLedgerError,
   TodoOpenWorkError,
+  todoLedgerBlock,
   unfinishedTodo,
 } from "./todo.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -1353,7 +1355,7 @@ function buildInitialMessage(
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
-  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The initial task already exists. Run \`"$SPUR_TODO_COMMAND" list\` first.\n- Add new requested work with \`"$SPUR_TODO_COMMAND" add --text <text> --reason <reason>\`.\n- Complete, cancel, or hold items with a reason. Human holds must name the required action. Resume held work before continuing.\n- Do not finish or self-destruct with open or held work.`;
+  const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
@@ -5788,6 +5790,8 @@ export class SessionService {
             return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
           })
           .join("\n")}\nRequest the required input before continuing.`;
+      } else if (projection.counts.total === 0) {
+        message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
       }
       if (!message) return;
       await this.sendAgentMessage(session, message, { interrupt: false });
@@ -8009,7 +8013,7 @@ export class SessionService {
         originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
-      ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
+      ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
       this.admissionReservations.delete(admissionReservation);
@@ -8823,7 +8827,7 @@ export class SessionService {
         originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
-      ensureTodoLedger(this.config.dataDir, placeholder, "spawn");
+      ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
       this.admissionReservations.delete(admissionReservation);
@@ -9049,7 +9053,7 @@ export class SessionService {
         updatedAt: nowIso(),
       };
       writeSession(this.config.dataDir, spawnPlaceholder);
-      ensureTodoLedger(this.config.dataDir, spawnPlaceholder, "spawn");
+      ensureTodoLedger(this.config.dataDir, spawnPlaceholder);
       prepared.placeholder = spawnPlaceholder;
 
       stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
@@ -10464,21 +10468,30 @@ export class SessionService {
     return this.withSessionLifecycleLocks(
       candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
       async () => {
-        const blocked = candidates.flatMap((candidate) => {
+        const emptySessionIds: string[] = [];
+        const unfinishedBlocked: Array<{
+          sessionId: string;
+          openItemIds: string[];
+          heldItemIds: string[];
+        }> = [];
+        for (const candidate of candidates) {
           const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
-          if (isTerminalSessionStatus(current.status)) return [];
-          const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, current));
-          return unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0
-            ? [{ sessionId: candidate.id, ...unfinished }]
-            : [];
-        });
+          if (isTerminalSessionStatus(current.status)) continue;
+          const projection = ensureTodoLedger(this.config.dataDir, current);
+          const block = todoLedgerBlock(projection);
+          if (block === "empty") emptySessionIds.push(candidate.id);
+          else if (block === "unfinished") {
+            unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
+          }
+        }
         if (
-          blocked.length > 0 &&
+          (emptySessionIds.length > 0 || unfinishedBlocked.length > 0) &&
           (!request.todoOverrideReason?.trim() ||
             !options?.todoActor ||
             options.todoActor.kind !== "human")
         ) {
-          throw new TodoOpenWorkError(blocked);
+          if (emptySessionIds.length > 0) throw new TodoEmptyLedgerError(emptySessionIds);
+          throw new TodoOpenWorkError(unfinishedBlocked);
         }
         const completedIds: string[] = [];
         for (const candidate of candidates) {
@@ -11176,11 +11189,12 @@ export class SessionService {
     try {
       if (targetStatus === "completed") {
         const projection = ensureTodoLedger(this.config.dataDir, session);
-        const unfinished = unfinishedTodo(projection);
-        if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
+        const block = todoLedgerBlock(projection);
+        if (block) {
           const overrideReason = request.todoOverrideReason?.trim();
           if (!overrideReason || !options?.todoActor || options.todoActor.kind !== "human") {
-            throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
+            if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+            throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
           }
           recordTodoFinishOverride(
             this.config.dataDir,
@@ -12855,9 +12869,11 @@ export class SessionService {
     if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
     }
-    const unfinished = unfinishedTodo(ensureTodoLedger(this.config.dataDir, session));
-    if (unfinished.openItemIds.length > 0 || unfinished.heldItemIds.length > 0) {
-      throw new TodoOpenWorkError([{ sessionId, ...unfinished }]);
+    const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
+    const handoffBlock = todoLedgerBlock(handoffProjection);
+    if (handoffBlock === "empty") throw new TodoEmptyLedgerError([sessionId]);
+    if (handoffBlock === "unfinished") {
+      throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
     }
     // Gate before any teardown below. The source session is still on-disk as
     // running/spawning here, so a denial leaves it fully untouched — no kill,
