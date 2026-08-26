@@ -127,6 +127,30 @@ function mockFetchOpenPrThenUnavailable(completeBodies: unknown[]) {
   });
 }
 
+// Retry is offered only for a rate limit, the one failure that clears on its
+// own. The second complete lands after the window resets.
+function mockFetchRateLimitedThenRetryOk(completeBodies: unknown[]) {
+  vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+    const url = typeof input === "string" ? input : (input as Request).url;
+    if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
+    if (url === "/api/runtime/voice")
+      return new Response(JSON.stringify({ available: false, language: "" }));
+    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
+    if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
+    if (url === "/api/sessions/api-c9e9/complete") {
+      const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
+      completeBodies.push(body);
+      if (completeBodies.length > 1) {
+        return new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
+      }
+      return new Response(JSON.stringify({ ...prCheckUnavailablePayload, rateLimited: true }), {
+        status: 409,
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+}
+
 async function clickDone() {
   const done = await screen.findByRole("button", { name: "Mark api-c9e9 as done" });
   fireEvent.click(done);
@@ -197,6 +221,23 @@ describe("Dashboard complete with an unavailable PR check", () => {
 
     await waitFor(() => expect(completeBodies).toHaveLength(2));
     expect(screen.getByRole("dialog", { name: "GitHub PR Check Unavailable" })).toBeInTheDocument();
+  });
+
+  it("completes on retry once the rate limit clears, without skipping the check", async () => {
+    const completeBodies: unknown[] = [];
+    mockFetchRateLimitedThenRetryOk(completeBodies);
+    render(<Dashboard />);
+
+    await clickDone();
+    fireEvent.click(await screen.findByRole("button", { name: /Retry PR Check/i }));
+
+    await waitFor(() => expect(completeBodies).toHaveLength(2));
+    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk" }]);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "GitHub PR Check Unavailable" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   // Cancelling leaves the row in place, so its Done button has to come back.
