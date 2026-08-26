@@ -20,7 +20,7 @@ INTERFACES
   Daemon HTTP API is the same surface the web UI drives; see `docs/commands.md`.
   Deploy switch restart behavior: `docs/commands.md#daemon-http-api`.
   Session tool and environment contract: `docs/commands.md`; implementation `v2/src/session-service.ts`. Call each tool by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path; login shells rebuild `PATH` and drop the tool directory.
-  Spur ToDo: daemon-authoritative, always on. The ledger starts empty; only the agent adds items, one per step, added before the step. An empty ledger blocks completion the same as open/held work. Hold blockers with a reason. Command and override contract: `docs/commands.md#todo`.
+  Spur ToDo: daemon-authoritative, always on. No code path seeds an item; the ledger starts empty. The agent adds one per step, before the step; a human can also add via CLI or session-detail UI. An empty ledger blocks completion the same as open/held work. Hold blockers with a reason. Command and override contract: `docs/commands.md#todo`.
   Session title write contract: `docs/commands.md`; implementation `v2/src/session-service.ts`.
 
 CONFIG FOOTGUNS
