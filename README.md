@@ -25,6 +25,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 ## Docs
 
 - [docs/commands.md](docs/commands.md) — CLI reference (spawn, wake, list, service, sidecars)
+- [docs/daemon-api.md](docs/daemon-api.md) — daemon HTTP routes
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior
 - [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output

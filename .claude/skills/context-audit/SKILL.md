@@ -132,7 +132,7 @@ BOUNDARIES
 
 Prose form and prose quality inside one surface: skill-writer.
 Command and config field semantics: docs/commands.md, docs/configuration.md,
-plus the spur skill.
+docs/daemon-api.md, plus the spur skill.
 
 
 EVIDENCE

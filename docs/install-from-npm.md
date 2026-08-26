@@ -115,7 +115,7 @@ spur spawn <project-id> --branch <branch> "smoke test" --json
 spur update
 ```
 
-`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and makes up to 60 daemon and web readiness polls. A failed reinit exits the command; after a successful reinit, the detached health monitor owns auto-rollback. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). Deploy switch route behavior lives in [commands.md](commands.md#daemon-http-api).
+`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and makes up to 60 daemon and web readiness polls. A failed reinit exits the command; after a successful reinit, the detached health monitor owns auto-rollback. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). Deploy switch route behavior lives in [daemon-api.md](daemon-api.md#daemon-http-api).
 
 With [`autoUpdate: true`](configuration.md#auto-update) the daemon self-updates once a newer version publishes, through the same deploy-switch path. Pin a version by hand in this order:
 

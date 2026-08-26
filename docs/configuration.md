@@ -433,6 +433,8 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`slowIntervalMs` since the last real poll) passed, the last cycle saw a non-terminal CI check, a tracked session is unpolled, or a session had a `send`/source-reply within `activeGraceMs`. Rate-limit cooldown backoff overrides all of it, here and on plain sources. With `query` also set, discovery runs on the same gated tick; every gate reads already-tracked sessions, so an undiscovered PR cannot re-arm the tick early.
 
+GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `graphqlCost`; consecutive zero-call cycles collapse into the first event of the run, the swallowed count lands on the next emitted event as `suppressedZeroCycles`), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known).
+
 ## Daemon restarts
 
 Tmux agent sessions survive daemon restarts: the systemd unit uses `KillMode=process`, so `systemctl restart` stops the node process only. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, restarts attention monitoring.
@@ -443,13 +445,13 @@ Unit files here are templates. Source deployments apply them through [install-fr
 
 ## Auto update
 
-`autoUpdate` (instance config only, default `false`) self-updates the daemon: once the npm registry publishes a version strictly newer than the running one, it runs the same switch a `Switch` press runs — same executor, guards, durable status record. See [Daemon HTTP API](commands.md#daemon-http-api).
+`autoUpdate` (instance config only, default `false`) self-updates the daemon: once the npm registry publishes a version strictly newer than the running one, it runs the same switch a `Switch` press runs — same executor, guards, durable status record. See [Daemon HTTP API](daemon-api.md#daemon-http-api).
 
 Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpdate: true`/`false` in `~/.spur/config.yaml`, re-read from disk every reaper tick — a hand edit takes effect on the next tick, no restart. Detection lag up to ~15 minutes (5-minute reaper tick plus the 10-minute registry cache), not immediate.
 
 An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release. A candidate already holding a terminal (`succeeded` or `failed`) status record is never retried. Events: `daemon.auto_update.started`, `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`.
 
-Rollback reaches only failures the switch helper itself detects ([commands.md](commands.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
+Rollback reaches only failures the switch helper itself detects ([daemon-api.md](daemon-api.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
 
 Pin a version by hand while auto-update is on: turn `autoUpdate` off first — [install-from-npm.md#upgrade](install-from-npm.md#upgrade) has the order and the reason.
 

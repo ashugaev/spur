@@ -34,7 +34,8 @@ DOCS
 
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
-  Commands, daemon HTTP routes, session tools and variables: docs/commands.md
+  Commands, session tools and variables: docs/commands.md
+  Daemon HTTP routes: docs/daemon-api.md
   Config fields: docs/configuration.md
 
 EDITING THIS FILE

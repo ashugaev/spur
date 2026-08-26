@@ -41,12 +41,14 @@ GRANULAR: one doc, one topic, one Diataxis mode; split on drift.
   Tutorial (first run)          docs/install-from-npm.md
   How-to (one task)             docs/install-from-source.md, docs/voice.md,
                                  TROUBLESHOOTING.md, SETUP.md
-  Reference (commands, fields)  docs/commands.md, docs/configuration.md
+  Reference (commands, fields)  docs/commands.md, docs/configuration.md,
+                                 docs/daemon-api.md
   Explanation (why)             gitignored planning notes, not shipped
 
 ONE SOURCE: each topic has one owning doc, everything else links.
 
   - Commands: docs/commands.md only. Config fields: docs/configuration.md only.
+    Daemon HTTP routes: docs/daemon-api.md only.
   - Contradiction: pick the owner, delete the copy, link.
 
 LINK GRAPH: every published doc reachable from the README Docs section, relative links only.
@@ -67,6 +69,6 @@ CHECKLIST
   - Numbers and commands match the canonical source
   - Reviewer treats undocumented new surface as a defect
 
-BOUNDARIES: docs/commands.md / docs/configuration.md plus the spur skill
-own command and config field semantics; SKILL.md, agent definitions,
-AGENTS.md/CLAUDE.md prose belong to skill-writer.
+BOUNDARIES: docs/commands.md / docs/configuration.md / docs/daemon-api.md
+plus the spur skill own command, config field, and daemon route semantics;
+SKILL.md, agent definitions, AGENTS.md/CLAUDE.md prose belong to skill-writer.
