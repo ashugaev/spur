@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { isSpurTodoProjection, type SpurTodoActor, type SpurTodoProjection } from "@/lib/types";
+import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 
 function actorLabel(actor: SpurTodoActor): string {
   if (actor.kind === "agent") return `${actor.agent} · ${actor.sessionId}`;
@@ -77,12 +78,17 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
       {error ? (
         <div
           role="alert"
-          className="border border-[var(--color-status-error)] bg-[var(--color-bg-surface)] px-3 py-2 text-[var(--color-status-error)]"
+          className={`border border-[var(--color-status-error)] bg-[var(--color-bg-surface)] px-3 py-2 text-[var(--color-status-error)] ${HARD_WRAP_TEXT_CLASS}`}
         >
           ToDo unavailable: {error}
         </div>
       ) : null}
-      {projection ? (
+      {projection && projection.items.length === 0 ? (
+        <p className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[var(--color-text-tertiary)]">
+          No ToDo items yet.
+        </p>
+      ) : null}
+      {projection && projection.items.length > 0 ? (
         <div className="space-y-2">
           <div className="flex items-center gap-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2">
             <div
@@ -140,7 +146,9 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                       {item.id.slice(0, 8)}
                     </span>
                     <span className="min-w-0">
-                      <span className="block text-[var(--color-text-primary)]">{item.text}</span>
+                      <span className="block min-w-0 text-[var(--color-text-primary)] [overflow-wrap:anywhere]">
+                        {item.text}
+                      </span>
                       <span className="block truncate text-[var(--color-text-secondary)]">
                         {reasonPreview(item)}
                       </span>
@@ -157,9 +165,13 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                             {event.type.replaceAll("_", " ")} · {actorLabel(event.actor)} ·{" "}
                             {new Date(event.at).toLocaleString()}
                           </div>
-                          {event.reason ? <div>{event.reason}</div> : null}
+                          {event.reason ? (
+                            <div className={HARD_WRAP_TEXT_CLASS}>{event.reason}</div>
+                          ) : null}
                           {event.blocker?.kind === "human" ? (
-                            <div>Human action: {event.blocker.requiredAction}</div>
+                            <div className={HARD_WRAP_TEXT_CLASS}>
+                              Human action: {event.blocker.requiredAction}
+                            </div>
                           ) : null}
                         </div>
                       ))}
@@ -172,7 +184,7 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                             Completion override · {actorLabel(event.actor)} ·{" "}
                             {new Date(event.at).toLocaleString()}
                           </div>
-                          <div>{event.reason}</div>
+                          <div className={HARD_WRAP_TEXT_CLASS}>{event.reason}</div>
                         </div>
                       ))}
                     </div>

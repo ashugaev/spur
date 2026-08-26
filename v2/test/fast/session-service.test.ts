@@ -59,10 +59,10 @@ const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const TODO_PROMPT = `Spur ToDo:
 - Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.
-- The initial task already exists. Run \`"$SPUR_TODO_COMMAND" list\` first.
-- Add new requested work with \`"$SPUR_TODO_COMMAND" add --text <text> --reason <reason>\`.
-- Complete, cancel, or hold items with a reason. Human holds must name the required action. Resume held work before continuing.
-- Do not finish or self-destruct with open or held work.`;
+- The ledger starts empty. You own every item; nothing is added for you.
+- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.
+- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.
+- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 type HasEstablishedConnections = (port: number) => Promise<"established" | "none" | "unknown">;
@@ -1829,7 +1829,7 @@ describe("SessionService", () => {
   });
 
   describe("Spur ToDo lifecycle", () => {
-    it("initializes the spawn ledger before returning the session", async () => {
+    it("starts the spawn ledger empty and writes no ledger file", async () => {
       createSessionStore();
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
@@ -1839,17 +1839,47 @@ describe("SessionService", () => {
       const projection = await service.readTodo(spawned.id);
 
       expect(readSessionMock(TEST_DATA_DIR, spawned.id)?.todoLedgerVersion).toBe(1);
-      expect(projection.items).toHaveLength(1);
-      expect(projection.items[0]).toMatchObject({ text: "Ship native ToDo", status: "open" });
+      expect(projection.counts.total).toBe(0);
+      expect(projection.items).toHaveLength(0);
+      expect(existsSync(join(TEST_DATA_DIR, "sessions", spawned.id, "todo.jsonl"))).toBe(false);
       service.dispose();
     });
 
-    it("blocks completion, then records a human override before completing", async () => {
+    it("blocks completion on an empty ledger, then records a human override before completing", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_ledger_empty" });
+      await service.complete(
+        "api-1",
+        { todoOverrideReason: "Operator accepts unfinished work", skipPrCheck: true },
+        { todoActor: { kind: "human", origin: "ui" } },
+      );
+
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      const projection = await service.readTodo("api-1");
+      expect(projection.finishOverrides).toHaveLength(1);
+      expect(projection.finishOverrides[0]).toMatchObject({
+        type: "finish_override_recorded",
+        reason: "Operator accepts unfinished work",
+      });
+      service.dispose();
+    });
+
+    it("blocks completion on open work, then records a human override before completing", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.mutateTodo(
+        "api-1",
+        { action: "add", text: "Ship it", reason: "Session objective" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
 
       await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
       await service.complete(
@@ -1862,20 +1892,40 @@ describe("SessionService", () => {
       const projection = await service.readTodo("api-1");
       expect(projection.items[0]?.status).toBe("open");
       expect(projection.finishOverrides).toHaveLength(1);
-      expect(projection.finishOverrides[0]).toMatchObject({
-        type: "finish_override_recorded",
-        reason: "Operator accepts unfinished work",
-      });
       service.dispose();
     });
 
-    it("preflights every current desk member before completing any", async () => {
+    it("preflights every current desk member before completing any, empty ledgers", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
       sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.completeDesk("api-1")).rejects.toMatchObject({
+        code: "todo_ledger_empty",
+        sessionIds: expect.arrayContaining(["api-1", "api-2"]),
+      });
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(sessions.get("api-2")?.status).toBe("running");
+      service.dispose();
+    });
+
+    it("preflights every current desk member before completing any, open work", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      for (const sessionId of ["api-1", "api-2"]) {
+        await service.mutateTodo(
+          sessionId,
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId },
+        );
+      }
 
       await expect(service.completeDesk("api-1")).rejects.toMatchObject({
         code: "todo_open_work",
@@ -1895,12 +1945,40 @@ describe("SessionService", () => {
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.mutateTodo(
+        "api-1",
+        { action: "add", text: "Ship it", reason: "Session objective" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
       const before = await service.readTodo("api-1");
 
       await service.pause("api-1");
 
       expect((await service.readTodo("api-1")).revision).toBe(before.revision);
       expect(sessions.get("api-1")?.status).toBe("stopped");
+      service.dispose();
+    });
+
+    it("nudges an empty ledger, at most once per 60s", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo is empty");
+
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(new Date("2026-03-18T10:06:01.000Z"));
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(2);
       service.dispose();
     });
 
@@ -1911,24 +1989,30 @@ describe("SessionService", () => {
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const itemId = (
+        await service.mutateTodo(
+          session.id,
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: session.id },
+        )
+      ).items[0]?.id;
+      if (!itemId) throw new Error("Expected added ToDo item");
       const internals = sessionServiceInternals(service);
       const send = vi
         .spyOn(internals, "sendAgentMessage")
         .mockRejectedValueOnce(new Error("pane unavailable"))
         .mockResolvedValue(SUBMITTED);
 
-      await internals.maybeNudgeTodo(session);
-      await internals.maybeNudgeTodo(session);
-      await internals.maybeNudgeTodo(session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(2);
       expect(send.mock.calls[1]?.[1]).toContain("Spur ToDo still has open work");
 
       vi.setSystemTime(new Date("2026-03-18T10:06:01.000Z"));
-      await internals.maybeNudgeTodo(session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(3);
 
-      const itemId = (await service.readTodo(session.id)).items[0]?.id;
-      if (!itemId) throw new Error("Expected initial ToDo item");
       await service.mutateTodo(
         session.id,
         {
@@ -1943,6 +2027,62 @@ describe("SessionService", () => {
       vi.setSystemTime(new Date("2026-03-18T10:07:02.000Z"));
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send.mock.calls.at(-1)?.[1]).toContain("Choose the release window");
+      service.dispose();
+    });
+
+    it("self-destruct refuses an empty ledger", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.selfDestruct("api-1")).rejects.toMatchObject({
+        code: "todo_ledger_empty",
+      });
+      expect(sessions.get("api-1")?.status).toBe("running");
+      service.dispose();
+    });
+
+    it("completeDesk with a human override completes an empty-ledger desk and records one override event", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2", workspaceId: "desk-1" }));
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.completeDesk(
+        "api-1",
+        { todoOverrideReason: "Operator accepts the empty desk", skipPrCheck: true },
+        { todoActor: { kind: "human", origin: "ui" } },
+      );
+
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      expect(sessions.get("api-2")?.status).toBe("completed");
+      const projection = await service.readTodo("api-1");
+      expect(projection.finishOverrides).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("handoff rejects an empty ledger with no override path", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.handoff(source.id, { agent: "cursor" })).rejects.toMatchObject({
+        code: "todo_ledger_empty",
+      });
+      expect(sessions.get(source.id)?.status).toBe("running");
       service.dispose();
     });
   });
@@ -26752,8 +26892,14 @@ describe("SessionService", () => {
       await useRealTodoLedger();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const initialId = (await service.readTodo(source.id)).items[0]?.id;
-      if (!initialId) throw new Error("Expected initial ToDo item");
+      const initialId = (
+        await service.mutateTodo(
+          source.id,
+          { action: "add", text: "Initial work", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: source.id },
+        )
+      ).items[0]?.id;
+      if (!initialId) throw new Error("Expected added ToDo item");
       await service.mutateTodo(
         source.id,
         { action: "complete", itemId: initialId, reason: "Initial work done" },
@@ -26789,8 +26935,14 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = service as unknown as { attentionMonitorRunning: boolean };
       await vi.waitFor(() => expect(internals.attentionMonitorRunning).toBe(false));
-      const initialId = (await service.readTodo(source.id)).items[0]?.id;
-      if (!initialId) throw new Error("Expected initial ToDo item");
+      const initialId = (
+        await service.mutateTodo(
+          source.id,
+          { action: "add", text: "Initial work", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: source.id },
+        )
+      ).items[0]?.id;
+      if (!initialId) throw new Error("Expected added ToDo item");
       await service.mutateTodo(
         source.id,
         { action: "complete", itemId: initialId, reason: "Ready for handoff" },

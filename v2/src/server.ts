@@ -78,6 +78,7 @@ import {
 } from "./types.js";
 import {
   InvalidTodoRequestError,
+  TodoEmptyLedgerError,
   TodoLedgerCorruptError,
   TodoOpenWorkError,
   TodoTransitionConflictError,
@@ -1720,7 +1721,21 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoOpenWorkError) {
-        sendJson(response, error.statusCode, { code: error.code, sessions: error.sessions });
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          sessions: error.sessions,
+          error: error.message,
+        });
+        return;
+      }
+      if (error instanceof TodoEmptyLedgerError) {
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          ...(error.sessionIds.length === 1
+            ? { sessionId: error.sessionIds[0] }
+            : { sessionIds: error.sessionIds }),
+          error: error.message,
+        });
         return;
       }
       if (error instanceof InvalidTodoRequestError) {

@@ -584,8 +584,8 @@ test.describe("Spur ToDo audit", () => {
               text: "Implement native ToDo",
               status: "completed",
               added: {
-                reason: "Created from the session objective",
-                actor: { kind: "system", source: "spawn" },
+                reason: "Session objective requires it",
+                actor: { kind: "agent", agent: "codex", sessionId: session.id },
                 at: "2026-08-20T10:00:00.000Z",
               },
               latestTransition: {
@@ -598,8 +598,8 @@ test.describe("Spur ToDo audit", () => {
                 {
                   eventId: "event-1",
                   type: "item_added",
-                  reason: "Created from the session objective",
-                  actor: { kind: "system", source: "spawn" },
+                  reason: "Session objective requires it",
+                  actor: { kind: "agent", agent: "codex", sessionId: session.id },
                   at: "2026-08-20T10:00:00.000Z",
                 },
                 {

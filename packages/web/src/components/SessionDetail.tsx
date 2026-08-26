@@ -1600,11 +1600,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
-  const [todoOverride, setTodoOverride] = useState<{
-    body?: Record<string, unknown>;
-    openCount: number;
-    heldCount: number;
-  } | null>(null);
+  const [todoOverride, setTodoOverride] = useState<
+    | { body?: Record<string, unknown>; empty: true }
+    | { body?: Record<string, unknown>; openCount: number; heldCount: number }
+    | null
+  >(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
     action: "complete" | "kill";
     body?: Record<string, unknown>;
@@ -1954,6 +1954,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               0,
             ),
           });
+          return false;
+        }
+        if (
+          action === "complete" &&
+          payload &&
+          typeof payload === "object" &&
+          "code" in payload &&
+          (payload as { code?: unknown }).code === "todo_ledger_empty"
+        ) {
+          setTodoOverride({ body, empty: true });
           return false;
         }
         if (
@@ -3638,8 +3648,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           ) : null}
           {todoOverride ? (
             <TodoOverrideDialog
-              openCount={todoOverride.openCount}
-              heldCount={todoOverride.heldCount}
+              {...("empty" in todoOverride
+                ? { empty: true }
+                : { openCount: todoOverride.openCount, heldCount: todoOverride.heldCount })}
               busy={busyAction === "complete"}
               onCancel={() => setTodoOverride(null)}
               onSubmit={(reason) => {

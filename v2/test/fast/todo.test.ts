@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import {
   ensureTodoLedger,
   mutateTodo,
+  recordTodoFinishOverride,
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
@@ -50,22 +51,40 @@ async function fixture(status: SessionRecord["status"] = "running") {
 }
 
 describe("Spur ToDo ledger", () => {
-  it("initializes once and persists the marker", async () => {
+  it("starts empty and writes no ledger file until the first real item", async () => {
     const { dataDir, session } = await fixture();
-    const first = ensureTodoLedger(dataDir, session, "spawn");
+    const first = ensureTodoLedger(dataDir, session);
     const marked = readSession(dataDir, session.id);
     if (!marked) throw new Error("Expected marked session");
-    const second = ensureTodoLedger(dataDir, marked);
+    const ledgerFile = join(dataDir, "sessions", session.id, "todo.jsonl");
 
-    expect(first.items).toHaveLength(1);
-    expect(first.items[0]?.text).toBe("Implement native ToDo");
-    expect(second.counts.total).toBe(1);
+    expect(first.counts.total).toBe(0);
+    expect(first.items).toHaveLength(0);
     expect(marked?.todoLedgerVersion).toBe(1);
+    expect(existsSync(ledgerFile)).toBe(false);
+
+    const second = ensureTodoLedger(dataDir, marked);
+    expect(second.counts.total).toBe(0);
+    expect(existsSync(ledgerFile)).toBe(false);
+
+    const added = mutateTodo(
+      dataDir,
+      requiredSession(dataDir, session.id),
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
+    expect(added.counts.total).toBe(1);
+    expect(existsSync(ledgerFile)).toBe(true);
   });
 
   it("preserves history through every supported transition", async () => {
     const { dataDir, session } = await fixture();
-    let projection = ensureTodoLedger(dataDir, session, "spawn");
+    let projection = mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
     const initial = projection.items[0]?.id;
     if (!initial) throw new Error("Expected initial item");
     projection = mutateTodo(
@@ -123,15 +142,44 @@ describe("Spur ToDo ledger", () => {
 
   it("fails closed for a torn or malformed ledger", async () => {
     const { dataDir, session } = await fixture();
-    ensureTodoLedger(dataDir, session, "spawn");
+    mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
     const path = join(dataDir, "sessions", session.id, "todo.jsonl");
     writeFileSync(path, `${readFileSync(path, "utf8")}{`, "utf8");
     expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
   });
 
+  it("rejects a ledger file missing its trailing newline", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    const content = readFileSync(path, "utf8");
+    writeFileSync(path, content.slice(0, -1), "utf8");
+    expect(() => replayTodo(dataDir, session.id)).toThrow(/empty or truncated/);
+  });
+
+  it("throws TodoLedgerCorruptError, not a raw fs error, when the ledger file is absent", async () => {
+    const { dataDir, session } = await fixture();
+    expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+  });
+
   it("rejects blank mutation fields before append", async () => {
     const { dataDir, session } = await fixture();
-    ensureTodoLedger(dataDir, session, "spawn");
+    mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
     expect(() =>
       mutateTodo(
         dataDir,
@@ -142,11 +190,26 @@ describe("Spur ToDo ledger", () => {
     ).toThrow(InvalidTodoRequestError);
   });
 
-  it("migrates terminal legacy records with a terminal item", async () => {
+  it("records a human override on an empty ledger without throwing", async () => {
+    const { dataDir, session } = await fixture();
+    const projection = ensureTodoLedger(dataDir, session);
+    const after = recordTodoFinishOverride(
+      dataDir,
+      session.id,
+      "Nothing to track",
+      { kind: "human", origin: "cli" },
+      projection,
+    );
+    expect(after.counts.total).toBe(0);
+    expect(after.finishOverrides).toHaveLength(1);
+  });
+
+  it("terminal sessions with no ledger file start empty rather than seeded", async () => {
     const { dataDir, session } = await fixture("completed");
     const projection = ensureTodoLedger(dataDir, session);
     expect(projection.status).toBe("resolved");
-    expect(projection.items[0]?.status).toBe("completed");
+    expect(projection.counts.total).toBe(0);
+    expect(readSession(dataDir, session.id)?.todoLedgerVersion).toBe(1);
   });
 
   it("repairs a terminal migration interrupted after the initial add", async () => {
@@ -178,7 +241,12 @@ describe("Spur ToDo ledger", () => {
 
   it("replays unchanged history after the session shard is archived", async () => {
     const { dataDir, session } = await fixture();
-    const before = ensureTodoLedger(dataDir, session, "spawn");
+    const before = mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
     const archivedParent = join(dataDir, "sessions-archive", session.project);
     mkdirSync(archivedParent, { recursive: true });
     renameSync(join(dataDir, "sessions", session.id), join(archivedParent, session.id));

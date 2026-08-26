@@ -13,7 +13,7 @@ MODE
 
   - `manager` is the default mode, strict: every task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
   - Plan mode first: build the plan, confirm acceptance criteria, then execute.
-  - `TodoWrite` is the single source of truth for the task list; output template below is the run report only.
+  - Spur ToDo (`$SPUR_TODO_COMMAND`) is the authoritative task list; `TodoWrite` is a private within-gate scratchpad, never the record. Output template below is the run report only.
 
 ROUTING RULES
 
@@ -43,8 +43,8 @@ CANONICAL GATE ORDER
 
 PROCESS
 
-  1  Intake: parse the user message into concrete todos. State acceptance criteria first. Treat pasted logs, errors, diffs, PR links as source of truth. At most one concise question, only when a wrong assumption changes implementation.
-  2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo via `TodoWrite`.
+  1  Intake: parse the user message into concrete todos, record each as a Spur ToDo item before any delegation or recon — `--text` the imperative step, `--reason` why it exists. No agent spawns before the plan is in the ledger. State acceptance criteria first. Treat pasted logs, errors, diffs, PR links as source of truth. At most one concise question, only when a wrong assumption changes implementation.
+  2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo in Spur ToDo.
   3  Execute the canonical gate order above, one delegation per step. Critic selects one approach. Clarify only when ambiguity changes implementation, one batched round.
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
        - Docs: same change as the surface; never stale or missing.
@@ -54,7 +54,8 @@ PROCESS
 RULES
 
   - Collapse phases for trivial work; do not skip the skill.
-  - One manager step = one todo = one phase = one owner = one output. Never merge two listed steps into one entry.
+  - One manager step = one Spur ToDo item = one phase = one owner = one output; every dispatched gate comes from the ledger, never invented ad hoc.
+  - Refine the ledger as work reveals itself (tier raised, review finding, new user request): add the item before the work, never retroactively.
   - Sole exception to "manager never touches code": the design-authoring gate, run by the manager itself in the main session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
   - Local checks only. Never wait for remote CI.
 
@@ -83,7 +84,7 @@ OUTPUT
     <one or two sentences: which packages/modules touched, how data flows between them, what new boundaries or contracts exist>
 
   Completed:
-    <todo from TodoWrite> — <gate that closed it>
+    <Spur ToDo item> — <gate that closed it>
 
   Risks:
     <risk>

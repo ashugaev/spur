@@ -89,7 +89,7 @@ TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r`
 
 `spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`. `spur complete <sessionId> --todo-override-reason <reason>`.
 
-Each session owns one append-only ToDo ledger. `add`/`complete`/`cancel`/`hold` require a reason; `--human-action` records a human blocker; `resume` reopens held work; no delete. Open/held work blocks completion, self-destruct, handoff, trigger+desk completion — override with a fresh reason (item states unchanged, enters audit history; a session can't override itself).
+Each session's ToDo ledger starts empty — no code path seeds an item; the agent adds one per step, right before it, and resolves it right after. `add`/`complete`/`cancel`/`hold` require a reason; `--human-action` records a human blocker; `resume` reopens held work; no delete. A human can also `add` through the CLI or session-detail UI. An empty ledger, and open or held work, both block completion, self-destruct, handoff, trigger+desk completion — override with `--todo-override-reason` (item states unchanged, enters audit history; self-destruct and handoff never accept an override; a session can't override itself).
 
 `$SPUR_TODO_COMMAND`: session-bound `spur-todo` wrapper, same actions, no `--session`, can't target another ledger. Routes/error codes: [daemon-api.md](daemon-api.md#session-routes).
 

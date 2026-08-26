@@ -3,19 +3,17 @@
 import { useState } from "react";
 import { INPUT_CLASS } from "@/design/classes";
 
-export function TodoOverrideDialog({
-  openCount,
-  heldCount,
-  busy,
-  onCancel,
-  onSubmit,
-}: {
-  openCount: number;
-  heldCount: number;
+type TodoOverrideDialogProps = (
+  | { empty: true }
+  | { empty?: false; openCount: number; heldCount: number }
+) & {
   busy: boolean;
   onCancel: () => void;
   onSubmit: (reason: string) => void;
-}) {
+};
+
+export function TodoOverrideDialog(props: TodoOverrideDialogProps) {
+  const { busy, onCancel, onSubmit } = props;
   const [reason, setReason] = useState("");
   return (
     <div
@@ -26,17 +24,18 @@ export function TodoOverrideDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="todo-override-title"
-        className="w-full max-w-lg border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4"
+        className="w-full max-w-lg border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] p-4"
       >
         <h2
           id="todo-override-title"
           className="font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]"
         >
-          Unfinished ToDo
+          {props.empty ? "Empty ToDo" : "Unfinished ToDo"}
         </h2>
         <p className="py-3 text-[var(--color-text-secondary)]">
-          {openCount} open and {heldCount} held items remain. Completing keeps them unfinished in
-          audit history.
+          {props.empty
+            ? "This session recorded no ToDo items. Completing keeps the ledger empty in audit history."
+            : `${props.openCount} open and ${props.heldCount} held items remain. Completing keeps them unfinished in audit history.`}
         </p>
         <label
           className="block uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]"

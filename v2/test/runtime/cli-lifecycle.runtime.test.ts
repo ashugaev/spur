@@ -1690,7 +1690,17 @@ projects:
     );
 
     const completed = JSON.parse(
-      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "complete",
+          spawned.id,
+          "--todo-override-reason",
+          "Runtime fixture completes before recording any ToDo step",
+          "--json",
+        ])
+      ).stdout,
     ) as SessionView;
     expect(completed.status).toBe("completed");
     expect(completed.workspaceExists).toBe(false);
@@ -1930,16 +1940,15 @@ projects:
     ) as SessionView;
     expect(spawned.branch).toBe(occupiedBranch);
 
-    // The complete gate is unconditional on session state: it 409s while the
-    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
-    // "waiting" (which lands strictly after its own resolve_initial_todo
-    // call) before completing, or this races the fixture's todo resolution.
-    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
-      timeoutMs: 15_000,
-      accept: (value) => value.state === "waiting",
-    });
-
-    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+    await context.execCli([
+      "--config",
+      configPath,
+      "complete",
+      spawned.id,
+      "--todo-override-reason",
+      "Runtime fixture completes before recording any ToDo step",
+      "--json",
+    ]);
 
     const occupiedWorktreePath = join(context.rootDir, "occupied-respawn-branch");
     await execFileAsync("git", ["worktree", "add", occupiedWorktreePath, occupiedBranch], {
@@ -2508,25 +2517,23 @@ projects:
       ).stdout,
     ) as SessionView;
 
-    // The fixture's fake agent resolves the initial ToDo item (its own
-    // `resolve_initial_todo` step) AFTER it prints the ready marker that
-    // `spawnSession` waits on, but strictly BEFORE it signals "waiting".
-    // Reading the ToDo list right after spawn races that resolution; wait
-    // for the agent to reach "waiting" so the transition is guaranteed to
-    // have landed.
-    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
-      timeoutMs: 15_000,
-      accept: (value) => value.state === "waiting",
-    });
-
-    const initial = JSON.parse(
-      (
-        await context.execCli(
-          ["--config", configPath, "todo", "list", "--session", spawned.id, "--json"],
-          humanCli,
-        )
-      ).stdout,
-    ) as TodoProjection;
+    const initial = await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli(
+              ["--config", configPath, "todo", "list", "--session", spawned.id, "--json"],
+              humanCli,
+            )
+          ).stdout,
+        ) as TodoProjection,
+      {
+        timeoutMs: 20_000,
+        accept: (projection) => Boolean(projection.items[0]?.latestTransition),
+        label: "fixture agent to record and resolve its first Spur ToDo item",
+      },
+    );
+    expect(initial.items[0]?.added?.actor).toMatchObject({ kind: "agent" });
     expect(initial.items[0]?.latestTransition?.actor).toEqual({
       kind: "agent",
       agent: spawned.agent,
@@ -2767,6 +2774,32 @@ projects:
         ])
       ).stdout,
     ) as SessionView;
+
+    // The fixture agent records and resolves its first Spur ToDo item during
+    // startup, before it signals waiting. Wait for that here so the later
+    // interactive complete ('c') does not race a pane pause into an empty
+    // ledger, which the daemon now refuses.
+    await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli([
+              "--config",
+              configPath,
+              "todo",
+              "list",
+              "--session",
+              spawned.id,
+              "--json",
+            ])
+          ).stdout,
+        ) as TodoProjection,
+      {
+        timeoutMs: 20_000,
+        accept: (projection) => Boolean(projection.items[0]?.latestTransition),
+        label: "fixture agent to record and resolve its first Spur ToDo item",
+      },
+    );
 
     const controllerSessionName = `${sessionPrefix}-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -3106,7 +3139,15 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
-    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+    await context.execCli([
+      "--config",
+      configPath,
+      "complete",
+      spawned.id,
+      "--todo-override-reason",
+      "Runtime fixture completes before recording any ToDo step",
+      "--json",
+    ]);
     expect(existsSync(artifactDir)).toBe(false);
 
     const missing = await fetch(
@@ -4512,17 +4553,15 @@ projects:
         ])
       ).stdout,
     ) as SessionView;
-
-    // The complete gate is unconditional on session state: it 409s while the
-    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
-    // "waiting" (which lands strictly after its own resolve_initial_todo
-    // call) before completing, or this races the fixture's todo resolution.
-    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${target.id}`), {
-      timeoutMs: 15_000,
-      accept: (value) => value.state === "waiting",
-    });
-
-    await context.execCli(["--config", configPath, "complete", target.id, "--json"]);
+    await context.execCli([
+      "--config",
+      configPath,
+      "complete",
+      target.id,
+      "--todo-override-reason",
+      "Runtime fixture completes before recording any ToDo step",
+      "--json",
+    ]);
 
     const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
     const respawned = JSON.parse(
@@ -5444,6 +5483,16 @@ projects:
         },
       );
       expect(withLink.slots?.links.some((link) => link.label === "dev")).toBe(true);
+
+      // Wait for the fixture to actually resolve the session's seeded Spur
+      // ToDo item before completing — the sidecar link landing is unrelated
+      // to the fixture's own todo-resolution CLI calls, so completing right
+      // after the link appears can still 409 on an open item that hasn't
+      // landed yet.
+      await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+        timeoutMs: 15_000,
+        accept: (value) => value.state === "waiting",
+      });
 
       const closed =
         action === "complete"
