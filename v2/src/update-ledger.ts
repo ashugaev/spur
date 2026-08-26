@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { HostChangedFailureKind } from "./deploy-switch-state.js";
+import { isHostChangedFailureKind, type HostChangedFailureKind } from "./deploy-switch-state.js";
 import { iterLiveLines, parseJsonLine } from "./jsonl-log-io.js";
 
 // Append-only policy memory for the update path, written by three processes
@@ -16,13 +16,27 @@ import { iterLiveLines, parseJsonLine } from "./jsonl-log-io.js";
 
 const UPDATE_LEDGER_FILE = "update-ledger.jsonl";
 
-export type UpdateLedgerEntry =
-  | { kind: "blocked"; version: string; failureKind: HostChangedFailureKind; at: string }
-  | { kind: "disarmed"; version: string; at: string };
+export interface BlockedLedgerEntry {
+  kind: "blocked";
+  version: string;
+  failureKind: HostChangedFailureKind;
+  at: string;
+}
 
+export interface DisarmedLedgerEntry {
+  kind: "disarmed";
+  version: string;
+  at: string;
+}
+
+export type UpdateLedgerEntry = BlockedLedgerEntry | DisarmedLedgerEntry;
+
+// Keyed by version, valued by the line that put it there, so `failureKind` and
+// `at` survive the read instead of being written and dropped: `.has` answers
+// the tick's question, the value answers "which kind, and since when".
 export interface UpdateLedger {
-  blocked: Set<string>;
-  disarmed: Set<string>;
+  blocked: Map<string, BlockedLedgerEntry>;
+  disarmed: Map<string, DisarmedLedgerEntry>;
 }
 
 export function updateLedgerPath(dataDir: string): string {
@@ -34,23 +48,34 @@ export function appendUpdateLedgerLine(path: string, entry: UpdateLedgerEntry): 
   appendFileSync(path, `${JSON.stringify(entry)}\n`, { encoding: "utf-8", mode: 0o600 });
 }
 
-// `parseJsonLine` casts without validating, so admit a line only when it names
-// a kind this module knows and a non-empty version: a truncated or corrupt
-// line must never enter the never-retry set nor fake a disarm.
-function isLedgerLine(value: unknown): value is { kind: "blocked" | "disarmed"; version: string } {
+// `parseJsonLine` casts without validating, so admit a line only when every
+// field of the entry type is there: a truncated or corrupt line must never
+// enter the never-retry set nor fake a disarm. `at` is checked as a parseable
+// date and a `blocked` line's `failureKind` against the host-changed subset,
+// narrower than what the tick asks of the status record: interrupted_unknown
+// never installed provably, so it must never permanently block a version.
+function isLedgerLine(value: unknown): value is UpdateLedgerEntry {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const line = value as Record<string, unknown>;
-  if (line.kind !== "blocked" && line.kind !== "disarmed") return false;
-  return typeof line.version === "string" && line.version.length > 0;
+  if (typeof line.version !== "string" || line.version.length === 0) return false;
+  if (typeof line.at !== "string" || Number.isNaN(Date.parse(line.at))) return false;
+  if (line.kind === "disarmed") return true;
+  return line.kind === "blocked" && isHostChangedFailureKind(line.failureKind);
 }
 
 export function readUpdateLedger(path: string): UpdateLedger {
-  const blocked = new Set<string>();
-  const disarmed = new Set<string>();
+  const blocked = new Map<string, BlockedLedgerEntry>();
+  const disarmed = new Map<string, DisarmedLedgerEntry>();
   for (const line of iterLiveLines(path)) {
     const entry = parseJsonLine<unknown>(line);
     if (!isLedgerLine(entry)) continue;
-    (entry.kind === "blocked" ? blocked : disarmed).add(entry.version);
+    // First line for a version wins: the file is append-only history, so the
+    // earliest line is when that version was blocked, or first disarmed.
+    if (entry.kind === "blocked") {
+      if (!blocked.has(entry.version)) blocked.set(entry.version, entry);
+    } else if (!disarmed.has(entry.version)) {
+      disarmed.set(entry.version, entry);
+    }
   }
   return { blocked, disarmed };
 }

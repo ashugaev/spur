@@ -10,9 +10,20 @@ import type {
 import type { UpdateLedger } from "../../src/update-ledger.js";
 
 function ledger(entries: { blocked?: string[]; disarmed?: string[] } = {}): UpdateLedger {
+  const at = "2026-01-01T00:00:00Z";
   return {
-    blocked: new Set(entries.blocked ?? []),
-    disarmed: new Set(entries.disarmed ?? []),
+    blocked: new Map(
+      (entries.blocked ?? []).map((version) => [
+        version,
+        { kind: "blocked", version, failureKind: "rolled_back", at } as const,
+      ]),
+    ),
+    disarmed: new Map(
+      (entries.disarmed ?? []).map((version) => [
+        version,
+        { kind: "disarmed", version, at } as const,
+      ]),
+    ),
   };
 }
 
@@ -167,7 +178,9 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        // `info`, not `warn`: a suppressed tick took no action, and it repeats
+        // every 5 minutes for as long as this release is the newest one.
+        level: "info",
         details: {
           version: "1.1.0",
           phase: "succeeded",
@@ -196,7 +209,7 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        level: "info",
         details: {
           version: "1.1.0",
           phase: "failed",
@@ -226,12 +239,14 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
-        details: expect.objectContaining({
+        level: "info",
+        details: {
+          version: "1.1.0",
+          phase: "failed",
           failureKind: "interrupted_unknown",
           initiator: "manual",
           reason: "no_retry_kind",
-        }),
+        },
       }),
     );
   });
@@ -256,7 +271,7 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        level: "info",
         details: expect.objectContaining({
           failureKind: "install_unhealthy",
           initiator: "manual",
@@ -406,7 +421,7 @@ describe("runAutoUpdateTick", () => {
 
   it("suppresses a blocked version with no matching record", async () => {
     const start = vi.fn();
-    const log = vi.fn();
+    const log = vi.fn<RunAutoUpdateTickDeps["log"]>();
     // The record behind the notice was cleared by a Switch or by re-arming
     // AUTO; the ledger is what keeps the version off the auto path.
     const deps = baseDeps({
@@ -422,8 +437,45 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        level: "info",
         details: { version: "1.1.0", reason: "blocked_version" },
+      }),
+    );
+    // A tick that suppressed the newest release repeats every 5 minutes for as
+    // long as that release stands: nothing on it may reach `warn`.
+    expect(log.mock.calls.map(([, entry]) => entry.level)).toEqual(["info"]);
+  });
+
+  it("does not fall back to an older unblocked release when the newest is blocked", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
+    const log = vi.fn();
+    // 1.1.0 is unblocked and newer than 1.0.0, so a fallback would install it.
+    // By design there is none: the auto path only ever considers the newest
+    // release, and sliding a host onto an older version than the one the
+    // operator reads as `latest` is worse than stopping.
+    const deps = baseDeps({
+      getReleases: async () => ({
+        entries: [
+          { tag: "1.2.0", publishedAt: "2026-02-01T00:00:00Z" },
+          { tag: "1.1.0", publishedAt: "2026-01-01T00:00:00Z" },
+        ],
+        stale: false,
+        error: null,
+      }),
+      readLedger: () => ledger({ blocked: ["1.2.0"] }),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        details: { version: "1.2.0", reason: "blocked_version" },
       }),
     );
   });

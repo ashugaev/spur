@@ -31,10 +31,18 @@ export type HostChangedFailureKind = "rolled_back" | "install_unhealthy";
 // interrupted_unknown, whose truth is unknown rather than provably changed.
 export type NoRetryFailureKind = HostChangedFailureKind | "interrupted_unknown";
 
-export function isNoRetryFailureKind(
-  kind: DeployFailureKind | undefined,
-): kind is NoRetryFailureKind {
+// Takes `unknown`, like `isFailureKind` below, so the ledger's line guard can
+// ask it of a field straight off disk without a cast.
+export function isNoRetryFailureKind(kind: unknown): kind is NoRetryFailureKind {
   return kind === "rolled_back" || kind === "install_unhealthy" || kind === "interrupted_unknown";
+}
+
+// The subset of NoRetryFailureKind that PROVABLY changed the host — the only
+// kinds a `blocked` ledger line may ever carry. Rejects interrupted_unknown,
+// whose truth is unknown, so the ledger's line guard can never permanently
+// block a version that was never proven to have installed.
+export function isHostChangedFailureKind(kind: unknown): kind is HostChangedFailureKind {
+  return kind === "rolled_back" || kind === "install_unhealthy";
 }
 
 export type DeploySwitchState =

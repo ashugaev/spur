@@ -40,8 +40,9 @@ jobs:
           df -h /
           docker system df
           IN_USE="$(docker ps -a --format '{{.Image}}')"
+          NOW="$(date -u +%s)"
           LEAKED=""
-          for REF in $(docker image ls --format '{{.Repository}}:{{.Tag}}'); do
+          while IFS='|' read -r REF CREATED; do
             case "$REF" in
               onboarding-*) ;;
               *) continue ;;
@@ -53,8 +54,18 @@ jobs:
             if printf '%s\n' "$IN_USE" | grep -qxF -e "$REF" -e "${REF%:latest}"; then
               continue
             fi
+            # Age guard for the window between a concurrent run's "Build test image"
+            # and its `docker compose up -d`: the image exists, no container does,
+            # so both guards above miss it. Under an hour old is never eligible,
+            # which is well past this job's 20-minute timeout. An unparseable
+            # timestamp keeps the image.
+            CREATED_AT="$(date -u -d "${CREATED% UTC}" +%s 2>/dev/null)"
+            if [ -z "$CREATED_AT" ] || [ "$((NOW - CREATED_AT))" -lt 3600 ]; then
+              echo "keeping $REF: created $CREATED"
+              continue
+            fi
             LEAKED="$LEAKED $REF"
-          done
+          done <<< "$(docker image ls --format '{{.Repository}}:{{.Tag}}|{{.CreatedAt}}')"
           if [ -n "$LEAKED" ]; then
             echo "removing leaked images:$LEAKED"
             docker rmi -f $LEAKED
