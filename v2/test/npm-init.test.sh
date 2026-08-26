@@ -43,7 +43,7 @@ setup_scenario() {
   local pkg_root="$scenario_dir/pkg"
 
   mkdir -p "$fake_home" "$fake_bin" "$pkg_root/scripts" "$pkg_root/deploy" "$pkg_root/dist" \
-    "$pkg_root/web/dist-server"
+    "$pkg_root/web/dist-server" "$pkg_root/skills/spur"
 
   cp "$NPM_INIT_SRC" "$pkg_root/scripts/npm-init.sh"
   cp "$VERIFY_PACKAGE_FILES_SRC" "$pkg_root/scripts/verify-package-files.sh"
@@ -55,6 +55,7 @@ setup_scenario() {
   : >"$pkg_root/dist/cli.js"
   : >"$pkg_root/web/dist-server/web-server.js"
   : >"$pkg_root/spur.yaml.reference"
+  : >"$pkg_root/skills/spur/SKILL.md"
 
   cat >"$fake_bin/node" <<'EOF'
 #!/usr/bin/env bash

@@ -1171,6 +1171,12 @@ projects:
       runOnStart: false,
       token: "token-123",
       allowedUsers: [123],
+      autoSpawn: {
+        enabled: true,
+        project: "spur-shepherd",
+        agent: "opencode",
+        selfDestruct: { enabled: true },
+      },
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "telegram",
@@ -1179,6 +1185,99 @@ projects:
         interrupt: false,
       },
     });
+  });
+
+  it("materializes telegram autoSpawn defaults with no model", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["telegram"]).toMatchObject({
+      autoSpawn: {
+        enabled: true,
+        project: "spur-shepherd",
+        agent: "opencode",
+        selfDestruct: { enabled: true },
+      },
+    });
+    expect(
+      (config.projects["backend"]?.sources["telegram"] as { autoSpawn?: { model?: string } })
+        .autoSpawn?.model,
+    ).toBeUndefined();
+  });
+
+  it("passes through a configured telegram autoSpawn model", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        autoSpawn:
+          agent: opencode
+          model: google/gemini-3.7-flash
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["telegram"]).toMatchObject({
+      autoSpawn: {
+        enabled: true,
+        agent: "opencode",
+        model: "google/gemini-3.7-flash",
+      },
+    });
+  });
+
+  it("rejects telegram autoSpawn model without agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        autoSpawn:
+          model: gpt-5
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.telegram.autoSpawn.model requires " +
+        "projects.backend.sources.telegram.autoSpawn.agent",
+    );
+  });
+
+  it("rejects an invalid telegram autoSpawn selfDestruct", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        autoSpawn:
+          selfDestruct: 5
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.telegram.autoSpawn.selfDestruct must be an object",
+    );
   });
 
   it("rejects telegram sources without an allowlist", async () => {

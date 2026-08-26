@@ -14,6 +14,10 @@ bash scripts/setup.sh
 
 Bootstrap details live in [SETUP.md](SETUP.md).
 
+Run from source without a global install: `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`. `pnpm --dir v2 build` also restarts a running daemon when Spur config is discoverable — a normal CLI command auto-connects its discovered project config into the daemon; registration and pruning rules live in [config registry](docs/configuration.md#config-registry).
+
+For a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`, use `scripts/spur-isolated-daemon.sh`. `isolated-daemon` and `isolated-ui` project sidecars start an isolated Spur daemon and the web UI against it; new isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks, and `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs.
+
 ## PR Checks
 
 Before opening or updating a PR:
@@ -31,6 +35,8 @@ When agent launch or prompt delivery changes:
 ```bash
 pnpm --dir v2 test:smoke
 ```
+
+`pnpm --dir v2 test` runs fast (mocked, in-process); `pnpm --dir v2 test:runtime` runs runtime integration (CLI, tmux, worktree, process boundaries); `pnpm --dir v2 test:smoke` runs a real-agent smoke test against this repo (skips if tmux/binaries/auth are missing). Run `test:runtime` when touching CLI, daemon, transport, session lifecycle, worktree, or tmux; run `test:smoke` when touching agent launch or prompt delivery.
 
 Tests allocate temp dirs under `TMPDIR` only, never under `~/.spur`. If an
 older revision left fixture dirs behind, list/remove them with

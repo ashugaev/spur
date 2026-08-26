@@ -306,6 +306,15 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   token: string;
   allowedUsers?: number[];
   allowedChats?: number[];
+  autoSpawn?: TelegramAutoSpawnConfig;
+}
+
+export interface TelegramAutoSpawnConfig {
+  enabled: boolean;
+  project: string;
+  agent: AgentName;
+  model?: string;
+  selfDestruct?: SelfDestructConfig;
 }
 
 export interface TelegramBinding {
