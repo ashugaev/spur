@@ -199,6 +199,23 @@ describe("Dashboard complete with an unavailable PR check", () => {
     expect(screen.getByRole("dialog", { name: "GitHub PR Check Unavailable" })).toBeInTheDocument();
   });
 
+  // Cancelling leaves the row in place, so its Done button has to come back.
+  // Held disabled, the session can never be closed again without a reload.
+  it("re-enables Done after the dialog is cancelled", async () => {
+    const completeBodies: unknown[] = [];
+    mockFetch(completeBodies);
+    render(<Dashboard />);
+
+    await clickDone();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    const done = await screen.findByRole("button", { name: "Mark api-c9e9 as done" });
+    await waitFor(() => expect(done).not.toBeDisabled());
+
+    fireEvent.click(done);
+    await waitFor(() => expect(completeBodies).toHaveLength(2));
+  });
+
   // The two PR dialogs are alternatives for one attempt. Stacked, the stale one
   // outlives a successful skip and can re-fire /complete on a terminal session.
   it("replaces the open-PR dialog instead of stacking both", async () => {

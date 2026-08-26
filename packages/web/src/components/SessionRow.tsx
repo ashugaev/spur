@@ -346,6 +346,9 @@ export function SessionRow({
               await onCompleteSession(session);
             } catch (err) {
               console.error("complete failed", err);
+            } finally {
+              // Complete can end on a PR dialog instead of removing the row, and
+              // cancelling it leaves the row in place. Always release the button.
               setCompleting(false);
             }
           }}
