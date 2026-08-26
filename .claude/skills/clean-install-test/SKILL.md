@@ -137,7 +137,12 @@ Second use of the same box: run `scripts/main-deploy.sh` end to end against real
      cd ~/spur && pnpm main:deploy
 
   4  Positive case: script exits 0, `spur-daemon.service` and `spur-web.service` both active, web answers 200 on 127.0.0.1:3012 (source-install port, not the npm path's 5555), and the run prints no `missing chunk` or `serving stale chunks` line.
-  5  Negative case: re-run and SIGTERM the script mid-build, then assert `spur-web.service` is still active — the exit trap restarts it.
+  5  Negative case: re-run and SIGTERM the script mid-build, then assert `spur-web.service` is still active — the exit trap restarts it. Two traps that read as a failure and are not:
+     - The stamp file matches after step 4, so a bare re-run takes the "Already deployed" fast path and never builds. Delete `~/.spur/main-deploy/repo/.git/main-deploy-last-successful` first, or there is no build to interrupt.
+     - `kill -TERM` on the `main-deploy.sh` bash pid does NOT fire the exit trap while `pnpm build` is the foreground child — bash runs the trap only after that child returns. Budget the remaining build (measured 630-690 s for a full one), never a 60 s poll. Confirm with `rc=143` plus the log's `main:deploy exiting rc=143 with spur-web inactive — starting`.
+     Then, and only then, check HTTP: `next start` needs 5-20 s after the trap starts the unit, so an immediate curl returns `000` on a healthy box. Assert the unit active first, poll `127.0.0.1:3012` for 200 second.
+
+  6  A guard keyed on the npm user units (`$HOME/.config/systemd/user/spur-daemon.service`) cannot fire on this box after step 2 — `tests/itest/reset-vm.sh:15` removes those units. Exercise it by planting the file by hand, then assert exit 1 and that both units' MainPIDs are unchanged.
 
 AUTONOMOUS MODE
 

@@ -20,6 +20,31 @@ web_next_dir="${SPUR_DEPLOY_WEB_NEXT_DIR:-$deploy_root/packages/web/.next}"
 daemon_env_file="${MAIN_DEPLOY_DAEMON_ENV_FILE:-/etc/spur/daemon.env}"
 systemd_unit_dir="${MAIN_DEPLOY_SYSTEMD_DIR:-/etc/systemd/system}"
 
+# Refuse on a host served by the npm-package user units. This script owns the
+# SOURCE deploy: it installs system-scope units and kill_rogue_daemon_on_port
+# kills any :4310 listener that is not the system unit's MainPID — on an npm
+# host that is the installed daemon, so the run would silently switch
+# production onto this checkout. Checked on the unit file, not `systemctl
+# --user`, so a cron/root invocation with no user bus is guarded too. Earliest
+# possible exit: before the lock, the git reset, and the re-exec.
+npm_daemon_unit="$service_home/.config/systemd/user/spur-daemon.service"
+if [[ -f "$npm_daemon_unit" ]]; then
+  cat >&2 <<EOF
+main:deploy aborting: $npm_daemon_unit exists.
+
+This host runs the npm-package units; this script deploys from source into
+$systemd_unit_dir and would take :4310 from the installed daemon.
+
+Update an npm host with:
+  spur update
+
+To migrate this host to a source deploy, remove the npm units first:
+  systemctl --user disable --now spur-daemon.service spur-web.service
+  rm $service_home/.config/systemd/user/spur-daemon.service $service_home/.config/systemd/user/spur-web.service
+EOF
+  exit 1
+fi
+
 ensure_deploy_clone() {
   if git -C "$deploy_root" rev-parse --git-dir >/dev/null 2>&1; then
     return

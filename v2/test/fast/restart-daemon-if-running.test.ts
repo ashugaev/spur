@@ -46,6 +46,54 @@ function runBin(cwd: string, configPath: string, extraEnv: Record<string, string
   });
 }
 
+// Same fixture cwd, but the config lives at the DEFAULT instance path under a
+// temp HOME (os.homedir() reads $HOME on POSIX) and SPUR_CONFIG is unset — the
+// exact shape of a `pnpm build` in a source tree resolving the host-global prod
+// slot.
+function runBinAgainstDefaultConfig(cwd: string, home: string) {
+  mkdirSync(join(home, ".spur"), { recursive: true });
+  writeFileSync(
+    join(home, ".spur", "config.yaml"),
+    "dataDir: " + join(home, ".spur") + "\nprojects: {}\n",
+  );
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k === "SPUR_SESSION" || k === "SPUR_DISABLE_AUTOSTART" || k === "SPUR_CONFIG") continue;
+    if (v !== undefined) env[k] = v;
+  }
+  env["HOME"] = home;
+  return spawnSync(process.execPath, [binPath], { cwd, env, encoding: "utf-8" });
+}
+
+describe("restart-daemon-if-running.mjs default-config skip", () => {
+  it("skips the daemon restart when the resolved config is the host default path", () => {
+    const { cwd, marker } = makeFixture();
+    const home = mkdtempSync(join(tmpdir(), "spur-restart-daemon-home-"));
+    const result = runBinAgainstDefaultConfig(cwd, home);
+    expect(result.status).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    expect(result.stderr).toContain("host default instance config");
+  });
+
+  it("skips via SPUR_CONFIG pointing at the host default path too", () => {
+    const { cwd, marker } = makeFixture();
+    const home = mkdtempSync(join(tmpdir(), "spur-restart-daemon-home-"));
+    mkdirSync(join(home, ".spur"), { recursive: true });
+    const defaultPath = join(home, ".spur", "config.yaml");
+    writeFileSync(defaultPath, "dataDir: " + join(home, ".spur") + "\nprojects: {}\n");
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k === "SPUR_SESSION" || k === "SPUR_DISABLE_AUTOSTART") continue;
+      if (v !== undefined) env[k] = v;
+    }
+    env["HOME"] = home;
+    env["SPUR_CONFIG"] = defaultPath;
+    const result = spawnSync(process.execPath, [binPath], { cwd, env, encoding: "utf-8" });
+    expect(result.status).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  });
+});
+
 describe("restart-daemon-if-running.mjs SPUR_DISABLE_AUTOSTART skip", () => {
   it("skips the daemon restart when SPUR_DISABLE_AUTOSTART is set", () => {
     const { cwd, marker, configPath } = makeFixture();

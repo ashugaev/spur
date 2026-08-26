@@ -978,9 +978,50 @@ test_foreign_new_listener_is_fatal() {
   fi
 }
 
+# --- Case (l): npm-package host is refused, never taken over --------------
+# A source deploy on a host running the npm user units would kill the
+# installed :4310 daemon and switch production onto this checkout. The guard
+# reads the unit file (not `systemctl --user`), so it holds with no user bus.
+test_npm_unit_host_refused() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  local head
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  mkdir -p "$HOME/.config/systemd/user"
+  : >"$HOME/.config/systemd/user/spur-daemon.service"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]]; then
+    ok "npm-unit-host: non-zero exit ($rc)"
+  else
+    bad "npm-unit-host: exited 0"
+  fi
+  if grep -q 'spur update' <<<"$out"; then
+    ok "npm-unit-host: abort names 'spur update'"
+  else
+    bad "npm-unit-host: abort does not name 'spur update'"
+    printf '%s\n' "$out"
+  fi
+  # No systemd action at all: the guard must precede restart/stop and the lock.
+  if [[ "$(cat "$SPUR_DEPLOY_STATE")" == "start spur-daemon.service
+start spur-web.service" ]]; then
+    ok "npm-unit-host: issued no systemctl action"
+  else
+    bad "npm-unit-host: touched systemd"
+    cat "$SPUR_DEPLOY_STATE"
+  fi
+}
+
 test_concurrency
 test_heal
 test_loud_failure
+test_npm_unit_host_refused
 test_slow_cold_start_does_not_fatal
 test_build_hook_no_abort
 test_stale_chunks_heal
