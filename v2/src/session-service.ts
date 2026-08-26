@@ -9419,7 +9419,8 @@ export class SessionService {
       .filter(
         (session) =>
           session.project === SHEPHERD_PROJECT_ID &&
-          ["running", "spawning"].includes(session.status),
+          ["running", "spawning"].includes(session.status) &&
+          readTelegramReplyTarget(this.config.dataDir, session.id) === null,
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
     if (reusable) {
@@ -10242,7 +10243,8 @@ export class SessionService {
   ): Promise<AgentSendOutcome> {
     const freshLaunch = options?.freshLaunch === true;
     const shouldWaitForSubmitAck =
-      agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+      agentWaitsForSubmitAck(session.agent) &&
+      !(session.agent === "codex" && process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"]);
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
     const binding: SubmitAckBinding | null = shouldWaitForSubmitAck
       ? await createAgentSubmitAckBinding(session.agent, {
@@ -11206,6 +11208,8 @@ export class SessionService {
       }
       if (targetStatus === "completed") {
         this.removeSessionArtifacts(session);
+        const replyTargetProjectId =
+          readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
         await this.pushTelegramNotice(
           sessionId,
           {
@@ -11215,9 +11219,9 @@ export class SessionService {
             ...(session.slots ? { slots: session.slots } : {}),
           },
           `Session ${telegramSessionLabel(session)} finished (${targetStatus}). This chat is unbound.`,
-          { closeTopic: true },
+          { closeTopic: session.selfDestruct?.enabled !== true },
         );
-        deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
+        deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -11321,6 +11325,8 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
+      const replyTargetProjectId =
+        readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
       await this.pushTelegramNotice(
         sessionId,
         {
@@ -11330,9 +11336,9 @@ export class SessionService {
           ...(session.slots ? { slots: session.slots } : {}),
         },
         `Session ${telegramSessionLabel(session)} finished (killed). This chat is unbound.`,
-        { closeTopic: true },
+        { closeTopic: session.selfDestruct?.enabled !== true },
       );
-      deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
+      deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {

@@ -2,12 +2,19 @@
 set -euo pipefail
 mode="${1:-}"
 cd "${CLAUDE_PROJECT_DIR:-.}"
-branch="$(git branch --show-current)"
+branch="$(git branch --show-current 2>/dev/null)"
 case "$branch" in
   main|master|"") exit 0 ;;
 esac
 problems=""
-[ -n "$(git status --porcelain)" ] && problems="$problems uncommitted"
+status="$(git status --porcelain 2>/dev/null || printf 'unknown')"
+if [ -n "$status" ]; then
+  problems="$problems uncommitted"
+elif default_ref="$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null)" \
+  && git rev-parse --verify --quiet "${default_ref}^{commit}" >/dev/null 2>&1 \
+  && git diff --quiet "${default_ref}...HEAD" >/dev/null 2>&1; then
+  exit 0
+fi
 gh pr view >/dev/null 2>&1 || problems="$problems no-pr"
 if [ -n "$problems" ]; then
   if [ "$mode" = "codex" ]; then

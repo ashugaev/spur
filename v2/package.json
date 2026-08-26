@@ -23,6 +23,7 @@
     "dist",
     "web",
     "deploy",
+    "skills",
     "scripts/install-and-restart.sh",
     "scripts/npm-init.sh",
     "scripts/verify-package-files.sh",
@@ -33,7 +34,7 @@
     "tmux.conf"
   ],
   "scripts": {
-    "build": "tsc && node bin/restart-daemon-if-running.mjs",
+    "build": "bash ../scripts/bundle-skills.sh && tsc && node bin/restart-daemon-if-running.mjs",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\"",
     "lint": "eslint . --max-warnings 0",

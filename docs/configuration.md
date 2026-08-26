@@ -227,9 +227,9 @@ Respawn, handoff, and restore carry the persisted mode forward. A mode renamed o
 
 ## Telegram binding
 
-Chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with an inline picker: sessions from all connected projects grouped by project, each labeled with its session title, plus a back button. `/watch <sessionId>` binds directly. One bot token serves all projects; access stays controlled by that source's `allowedUsers` / `allowedChats`. `/watch@otherbot` is ignored in group chats. Bound messages, and messages that spawn a session, reach the agent with a contract: the requester sees only replies sent with `spur source reply "<message>"`, terminal output is invisible.
+Chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with an inline picker: sessions from all connected projects grouped by project, each labeled with its session title, plus a back button. `/watch <sessionId>` binds directly. A message from an allowed user in a chat with no live bound session auto-spawns an ephemeral session and binds the chat to it, one per chat; see `autoSpawn` below. One bot token serves all projects; access stays controlled by that source's `allowedUsers` / `allowedChats`. `/watch@otherbot` is ignored in group chats. Bound messages, and messages that spawn a session, reach the agent with a contract: the requester sees only replies sent with `spur source reply "<message>"`, terminal output is invisible.
 
-Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` send a farewell and close the topic. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
+Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` always send a farewell and drop the binding — the forum topic closes too, unless the session was spawned with `selfDestruct` enabled. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
 
 ## Event log retention
 
@@ -249,7 +249,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `projectsRoot`: optional, default `<dataDir>/projects`. Base for projects created without an explicit `path`; the dashboard/API derives `<projectsRoot>/<project-id>` and creates it.
 - `defaultAgent`: optional, `claude|codex|cursor|opencode`, default `claude`.
-- `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here.
+- `ui.port`: optional, default `5555`. Web UI listen port. `spur-web.service` carries the same number as `Environment=PORT` and wins when both are set; `spur doctor` warns on a mismatch (`web-ui-port-drift`). Moving the port means both — `spur init --web-port <n>` for the unit, `ui.port` here. Sources that call the web UI (Telegram voice transcription, see [voice.md](voice.md#telegram-voice-notes)) resolve their target lazily, at the moment they need it, rather than trusting this field directly: a daemon with no `SPUR_SESSION_TOOL_DIR` in its own process env (any normal daemon) posts to `http://127.0.0.1:<ui.port>`; one that does (an isolated daemon, `scripts/spur-isolated-daemon.sh`) instead reads the outer session's own reserved `isolated-ui` sidecar port and skips transcription (no request sent) when that reservation isn't known yet — this field's own value never matters for that case, and the launcher never writes it.
 - `models.codexHome`: optional, default `~/.codex`. Instance config only. Codex picker reads visible entries from `models_cache.json` here; each Codex session copies that cache into its isolated home. Missing, malformed, or empty visible cache returns no Codex models.
 - Agent executable overrides: `SPUR_CLAUDE_BIN`, `SPUR_CODEX_BIN`, `SPUR_CURSOR_BIN`, and `SPUR_OPENCODE_BIN`. Each optional process environment value replaces that agent's standard PATH command for preflight, model discovery, launch, restore, transcript reads, and process matching. Use an absolute executable path for daemon and sidecar restarts. A missing OpenCode executable makes model discovery and spawn fail with the command and override name; it never returns a false empty catalog.
 - `projects.<id>.path`: required repo path.
@@ -271,7 +271,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.preflight`: optional object; enables strict branch preflight before worktree creation. The agent returns one branch name or `NO_PROJECT_RULES` only.
 - `projects.<id>.preflight.prompt`: optional; defaults to Spur's built-in branch-or-no-rules prompt.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor|opencode`; falls back to top-level.
-- `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model. The web spawn/respawn/handoff modal always sends a concrete model, resolved in order: carried session model (same agent only), first favorite, this map, agent's first catalog entry. So a web-launched `codex` spawn never falls back to codex's own `config.toml` default, and a `cursor` spawn shows and sends the concrete model cursor's auto-select would land on, not the `auto` placeholder (`auto` only when cursor's catalog offers nothing else).
+- `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model. Full spawn model-resolution order: request model, then this map, then Spur's built-in per-agent default (`claude` and `cursor` only — `codex` and `opencode` have none), then the agent's own default. The web spawn/respawn/handoff modal always sends a concrete model, resolved in order: carried session model (same agent only), first favorite, this map, agent's first catalog entry. So a web-launched `codex` spawn never falls back to codex's own `config.toml` default, and a `cursor` spawn shows and sends the concrete model cursor's auto-select would land on, not the `auto` placeholder (`auto` only when cursor's catalog offers nothing else).
 - `GET /projects/:id/spawn-defaults?agent=<name>`: what the picker calls. Returns `{model, worktree}` — what a spawn with no `model` / `overrides.worktree` would resolve to, model already through the per-agent launch-model rewrite. The web layer caps this route and `/models` at 8s; a direct daemon client is unbounded. `cursor models` is capped at 5s and on timeout returns the built-in `auto` fallback catalog with a 200, same as cursor not installed.
 - `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
 - `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins.
@@ -282,6 +282,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
 - `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.
+- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`. `true` emits a repo's first-poll backlog instead of suppressing it, at most 10 per repo; suppressed items are recorded as seen either way. Parsed but inert for `gitlab`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll`: optional for `github`. Enables slow-window polling; omitted entirely by default, which keeps the existing poll-every-tick cadence.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.slowIntervalMs`: optional, default `5 × intervalMs`. Must be greater than `intervalMs`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.activeGraceMs`: optional, default `600000`.
@@ -293,6 +294,11 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.token`: required for `telegram`; supports `${ENV_VAR}` from the project `.env` or process env.
 - `projects.<id>.sources.<sourceId>.allowedUsers`: required non-empty Telegram user id allowlist.
 - `projects.<id>.sources.<sourceId>.allowedChats`: optional Telegram chat id allowlist; when omitted, any `allowedUsers` member can reach the bot from any shared chat.
+- `projects.<id>.sources.<sourceId>.autoSpawn.enabled`: optional boolean, default `true`. `false` replies `No Spur session bound here. Use /watch or /spawn.` in an unbound chat.
+- `projects.<id>.sources.<sourceId>.autoSpawn.project`: optional, default `spur-shepherd`.
+- `projects.<id>.sources.<sourceId>.autoSpawn.agent`: optional `claude|codex|cursor|opencode`, default `opencode`.
+- `projects.<id>.sources.<sourceId>.autoSpawn.model`: optional, no default; requires `agent` to be set. Unset, the spawn falls through the model-resolution order described under `projects.<id>.defaultModels` above. Setting `model` without `agent` throws. Forwarded verbatim — an invalid model surfaces as a `Spawn failed: <cause>` reply.
+- `projects.<id>.sources.<sourceId>.autoSpawn.selfDestruct`: optional, default `{enabled: true}`. [selfDestruct](#selfdestruct-steps) shape.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn` | `send`: exactly one required; `spawn` accepts object form or a flat block array.
@@ -424,13 +430,19 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 - `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
-- `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`.
+- `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`. `text` also carries a transcribed voice note, see [voice.md](voice.md#telegram-voice-notes).
 
 `github` polls running sessions, matches each to a PR branch, emits changed signals only; state persists under `dataDir`. With `query` set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids. GitHub PR URLs seed the native `session.pr` binding; other review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 
 `github:ci_failed`: retry every 10 minutes, stop after 3 deliveries, reset when the failing signal leaves the snapshot. `github:merge_conflict`: one-shot on becoming conflicting, cleared when mergeable, re-emittable. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is always polled.
 
 With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`slowIntervalMs` since the last real poll) passed, the last cycle saw a non-terminal CI check, a tracked session is unpolled, or a session had a `send`/source-reply within `activeGraceMs`. Rate-limit cooldown backoff overrides all of it, here and on plain sources. With `query` also set, discovery runs on the same gated tick; every gate reads already-tracked sessions, so an undiscovered PR cannot re-arm the tick early.
+
+GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `graphqlCost`; consecutive zero-call cycles collapse into the first event of the run, the swallowed count lands on the next emitted event as `suppressedZeroCycles`), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known).
+
+Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
+
+Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
 
 ## Daemon restarts
 
@@ -442,7 +454,7 @@ Unit files here are templates. Source deployments apply them through [install-fr
 
 ## Auto update
 
-`autoUpdate` (instance config only, default `false`) self-updates the daemon: once the npm registry publishes a version strictly newer than the running one, it runs the same switch a `Switch` press runs — same executor, guards, durable status record. See [Daemon HTTP API](commands.md#daemon-http-api).
+`autoUpdate` (instance config only, default `false`) self-updates the daemon: once the npm registry publishes a version strictly newer than the running one, it runs the same switch a `Switch` press runs — same executor, guards, durable status record. See [Daemon HTTP API](daemon-api.md#daemon-http-api).
 
 Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpdate: true`/`false` in `~/.spur/config.yaml`, re-read from disk every reaper tick — a hand edit takes effect on the next tick, no restart. Detection lag up to ~15 minutes (5-minute reaper tick plus the 10-minute registry cache), not immediate.
 
@@ -452,9 +464,9 @@ The daemon writes `autoUpdate: false` itself once one of its own attempts instal
 
 `<dataDir>/update-ledger.jsonl` is append-only, never pruned or rotated: one `blocked` line per version that installed and left the host changed, one `disarmed` line per disarm. A `blocked` version is never auto-attempted again on that host, even after the status record is gone — suppression logs `reason` `blocked_version`.
 
-The web version popover names that version — `rolled_back` or `install_unhealthy`, any initiator — and says auto-update is suspended only where that is true, i.e. an auto-initiated failure with the flag now off. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. Field: [`updateFailure`](commands.md#daemon-http-api).
+The web version popover names that version — `rolled_back` or `install_unhealthy`, any initiator — and says auto-update is suspended only where that is true, i.e. an auto-initiated failure with the flag now off. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. Field: [`updateFailure`](daemon-api.md#daemon-http-api).
 
-Retry rule, keyed on the failed attempt's [`failureKind`](commands.md#daemon-http-api):
+Retry rule, keyed on the failed attempt's [`failureKind`](daemon-api.md#daemon-http-api):
 
 - `install_failed` — target never installed. Retried every tick, no cap, no backoff.
 - no `failureKind` — attempt died before it classified (lock timeout, helper killed), nothing installed. Retried the same way.
@@ -464,7 +476,7 @@ Retry rule, keyed on the failed attempt's [`failureKind`](commands.md#daemon-htt
 
 Update events, every initiator: `daemon.auto_update.started`, `daemon.auto_update.retry`, `daemon.auto_update.suppressed` (with `reason` `succeeded_record`, `no_retry_kind`, or `blocked_version`), `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.paused`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`, `daemon.deploy_switch.started`, `daemon.deploy_switch.rejected`, `cli.update.started`, `cli.update.rolled_back`, `cli.update.abandoned`. All in the [event log](#event-log-retention).
 
-Rollback reaches only failures the switch helper itself detects ([commands.md](commands.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
+Rollback reaches only failures the switch helper itself detects ([daemon-api.md](daemon-api.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
 
 Pin a version by hand while auto-update is on: turn `autoUpdate` off first — [install-from-npm.md#upgrade](install-from-npm.md#upgrade) has the order and the reason.
 

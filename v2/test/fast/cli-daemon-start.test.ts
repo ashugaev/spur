@@ -30,6 +30,7 @@ const ensureInstanceConfigMock = vi.fn(() => ({
 const assertConfigMayUseProdSlotMock = vi.fn();
 const restartDaemonIfRunningMock = vi.fn();
 const stopDaemonIfRunningMock = vi.fn();
+const installHostSkillsForDaemonStartMock = vi.fn(() => []);
 
 vi.mock("../../src/npm-prefix.js", () => ({
   ensureNpmPinFile: ensureNpmPinFileMock,
@@ -69,6 +70,14 @@ vi.mock("../../src/io.js", () => ({
   writeStdout: vi.fn(),
 }));
 
+// D2 safety: this file drives `daemon start` for real, so the real
+// installer (which would touch this runner's actual `homedir()`) must never
+// run here — mock it wholesale.
+vi.mock("../../src/host-skills.js", () => ({
+  installHostSkillsForDaemonStart: installHostSkillsForDaemonStartMock,
+  renderHostSkillWarnings: vi.fn(() => []),
+}));
+
 vi.mock("../../src/runtime-tmux.js", () => ({
   setTmuxSocketName: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
@@ -95,6 +104,8 @@ describe("spur daemon CLI", () => {
     stopDaemonIfRunningMock.mockClear();
     assertConfigMayUseProdSlotMock.mockClear();
     assertConfigMayUseProdSlotMock.mockImplementation(() => {});
+    installHostSkillsForDaemonStartMock.mockClear();
+    installHostSkillsForDaemonStartMock.mockImplementation(() => []);
   });
 
   afterEach(() => {
@@ -122,6 +133,13 @@ describe("spur daemon CLI", () => {
         "failed to write npm global-prefix pin file: EACCES: permission denied",
       ),
     );
+  });
+
+  it("T7a calls installHostSkillsForDaemonStart exactly once with the resolved configPath", async () => {
+    await parseCli(["daemon", "start", "--json"]);
+
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledTimes(1);
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledWith("/tmp/spur.yaml");
   });
 
   it("reaches stopDaemonIfRunning for a plain stop with no --config", async () => {

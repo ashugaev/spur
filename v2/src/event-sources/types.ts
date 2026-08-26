@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import {
   isStaleParked,
   type AgentName,
+  type SelfDestructConfig,
   type SessionRecord,
   type SourceConfig,
   type SourceType,
@@ -31,6 +32,8 @@ export interface SourceSpawnSessionRequest {
   project: string;
   prompt?: string;
   agent?: AgentName;
+  model?: string;
+  selfDestruct?: SelfDestructConfig;
 }
 
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
@@ -44,6 +47,18 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   signal: AbortSignal;
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  /**
+   * Resolves this instance's own web UI base URL, lazily — called at the
+   * moment a source actually needs it (voice transcription today), not at
+   * source start. Returns `null` when this instance's web UI port cannot yet
+   * be determined (an isolated daemon whose `isolated-ui` sidecar has no
+   * reservation yet — see `resolveWebBaseUrl` in `ports.ts`); a source must
+   * treat that as "disabled for now", never fall back to a guessed or
+   * default port. `event-sources/index.ts` caches the first successful
+   * resolution so every source module reads the same value and this isn't
+   * re-resolved on every call.
+   */
+  resolveWebBaseUrl(): Promise<string | null>;
 }
 
 export interface SourceHandle {
