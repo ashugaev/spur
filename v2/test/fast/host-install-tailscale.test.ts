@@ -10,6 +10,11 @@ interface ExecFileSyncCall {
 }
 
 const execFileSyncCalls: ExecFileSyncCall[] = [];
+const callOrder: string[] = [];
+const installHostSkillsMock = vi.fn(() => {
+  callOrder.push("installHostSkills");
+  return [];
+});
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof ChildProcess>("node:child_process");
@@ -17,10 +22,20 @@ vi.mock("node:child_process", async () => {
     ...actual,
     execFileSync: (command: string, args: ReadonlyArray<string>) => {
       execFileSyncCalls.push({ command, args: [...args] });
+      callOrder.push("bash");
       return "";
     },
   };
 });
+
+// D2 safety, also T8 (see AMENDMENT A6): the fixture root from
+// `writeFakeCliTree` has no `skills/` dir, so the real installer would
+// already no-op here — but mock it wholesale anyway rather than rely on
+// that, and to make the call itself assertable.
+vi.mock("../../src/host-skills.js", () => ({
+  installHostSkills: installHostSkillsMock,
+  renderHostSkillWarnings: vi.fn(() => []),
+}));
 
 const { runNpmInit } = await import("../../src/host-install.js");
 const { npmGlobalPrefix, npmPinConfigPath } = await import("../../src/npm-prefix.js");
@@ -52,6 +67,8 @@ describe("runNpmInit --tailscale forwarding", () => {
 
   afterEach(async () => {
     execFileSyncCalls.length = 0;
+    callOrder.length = 0;
+    installHostSkillsMock.mockClear();
     if (originalHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = originalHome;
     await rm(fakeHome, { recursive: true, force: true });
@@ -94,6 +111,8 @@ describe("runNpmInit npm-prefix heal ordering", () => {
 
   afterEach(async () => {
     execFileSyncCalls.length = 0;
+    callOrder.length = 0;
+    installHostSkillsMock.mockClear();
     if (originalHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = originalHome;
     if (originalLower === undefined) delete process.env["npm_config_prefix"];
@@ -124,5 +143,45 @@ describe("runNpmInit npm-prefix heal ordering", () => {
     expect(execFileSyncCalls[0]?.command).toBe("bash");
     const pinContents = await readFile(npmPinConfigPath(fakeHome), "utf8");
     expect(pinContents).toBe(`prefix=${npmGlobalPrefix(fakeHome)}\n`);
+  });
+});
+
+// T8 (see AMENDMENT A6): the host-skill install hook inside `runNpmInit`.
+describe("runNpmInit host skill install hook", () => {
+  let cliEntrypoint: string;
+  let fakeHome: string;
+  const originalHome = process.env["HOME"];
+
+  beforeEach(async () => {
+    cliEntrypoint = await writeFakeCliTree();
+    fakeHome = await mkdtemp(join(tmpdir(), "spur-host-install-skills-home-"));
+    process.env["HOME"] = fakeHome;
+  });
+
+  afterEach(async () => {
+    execFileSyncCalls.length = 0;
+    callOrder.length = 0;
+    installHostSkillsMock.mockClear();
+    installHostSkillsMock.mockImplementation(() => {
+      callOrder.push("installHostSkills");
+      return [];
+    });
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+    await rm(fakeHome, { recursive: true, force: true });
+  });
+
+  it("calls installHostSkills exactly once, after the bash execFileSync call", () => {
+    runNpmInit(cliEntrypoint, {});
+    expect(installHostSkillsMock).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual(["bash", "installHostSkills"]);
+  });
+
+  it("leaves runNpmInit resolving normally when the installer throws", () => {
+    installHostSkillsMock.mockImplementation(() => {
+      throw new Error("boom");
+    });
+    expect(() => runNpmInit(cliEntrypoint, {})).not.toThrow();
+    expect(execFileSyncCalls).toHaveLength(1);
   });
 });

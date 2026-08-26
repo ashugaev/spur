@@ -2204,6 +2204,8 @@ function samePathOnDisk(a: string, b: string): boolean {
 // Exported for bin/restart-daemon-if-running.mjs: the default path is the
 // host-global production slot, and a `pnpm build` in an arbitrary source tree
 // must never restart the daemon that owns it (see that script's guard).
+// Also gates the `daemon start` host-skill install, so an isolated, sidecar,
+// or worktree daemon never writes the operator's agent skill dirs.
 export function isDefaultInstanceConfigPath(configPath: string): boolean {
   return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
 }

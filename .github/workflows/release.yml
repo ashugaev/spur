@@ -45,6 +45,10 @@ jobs:
             echo "packed tarball is missing node-pty/prebuilds/linux-$arch/pty.node"
             exit 1
           }
+          tar -tvzf "$tgz" | grep " package/skills/spur/SKILL.md$" | grep -q "^-" || {
+            echo "packed tarball has package/skills/spur/SKILL.md as a non-regular file"
+            exit 1
+          }
       - name: Verify bundled web boots
         run: |
           NODE_ENV=production WEB_HOST=127.0.0.1 PORT=41799 node v2/web/dist-server/web-server.js &
