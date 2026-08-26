@@ -37,6 +37,7 @@ import {
   type SidecarConfig,
   type SourceConfig,
   type TagDefinition,
+  type TelegramAutoSpawnConfig,
   type TelegramSourceConfig,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
@@ -61,6 +62,7 @@ import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
+import { SHEPHERD_PROJECT_ID } from "./shepherd.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 
 export const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
@@ -869,6 +871,34 @@ function parseServiceSource(
   };
 }
 
+function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnConfig {
+  const autoSpawnLabel = `${label}.autoSpawn`;
+  const obj = raw === undefined ? {} : asObject(raw, autoSpawnLabel);
+  const enabled = asOptionalBoolean(obj["enabled"], `${autoSpawnLabel}.enabled`) ?? true;
+  const project =
+    asOptionalString(obj["project"], `${autoSpawnLabel}.project`) ?? SHEPHERD_PROJECT_ID;
+  const agentRaw = asOptionalAgent(obj["agent"], `${autoSpawnLabel}.agent`);
+  const model = asOptionalString(obj["model"], `${autoSpawnLabel}.model`);
+  if (model !== undefined && agentRaw === undefined) {
+    throw new Error(`${autoSpawnLabel}.model requires ${autoSpawnLabel}.agent`);
+  }
+  const agent = agentRaw ?? "opencode";
+  let selfDestruct: SelfDestructConfig;
+  try {
+    selfDestruct = normalizeSelfDestructConfig(obj["selfDestruct"]) ?? { enabled: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${autoSpawnLabel}.${message}`, { cause: error });
+  }
+  return {
+    enabled,
+    project,
+    agent,
+    ...(model !== undefined ? { model } : {}),
+    selfDestruct,
+  };
+}
+
 function parseTelegramSource(
   projectId: string,
   sourceId: string,
@@ -886,12 +916,14 @@ function parseTelegramSource(
   if ((allowedUsers?.length ?? 0) === 0) {
     throw new Error(`${label} must define allowedUsers`);
   }
+  const autoSpawn = parseTelegramAutoSpawn(raw["autoSpawn"], label);
   return {
     type: "telegram",
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     token,
     ...(allowedUsers !== undefined ? { allowedUsers } : {}),
     ...(allowedChats !== undefined ? { allowedChats } : {}),
+    autoSpawn,
   };
 }
 
@@ -2169,7 +2201,10 @@ function samePathOnDisk(a: string, b: string): boolean {
   }
 }
 
-function isDefaultInstanceConfigPath(configPath: string): boolean {
+// Exported for bin/restart-daemon-if-running.mjs: the default path is the
+// host-global production slot, and a `pnpm build` in an arbitrary source tree
+// must never restart the daemon that owns it (see that script's guard).
+export function isDefaultInstanceConfigPath(configPath: string): boolean {
   return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
 }
 

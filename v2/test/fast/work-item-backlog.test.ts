@@ -41,6 +41,7 @@ function makeDeps(emitExisting: boolean): {
     emit,
     signal: new AbortController().signal,
     logger: {},
+    resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
   };
   return { deps, emit };
 }

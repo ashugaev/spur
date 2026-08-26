@@ -17,6 +17,7 @@ import { BusyContent } from "@/components/BusyContent";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
+import { buildDeskSpawnPayload, buildRespawnSessionPayload } from "@/lib/spawn-payload";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
@@ -1661,6 +1662,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
+  const [deskSpawnModel, setDeskSpawnModel] = useState<string | null>(null);
+  const [deskSpawnModelResolved, setDeskSpawnModelResolved] = useState(false);
+  const deskSpawnDefaults = useResolvedSpawnDefaults(
+    deskSpawnOpen && session ? session.projectId : "",
+    deskSpawnAgent,
+  );
   const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
   const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
   const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -2079,18 +2086,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (respawningRef.current) return;
     const submitRespawn = async (forceKillSource: boolean) => {
       const nextPrompt = respawnPrompt.trim();
-      const payload: Record<string, unknown> = {
-        prompt: nextPrompt,
-        startupAttachmentIds: respawnStartupAttachmentIds,
-      };
-      const encodedAttachments = encodeFileAttachments(respawnAttachments);
-      assertAttachmentsWithinLimit(encodedAttachments);
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (forceKillSource) payload.forceKillSource = true;
-      if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
-      // Only the settled-empty-catalog case omits `model`; every other model
-      // state (including a manual pick or a resolved default) sends it.
-      if (respawnModel !== null) payload.model = respawnModel;
+      if (!session || !respawnAgent) return;
+      const payload = buildRespawnSessionPayload(
+        {
+          prompt: nextPrompt,
+          agent: respawnAgent,
+          model: respawnModel,
+          attachments: respawnAttachments,
+          startupAttachmentIds: respawnStartupAttachmentIds,
+        },
+        session.agent,
+        forceKillSource,
+      );
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2195,6 +2202,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const openDeskSpawn = () => {
     if (!session) return;
     setDeskSpawnAgent(session.agent);
+    setDeskSpawnModel(null);
+    setDeskSpawnModelResolved(false);
     setDeskSpawnPrompt("");
     setDeskSpawnBranch(session.branch ?? "");
     setDeskSpawnPlanMode(false);
@@ -2206,25 +2215,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleDeskSpawn = async () => {
     if (!session || deskSpawningRef.current) return;
     const nextPrompt = deskSpawnPrompt.trim();
-    const filteredSteps = deskSpawnSteps
-      .map((step) => step.value.trim())
-      .filter((step) => step.length > 0);
-    const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
     deskSpawningRef.current = true;
     setDeskSpawning(true);
     try {
-      assertAttachmentsWithinLimit(encodedAttachments);
-      const payload: Record<string, unknown> = {
-        projectId: session.projectId,
-        prompt: nextPrompt,
-        agent: deskSpawnAgent,
-        reuseWorkspaceSessionId: session.id,
-        overrides: { worktree: session.worktree },
-      };
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (deskSpawnBranch.trim()) payload.branch = deskSpawnBranch.trim();
-      if (deskSpawnPlanMode) payload.planMode = true;
-      if (filteredSteps.length > 0) payload.steps = filteredSteps;
+      const payload = buildDeskSpawnPayload(
+        {
+          prompt: nextPrompt,
+          agent: deskSpawnAgent,
+          model: deskSpawnModel,
+          attachments: deskSpawnAttachments,
+          branch: deskSpawnBranch,
+          planMode: deskSpawnPlanMode,
+          steps: deskSpawnSteps,
+        },
+        session,
+      );
 
       const response = await fetch("/api/spawn", {
         method: "POST",
@@ -4003,6 +4008,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               history={{ entries: deskSpawnHistory.entries, onSelect: setDeskSpawnPrompt }}
               mode={{
                 kind: "desk",
+                model: {
+                  value: deskSpawnModel,
+                  onChange: setDeskSpawnModel,
+                  spawnDefaults: deskSpawnDefaults,
+                  carry: { agent: session.agent, model: session.model },
+                  onResolvedChange: setDeskSpawnModelResolved,
+                },
                 branch: { value: deskSpawnBranch, onChange: setDeskSpawnBranch },
                 planMode: { value: deskSpawnPlanMode, onChange: setDeskSpawnPlanMode },
                 steps: {
@@ -4013,7 +4025,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 },
               }}
               onAddFiles={addDeskSpawnFiles}
-              onAgentChange={setDeskSpawnAgent}
+              onAgentChange={(next) => {
+                setDeskSpawnAgent(next);
+                setDeskSpawnModel(null);
+                setDeskSpawnModelResolved(false);
+              }}
               onClose={() => setDeskSpawnOpen(false)}
               onPromptChange={setDeskSpawnPrompt}
               onRemoveAttachment={(index) =>
@@ -4030,7 +4046,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               showCancel
               slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
               submitBusyAriaLabel="Spawning desk agent"
-              submitDisabled={deskSpawning}
+              submitDisabled={deskSpawning || !deskSpawnModelResolved}
               submitLabel="Spawn"
               submitting={deskSpawning}
               title="Desk agent"

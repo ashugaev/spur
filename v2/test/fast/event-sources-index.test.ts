@@ -32,8 +32,8 @@ interface TestConfigProject {
 function buildConfig(
   dataDir: string,
   projects: Record<string, TestConfigProject>,
-): { dataDir: string; projects: Record<string, TestConfigProject> } {
-  return { dataDir, projects };
+): { dataDir: string; projects: Record<string, TestConfigProject>; ui: { port: number } } {
+  return { dataDir, projects, ui: { port: 5555 } };
 }
 
 describe("startConfiguredSources", () => {

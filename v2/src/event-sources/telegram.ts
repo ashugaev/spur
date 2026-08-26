@@ -11,6 +11,7 @@ import {
 } from "../metadata.js";
 import {
   TELEGRAM_MESSAGE_EVENT,
+  type TelegramAutoSpawnConfig,
   type TelegramBinding,
   type TelegramMessageEventData,
   type TelegramSourceConfig,
@@ -51,6 +52,13 @@ interface TelegramTextMessage {
     id: number;
     username?: string;
   };
+  voice?: {
+    file_id: string;
+    file_unique_id: string;
+    duration: number;
+    mime_type?: string;
+    file_size?: number;
+  };
 }
 
 interface TelegramTextContext {
@@ -62,6 +70,7 @@ interface TelegramTextContext {
   api?: {
     editMessageText(chatId: number, messageId: number, text: string): Promise<unknown>;
   };
+  getFile?(signal?: AbortSignal): Promise<{ file_path?: string }>;
 }
 
 interface TelegramSentMessage {
@@ -96,6 +105,7 @@ interface TelegramRuntime {
   lastUpdateId?: number;
   botUsername?: string;
   pendingSpawns: Map<string, TelegramPendingSpawn>;
+  autoSpawnInFlight: Set<string>;
   persistBindings(options?: { removeKeys?: string[] }): Promise<void>;
   drainWrites(): Promise<void>;
 }
@@ -304,7 +314,11 @@ function isAllowed(
   return true;
 }
 
-function eventData(message: TelegramTextMessage, sessionId: string): TelegramMessageEventData {
+function eventData(
+  message: TelegramTextMessage,
+  sessionId: string,
+  text: string,
+): TelegramMessageEventData {
   if (!message.from) {
     throw new Error("Telegram message must include a user");
   }
@@ -317,7 +331,7 @@ function eventData(message: TelegramTextMessage, sessionId: string): TelegramMes
     userId: message.from.id,
     ...(message.from.username ? { username: message.from.username } : {}),
     messageId: message.message_id,
-    text: message.text?.trim() ?? "",
+    text,
   };
 }
 
@@ -454,14 +468,16 @@ async function requestSpawnPrompt(
   await ctx.reply(`Send task prompt for new ${agent} Spur agent.`);
 }
 
+type TelegramSpawnRequest = Omit<SourceSpawnSessionRequest, "project"> & { project?: string };
+
 async function spawnTelegramSession(
   runtime: TelegramRuntime,
-  request: Omit<SourceSpawnSessionRequest, "project">,
+  request: TelegramSpawnRequest,
 ): Promise<SourceSessionListItem | null> {
   if (!runtime.deps.spawnSession) return null;
   return runtime.deps.spawnSession({
-    project: runtime.deps.projectId,
     ...request,
+    project: request.project ?? runtime.deps.projectId,
   });
 }
 
@@ -497,7 +513,7 @@ async function bindSpawnedSession(
   ctx: Pick<TelegramTextContext, "reply" | "api">,
   chatId: number,
   messageThreadId: number | undefined,
-  request: Omit<SourceSpawnSessionRequest, "project">,
+  request: TelegramSpawnRequest,
 ): Promise<void> {
   const deps = runtime.deps;
   const status = await ctx.reply(`Spawning ${request.agent} agent...`);
@@ -586,6 +602,41 @@ async function unbindTelegramThread(
     deleteTelegramReplyTarget(deps.dataDir, binding.sessionId);
   }
   return { deleted, binding };
+}
+
+type AutoSpawnAcquireResult =
+  | { status: "off" }
+  | { status: "busy" }
+  | { status: "acquired"; autoSpawn: TelegramAutoSpawnConfig };
+
+function tryAcquireAutoSpawn(runtime: TelegramRuntime, key: string): AutoSpawnAcquireResult {
+  const autoSpawn = runtime.deps.config.autoSpawn;
+  if (autoSpawn?.enabled !== true) return { status: "off" };
+  if (runtime.autoSpawnInFlight.has(key)) return { status: "busy" };
+  runtime.autoSpawnInFlight.add(key);
+  return { status: "acquired", autoSpawn };
+}
+
+async function runAutoSpawn(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  text: string,
+  key: string,
+  autoSpawn: TelegramAutoSpawnConfig,
+): Promise<void> {
+  try {
+    await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, {
+      project: autoSpawn.project,
+      agent: autoSpawn.agent,
+      ...(autoSpawn.model !== undefined ? { model: autoSpawn.model } : {}),
+      ...(autoSpawn.selfDestruct !== undefined ? { selfDestruct: autoSpawn.selfDestruct } : {}),
+      prompt: text,
+    });
+  } finally {
+    runtime.autoSpawnInFlight.delete(key);
+  }
 }
 
 async function handleTelegramCallback(
@@ -721,7 +772,6 @@ async function handleTelegramText(
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
-  const key = telegramBindingKey(message.chat.id, message.message_thread_id);
   const command = parseTelegramCommand(message.text, runtime.botUsername);
   if (command?.kind === "help") {
     await sendHelp(ctx);
@@ -808,6 +858,28 @@ async function handleTelegramText(
     return;
   }
 
+  await routeTelegramPrompt(runtime, ctx, message, from, message.text.trim());
+}
+
+/**
+ * Binds a plain-text prompt (typed text, or a transcribed voice note) to the
+ * agent: a pending `/spawn` claims it as the spawn prompt, otherwise it goes
+ * to the chat's bound session. `from` is non-optional and `key` is
+ * recomputed from `message` so this is safe to call from any handler that
+ * has already run `isAllowed`/`rememberUpdate` itself — command parsing and
+ * the `/` reject stay in `handleTelegramText` only, so a transcript starting
+ * with `/` is never treated as a command.
+ */
+async function routeTelegramPrompt(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  message: TelegramTextMessage,
+  from: { id: number; username?: string },
+  text: string,
+): Promise<void> {
+  const deps = runtime.deps;
+  const key = telegramBindingKey(message.chat.id, message.message_thread_id);
+
   const pendingSpawn = takePendingSpawn(
     runtime,
     message.chat.id,
@@ -821,7 +893,7 @@ async function handleTelegramText(
     }
     await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
       agent: pendingSpawn.agent,
-      prompt: message.text.trim(),
+      prompt: text,
     });
     return;
   }
@@ -832,11 +904,50 @@ async function handleTelegramText(
     binding = runtime.bindings.get(key);
   }
   if (!binding) {
+    const acquireResult = tryAcquireAutoSpawn(runtime, key);
+    switch (acquireResult.status) {
+      case "busy":
+        await ctx.reply("Spawn already in progress here.");
+        return;
+      case "acquired":
+        await runAutoSpawn(
+          runtime,
+          ctx,
+          message.chat.id,
+          message.message_thread_id,
+          text,
+          key,
+          acquireResult.autoSpawn,
+        );
+        return;
+      case "off":
+        break;
+    }
     await ctx.reply("No Spur session bound here. Use /watch or /spawn.");
     return;
   }
   const session = await findSession(deps, binding.sessionId);
   if (!session) {
+    const acquireResult = tryAcquireAutoSpawn(runtime, key);
+    switch (acquireResult.status) {
+      case "busy":
+        await ctx.reply("Spawn already in progress here.");
+        return;
+      case "acquired":
+        await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
+        await runAutoSpawn(
+          runtime,
+          ctx,
+          message.chat.id,
+          message.message_thread_id,
+          text,
+          key,
+          acquireResult.autoSpawn,
+        );
+        return;
+      case "off":
+        break;
+    }
     await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
     await ctx.reply(`Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`);
     return;
@@ -860,7 +971,7 @@ async function handleTelegramText(
       : {}),
     lastInboundAt: new Date().toISOString(),
   });
-  deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(message, binding.sessionId));
+  deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(message, binding.sessionId, text));
 }
 
 function logRunnerError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
@@ -899,6 +1010,165 @@ function extractMessageId(message: TelegramSentMessage | undefined): number | un
   return message && typeof message.message_id === "number" ? message.message_id : undefined;
 }
 
+// `deps.signal.aborted` can flip to `true` while a preceding `await` in this
+// module is in flight; routed through a function call so TypeScript's
+// control-flow analysis never narrows it to a stale literal across an
+// `await` (it otherwise trips `no-unnecessary-condition` on a later check).
+function isAborted(deps: SourceStartDeps<TelegramSourceConfig>): boolean {
+  return deps.signal.aborted;
+}
+
+// ffmpeg + whisper_cpp can run to ~4 minutes on a slow host
+// (packages/web/src/lib/voice.ts:951-963); this bounds the detached task so
+// a stuck transcription cannot hold a voice note open indefinitely.
+const VOICE_TRANSCRIBE_TIMEOUT_MS = 300_000;
+
+/**
+ * Downloads the voice note referenced by `ctx.getFile()` and posts it to the
+ * web UI's transcribe route. Throws on any failure; the caller decides how
+ * to surface it. Voice notes are always OGG/Opus, so the fixed `voice.ogg`
+ * filename picks the right decoder (packages/web/src/lib/voice.ts:937/1015
+ * take the extension from the filename).
+ */
+async function transcribeTelegramVoice(
+  ctx: Pick<TelegramTextContext, "getFile">,
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  webBaseUrl: string,
+): Promise<string> {
+  if (!ctx.getFile) {
+    throw new Error("Telegram file API unavailable");
+  }
+  const signal = AbortSignal.any([deps.signal, AbortSignal.timeout(VOICE_TRANSCRIBE_TIMEOUT_MS)]);
+  const file = await ctx.getFile(signal);
+  if (!file.file_path) {
+    throw new Error("Telegram returned no file path for this voice note");
+  }
+  const fileUrl = `https://api.telegram.org/file/bot${deps.config.token}/${file.file_path}`;
+  const fileResponse = await fetch(fileUrl, { signal });
+  if (!fileResponse.ok) {
+    throw new Error(`Telegram file download failed with status ${fileResponse.status}`);
+  }
+  const audioBuffer = await fileResponse.arrayBuffer();
+
+  const form = new FormData();
+  form.set("audio", new File([audioBuffer], "voice.ogg", { type: "audio/ogg" }));
+  const transcribeResponse = await fetch(`${webBaseUrl}/api/runtime/voice/transcribe`, {
+    method: "POST",
+    body: form,
+    signal,
+  });
+  if (!transcribeResponse.ok) {
+    throw new Error(`Voice transcription request failed with status ${transcribeResponse.status}`);
+  }
+  const payload: unknown = await transcribeResponse.json();
+  const text =
+    payload && typeof payload === "object" ? (payload as { text?: unknown }).text : undefined;
+  if (typeof text !== "string") {
+    throw new Error("Voice transcription response did not include text");
+  }
+  return text;
+}
+
+/**
+ * The detached task behind a voice update: transcribes, echoes the
+ * transcript back to the chat, then routes it exactly like typed text. Never
+ * awaited by the sink handler — see `handleTelegramVoice`. Every step after
+ * an `await` re-checks `deps.signal.aborted` so a source `stop()` mid-flight
+ * degrades to silence rather than a stale reply or a spawn after shutdown.
+ */
+async function transcribeAndRoute(
+  runtime: TelegramRuntime,
+  ctx: TelegramTextContext,
+  message: TelegramTextMessage,
+  from: { id: number; username?: string },
+  statusMessageId: number | undefined,
+): Promise<void> {
+  const deps = runtime.deps;
+  const webBaseUrl = await deps.resolveWebBaseUrl();
+  if (isAborted(deps)) return;
+  if (webBaseUrl === null) {
+    await editOrReply(
+      ctx,
+      message.chat.id,
+      statusMessageId,
+      "Voice transcription is disabled for this Spur instance.",
+    );
+    return;
+  }
+
+  let transcript: string;
+  try {
+    transcript = await transcribeTelegramVoice(ctx, deps, webBaseUrl);
+  } catch (error) {
+    if (isAborted(deps)) {
+      // An abort-cancelled fetch must not reply during shutdown, but the
+      // failure still gets logged so it isn't silent in the daemon's own log.
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
+      );
+    } else {
+      await editOrReply(
+        ctx,
+        message.chat.id,
+        statusMessageId,
+        `Voice transcription failed: ${redactedErrorText(deps, error)}`,
+      );
+    }
+    return;
+  }
+  if (isAborted(deps)) return;
+
+  const trimmed = transcript.trim();
+  if (!trimmed) {
+    await editOrReply(
+      ctx,
+      message.chat.id,
+      statusMessageId,
+      "Could not transcribe voice message (empty transcript).",
+    );
+    return;
+  }
+
+  await editOrReply(ctx, message.chat.id, statusMessageId, `Heard: "${trimmed}"`);
+  if (isAborted(deps)) return;
+
+  await routeTelegramPrompt(runtime, ctx, message, from, trimmed);
+}
+
+/**
+ * Sink handler for `message:voice`. Does only cheap, ordered work —
+ * `rememberUpdate`, allow-check, one ack reply — then detaches the
+ * transcribe-and-route task and returns, so `sink.concurrency: 1` never
+ * blocks the source on a multi-minute transcription.
+ */
+async function handleTelegramVoice(
+  ctx: TelegramTextContext,
+  runtime: TelegramRuntime,
+): Promise<void> {
+  const deps = runtime.deps;
+  if (!(await rememberUpdate(runtime, ctx.update))) return;
+  const message = ctx.message;
+  if (!message?.voice) return;
+  const from = message.from;
+  if (!isAllowed(deps.config, message.chat.id, from)) return;
+  if (!from) return;
+
+  let statusMessageId: number | undefined;
+  try {
+    statusMessageId = extractMessageId(await ctx.reply("Transcribing voice message..."));
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice ack failed: ${errorText(error)}`,
+    );
+  }
+
+  void transcribeAndRoute(runtime, ctx, message, from, statusMessageId).catch((error: unknown) => {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
+    );
+  });
+}
+
 async function startTelegramSource(
   deps: SourceStartDeps<TelegramSourceConfig>,
 ): Promise<SourceHandle> {
@@ -910,6 +1180,7 @@ async function startTelegramSource(
     bindings,
     ...(lastUpdateId !== undefined ? { lastUpdateId } : {}),
     pendingSpawns: new Map(),
+    autoSpawnInFlight: new Set(),
     persistBindings(options: { removeKeys?: string[] } = {}): Promise<void> {
       const removedKeys = new Set(options.removeKeys ?? []);
       const next = writeQueue.then(() =>
@@ -954,6 +1225,9 @@ async function startTelegramSource(
   });
   bot.on("message:text", async (ctx: Context) => {
     await handleTelegramText(ctx as TelegramTextContext, runtime);
+  });
+  bot.on("message:voice", async (ctx: Context) => {
+    await handleTelegramVoice(ctx as TelegramTextContext, runtime);
   });
   bot.on("callback_query:data", async (ctx: Context) => {
     await handleTelegramCallback(ctx as TelegramCallbackContext, runtime);

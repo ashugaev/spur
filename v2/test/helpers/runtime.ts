@@ -449,9 +449,8 @@ fi`;
       : `printf '%s\\n' "ack: slow tool"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}`;
-  // Both claude and codex buffer pasted multi-line input and write a single
-  // record with the full message. Claude emits one user JSONL entry whose
-  // content text matches what scanClaudeJsonlForMessage compares against.
+  // Fake agents buffer pasted multi-line input and write one user record with
+  // the full message, matching the submit-ack scanners' production boundary.
   const claudeEmitBuffered = `if [[ -n "\${session_dir:-}" && -n "\${session_uuid:-}" ]]; then
     encoded_text="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")"
     timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
@@ -464,6 +463,10 @@ fi`;
     printf '{"type":"event_msg","payload":{"type":"user_message","message":%s}}\\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")" >> "$session_rollout"
   fi
   emit_hook_event "UserPromptSubmit"`;
+  const cursorEmitBuffered = `if [[ -n "\${transcript_file:-}" ]]; then
+    encoded_text="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")"
+    printf '{"role":"user","message":{"content":[{"type":"text","text":%s}]}}\\n' "$encoded_text" >> "$transcript_file"
+  fi`;
   const readLoop =
     agentName === "claude"
       ? `while IFS= read -r line; do
@@ -607,7 +610,16 @@ $extra"
   codex_process_line "$chunk"
 done`
         : `while IFS= read -r line; do
+  full_msg="$line"
   printf '%s\\n' "$line" >> "$log_file"
+  # Cursor records one user turn for the submitted message. Drain a pasted
+  # multi-line message through its delayed submit Enter before writing it.
+  while IFS= read -r -t 0.5 extra; do
+    full_msg="$full_msg
+$extra"
+    printf '%s\\n' "$extra" >> "$log_file"
+  done
+  ${cursorEmitBuffered}
   touch_chat_store "$chat_id"
   case "$line" in
     show-waiting-menu)
@@ -681,13 +693,21 @@ else:
   local todo_id
   todo_id="$("$SPUR_TODO_COMMAND" add --text "Fixture step" --reason "Runtime agent fixture step" --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
   if [[ -n "$todo_id" ]]; then
-    "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
+    SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
   fi
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 printf '%s\n' "${header}"
 printf '%s\n' "${prompt}"
-record_fixture_todo
+# Backgrounded: a resume/wake triggered by send() holds the session's
+# workspace lock for the whole submit-ack wait, and every SPUR_TODO_COMMAND
+# call below re-enters that same lock. Run synchronously here and a
+# resume-via-send deadlocks — the daemon waits for this script to reach
+# signalWaiting/the read loop (which is what satisfies the ack), while this
+# script is blocked waiting for the lock the daemon is holding. Backgrounding
+# lets startup reach signalWaiting immediately; the fixture add/complete
+# round trip then completes once the ack is found and the lock releases.
+record_fixture_todo &
 ${signalWaiting}
 ${readLoop}
 `;
