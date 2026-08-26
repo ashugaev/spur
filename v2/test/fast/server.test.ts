@@ -7,6 +7,7 @@ import { logSpurEvent, readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer, type StartedServer } from "../../src/server.js";
+import { TodoEmptyLedgerError } from "../../src/todo.js";
 import {
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
@@ -1691,6 +1692,59 @@ describe("startServer", () => {
     }
 
     expect(calls).toEqual(["session:demo-1", "desk:demo-1"]);
+  });
+
+  it("returns 409 todo_ledger_empty naming the fix when completing an empty ledger", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalComplete = SessionService.prototype.complete;
+    SessionService.prototype.complete = async function mockComplete(sessionId: string) {
+      throw new TodoEmptyLedgerError([sessionId]);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as {
+        code: string;
+        sessionId: string;
+        error: string;
+      };
+      expect(body.code).toBe("todo_ledger_empty");
+      expect(body.sessionId).toBe("demo-1");
+      expect(body.error).toContain("$SPUR_TODO_COMMAND");
+      expect(body.error).toContain("add");
+    } finally {
+      SessionService.prototype.complete = originalComplete;
+      await server.stop();
+    }
   });
 
   it("streams session artifact content through GET /sessions/:id/artifacts/:artifactId", async () => {
