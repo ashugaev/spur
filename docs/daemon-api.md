@@ -13,4 +13,4 @@ Daemon HTTP route reference. Default `127.0.0.1:4310`. CLI usage: [commands.md](
 
 `POST /sessions/:id/queue/remove` and `POST /sessions/:id/queue/flush` take body `{"message": "<exact queued text>"}` — content-keyed, no index over the wire, matched against the trimmed queued value; `404` when that text is not queued. The web session view drives both from per-row send-now/delete icons. See [send, queue](commands.md#send-queue).
 
-`POST /shepherd/spawn` reuses the newest running or spawning Shepherd session. `{ reportDisposition: true }` returns `{ disposition: "spawned" | "reused", session }`; omitted, the legacy session-only response. See [shepherd, wake](commands.md#shepherd-wake).
+`POST /shepherd/spawn` reuses the newest running or spawning Shepherd session, skipping one that holds a Telegram reply target (bound by `/watch` or `autoSpawn`) — that case spawns a fresh Shepherd. `{ reportDisposition: true }` returns `{ disposition: "spawned" | "reused", session }`; omitted, the legacy session-only response. See [shepherd, wake](commands.md#shepherd-wake).
