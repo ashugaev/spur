@@ -29,9 +29,11 @@
 #
 # A failed run records WHICH branch failed in the status record's failureKind,
 # because only this script knows: install_failed (the target never installed,
-# safe to retry), rolled_back (installed, failed, previous version restored),
-# install_unhealthy (installed, failed, previous version NOT restored). The
-# daemon never re-derives the kind from the exit code.
+# safe to retry, also used for a lock give-up), rolled_back (installed,
+# failed, previous version restored), install_unhealthy (installed, failed,
+# previous version NOT restored). The daemon never re-derives the kind from
+# the exit code. A succeeded run that skipped the restart because systemctl
+# is unavailable records outcome:"restart_skipped" instead.
 
 set -u
 
@@ -41,16 +43,6 @@ VERSION="${1:-}"
 LOG_DIR="${SPUR_INSTALL_LOG_DIR:-$HOME/.spur/logs}"
 mkdir -p "$LOG_DIR"
 exec >>"$LOG_DIR/install-and-restart.log" 2>&1
-
-LOCK_FILE="${SPUR_INSTALL_LOCK_FILE:-$HOME/.spur/install-and-restart.lock}"
-mkdir -p "$(dirname "$LOCK_FILE")"
-exec 9>"$LOCK_FILE"
-# Bounded wait: `spur update` holds the same lock, so an unbounded wait would
-# leave this helper (and the daemon's "running" deploy status) wedged forever.
-if ! flock --wait "${SPUR_INSTALL_LOCK_WAIT_SECONDS:-600}" 9; then
-  echo "$(date -u +%FT%TZ) install-and-restart lock failed: $LOCK_FILE"
-  exit 1
-fi
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "$(date -u +%FT%TZ) install-and-restart invalid version: $VERSION"
@@ -81,6 +73,7 @@ fi
 # install and, when the daemon asked for it, the terminal deploy status.
 _VALIDATOR_TMP=""
 STATUS_FAILURE_KIND=""
+STATUS_OUTCOME=""
 on_exit() {
   status_rc=$?
   [ -z "$_VALIDATOR_TMP" ] || rm -rf "$_VALIDATOR_TMP"
@@ -101,13 +94,30 @@ on_exit() {
   if [ -n "$STATUS_FAILURE_KIND" ]; then
     status_kind=",\"failureKind\":\"$STATUS_FAILURE_KIND\""
   fi
+  status_outcome=""
+  if [ "$status_rc" -eq 0 ] && [ -n "$STATUS_OUTCOME" ]; then
+    status_outcome=",\"outcome\":\"$STATUS_OUTCOME\""
+  fi
   status_tmp="$STATUS_FILE.tmp.$$"
-  printf '{"phase":"%s","version":"%s","pid":%s,"startedAt":"%s","finishedAt":"%s","exitCode":%s,"initiator":"%s"%s}\n' \
+  printf '{"phase":"%s","version":"%s","pid":%s,"startedAt":"%s","finishedAt":"%s","exitCode":%s,"initiator":"%s"%s%s}\n' \
     "$status_phase" "$VERSION" "$$" "$STATUS_STARTED_AT" "$(date -u +%FT%TZ)" "$status_rc" \
-    "$STATUS_INITIATOR" "$status_kind" >"$status_tmp"
+    "$STATUS_INITIATOR" "$status_kind" "$status_outcome" >"$status_tmp"
   mv -f "$status_tmp" "$STATUS_FILE"
 }
 trap on_exit EXIT
+
+LOCK_FILE="${SPUR_INSTALL_LOCK_FILE:-$HOME/.spur/install-and-restart.lock}"
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+# Bounded wait: `spur update` holds the same lock, so an unbounded wait would
+# leave this helper (and the daemon's "running" deploy status) wedged forever.
+# Below the trap arm so a give-up still records a terminal status: nothing
+# installed, so install_failed (safe to retry) is the correct kind.
+if ! flock --wait "${SPUR_INSTALL_LOCK_WAIT_SECONDS:-600}" 9; then
+  echo "$(date -u +%FT%TZ) install-and-restart lock failed: $LOCK_FILE"
+  STATUS_FAILURE_KIND="install_failed"
+  exit 1
+fi
 
 # Derive the npm prefix from where this script (shipped inside the package at
 # <prefix>/lib/node_modules/@shugaev/spur/scripts/) already lives, so the install
@@ -257,4 +267,5 @@ if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
 fi
 
 echo "$(date -u +%FT%TZ) install-and-restart systemctl not available, manual restart required"
+STATUS_OUTCOME="restart_skipped"
 exit 0

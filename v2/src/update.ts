@@ -9,7 +9,7 @@ import {
   deploySwitchStatePath,
   readDeploySwitchState,
   writeDeploySwitchState,
-  type NoRetryFailureKind,
+  type HostChangedFailureKind,
 } from "./deploy-switch-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
@@ -83,7 +83,7 @@ export interface UpdateDeps {
 export interface ManualRollbackFailure {
   version: string;
   startedAt: string;
-  failureKind: NoRetryFailureKind;
+  failureKind: HostChangedFailureKind;
 }
 
 // A rollback under `spur update` runs in a separate process and used to leave
@@ -433,7 +433,7 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
     // it did to the host, classified the same way the deploy-switch helper
     // classifies its own branches.
     const attempted = state.inProgress;
-    const recordRollback = (failureKind: NoRetryFailureKind): void => {
+    const recordRollback = (failureKind: HostChangedFailureKind): void => {
       deps.logEvent("cli.update.rolled_back", {
         level: "warn",
         details: {

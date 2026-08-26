@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { NoRetryFailureKind } from "./deploy-switch-state.js";
+import type { HostChangedFailureKind } from "./deploy-switch-state.js";
 import { iterLiveLines, parseJsonLine } from "./jsonl-log-io.js";
 
 // Append-only policy memory for the update path, written by three processes
@@ -17,7 +17,7 @@ import { iterLiveLines, parseJsonLine } from "./jsonl-log-io.js";
 const UPDATE_LEDGER_FILE = "update-ledger.jsonl";
 
 export type UpdateLedgerEntry =
-  | { kind: "blocked"; version: string; failureKind: NoRetryFailureKind; at: string }
+  | { kind: "blocked"; version: string; failureKind: HostChangedFailureKind; at: string }
   | { kind: "disarmed"; version: string; at: string };
 
 export interface UpdateLedger {

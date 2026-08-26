@@ -79,6 +79,25 @@ if ! grep -q "systemctl not available, manual restart required" "$LOG_FILE"; the
   exit 1
 fi
 
+# Case 3b: no systemctl records restart_skipped on the status file (A3) — same
+# branch as Case 3, with a status file to see what it wrote after a real install.
+rm -f "$LOG_FILE"
+STATUS_FILE3B="$LOG_DIR/restart-skipped-status.json"
+LEDGER_FILE3B="$LOG_DIR/restart-skipped-ledger.jsonl"
+rm -f "$STATUS_FILE3B" "$LEDGER_FILE3B"
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  SPUR_INSTALL_STATUS_FILE="$STATUS_FILE3B" SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE3B" \
+  NPM=echo SYSTEMCTL=spur-no-such-systemctl \
+  bash "$HELPER" 1.2.3
+grep -q '"phase":"succeeded"' "$STATUS_FILE3B" || fail "no-systemctl run recorded no success status"
+grep -q '"outcome":"restart_skipped"' "$STATUS_FILE3B" || fail "no-systemctl run recorded no restart_skipped outcome"
+if grep -q 'failureKind' "$STATUS_FILE3B"; then
+  fail "a restart_skipped status must carry no failureKind"
+fi
+if [ -e "$LEDGER_FILE3B" ]; then
+  fail "a restart_skipped run must never block its own version: $(cat "$LEDGER_FILE3B")"
+fi
+
 # Case 4: multi-word SYSTEMCTL override (the real default is "systemctl --user")
 # splits into command + args.
 rm -f "$LOG_FILE"
@@ -267,17 +286,31 @@ second_pid=$!
 wait "$first_pid" "$second_pid"
 [ "$(tr '\n' ' ' <"$LOCK_TRACE")" = "start end start end " ] || fail "concurrent installs overlapped"
 
-# Case 14: a held lock makes the helper give up instead of waiting forever.
-flock "$LOCK_FILE" -c "sleep 3" &
+# Case 14: a held lock makes the helper give up instead of waiting forever,
+# and records install_failed so a record-less retry can never happen (a lock
+# give-up now runs under the armed trap; A1). No daemon writes the "running"
+# record here, so the :64-78 wait loop spins its full ~2s before the lock is
+# even attempted — acceptable, noted in the spec's test plan. Held long enough
+# (5s) to outlast that 2s wait plus the 1s lock-wait timeout below.
+flock "$LOCK_FILE" -c "sleep 5" &
 holder_pid=$!
 sleep 0.2
+STATUS_FILE14="$PREFIX_DIR/lock-give-up-status.json"
+LEDGER_FILE14="$PREFIX_DIR/lock-give-up-ledger.jsonl"
+rm -f "$STATUS_FILE14" "$LEDGER_FILE14"
 set +e
 SPUR_INSTALL_LOCK_WAIT_SECONDS=1 SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  SPUR_INSTALL_STATUS_FILE="$STATUS_FILE14" SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE14" \
   NPM=echo SYSTEMCTL=echo bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
 lock_rc=$?
 set -e
 [ "$lock_rc" -eq 1 ] || fail "helper did not give up on a held lock (rc=$lock_rc)"
 grep -q "install-and-restart lock failed" "$LOG_DIR/install-and-restart.log" || fail "missing lock failure log"
+grep -q '"phase":"failed"' "$STATUS_FILE14" || fail "a lock give-up recorded no terminal status"
+grep -q '"failureKind":"install_failed"' "$STATUS_FILE14" || fail "a lock give-up recorded no failureKind"
+if [ -e "$LEDGER_FILE14" ]; then
+  fail "a lock give-up must never write a ledger line: $(cat "$LEDGER_FILE14")"
+fi
 wait "$holder_pid"
 
 # Case 15: detached deploy runs replace the durable running record with terminal status.

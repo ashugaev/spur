@@ -460,19 +460,20 @@ Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpd
 
 An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release.
 
-The daemon writes `autoUpdate: false` itself once one of its own attempts installs a version and leaves the host changed (`failureKind` `rolled_back` or `install_unhealthy`), and logs `daemon.auto_update.paused`. At most once per version, ever: a hand edit back to `autoUpdate: true` holds. Only the daemon's own attempt disarms this way; [`spur update`](install-from-npm.md#upgrade) never touches the flag.
+The daemon writes `autoUpdate: false` itself once one of its own attempts installs a version and leaves the host changed (`failureKind` `rolled_back` or `install_unhealthy`), or dies without reporting what it did (`failureKind` `interrupted_unknown`), and logs `daemon.auto_update.paused`. At most once per version, ever: a hand edit back to `autoUpdate: true` holds. Only the daemon's own attempt disarms this way; [`spur update`](install-from-npm.md#upgrade) never touches the flag.
 
 `<dataDir>/update-ledger.jsonl` is append-only, never pruned or rotated: one `blocked` line per version that installed and left the host changed, one `disarmed` line per disarm. A `blocked` version is never auto-attempted again on that host, even after the status record is gone — suppression logs `reason` `blocked_version`.
 
-The web version popover names that version — `rolled_back` or `install_unhealthy`, any initiator — and says auto-update is suspended only where that is true, i.e. an auto-initiated failure with the flag now off. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. Field: [`updateFailure`](daemon-api.md#daemon-http-api).
+The web version popover names that version — `rolled_back`, `install_unhealthy`, or `interrupted_unknown`, any initiator — and says auto-update is suspended only where that is true, i.e. an auto-initiated failure with the flag now off. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. A separate, unrelated notice — `restart_skipped` — shows a succeeded install that could not restart the services (no `systemctl`); it clears on its own once the daemon's running version matches the installed one, no operator action needed. Field: [`updateFailure`](daemon-api.md#daemon-http-api).
 
 Retry rule, keyed on the failed attempt's [`failureKind`](daemon-api.md#daemon-http-api):
 
-- `install_failed` — target never installed. Retried every tick, no cap, no backoff.
-- no `failureKind` — attempt died before it classified (lock timeout, helper killed), nothing installed. Retried the same way.
+- `install_failed` — target never installed, including a lock timeout that gave up before the install started. Retried every tick, no cap, no backoff.
+- no `failureKind` — a record written by the daemon's own spawn-error path (the helper never ran at all), nothing installed. Retried the same way.
 - `rolled_back` — installed, failed, previous version reinstalled. Never auto-retried.
 - `install_unhealthy` — installed, failed, previous version not restored. Never auto-retried.
-- `succeeded` — never retried, even when the running version is still the older one.
+- `interrupted_unknown` — the run died without reporting what it did (killed, OOM, reboot); whether it installed is unknown. Never auto-retried, disarms `autoUpdate` once for an auto-initiated attempt same as the two kinds above; re-enabling `Auto` clears the record and unblocks one further attempt.
+- `succeeded` — never retried, even when the running version is still the older one; a `restart_skipped` outcome on that record only adds a notice, it never changes this rule.
 
 Update events, every initiator: `daemon.auto_update.started`, `daemon.auto_update.retry`, `daemon.auto_update.suppressed` (with `reason` `succeeded_record`, `no_retry_kind`, or `blocked_version`), `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.paused`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`, `daemon.deploy_switch.started`, `daemon.deploy_switch.rejected`, `cli.update.started`, `cli.update.rolled_back`, `cli.update.abandoned`. All in the [event log](#event-log-retention).
 
