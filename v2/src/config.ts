@@ -322,6 +322,7 @@ function parseTriggerSpawnBlock(
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${label}.${message}`, { cause: error });
   }
+  const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
 
   return {
     prompt,
@@ -332,6 +333,7 @@ function parseTriggerSpawnBlock(
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+    ...(restrictWrites !== undefined ? { restrictWrites } : {}),
   };
 }
 
@@ -394,7 +396,6 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
     ...(autoComplete !== undefined ? { autoComplete } : {}),
-    ...(restrictWrites !== undefined ? { restrictWrites } : {}),
     ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
   };
 }

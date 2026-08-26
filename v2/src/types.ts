@@ -428,6 +428,8 @@ export interface TriggerSpawnBlockConfig {
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
+  /** Overrides the spawn-level restrictWrites default for this block. */
+  restrictWrites?: boolean;
 }
 
 export interface TriggerSpawnConfig {
