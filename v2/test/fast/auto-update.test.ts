@@ -178,7 +178,9 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        // `info`, not `warn`: a suppressed tick took no action, and it repeats
+        // every 5 minutes for as long as this release is the newest one.
+        level: "info",
         details: {
           version: "1.1.0",
           phase: "succeeded",
@@ -207,7 +209,7 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        level: "info",
         details: {
           version: "1.1.0",
           phase: "failed",
@@ -239,7 +241,7 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        level: "info",
         details: expect.objectContaining({
           failureKind: "install_unhealthy",
           initiator: "manual",
@@ -371,7 +373,7 @@ describe("runAutoUpdateTick", () => {
 
   it("suppresses a blocked version with no matching record", async () => {
     const start = vi.fn();
-    const log = vi.fn();
+    const log = vi.fn<RunAutoUpdateTickDeps["log"]>();
     // The record behind the notice was cleared by a Switch or by re-arming
     // AUTO; the ledger is what keeps the version off the auto path.
     const deps = baseDeps({
@@ -387,10 +389,13 @@ describe("runAutoUpdateTick", () => {
     expect(log).toHaveBeenCalledWith(
       "daemon.auto_update.suppressed",
       expect.objectContaining({
-        level: "warn",
+        level: "info",
         details: { version: "1.1.0", reason: "blocked_version" },
       }),
     );
+    // A tick that suppressed the newest release repeats every 5 minutes for as
+    // long as that release stands: nothing on it may reach `warn`.
+    expect(log.mock.calls.map(([, entry]) => entry.level)).toEqual(["info"]);
   });
 
   it("still starts a newer candidate that the ledger does not name", async () => {

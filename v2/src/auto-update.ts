@@ -112,9 +112,13 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
   // The ledger outlives the record: re-arming `autoUpdate` and any manual
   // Switch may clear the record behind the operator's notice, and neither is a
   // reason to install a version that already failed on this host once.
+  // `info`, like the retry suppression below: this branch takes no action, and
+  // the same newest release stays suppressed on every 5-minute tick until the
+  // registry moves on. `warn` here is a permanent warn every 5 minutes that no
+  // collapse window catches, for a host doing exactly what it should.
   if (ledger.blocked.has(candidate.tag)) {
     log("daemon.auto_update.suppressed", {
-      level: "warn",
+      level: "info",
       details: { version: candidate.tag, reason: "blocked_version" },
     });
     return;
@@ -132,10 +136,13 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
   // A human press is unaffected either way: this branch lives in the tick,
   // not in `startDeploySwitch`. `state` is guaranteed terminal here (the
   // `phase === "running"` branch above already returned).
+  // Level tracks whether the tick did something: this branch does not, so
+  // `info`. Every attempt still logs — `retry` below, `started`/`skipped`
+  // after it — and the disarm, a real state change, stays `warn`.
   if (state && state.version === candidate.tag) {
     if (state.phase === "succeeded" || isNoRetryFailureKind(state.failureKind)) {
       log("daemon.auto_update.suppressed", {
-        level: "warn",
+        level: "info",
         details: {
           version: candidate.tag,
           phase: state.phase,

@@ -476,6 +476,8 @@ Retry rule, keyed on the failed attempt's [`failureKind`](daemon-api.md#daemon-h
 
 Update events, every initiator: `daemon.auto_update.started`, `daemon.auto_update.retry`, `daemon.auto_update.suppressed` (with `reason` `succeeded_record`, `no_retry_kind`, or `blocked_version`), `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.paused`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`, `daemon.deploy_switch.started`, `daemon.deploy_switch.rejected`, `cli.update.started`, `cli.update.rolled_back`, `cli.update.abandoned`. All in the [event log](#event-log-retention).
 
+`daemon.auto_update.suppressed` is `info` — it repeats every tick while the suppressed release is the newest one. `paused` and `disarm_failed` are `warn`.
+
 Rollback reaches only failures the switch helper itself detects ([daemon-api.md](daemon-api.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
 
 Pin a version by hand while auto-update is on: turn `autoUpdate` off first — [install-from-npm.md#upgrade](install-from-npm.md#upgrade) has the order and the reason.
