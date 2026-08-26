@@ -29,6 +29,43 @@ jobs:
       COMPOSE_PROJECT_NAME: onboarding-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
+      # Runs first, and before checkout, because a full runner disk fails this job
+      # long before the build step. Scoped to this workflow's own leak: the images
+      # tagged after COMPOSE_PROJECT_NAME that Cleanup left behind until --rmi local.
+      - name: Reclaim leaked onboarding images
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== disk before reclaim ==="
+          df -h /
+          docker system df
+          IN_USE="$(docker ps -a --format '{{.Image}}')"
+          LEAKED=""
+          for REF in $(docker image ls --format '{{.Repository}}:{{.Tag}}'); do
+            case "$REF" in
+              onboarding-*) ;;
+              *) continue ;;
+            esac
+            # Never touch this run's own image, nor one a concurrent run still uses.
+            case "$REF" in
+              "$COMPOSE_PROJECT_NAME"*) continue ;;
+            esac
+            if printf '%s\n' "$IN_USE" | grep -qxF -e "$REF" -e "${REF%:latest}"; then
+              continue
+            fi
+            LEAKED="$LEAKED $REF"
+          done
+          if [ -n "$LEAKED" ]; then
+            echo "removing leaked images:$LEAKED"
+            docker rmi -f $LEAKED
+          else
+            echo "no leaked onboarding-* images"
+          fi
+          docker builder prune -af --filter until=24h
+          echo "=== disk after reclaim ==="
+          df -h /
+          docker system df
+
       - name: Checkout repository
         uses: actions/checkout@v5
 
@@ -66,7 +103,7 @@ jobs:
       - name: Cleanup
         if: always()
         working-directory: tests/integration
-        run: docker compose down -v --remove-orphans
+        run: docker compose down -v --rmi local --remove-orphans
 
       - name: Upload test logs
         if: failure()
