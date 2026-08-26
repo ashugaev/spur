@@ -1,6 +1,6 @@
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_RESUME_READY_MARKER } from "../../src/agents/cursor.js";
 
 type ExecFileAsync = (
@@ -28,11 +28,21 @@ vi.mock("node:timers/promises", () => ({
 const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.url));
 
 describe("runtime-tmux", () => {
+  const originalSkipCodexSubmitAck = process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
   const originalSystemdScope = process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
+
+  beforeEach(() => {
+    delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+  });
 
   afterEach(() => {
     execFileAsyncMock.mockReset();
     sleepMock.mockReset().mockResolvedValue(undefined);
+    if (originalSkipCodexSubmitAck === undefined) {
+      delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+    } else {
+      process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"] = originalSkipCodexSubmitAck;
+    }
     if (originalSystemdScope === undefined) {
       delete process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
     } else {

@@ -1048,10 +1048,18 @@ test.describe("S2: Actions bar", () => {
         body: JSON.stringify(makeSpawningSession({ id: "detail-s2-respawn-next" })),
       });
     });
+    await mockAgentModels(page, {
+      claude: [{ id: "opus", label: "Opus" }],
+    });
+    await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
-    await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
+    const respawnDialog = page.getByRole("dialog", { name: "Edit & Respawn" });
+    await expect(respawnDialog.getByRole("button", { name: "Respawn model" })).toContainText(
+      "Opus",
+    );
+    await expect(respawnDialog.getByRole("button", { name: "Attach file" })).toBeVisible();
     const textarea = page.getByPlaceholder("Initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
@@ -1068,7 +1076,9 @@ test.describe("S2: Actions bar", () => {
     });
 
     await expect(page.locator('img[alt="respawn.png"]')).toBeVisible({ timeout: 5000 });
-    await page.getByRole("button", { name: /^respawn$/i }).click();
+    const respawnSubmit = respawnDialog.getByRole("button", { name: /^respawn$/i });
+    await expect(respawnSubmit).toBeEnabled();
+    await respawnSubmit.click();
     await page.waitForURL("**/sessions/detail-s2-respawn-next");
 
     expect(respawnBody).toMatchObject({
@@ -1197,14 +1207,19 @@ test.describe("S2: Actions bar", () => {
         body: JSON.stringify(spawned),
       });
     });
+    await mockAgentModels(page, {
+      claude: [{ id: "opus", label: "Opus" }],
+    });
+    await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^desk agent$/i }).click();
-    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Desk spawn agent" })).toBeVisible();
-    const modelButton = page.getByRole("button", { name: "Desk spawn model" });
-    await expect(modelButton).toBeVisible();
+    const deskDialog = page.getByRole("dialog", { name: "Desk agent" });
+    await expect(deskDialog.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
+    await expect(deskDialog.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
+    await expect(deskDialog.getByRole("combobox", { name: "Desk spawn agent" })).toBeVisible();
+    const modelButton = deskDialog.getByRole("button", { name: "Desk spawn model" });
+    await expect(modelButton).toContainText("Opus");
     await modelButton.click();
     await page.getByRole("menuitem", { name: /^Opus(?:\(catalog default\))? opus$/ }).click();
     await expect(page.getByRole("textbox", { name: "branch name" })).toHaveValue(
@@ -1217,7 +1232,9 @@ test.describe("S2: Actions bar", () => {
     await page.getByRole("textbox", { name: "step 1" }).fill("Inspect failing test");
     await page.getByRole("button", { name: /^\+ step$/i }).click();
     await page.getByRole("textbox", { name: "step 2" }).fill("Patch focused fix");
-    await page.getByRole("button", { name: /^spawn/i }).click();
+    const spawnSubmit = deskDialog.getByRole("button", { name: /^spawn$/i });
+    await expect(spawnSubmit).toBeEnabled();
+    await spawnSubmit.click();
 
     await expect(page).toHaveURL(/\/sessions\/detail-s2-desk-spawn-next/);
     expect(spawnBody).toMatchObject({
@@ -1261,9 +1278,17 @@ test.describe("S2: Actions bar", () => {
         body: JSON.stringify({ error: "spawn failed" }),
       });
     });
+    await mockAgentModels(page, {
+      claude: [{ id: "opus", label: "Opus" }],
+    });
+    await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const deskDialog = page.getByRole("dialog", { name: "Desk agent" });
+    await expect(deskDialog.getByRole("button", { name: "Desk spawn model" })).toContainText(
+      "Opus",
+    );
     const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
     await textarea.evaluate((element) => {
       const dt = new DataTransfer();
@@ -1277,7 +1302,9 @@ test.describe("S2: Actions bar", () => {
       );
     });
     await expect(page.locator('img[alt="desk.png"]')).toBeVisible();
-    await page.getByRole("button", { name: /^spawn/i }).click();
+    const spawnSubmit = deskDialog.getByRole("button", { name: /^spawn$/i });
+    await expect(spawnSubmit).toBeEnabled();
+    await spawnSubmit.click();
 
     await expect(page.getByRole("heading", { name: /desk agent/i })).toBeVisible();
     await expect(textarea).toHaveValue("");
@@ -1309,11 +1336,21 @@ test.describe("S2: Actions bar", () => {
         body: JSON.stringify(spawned),
       });
     });
+    await mockAgentModels(page, {
+      claude: [{ id: "opus", label: "Opus" }],
+    });
+    await mockSpawnDefaults(page);
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const deskDialog = page.getByRole("dialog", { name: "Desk agent" });
+    await expect(deskDialog.getByRole("button", { name: "Desk spawn model" })).toContainText(
+      "Opus",
+    );
     await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Spawn once");
-    await page.getByRole("button", { name: /^spawn/i }).dblclick();
+    const spawnSubmit = deskDialog.getByRole("button", { name: /^spawn$/i });
+    await expect(spawnSubmit).toBeEnabled();
+    await spawnSubmit.dblclick();
 
     await expect.poll(() => spawnCalls).toBe(1);
     releaseSpawn?.();
