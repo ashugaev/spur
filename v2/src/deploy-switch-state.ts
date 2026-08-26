@@ -20,9 +20,9 @@ export type DeployFailureKind = "install_failed" | "rolled_back" | "install_unhe
 // ask the same question of the same field.
 export type NoRetryFailureKind = Exclude<DeployFailureKind, "install_failed">;
 
-export function isNoRetryFailureKind(
-  kind: DeployFailureKind | undefined,
-): kind is NoRetryFailureKind {
+// Takes `unknown`, like `isFailureKind` below, so the ledger's line guard can
+// ask it of a field straight off disk without a cast.
+export function isNoRetryFailureKind(kind: unknown): kind is NoRetryFailureKind {
   return kind === "rolled_back" || kind === "install_unhealthy";
 }
 

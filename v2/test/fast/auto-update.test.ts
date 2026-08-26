@@ -10,9 +10,20 @@ import type {
 import type { UpdateLedger } from "../../src/update-ledger.js";
 
 function ledger(entries: { blocked?: string[]; disarmed?: string[] } = {}): UpdateLedger {
+  const at = "2026-01-01T00:00:00Z";
   return {
-    blocked: new Set(entries.blocked ?? []),
-    disarmed: new Set(entries.disarmed ?? []),
+    blocked: new Map(
+      (entries.blocked ?? []).map((version) => [
+        version,
+        { kind: "blocked", version, failureKind: "rolled_back", at } as const,
+      ]),
+    ),
+    disarmed: new Map(
+      (entries.disarmed ?? []).map((version) => [
+        version,
+        { kind: "disarmed", version, at } as const,
+      ]),
+    ),
   };
 }
 
