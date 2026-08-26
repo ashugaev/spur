@@ -18,10 +18,17 @@ function makeFixture(): { cwd: string; marker: string; configPath: string } {
   const dist = join(cwd, "dist");
   mkdirSync(dist);
   writeFileSync(join(cwd, "package.json"), '{"type":"module"}\n');
-  // Stand-in for the built CLI: records that `daemon restart` ran, exits 0.
+  // Stand-in for the built CLI: records that `daemon restart` ran, prints a
+  // marker so a stdio:"inherit" propagation is observable, and exits with
+  // SPUR_TEST_EXIT_CODE (default 0) so status propagation is observable too.
   writeFileSync(
     join(dist, "cli.js"),
-    `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "1");\n`,
+    [
+      `import { writeFileSync } from "node:fs";`,
+      `process.stdout.write("daemon-restart-cli-stdout\\n");`,
+      `writeFileSync(${JSON.stringify(marker)}, "1");`,
+      `process.exitCode = Number(process.env.SPUR_TEST_EXIT_CODE ?? "0");`,
+    ].join("\n"),
   );
   // An instance config so instanceConfigExists() returns true (the non-skip
   // path), proving the env — not a missing config — is the cause of the skip.
@@ -78,6 +85,19 @@ describe("restart-daemon-if-running.mjs opt-in gate", () => {
     const { cwd, marker, configPath } = makeFixture();
     const result = runBin(cwd, configPath, { SPUR_BUILD_RESTART: "1" });
     expect(result.status).toBe(0);
+    expect(existsSync(marker)).toBe(true);
+    // Pins stdio: "inherit" — the restarted CLI's own stdout must reach the
+    // parent, not be swallowed.
+    expect(result.stdout).toContain("daemon-restart-cli-stdout");
+  });
+
+  it("propagates the restarted CLI's non-zero exit status", () => {
+    const { cwd, marker, configPath } = makeFixture();
+    const result = runBin(cwd, configPath, {
+      SPUR_BUILD_RESTART: "1",
+      SPUR_TEST_EXIT_CODE: "7",
+    });
+    expect(result.status).toBe(7);
     expect(existsSync(marker)).toBe(true);
   });
 });

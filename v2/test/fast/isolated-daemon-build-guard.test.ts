@@ -84,7 +84,7 @@ runtime_state=missing
 if [[ -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
   runtime_state=present
 fi
-echo "build SPUR_DISABLE_AUTOSTART=\${SPUR_DISABLE_AUTOSTART:-} runtime=$runtime_state" >> "$SPUR_TEST_LOG"
+echo "build runtime=$runtime_state" >> "$SPUR_TEST_LOG"
 if [[ "\${SPUR_TEST_BUILD_FAIL:-}" == "1" ]]; then
   exit 84
 fi
@@ -169,7 +169,7 @@ describe("spur-isolated-daemon build guard", () => {
     const worktree = createFakeWorktree();
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
+      "build runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -182,7 +182,7 @@ describe("spur-isolated-daemon build guard", () => {
     writeFileSync(runtimePath, "STALE_RUNTIME=1\n", "utf8");
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
+      "build runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -232,7 +232,7 @@ describe("spur-isolated-daemon build guard", () => {
     utimesSync(sourcePath, newTime, newTime);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
+      "build runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",

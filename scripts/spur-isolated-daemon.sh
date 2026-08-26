@@ -67,7 +67,7 @@ ensure_v2_build() {
       -newer "$oldest_output" -print -quit
   )"
   if [[ -n "$stale_input" ]]; then
-    SPUR_DISABLE_AUTOSTART=1 pnpm --dir "$V2_DIR" build
+    pnpm --dir "$V2_DIR" build
   fi
 }
 
