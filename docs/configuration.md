@@ -474,6 +474,8 @@ Retry rule, keyed on the failed attempt's [`failureKind`](daemon-api.md#daemon-h
 - `install_unhealthy` — installed, failed, previous version not restored. Never auto-retried.
 - `succeeded` — never retried, even when the running version is still the older one.
 
+Only the newest release is ever a candidate: a suppressed or blocked newest release stops the auto path until the registry publishes a newer one, never falls back to an older release.
+
 Update events, every initiator: `daemon.auto_update.started`, `daemon.auto_update.retry`, `daemon.auto_update.suppressed` (with `reason` `succeeded_record`, `no_retry_kind`, or `blocked_version`), `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.paused`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`, `daemon.deploy_switch.started`, `daemon.deploy_switch.rejected`, `cli.update.started`, `cli.update.rolled_back`, `cli.update.abandoned`. All in the [event log](#event-log-retention).
 
 `daemon.auto_update.suppressed` is `info` — it repeats every tick while the suppressed release is the newest one. `paused` and `disarm_failed` are `warn`.

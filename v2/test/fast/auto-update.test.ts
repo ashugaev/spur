@@ -398,6 +398,40 @@ describe("runAutoUpdateTick", () => {
     expect(log.mock.calls.map(([, entry]) => entry.level)).toEqual(["info"]);
   });
 
+  it("does not fall back to an older unblocked release when the newest is blocked", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
+    const log = vi.fn();
+    // 1.1.0 is unblocked and newer than 1.0.0, so a fallback would install it.
+    // By design there is none: the auto path only ever considers the newest
+    // release, and sliding a host onto an older version than the one the
+    // operator reads as `latest` is worse than stopping.
+    const deps = baseDeps({
+      getReleases: async () => ({
+        entries: [
+          { tag: "1.2.0", publishedAt: "2026-02-01T00:00:00Z" },
+          { tag: "1.1.0", publishedAt: "2026-01-01T00:00:00Z" },
+        ],
+        stale: false,
+        error: null,
+      }),
+      readLedger: () => ledger({ blocked: ["1.2.0"] }),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        details: { version: "1.2.0", reason: "blocked_version" },
+      }),
+    );
+  });
+
   it("still starts a newer candidate that the ledger does not name", async () => {
     const start = vi.fn(
       async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
