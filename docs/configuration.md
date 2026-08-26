@@ -435,6 +435,10 @@ With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`sl
 
 GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `graphqlCost`; consecutive zero-call cycles collapse into the first event of the run, the swallowed count lands on the next emitted event as `suppressedZeroCycles`), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known).
 
+Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
+
+Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
+
 ## Daemon restarts
 
 Tmux agent sessions survive daemon restarts: the systemd unit uses `KillMode=process`, so `systemctl restart` stops the node process only. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, restarts attention monitoring.

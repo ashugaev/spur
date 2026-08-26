@@ -48,7 +48,8 @@ GRANULAR: one doc, one topic, one Diataxis mode; split on drift.
 ONE SOURCE: each topic has one owning doc, everything else links.
 
   - Commands: docs/commands.md only. Config fields: docs/configuration.md only.
-    Daemon HTTP routes: docs/daemon-api.md only.
+    Deploy, todo, queue, and shepherd route contracts: docs/daemon-api.md only.
+    A route documented as part of a config field's behavior stays with that field.
   - Contradiction: pick the owner, delete the copy, link.
 
 LINK GRAPH: every published doc reachable from the README Docs section, relative links only.
