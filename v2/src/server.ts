@@ -1721,7 +1721,11 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoOpenWorkError) {
-        sendJson(response, error.statusCode, { code: error.code, sessions: error.sessions });
+        sendJson(response, error.statusCode, {
+          code: error.code,
+          sessions: error.sessions,
+          error: error.message,
+        });
         return;
       }
       if (error instanceof TodoEmptyLedgerError) {

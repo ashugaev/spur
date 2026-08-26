@@ -56,7 +56,9 @@ export class TodoOpenWorkError extends Error {
   constructor(
     readonly sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>,
   ) {
-    super("Resolve or explicitly override unfinished Spur ToDo items before completion");
+    super(
+      'Spur ToDo has open or held items. Resolve each with "$SPUR_TODO_COMMAND" complete/cancel/resume --reason <why>, or override with --todo-override-reason.',
+    );
   }
 }
 

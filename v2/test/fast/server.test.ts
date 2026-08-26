@@ -7,7 +7,7 @@ import { logSpurEvent, readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer, type StartedServer } from "../../src/server.js";
-import { TodoEmptyLedgerError } from "../../src/todo.js";
+import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
@@ -1722,12 +1722,13 @@ describe("startServer", () => {
       throw new TodoEmptyLedgerError([sessionId]);
     };
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
-
+    let server: StartedServer | undefined;
     try {
+      server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
         method: "POST",
       });
@@ -1743,7 +1744,62 @@ describe("startServer", () => {
       expect(body.error).toContain("add");
     } finally {
       SessionService.prototype.complete = originalComplete;
-      await server.stop();
+      await server?.stop();
+    }
+  });
+
+  it("returns 409 todo_open_work with an actionable error alongside the sessions array", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalComplete = SessionService.prototype.complete;
+    SessionService.prototype.complete = async function mockComplete(sessionId: string) {
+      throw new TodoOpenWorkError([{ sessionId, openItemIds: ["item-1"], heldItemIds: [] }]);
+    };
+
+    let server: StartedServer | undefined;
+    try {
+      server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as {
+        code: string;
+        sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>;
+        error: string;
+      };
+      expect(body.code).toBe("todo_open_work");
+      expect(body.sessions).toEqual([
+        { sessionId: "demo-1", openItemIds: ["item-1"], heldItemIds: [] },
+      ]);
+      expect(body.error).toContain("$SPUR_TODO_COMMAND");
+    } finally {
+      SessionService.prototype.complete = originalComplete;
+      await server?.stop();
     }
   });
 

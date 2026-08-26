@@ -153,6 +153,25 @@ describe("Spur ToDo ledger", () => {
     expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
   });
 
+  it("rejects a ledger file missing its trailing newline", async () => {
+    const { dataDir, session } = await fixture();
+    mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    const content = readFileSync(path, "utf8");
+    writeFileSync(path, content.slice(0, -1), "utf8");
+    expect(() => replayTodo(dataDir, session.id)).toThrow(/empty or truncated/);
+  });
+
+  it("throws TodoLedgerCorruptError, not a raw fs error, when the ledger file is absent", async () => {
+    const { dataDir, session } = await fixture();
+    expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+  });
+
   it("rejects blank mutation fields before append", async () => {
     const { dataDir, session } = await fixture();
     mutateTodo(

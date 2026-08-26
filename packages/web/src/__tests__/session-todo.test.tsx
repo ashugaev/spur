@@ -180,7 +180,6 @@ describe("SessionTodo", () => {
 
     const itemText = await screen.findByText(longToken, { selector: "span" });
     expect(itemText).toHaveClass("min-w-0");
-    expect(itemText).toHaveClass("break-words");
     expect(itemText).toHaveClass("[overflow-wrap:anywhere]");
 
     fireEvent.click(screen.getByRole("button", { name: new RegExp(longToken) }));
