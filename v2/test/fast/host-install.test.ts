@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import type * as FsModule from "node:fs";
 import type * as OsModule from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CacheRetentionModule from "../../src/cache-retention.js";
+import type * as HostSkillsModule from "../../src/host-skills.js";
 import type * as PortProbe from "../../src/port-probe.js";
 import type * as UpdateHealth from "../../src/update-health.js";
 import type * as Workspace from "../../src/workspace.js";
@@ -22,6 +23,7 @@ const {
   writeFileSyncMock,
   planCachePruneMock,
   resolveDoctorRepoRootMock,
+  packagedSkillsDirOverride,
 } = vi.hoisted(() => ({
   execFileSyncMock: vi.fn(),
   platformMock: vi.fn(),
@@ -33,6 +35,7 @@ const {
   writeFileSyncMock: vi.fn(),
   planCachePruneMock: vi.fn(),
   resolveDoctorRepoRootMock: vi.fn(),
+  packagedSkillsDirOverride: { value: undefined as string | undefined },
 }));
 
 // `reclaimable-caches` is the one check that calls `planCachePrune` (a `du`
@@ -42,6 +45,17 @@ const {
 vi.mock("../../src/cache-retention.js", async () => {
   const actual = await vi.importActual<typeof CacheRetentionModule>("../../src/cache-retention.js");
   return { ...actual, planCachePrune: planCachePruneMock };
+});
+
+// `checkHostSkillSymlinks` is the only check that calls `packagedSkillsDir`;
+// pre-existing tests below never set the override, so it stays passed
+// through to the real function — the actual `v2/skills/` on this checkout.
+vi.mock("../../src/host-skills.js", async () => {
+  const actual = await vi.importActual<typeof HostSkillsModule>("../../src/host-skills.js");
+  return {
+    ...actual,
+    packagedSkillsDir: () => packagedSkillsDirOverride.value ?? actual.packagedSkillsDir(),
+  };
 });
 
 vi.mock("node:child_process", async () => {
@@ -91,6 +105,7 @@ vi.mock("../../src/workspace.js", async () => {
 
 import {
   checkConfigRegistry,
+  checkHostSkillSymlinks,
   checkServiceHealth,
   checkSpurOnPath,
   checkVersionDrift,
@@ -841,6 +856,107 @@ describe("collectHostInstallChecks", () => {
     expect(checks.find((check) => check.id === "web-reachable")).toBeUndefined();
     expect(hasErrorSeverity(checks)).toBe(true);
   });
+});
+
+describe("checkHostSkillSymlinks", () => {
+  let fixtureRoot: string;
+  let home: string;
+
+  beforeEach(async () => {
+    fixtureRoot = await mkdtemp(join(tmpdir(), "spur-host-skill-check-"));
+    home = await mkdtemp(join(tmpdir(), "spur-host-skill-check-home-"));
+    await mkdir(join(fixtureRoot, "skills", "spur"), { recursive: true });
+    await writeFile(join(fixtureRoot, "skills", "spur", "SKILL.md"), "---\nname: spur\n---\n");
+    packagedSkillsDirOverride.value = join(fixtureRoot, "skills");
+  });
+
+  afterEach(async () => {
+    packagedSkillsDirOverride.value = undefined;
+    await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it("T10 is inert when the install ships no packaged skills", async () => {
+    packagedSkillsDirOverride.value = join(fixtureRoot, "no-skills-here");
+    const check = checkHostSkillSymlinks(home);
+    expect(check).toEqual({
+      id: "skills-symlinks",
+      ok: true,
+      severity: "info",
+      detail: "skipped — no packaged skills in this install",
+    });
+  });
+
+  it("T10 warns on a real conflicting directory and names the path", async () => {
+    await mkdir(join(home, ".claude", "skills", "spur", "nested"), { recursive: true });
+    const check = checkHostSkillSymlinks(home);
+    expect(check.id).toBe("skills-symlinks");
+    expect(check.ok).toBe(false);
+    expect(check.severity).toBe("warn");
+    expect(check.detail).toContain(join(home, ".claude", "skills", "spur"));
+    expect(check.fix).toContain("spur reinit");
+  });
+
+  it("T10 degrades one unreadable target to an 'unreadable' line, never throws, never flips ok", async () => {
+    // Reviewer repro: a file where a host agent dir's PARENT should be a
+    // directory makes lstat on the skill path itself throw ENOTDIR/ENOENT
+    // variants — this must never escape and kill the other ~60 checks.
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(join(home, ".claude", "skills"), "not a directory");
+
+    expect(() => checkHostSkillSymlinks(home)).not.toThrow();
+    const check = checkHostSkillSymlinks(home);
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain("unreadable");
+  });
+
+  it("T10 is ok with an empty home, naming the current (absent) target", async () => {
+    const check = checkHostSkillSymlinks(home);
+    expect(check.ok).toBe(true);
+    expect(check.severity).toBe("warn");
+    expect(check.detail).toContain("absent");
+  });
+
+  it("T10 never mkdirs or writes — read-only", async () => {
+    checkHostSkillSymlinks(home);
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+    expect(existsSync(join(home, ".codex"))).toBe(false);
+  });
+
+  it("T10-absent (AC7, AC8) a home with no agent dirs is ok:true, no fix, names both absent roots, creates nothing", async () => {
+    const check = checkHostSkillSymlinks(home);
+
+    expect(check.ok).toBe(true);
+    expect(check.fix).toBeUndefined();
+    expect(check.detail).toContain(join(home, ".claude", "skills"));
+    expect(check.detail).toContain(join(home, ".codex", "skills"));
+    expect(check.detail).toContain("host dir absent");
+    expect(readdirSync(home)).toEqual([]);
+  });
+
+  // chmod 000 grants root traversal regardless — this would go GREEN having
+  // exercised nothing under a root-uid CI lane.
+  it.skipIf(process.getuid?.() === 0)(
+    "T10-unreadable an EACCES root is a distinct 'unreadable' line, never the mkdir-p fix, still ok:true",
+    async () => {
+      const claudeDir = join(home, ".claude");
+      await mkdir(join(claudeDir, "skills"), { recursive: true });
+      chmodSync(claudeDir, 0o000);
+
+      try {
+        const check = checkHostSkillSymlinks(home);
+        expect(check.ok).toBe(true);
+        const claudeLine = check.detail
+          .split("\n")
+          .find((line) => line.startsWith(join(home, ".claude", "skills")));
+        expect(claudeLine).toContain("unreadable");
+        expect(claudeLine).not.toContain("mkdir -p");
+        expect(check.detail).toContain(join(home, ".codex", "skills"));
+      } finally {
+        chmodSync(claudeDir, 0o755);
+      }
+    },
+  );
 });
 
 describe("resolveSystemdScope", () => {

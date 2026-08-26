@@ -173,7 +173,7 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(
+export function fakeAgentScript(
   agentName: "claude" | "codex" | "cursor",
   options?: { hupResistant?: boolean },
 ): string {
@@ -471,6 +471,7 @@ fi`;
     agentName === "claude"
       ? `while IFS= read -r line; do
   full_msg="$line"
+  dispatch_line="$line"
   printf '%s\\n' "$line" >> "$log_file"
   # Drain remaining lines from the same paste. Daemon sends paste then sleeps
   # DEFAULT_SUBMIT_DELAY_MS (300ms) before the submit Enter; drain must exceed
@@ -478,10 +479,13 @@ fi`;
   while IFS= read -r -t 0.5 extra; do
     full_msg="$full_msg
 $extra"
+    if [[ -n "$extra" ]]; then
+      dispatch_line="$extra"
+    fi
     printf '%s\\n' "$extra" >> "$log_file"
   done
   ${claudeEmitBuffered}
-  case "$line" in
+  case "$dispatch_line" in
     show-waiting-menu)
       ${signalNeedsInput}
       printf '%s\\n' "Entered plan mode"

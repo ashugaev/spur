@@ -12,6 +12,7 @@ coverage/
 packages/web/screenshots/
 packages/web/test-results/
 v2/web/
+v2/skills/
 
 # Environment files (secrets)
 .env

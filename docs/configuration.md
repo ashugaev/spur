@@ -282,6 +282,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
 - `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.
+- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`. `true` emits a repo's first-poll backlog instead of suppressing it, at most 10 per repo; suppressed items are recorded as seen either way. Parsed but inert for `gitlab`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll`: optional for `github`. Enables slow-window polling; omitted entirely by default, which keeps the existing poll-every-tick cadence.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.slowIntervalMs`: optional, default `5 × intervalMs`. Must be greater than `intervalMs`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.activeGraceMs`: optional, default `600000`.
@@ -437,6 +438,12 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`slowIntervalMs` since the last real poll) passed, the last cycle saw a non-terminal CI check, a tracked session is unpolled, or a session had a `send`/source-reply within `activeGraceMs`. Rate-limit cooldown backoff overrides all of it, here and on plain sources. With `query` also set, discovery runs on the same gated tick; every gate reads already-tracked sessions, so an undiscovered PR cannot re-arm the tick early.
 
+GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `graphqlCost`; consecutive zero-call cycles collapse into the first event of the run, the swallowed count lands on the next emitted event as `suppressedZeroCycles`), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known).
+
+Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
+
+Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
+
 ## Daemon restarts
 
 Tmux agent sessions survive daemon restarts: the systemd unit uses `KillMode=process`, so `systemctl restart` stops the node process only. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, restarts attention monitoring.
@@ -447,13 +454,13 @@ Unit files here are templates. Source deployments apply them through [install-fr
 
 ## Auto update
 
-`autoUpdate` (instance config only, default `false`) self-updates the daemon: once the npm registry publishes a version strictly newer than the running one, it runs the same switch a `Switch` press runs — same executor, guards, durable status record. See [Daemon HTTP API](commands.md#daemon-http-api).
+`autoUpdate` (instance config only, default `false`) self-updates the daemon: once the npm registry publishes a version strictly newer than the running one, it runs the same switch a `Switch` press runs — same executor, guards, durable status record. See [Daemon HTTP API](daemon-api.md#daemon-http-api).
 
 Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpdate: true`/`false` in `~/.spur/config.yaml`, re-read from disk every reaper tick — a hand edit takes effect on the next tick, no restart. Detection lag up to ~15 minutes (5-minute reaper tick plus the 10-minute registry cache), not immediate.
 
 An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release. A candidate already holding a terminal (`succeeded` or `failed`) status record is never retried. Events: `daemon.auto_update.started`, `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`.
 
-Rollback reaches only failures the switch helper itself detects ([commands.md](commands.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
+Rollback reaches only failures the switch helper itself detects ([daemon-api.md](daemon-api.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
 
 Pin a version by hand while auto-update is on: turn `autoUpdate` off first — [install-from-npm.md#upgrade](install-from-npm.md#upgrade) has the order and the reason.
 

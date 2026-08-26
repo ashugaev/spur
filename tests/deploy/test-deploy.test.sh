@@ -50,12 +50,13 @@ make_large_tarball() {
   local name="$1"
   local dir="$WORK_DIR/$name"
   local pkg_dir="$dir/package"
-  mkdir -p "$pkg_dir/deploy" "$pkg_dir/dist" "$pkg_dir/web/dist-server" "$pkg_dir/filler"
+  mkdir -p "$pkg_dir/deploy" "$pkg_dir/dist" "$pkg_dir/web/dist-server" "$pkg_dir/filler" "$pkg_dir/skills/spur"
   touch "$pkg_dir/deploy/spur-daemon.npm.service"
   touch "$pkg_dir/deploy/spur-web.npm.service"
   touch "$pkg_dir/dist/cli.js"
   touch "$pkg_dir/web/dist-server/web-server.js"
   touch "$pkg_dir/spur.yaml.reference"
+  touch "$pkg_dir/skills/spur/SKILL.md"
   local i=0
   while [ "$i" -lt 5000 ]; do
     printf '%0.s_%.0s' {1..100} >"$pkg_dir/filler/$i.txt"
@@ -124,7 +125,8 @@ tgz_a2="$(make_tarball a2 \
   deploy/spur-web.npm.service \
   dist/cli.js \
   web/dist-server/web-server.js \
-  spur.yaml.reference)"
+  spur.yaml.reference \
+  skills/spur/SKILL.md)"
 
 set +e
 bash "$verify_script" "$tgz_a2" 2>&1

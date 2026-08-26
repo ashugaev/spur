@@ -74,6 +74,13 @@ rm -f /tmp/agent-run.jsonl /tmp/agent-run.done /tmp/prompt.txt
 rm -rf "$HOME/.cursor/projects" "$HOME/.claude/projects" "$HOME/.claude/todos"
 rm -rf "$HOME/spur-docs"
 
+# host-skills only creates these two — never `rm -rf "$HOME/.claude"`, that
+# destroys the planted credentials this harness relies on. Both dirs, once
+# created by an install, otherwise survive every reset and make run N+1
+# exercise the "dir already exists" branch instead of the fresh-host one.
+log "removing agent skill dirs the tested install creates"
+rm -rf "$HOME/.claude/skills" "$HOME/.codex"
+
 # Assert on the paths this script removes, not on PATH lookup: `bash
 # ~/itest-reset.sh` over ssh sources no profile, so `command -v node` reports
 # absent for an nvm-installed node whose files (and PATH lines) are still
@@ -101,4 +108,5 @@ printf '  %-14s %s\n' "port-4310"     "$(ss -ltn 2>/dev/null | grep -q ':4310 ' 
 printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] && echo cursor-agent || echo none)"
 printf '  %-14s %s\n' "harness"       "$([ -x "$HOME/.itest-harness/bin/claude" ] && echo claude || echo MISSING)"
 printf '  %-14s %s\n' "harness-creds" "$([ -s "$HOME/.claude/.credentials.json" ] && echo present || echo MISSING)"
+printf '  %-14s %s\n' "agent-skills"  "$([ -e "$HOME/.claude/skills" ] || [ -e "$HOME/.codex" ] && echo leftover || echo clean)"
 log "done"

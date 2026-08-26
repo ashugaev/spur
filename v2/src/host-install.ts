@@ -4,6 +4,7 @@ import {
   existsSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   statSync,
   unlinkSync,
@@ -25,6 +26,14 @@ import {
   type InstanceConfigReadResult,
 } from "./config.js";
 import { parseDfField } from "./disk-space.js";
+import {
+  classifyHostSkillRoot,
+  classifyHostSkillTarget,
+  installHostSkills,
+  packagedSkillsDir,
+  renderHostSkillWarnings,
+} from "./host-skills.js";
+import { writeStderr } from "./io.js";
 import { listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { withTimeout } from "./promise-timeout.js";
@@ -101,6 +110,99 @@ export function checkOpenCodeExecutable(): HostInstallCheck {
       : {
           fix: "npm install -g --prefix ~/.local opencode-ai, or set SPUR_OPENCODE_BIN to an executable path",
         }),
+  };
+}
+
+// Read-only: classifies every host skill target, never writes. Inert when
+// the running install ships no packaged skills (source checkout / a build
+// that has not run `bundle-skills.sh` yet — see I6). `detail` always names
+// the CURRENT link target per skill/host-dir, including the `ok: true` case,
+// so "my host skill points at a worktree" (see A9) is a one-command
+// discovery via `spur doctor`.
+export function checkHostSkillSymlinks(home: string): HostInstallCheck {
+  const skillsDir = packagedSkillsDir();
+  const inert: HostInstallCheck = {
+    id: "skills-symlinks",
+    ok: true,
+    severity: "info",
+    detail: "skipped — no packaged skills in this install",
+  };
+  if (!existsSync(skillsDir)) {
+    return inert;
+  }
+
+  let skillNames: string[];
+  try {
+    skillNames = readdirSync(skillsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return inert;
+  }
+
+  const details: string[] = [];
+  const fixes: string[] = [];
+  let hasConflict = false;
+
+  // Never mkdir here — an absent agent host dir is a legitimate state, not
+  // a defect, and this check must stay read-only (see host-skills spec).
+  // Test each root once, outside the per-skill loop, so an absent root
+  // yields one line naming it instead of one indistinguishable-from-a-real-
+  // conflict "absent" line per skill.
+  for (const root of [join(home, ".claude", "skills"), join(home, ".codex", "skills")]) {
+    // Absent and unreadable (EACCES on the root or a parent) are distinct:
+    // `existsSync` alone would read `false` for both, and `mkdir -p` cannot
+    // fix a permissions problem — never send the operator to a command that
+    // is guaranteed to fail.
+    const rootState = classifyHostSkillRoot(root);
+    if (rootState === "absent") {
+      details.push(
+        `${root}: host dir absent — Spur does not create it; run \`mkdir -p ${root} && spur reinit\` to link`,
+      );
+      continue;
+    }
+    if (rootState === "unreadable") {
+      details.push(`${root}: host dir unreadable (permission denied) — cannot classify its links`);
+      continue;
+    }
+
+    for (const name of skillNames) {
+      const link = join(root, name);
+      // Read-only classification of one hostile host path (e.g. a file
+      // where a parent dir should be) must never take down the other ~60
+      // doctor checks — degrade this one target to an "unreadable" line
+      // instead, same as `readdirSync` above and the file's own convention
+      // (`checkClaudeOnboarding`, `checkSpurOnPath`) of never throwing.
+      try {
+        const classification = classifyHostSkillTarget(link);
+        const currentTarget =
+          classification === "absent"
+            ? "(absent)"
+            : classification === "file" || classification === "directory"
+              ? `(not a symlink, ${classification})`
+              : readlinkSync(link);
+        details.push(`${link}: ${classification} -> ${currentTarget}`);
+        if (
+          classification === "foreign-symlink" ||
+          classification === "file" ||
+          classification === "directory"
+        ) {
+          hasConflict = true;
+          fixes.push(`move or delete ${link}, then run \`spur reinit\``);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        details.push(`${link}: unreadable (${message})`);
+      }
+    }
+  }
+
+  return {
+    id: "skills-symlinks",
+    ok: !hasConflict,
+    severity: "warn",
+    detail: details.join("\n"),
+    ...(fixes.length ? { fix: fixes.join("; ") } : {}),
   };
 }
 
@@ -1330,6 +1432,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   checks.push(checkNodeVersion());
   checks.push(checkClaudeOnboarding(home));
   checks.push(checkOpenCodeExecutable());
+  checks.push(checkHostSkillSymlinks(home));
 
   const warnFreeGb =
     instanceConfig.status === "ok"
@@ -1506,4 +1609,17 @@ export function runNpmInit(
   }
   args.push(options.tailscale === false ? "--no-tailscale" : "--tailscale");
   execFileSync("bash", [script, ...args], { stdio: "inherit" });
+  // Refreshes ~/.claude/skills and ~/.codex/skills for every `spur init` /
+  // `update` / `reinit` / `POST /deploy/switch` / auto-update tick — the
+  // callers that all funnel through this function. Never allowed to fail
+  // the init/update/reinit flow (see `install-and-restart.sh` rollback).
+  try {
+    for (const line of renderHostSkillWarnings(installHostSkills())) {
+      writeStderr(line);
+    }
+  } catch (error) {
+    writeStderr(
+      `spur: failed to install host skill symlinks: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
