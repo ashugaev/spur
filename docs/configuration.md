@@ -202,7 +202,7 @@ triggers:
           defaultBranch: main
 ```
 
-`spawnDeskGroup: true` requires multiple flat spawn entries, rejects `autoComplete`, and attaches all children to one parent desk. Every entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch`.
+`spawnDeskGroup: true` requires multiple flat spawn entries, rejects `autoComplete`, and attaches all children to one parent desk. Every entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch`. The desk anchor is the first entry that spawns successfully; if an entry fails, the next one becomes the anchor and the remaining entries join it.
 
 A desk group is any set of sessions sharing one workspace: the children of a `spawnDeskGroup` trigger, and the two sides of a handoff.
 
