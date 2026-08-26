@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeSession } from "./metadata.js";
-import { extractBareUserTask } from "./handoff-prompt.js";
 import {
   type SessionRecord,
   type TodoActor,
@@ -58,6 +57,16 @@ export class TodoOpenWorkError extends Error {
     readonly sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>,
   ) {
     super("Resolve or explicitly override unfinished Spur ToDo items before completion");
+  }
+}
+
+export class TodoEmptyLedgerError extends Error {
+  readonly statusCode = 409;
+  readonly code = "todo_ledger_empty";
+  constructor(readonly sessionIds: string[]) {
+    super(
+      'Spur ToDo ledger is empty. Record each step with "$SPUR_TODO_COMMAND" add --text <step> --reason <why>, then complete it.',
+    );
   }
 }
 
@@ -249,7 +258,6 @@ export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
       at: event.at,
     };
   }
-  if (items.length === 0) throw new TodoLedgerCorruptError(sessionId, "ToDo ledger has no items");
   const counts = {
     total: items.length,
     open: items.filter((item) => item.status === "open").length,
@@ -266,73 +274,55 @@ export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
   };
 }
 
-export function ensureTodoLedger(
-  dataDir: string,
-  session: SessionRecord,
-  source: "spawn" | "legacy_migration" = "legacy_migration",
-): TodoProjection {
+function emptyProjection(): TodoProjection {
+  return {
+    revision: "",
+    status: "resolved",
+    counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+    items: [],
+    finishOverrides: [],
+  };
+}
+
+export function ensureTodoLedger(dataDir: string, session: SessionRecord): TodoProjection {
   const path = ledgerPath(dataDir, session.id, session.project);
-  if (session.todoLedgerVersion === 1) return replayTodo(dataDir, session.id);
-  if (existsSync(path)) {
-    let projection = replayTodo(dataDir, session.id);
-    if (session.status === "completed" || session.status === "killed") {
-      const actor: TodoActor = { kind: "system", source: "legacy_migration" };
-      for (const item of projection.items) {
-        if (item.status !== "open" && item.status !== "held") continue;
-        appendEvent(
-          dataDir,
-          {
-            ...eventBase(session.id, actor),
-            type: session.status === "completed" ? "item_completed" : "item_cancelled",
-            itemId: item.id,
-            reason:
-              session.status === "completed"
-                ? "Session completed before Spur ToDo tracking"
-                : "Session killed before Spur ToDo tracking",
-          },
-          session.project,
-        );
-      }
-      projection = replayTodo(dataDir, session.id);
+  if (!existsSync(path)) {
+    if (session.todoLedgerVersion !== 1) {
+      writeSession(dataDir, { ...session, todoLedgerVersion: 1 });
     }
-    writeSession(dataDir, { ...session, todoLedgerVersion: 1 });
-    return projection;
+    return emptyProjection();
   }
-  const bareTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt).trim();
-  const itemId = randomUUID();
-  const actor: TodoActor = { kind: "system", source };
-  appendEvent(
-    dataDir,
-    {
-      ...eventBase(session.id, actor),
-      type: "item_added",
-      itemId,
-      text: bareTask || "Complete the session task",
-      reason: bareTask
-        ? source === "spawn"
-          ? "Created from the session objective"
-          : "Imported from the session objective when Spur ToDo was enabled"
-        : "Session created without a text prompt",
-    },
-    session.project,
-  );
+  if (session.todoLedgerVersion === 1) return replayTodo(dataDir, session.id);
+  let projection = replayTodo(dataDir, session.id);
   if (session.status === "completed" || session.status === "killed") {
-    appendEvent(
-      dataDir,
-      {
-        ...eventBase(session.id, actor),
-        type: session.status === "completed" ? "item_completed" : "item_cancelled",
-        itemId,
-        reason:
-          session.status === "completed"
-            ? "Session completed before Spur ToDo tracking"
-            : "Session killed before Spur ToDo tracking",
-      },
-      session.project,
-    );
+    const actor: TodoActor = { kind: "system", source: "legacy_migration" };
+    for (const item of projection.items) {
+      if (item.status !== "open" && item.status !== "held") continue;
+      appendEvent(
+        dataDir,
+        {
+          ...eventBase(session.id, actor),
+          type: session.status === "completed" ? "item_completed" : "item_cancelled",
+          itemId: item.id,
+          reason:
+            session.status === "completed"
+              ? "Session completed before Spur ToDo tracking"
+              : "Session killed before Spur ToDo tracking",
+        },
+        session.project,
+      );
+    }
+    projection = replayTodo(dataDir, session.id);
   }
   writeSession(dataDir, { ...session, todoLedgerVersion: 1 });
-  return replayTodo(dataDir, session.id);
+  return projection;
+}
+
+export function todoLedgerBlock(projection: TodoProjection): "empty" | "unfinished" | null {
+  if (projection.counts.total === 0) return "empty";
+  const { openItemIds, heldItemIds } = unfinishedTodo(projection);
+  if (openItemIds.length > 0 || heldItemIds.length > 0) return "unfinished";
+  return null;
 }
 
 export function mutateTodo(
