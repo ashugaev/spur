@@ -95,8 +95,10 @@ export async function startDeploySwitch(args: {
     startedAt,
   });
   // The helper writes its own terminal status, but only after it arms the
-  // trap: this covers a spawn error and the exits before that (bad version,
-  // lock timeout). The helper's write is authoritative when it exists — it
+  // trap: this covers a spawn error and the exit before that (bad version —
+  // the only pre-trap exit left; a lock timeout now runs under the armed
+  // trap and writes its own install_failed record). The helper's write is
+  // authoritative when it exists — it
   // is the only process that knows which branch it took, so it is the only
   // one that can set `failureKind`. Its EXIT trap runs before the process
   // exits, so this handler normally observes that record; overwriting it

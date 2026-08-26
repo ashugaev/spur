@@ -551,6 +551,42 @@ describe("VersionMenu", () => {
       expect(versionsFetchCount).toBe(1);
     });
 
+    it("does not drop a restart_skipped notice when Auto is re-enabled, unlike a rollback notice", async () => {
+      // Re-enabling Auto only clears a `failed` record server-side
+      // (clearFailedDeploySwitchRecord never touches a `succeeded` one); a
+      // restart_skipped notice rides a `succeeded` record and must survive
+      // the optimistic write, or it flickers off until the next 60s poll.
+      let versionsFetchCount = 0;
+      mockFetch({
+        info: { payload: { version: "1.4.2" } },
+        versions: {
+          payload: {
+            current: "1.4.2",
+            autoUpdate: false,
+            available: AVAILABLE,
+            updateFailure: { version: "1.5.0", failureKind: "restart_skipped", initiator: "auto" },
+          },
+        },
+        autoUpdate: { payload: { autoUpdate: true } },
+        onVersionsFetch: () => {
+          versionsFetchCount += 1;
+        },
+      });
+
+      render(<VersionMenu />);
+      fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+      await screen.findByTestId("version-update-failure");
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto update" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
+      });
+      expect(screen.getByTestId("version-update-failure")).toBeInTheDocument();
+      expect(screen.getByTestId("version-rollback-icon")).toBeInTheDocument();
+      expect(versionsFetchCount).toBe(1);
+    });
+
     it("keeps the notice when Auto is switched off, which the daemon does not treat as an answer", async () => {
       // Unchecking is not the operator answering the rollback: the daemon keeps
       // the record (server-auto-update.test.ts "enabled false leaves the same

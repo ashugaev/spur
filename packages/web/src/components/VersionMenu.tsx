@@ -267,9 +267,15 @@ export function VersionMenu() {
           ? {
               ...old,
               autoUpdate: result.autoUpdate,
-              // Re-arming is the operator answering the rollback, and the
-              // daemon clears the record on that same request.
-              ...(result.autoUpdate ? { updateFailure: undefined } : {}),
+              // Re-arming is the operator answering a failed record, and the
+              // daemon clears it on that same request — but only a `failed`
+              // record (clearFailedDeploySwitchRecord never touches a
+              // `succeeded` one). A restart_skipped notice rides a `succeeded`
+              // record, so it survives this write and must stay on screen,
+              // not flicker off until the next 60s poll brings it back.
+              ...(result.autoUpdate && old.updateFailure?.failureKind !== "restart_skipped"
+                ? { updateFailure: undefined }
+                : {}),
             }
           : old,
       );

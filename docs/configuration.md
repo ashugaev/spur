@@ -469,7 +469,7 @@ The web version popover names that version — `rolled_back`, `install_unhealthy
 Retry rule, keyed on the failed attempt's [`failureKind`](daemon-api.md#daemon-http-api):
 
 - `install_failed` — target never installed, including a lock timeout that gave up before the install started. Retried every tick, no cap, no backoff.
-- no `failureKind` — a record written by the daemon's own spawn-error path (the helper never ran at all), nothing installed. Retried the same way.
+- no `failureKind` — a record written by the daemon's own spawn-error path, or the helper died before it armed its own trap (invalid version, or killed during its pre-trap wait for the daemon's `running` record). Nothing installed. Retried the same way.
 - `rolled_back` — installed, failed, previous version reinstalled. Never auto-retried.
 - `install_unhealthy` — installed, failed, previous version not restored. Never auto-retried.
 - `interrupted_unknown` — the run died without reporting what it did (killed, OOM, reboot); whether it installed is unknown. Never auto-retried, disarms `autoUpdate` once for an auto-initiated attempt same as the two kinds above; re-enabling `Auto` clears the record and unblocks one further attempt.
