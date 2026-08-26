@@ -985,6 +985,23 @@ export async function captureTmuxPane(sessionName: string, lines = 80): Promise<
   }
 }
 
+// Waits for the fake agent to actually consume a sent prompt, not merely for a
+// startup `waiting` record the daemon's delivery gate would otherwise accept.
+// The fake prints `ack: <line>` only after its drain loop finishes and it
+// dispatches that exact line (runtime.ts claude/codex/cursor read loops).
+// `line` must fit one non-wrapped pane row (captureTmuxPane uses -J -S -80).
+export async function waitForAgentDispatch(
+  sessionName: string,
+  line: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  await pollUntil(() => captureTmuxPane(sessionName), {
+    timeoutMs,
+    accept: (pane) => pane.includes(`ack: ${line}`),
+    label: `agent dispatch of "${line}" in ${sessionName}`,
+  });
+}
+
 // Resolves the effective value of a tmux format variable for a session, honoring
 // global defaults (e.g. `set -g status off` in tmux.conf) that `show-options`
 // without `-g` does not surface at the session scope.

@@ -7,7 +7,9 @@ import {
   createRuntimeTestContext,
   isTmuxAvailable,
   killTmuxSessionsByPrefix,
+  stopDaemonByPid,
   syncTmuxEnvironment,
+  waitForAgentDispatch,
   type RuntimeTestContext,
 } from "../helpers/runtime.js";
 
@@ -73,14 +75,11 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
       if (!current) {
         throw new Error("expected active runtime context during cleanup");
       }
-      if (current.daemonPid) {
-        try {
-          process.kill(current.daemonPid, "SIGTERM");
-        } catch {
-          // Already gone.
-        }
-      }
+      // Kill the CLI's own tmux sessions before stopping the daemon. A surviving
+      // CLI process auto-starts an untracked replacement daemon on daemon exit
+      // (see client.ts's detached/unref respawn path), leaking an orphan.
       await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
+      await stopDaemonByPid(current.daemonPid);
       await current.context.cleanup();
     }
   });
@@ -116,7 +115,14 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     prompt = "status test",
   ): Promise<SessionView> {
     const args = ["--config", configPath, "spawn", "test", prompt, "--agent", agent, "--json"];
-    return JSON.parse((await context.execCli(args, { timeoutMs: 90_000 })).stdout) as SessionView;
+    const session = JSON.parse(
+      (await context.execCli(args, { timeoutMs: 90_000 })).stdout,
+    ) as SessionView;
+    // The daemon's delivery gate accepts the fixture's startup `waiting` record,
+    // not evidence the initial prompt was actually consumed — wait for the
+    // fixture's own dispatch ack before any test sends a follow-up.
+    await waitForAgentDispatch(session.id, prompt);
+    return session;
   }
 
   // ── Claude JSONL-based state detection ─────────────────────────────────

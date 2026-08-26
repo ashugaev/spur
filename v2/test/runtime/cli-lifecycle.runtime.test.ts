@@ -32,6 +32,7 @@ import {
   stopDaemonByPid,
   syncTmuxEnvironment,
   tmuxSessionExists,
+  waitForAgentDispatch,
   type RuntimeTestContext,
 } from "../helpers/runtime.js";
 
@@ -541,10 +542,7 @@ async function runRestoreScenario(args: {
     // below times out waiting for an "error" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
-    await pollUntil(async () => captureTmuxPane(spawned.id), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes("ack: restore runtime prompt"),
-    });
+    await waitForAgentDispatch(spawned.id, "restore runtime prompt");
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
   }
 
@@ -638,11 +636,14 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
   afterEach(async () => {
     while (activeContexts.length > 0) {
       const current = popActiveContext();
-      await stopDaemonByPid(current.daemonPid);
+      // Kill the CLI's own tmux sessions before stopping the daemon. A surviving
+      // CLI process auto-starts an untracked replacement daemon on daemon exit
+      // (see client.ts's detached/unref respawn path), leaking an orphan.
       if (current.controllerSessionName) {
         await killTmuxSession(current.controllerSessionName);
       }
       await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
+      await stopDaemonByPid(current.daemonPid);
       await current.context.cleanup();
     }
   });
@@ -1113,10 +1114,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       // run). Wait for the fixture's own "ack: <message>" echo, which only
       // prints once its case statement actually runs on a closed message,
       // before sending the next one.
-      await pollUntil(async () => captureTmuxPane(spawned.id), {
-        timeoutMs: 15_000,
-        accept: (value) => value.includes("ack: notify me"),
-      });
+      await waitForAgentDispatch(spawned.id, "notify me");
 
       await context.execCli(["--config", configPath, "send", spawned.id, "show-waiting-menu"]);
 
@@ -3106,6 +3104,15 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
+    // `spawn --json` returns before the fixture's resolve_initial_todo finishes
+    // resolving the bootstrap todo item (~1.6s later). Completing the session
+    // inside that window races a still-open item into TodoOpenWorkError (409).
+    await pollUntil(async () => context.fetchJson<TodoProjection>(`/sessions/${spawned.id}/todo`), {
+      timeoutMs: 15_000,
+      accept: (value) =>
+        value.items.every((item) => item.status !== "open" && item.status !== "held"),
+    });
+
     await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
     expect(existsSync(artifactDir)).toBe(false);
 
@@ -4649,10 +4656,7 @@ projects:
     // below times out waiting for an "error" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
-    await pollUntil(async () => captureTmuxPane(spawned.id), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes("ack: restore runtime prompt"),
-    });
+    await waitForAgentDispatch(spawned.id, "restore runtime prompt");
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
     // The agent process exits on its own, leaving the tmux pane/session alive
@@ -5994,11 +5998,14 @@ describe.skipIf(!tmuxOk || platform() !== "linux")("duplicate-agent guard (runti
   afterEach(async () => {
     while (activeContexts.length > 0) {
       const current = popActiveContext();
-      await stopDaemonByPid(current.daemonPid);
+      // Kill the CLI's own tmux sessions before stopping the daemon. A surviving
+      // CLI process auto-starts an untracked replacement daemon on daemon exit
+      // (see client.ts's detached/unref respawn path), leaking an orphan.
       if (current.controllerSessionName) {
         await killTmuxSession(current.controllerSessionName);
       }
       await killTmuxSessionsByPrefix(current.sessionPrefix, current.context.tmuxSocketName);
+      await stopDaemonByPid(current.daemonPid);
       await current.context.cleanup();
     }
   });
