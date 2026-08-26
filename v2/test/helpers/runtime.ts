@@ -662,6 +662,22 @@ record_fixture_todo() {
   if [[ -z "\${SPUR_TODO_COMMAND:-}" ]]; then
     return
   fi
+  # Idempotent: a resumed/restored process re-runs this startup script, but the
+  # fixture item is a one-time "the agent touched ToDo" marker, not a per-launch
+  # step. Re-adding on every relaunch races a caller polling for a clean ledger
+  # right after a resume (see cli-lifecycle.runtime.test.ts pause/resume/complete).
+  local already
+  already="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+else:
+    found = any(item.get("text") == "Fixture step" for item in data.get("items", []))
+    print("yes" if found else "")' 2>/dev/null || true)"
+  if [[ -n "$already" ]]; then
+    return
+  fi
   local todo_id
   todo_id="$("$SPUR_TODO_COMMAND" add --text "Fixture step" --reason "Runtime agent fixture step" --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
   if [[ -n "$todo_id" ]]; then

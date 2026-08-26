@@ -5389,6 +5389,16 @@ projects:
       );
       expect(withLink.slots?.links.some((link) => link.label === "dev")).toBe(true);
 
+      // Wait for the fixture to actually resolve the session's seeded Spur
+      // ToDo item before completing — the sidecar link landing is unrelated
+      // to the fixture's own todo-resolution CLI calls, so completing right
+      // after the link appears can still 409 on an open item that hasn't
+      // landed yet.
+      await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+        timeoutMs: 15_000,
+        accept: (value) => value.state === "waiting",
+      });
+
       const closed =
         action === "complete"
           ? await context.fetchJson<SessionView>(`/sessions/${spawned.id}/complete`, {
