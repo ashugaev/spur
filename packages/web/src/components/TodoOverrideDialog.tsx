@@ -24,7 +24,7 @@ export function TodoOverrideDialog(props: TodoOverrideDialogProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="todo-override-title"
-        className="w-full max-w-lg border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4"
+        className="w-full max-w-lg border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] p-4"
       >
         <h2
           id="todo-override-title"

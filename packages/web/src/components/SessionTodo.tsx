@@ -83,7 +83,12 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
           ToDo unavailable: {error}
         </div>
       ) : null}
-      {projection ? (
+      {projection && projection.items.length === 0 ? (
+        <p className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[var(--color-text-tertiary)]">
+          No ToDo items yet.
+        </p>
+      ) : null}
+      {projection && projection.items.length > 0 ? (
         <div className="space-y-2">
           <div className="flex items-center gap-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2">
             <div

@@ -67,6 +67,22 @@ describe("SessionTodo", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows an explicit empty-ledger message for a whole-session empty projection", async () => {
+    const empty: SpurTodoProjection = {
+      revision: "event-0",
+      status: "resolved",
+      counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+      items: [],
+      finishOverrides: [],
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(empty), { status: 200 }),
+    );
+    render(<SessionTodo sessionId="api-1" />);
+    expect(await screen.findByText("No ToDo items yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Spur ToDo items" })).not.toBeInTheDocument();
+  });
+
   it("keeps the last good projection when polling fails", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify(projection), { status: 200 }))
