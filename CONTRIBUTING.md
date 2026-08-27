@@ -16,7 +16,7 @@ Bootstrap details live in [SETUP.md](SETUP.md).
 
 Run from source without a global install: `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`. `pnpm --dir v2 build` also restarts a running daemon when Spur config is discoverable — a normal CLI command auto-connects its discovered project config into the daemon; registration and pruning rules live in [config registry](docs/configuration.md#config-registry).
 
-For a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`, use `scripts/spur-isolated-daemon.sh`. `isolated-daemon` and `isolated-ui` project sidecars start an isolated Spur daemon and the web UI against it; new isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks, and `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs.
+For a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`, use `scripts/spur-isolated-daemon.sh`. `isolated-daemon` and `isolated-ui` project sidecars start an isolated Spur daemon and the web UI against it; new isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks, and `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs. The launcher writes its throwaway CLI wrapper to `$SPUR_SESSION_TOOL_DIR/spur-isolated`, never `spur` — the session's own `spur` wrapper stays untouched, so agent tooling that calls `spur` keeps talking to the real daemon.
 
 ## PR Checks
 

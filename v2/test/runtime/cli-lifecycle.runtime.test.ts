@@ -277,19 +277,19 @@ done
 if [[ ! -f "$runtime_file" ]]; then
   exit 1
 fi
-"$SPUR_SESSION_TOOL_DIR/spur" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
+"$SPUR_SESSION_TOOL_DIR/spur-isolated" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
 printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
 set +e
 valid_status=1
 for _ in $(seq 1 30); do
-  "$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
+  "$SPUR_SESSION_TOOL_DIR/spur-isolated" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
   valid_status=$?
   if [[ "$valid_status" -eq 0 ]]; then
     break
   fi
   sleep 1
 done
-"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
+"$SPUR_SESSION_TOOL_DIR/spur-isolated" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
 invalid_status=$?
 set -e
 printf '%s\n' "$valid_status" > ".sibling-isolated-branch-valid-status-\${SPUR_SESSION:?}"
@@ -5610,7 +5610,7 @@ projects:
       timeoutMs: 15_000,
       accept: (value) => value === true,
     });
-    await pollUntil(async () => existsSync(join(toolDir, "spur")), {
+    await pollUntil(async () => existsSync(join(toolDir, "spur-isolated")), {
       timeoutMs: 15_000,
       accept: (value) => value === true,
     });
@@ -5627,6 +5627,7 @@ projects:
       accept: (value) => value === true,
     });
     const isolatedEnv = await readFile(join(toolDir, "isolated-env.sh"), "utf8");
+    const outerWrapper = await readFile(join(toolDir, "spur"), "utf8");
     const branchValidStatus = (await readFile(branchValidStatusPath, "utf8")).trim();
     const branchValidOutput = await readFile(branchValidOutputPath, "utf8");
     const branchInvalidStatus = (await readFile(branchInvalidStatusPath, "utf8")).trim();
@@ -5641,6 +5642,8 @@ projects:
     expect(branchInvalidOutput).toContain(
       'branch "Bad_Branch.Name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
     );
+    expect(outerWrapper).toContain(`--config ${configPath}`);
+    expect(outerWrapper).not.toContain("spur-isolated-daemon.");
   });
 
   it("starting isolated-ui starts isolated-daemon dependency first", async () => {

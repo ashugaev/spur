@@ -13,6 +13,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 - `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo`.
 - `branchNaming.regex` adds `spur-branch` and a push-checking `git` wrapper.
 - Hook-state agents also get `spur-agent-state`.
+- `isolated-daemon`/`isolated-ui` sidecars add `spur-isolated`, a CLI wrapper bound to the throwaway isolated daemon; the plain `spur` wrapper still targets the real daemon.
 - Call each by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path — login shells rebuild `PATH`, drop the tool dir.
 - Identity: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
 - Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`; hook-state agents add `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE`.
