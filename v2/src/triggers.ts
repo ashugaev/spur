@@ -303,11 +303,11 @@ async function runSpawnTrigger(
 
     let anchorSessionId: string | undefined;
     for (const [blockIndex, block] of blocks.entries()) {
-      if (deskGroup === true && blockIndex > 0 && anchorSessionId === undefined) {
+      const isAnchorBlock = deskGroup === true && anchorSessionId === undefined;
+      if (isAnchorBlock && blockIndex > 0) {
         logger.warn(
-          `[trigger:${projectId}/${triggerId}] skipping desk-group spawn blocks: anchor session failed`,
+          `[trigger:${projectId}/${triggerId}] promoting spawn block ${blockIndex} to desk anchor: earlier anchor spawn failed`,
         );
-        break;
       }
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
@@ -328,7 +328,7 @@ async function runSpawnTrigger(
             ? { reuseWorkspaceSessionId: anchorSessionId }
             : {}),
         });
-        if (deskGroup === true && anchorSessionId === undefined) {
+        if (isAnchorBlock) {
           anchorSessionId = session.id;
         }
         if (workItemData) {
@@ -344,14 +344,13 @@ async function runSpawnTrigger(
           projectId,
           sourceId,
           triggerId,
-          message:
-            deskGroup === true && blockIndex === 0
-              ? `Spawn trigger ${projectId}/${triggerId} created desk anchor ${session.id}`
-              : `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
+          message: isAnchorBlock
+            ? `Spawn trigger ${projectId}/${triggerId} created desk anchor ${session.id}`
+            : `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
           details: {
             eventName,
             agent: block.agent ?? null,
-            ...(deskGroup === true && blockIndex === 0 ? { deskGroup: true } : {}),
+            ...(isAnchorBlock ? { deskGroup: true } : {}),
           },
         });
       } catch (error) {
