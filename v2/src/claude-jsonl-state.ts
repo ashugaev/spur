@@ -4,6 +4,7 @@ import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
   CLAUDE_BOOKKEEPING_RECORD_TYPES,
   detectClaudeRateLimit,
+  parseRateLimitResetAtMs,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 
@@ -17,6 +18,13 @@ export interface ParsedRecord {
   requestsUserInput?: boolean;
   /** True when the record is a synthetic `error: "rate_limit"` API error. */
   rateLimited?: boolean;
+  /**
+   * Epoch ms the limit resets at, parsed from this record's own banner text
+   * and anchored to this record's own timestamp. Absent when the record
+   * carries no parseable "resets HH[:MM](am|pm) (UTC)" clause, or no
+   * parseable own timestamp — never inferred from the caller's clock.
+   */
+  rateLimitResetAtMs?: number;
   /** True when the record is a synthetic `error: "server_error"` API error. */
   serverError?: boolean;
   /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
@@ -154,11 +162,14 @@ function contentBlocks(message: Record<string, unknown>): unknown[] {
   return Array.isArray(message["content"]) ? (message["content"] as unknown[]) : [];
 }
 
-function extractTimestampMs(
+// Presence-aware: returns undefined rather than falling back, so callers that
+// must not anchor to the reader's own clock (e.g. the rate-limit reset parse,
+// which would otherwise anchor to a post-restart Date.now() up to ~24h off)
+// can tell "no own timestamp" apart from "timestamp is exactly 0".
+function extractRecordTimestampMs(
   parsed: Record<string, unknown>,
   message: Record<string, unknown>,
-  fallbackTimestampMs: number,
-): number {
+): number | undefined {
   const rawTimestamp = parsed["timestamp"] ?? message["timestamp"];
   if (typeof rawTimestamp === "number" && Number.isFinite(rawTimestamp)) {
     return rawTimestamp;
@@ -169,7 +180,15 @@ function extractTimestampMs(
       return timestampMs;
     }
   }
-  return fallbackTimestampMs;
+  return undefined;
+}
+
+function extractTimestampMs(
+  parsed: Record<string, unknown>,
+  message: Record<string, unknown>,
+  fallbackTimestampMs: number,
+): number {
+  return extractRecordTimestampMs(parsed, message) ?? fallbackTimestampMs;
 }
 
 function hasBlockType(blocks: unknown[], type: string): boolean {
@@ -231,7 +250,8 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
 
   const type = typeof parsed["type"] === "string" ? parsed["type"] : "";
   const message = unwrapMessage(parsed);
-  const recordTimestampMs = extractTimestampMs(parsed, message, timestampMs);
+  const ownTimestampMs = extractRecordTimestampMs(parsed, message);
+  const recordTimestampMs = ownTimestampMs ?? timestampMs;
 
   if (type === "progress") {
     return { type: "progress", timestampMs: recordTimestampMs };
@@ -248,13 +268,24 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       typeof message["stop_reason"] === "string" ? message["stop_reason"] : undefined;
     const blocks = contentBlocks(message);
     const toolUseHints = extractToolUseHints(blocks);
+    const isRateLimit = parsed["error"] === "rate_limit";
+    // Anchored to this record's OWN timestamp only. A record with no
+    // parseable own timestamp (ownTimestampMs is undefined) is left without
+    // a resetAtMs rather than anchoring to `timestampMs`, which on the first
+    // post-restart read is the reader's Date.now(), not the record's real
+    // time.
+    const rateLimitResetAtMs =
+      isRateLimit && ownTimestampMs !== undefined
+        ? parseRateLimitResetAtMs(extractTextContent(message), ownTimestampMs)
+        : undefined;
     return {
       type: "assistant",
       role: "assistant",
       ...(stopReason ? { stopReason } : {}),
       hasToolUse: toolUseHints.hasToolUse,
       ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
-      ...(parsed["error"] === "rate_limit" ? { rateLimited: true } : {}),
+      ...(isRateLimit ? { rateLimited: true } : {}),
+      ...(rateLimitResetAtMs !== undefined ? { rateLimitResetAtMs } : {}),
       ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
       ...(typeof message["model"] === "string" && message["model"] !== SYNTHETIC_MODEL
         ? { model: message["model"] }

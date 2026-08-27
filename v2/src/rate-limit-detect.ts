@@ -1,6 +1,8 @@
 export interface RateLimitDetection {
   limited: boolean;
   reason: string;
+  /** Epoch ms the limit resets at, when the source text carries a parseable reset instant. */
+  resetAtMs?: number;
 }
 
 const NOT_LIMITED: RateLimitDetection = { limited: false, reason: "" };
@@ -117,6 +119,66 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
 export interface ClaudeRateLimitRecord {
   type: string;
   rateLimited?: boolean;
+  /** Epoch ms the limit resets at, parsed from the record's own banner text. */
+  rateLimitResetAtMs?: number;
+}
+
+// Matches "resets 7pm (UTC)" / "resets 11:20am (UTC)" (case-insensitive).
+// Timezone must be spelled out as "(UTC)" — anything else (or nothing) is
+// unparseable, since guessing a timezone would risk a wrong expiry.
+const RATE_LIMIT_RESET_RE = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(\s*utc\s*\)/i;
+
+// Parses a claude rate-limit banner's trailing "resets HH[:MM](am|pm) (UTC)"
+// clause into an absolute epoch-ms instant, anchored to the record's own
+// timestamp (never the caller's clock — see claude-jsonl-state.ts's
+// extractRecordTimestampMs). Forward-only: the returned instant is always
+// strictly after `anchorMs`, rolling over to the next day when the banner's
+// clock time has already passed on the anchor's own UTC calendar date. A
+// backward-inclusive match would land the reset in the past at parse time on
+// the reporter's own case (a banner printed just after its own reset hour),
+// which is worse than never expiring at all. Returns `undefined` for any
+// unparseable, out-of-range, or non-UTC form — never a guessed timezone or a
+// fallback expiry.
+export function parseRateLimitResetAtMs(text: string, anchorMs: number): number | undefined {
+  const match = RATE_LIMIT_RESET_RE.exec(text);
+  if (!match) {
+    return undefined;
+  }
+  const hourRaw = Number(match[1]);
+  const minuteRaw = match[2] !== undefined ? Number(match[2]) : 0;
+  const meridiem = (match[3] ?? "").toLowerCase();
+  if (!Number.isFinite(hourRaw) || hourRaw < 1 || hourRaw > 12) {
+    return undefined;
+  }
+  if (!Number.isFinite(minuteRaw) || minuteRaw > 59) {
+    return undefined;
+  }
+  let hour24 = hourRaw % 12;
+  if (meridiem === "pm") {
+    hour24 += 12;
+  }
+  const anchorDate = new Date(anchorMs);
+  let candidate = Date.UTC(
+    anchorDate.getUTCFullYear(),
+    anchorDate.getUTCMonth(),
+    anchorDate.getUTCDate(),
+    hour24,
+    minuteRaw,
+    0,
+    0,
+  );
+  if (candidate <= anchorMs) {
+    candidate += 24 * 60 * 60 * 1000;
+  }
+  return candidate;
+}
+
+// True when `detection` carries a parsed reset instant that has already
+// passed as of `nowMs`. A detection with no `resetAtMs` (no parseable reset
+// text, or the source never carries one, e.g. pane banners) is never
+// expired — that's today's safe, time-blind fallback.
+export function rateLimitExpired(detection: RateLimitDetection, nowMs: number): boolean {
+  return detection.resetAtMs !== undefined && nowMs >= detection.resetAtMs;
 }
 
 // Bookkeeping / pass-through record types Claude Code appends after a turn
@@ -145,7 +207,13 @@ export function detectClaudeRateLimit(
       continue;
     }
     if (record.rateLimited) {
-      return { limited: true, reason: "claude rate_limit" };
+      return {
+        limited: true,
+        reason: "claude rate_limit",
+        ...(record.rateLimitResetAtMs !== undefined
+          ? { resetAtMs: record.rateLimitResetAtMs }
+          : {}),
+      };
     }
     return NOT_LIMITED;
   }

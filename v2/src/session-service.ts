@@ -102,6 +102,7 @@ import {
   detectClaudeCompacting,
   detectClaudeUsageLimitMenu,
   detectCodexMcpPermissionDialog,
+  rateLimitExpired,
   scanTmuxRateLimit,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
@@ -954,6 +955,17 @@ function statusFallbackState(
   if (isStaleParked(session)) return "stale";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
+}
+
+// True only while a reported rate limit is both flagged AND, when it carries
+// a parsed reset instant, not yet past it. A `resetAtMs`-less detection (a
+// pane banner, or a jsonl record whose text/timestamp didn't parse) is never
+// expired — that's today's safe, time-blind fallback. This is the single
+// site classifySessionRecord's state override reads; the raw `rateLimit?.limited`
+// checks elsewhere in that method are deliberately left unexpired (see
+// classifySessionRecord's comments at the pane-banner fallback gates).
+function rateLimitActive(rateLimit: RateLimitDetection | null, nowMs: number): boolean {
+  return rateLimit?.limited === true && !rateLimitExpired(rateLimit, nowMs);
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -14634,7 +14646,7 @@ export class SessionService {
         // scanPane:false dashboard tick's own idle re-read doesn't keep
         // refreshing stabilizeState's hold window against this working
         // transition.
-        if (detectClaudeCompacting(paneText) && !rateLimit?.limited) {
+        if (detectClaudeCompacting(paneText) && !rateLimitActive(rateLimit, Date.now())) {
           state = "working";
           this.claudeCompactingOverrides.set(
             session.id,
@@ -14702,9 +14714,19 @@ export class SessionService {
           rateLimit = tmuxHit;
         }
       }
-      if (rateLimit?.limited) {
+      if (rateLimitActive(rateLimit, Date.now())) {
         state = "rate_limited";
-        classifiedDetail = `State: rate_limited (${rateLimit.reason})`;
+        classifiedDetail = `State: rate_limited (${rateLimit?.reason})`;
+      } else if (rateLimit?.limited) {
+        // The parsed reset instant has passed: leave `state` as the source
+        // above computed it (never force it back to rate_limited), but
+        // record the expiry so session.state.classified reflects it. This
+        // also implicitly blocks the hasServerErrorRecord arm below — a
+        // stale server-error record must not get promoted to an urgent
+        // `error` state just because the transcript tail's rate-limit
+        // record won the tail-walk over it.
+        const resetAtMs = rateLimit.resetAtMs;
+        classifiedDetail = `State: ${state} (rate limit expired${resetAtMs !== undefined ? ` at ${new Date(resetAtMs).toISOString()}` : ""})`;
       } else if (hasServerErrorRecord) {
         state = "error";
         stateSource = "jsonl";
@@ -14733,10 +14755,12 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
-      // Only true when the override above actually applied: a rate_limit
-      // record always wins state, so when that happens this reports false
-      // and updateStateHistory's clear branch drops any stale serverErrorAt
-      // instead of arming it — the two markers stay independently owned.
+      // Only true when the hasServerErrorRecord arm above actually applied: a
+      // live (non-expired) rate_limit record wins state outright, and an
+      // expired one still blocks this arm without winning state itself — in
+      // both cases this reports false and updateStateHistory's clear branch
+      // drops any stale serverErrorAt instead of arming it, so the two
+      // markers stay independently owned.
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
       agentActivityAt,

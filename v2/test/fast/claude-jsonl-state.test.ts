@@ -290,6 +290,63 @@ describe("parseJsonlRecord server_error detection", () => {
   });
 });
 
+// ── parseJsonlRecord rate-limit reset detection ─────────────────────────
+
+describe("parseJsonlRecord rate_limit reset detection", () => {
+  const RATE_LIMIT_LINE_NO_TIMESTAMP = JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    apiErrorStatus: 429,
+    error: "rate_limit",
+    message: {
+      model: "<synthetic>",
+      role: "assistant",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "You've hit your session limit · resets 1pm (UTC)" }],
+    },
+  });
+  const RATE_LIMIT_LINE_WITH_TIMESTAMP = JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    apiErrorStatus: 429,
+    error: "rate_limit",
+    timestamp: "2026-07-12T18:18:45.588Z",
+    message: {
+      model: "<synthetic>",
+      role: "assistant",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "You've hit your session limit · resets 7pm (UTC)" }],
+    },
+  });
+
+  it("leaves rateLimitResetAtMs undefined when the record carries no own timestamp (gated on a literal anchor, DECISION 1)", () => {
+    const record = parseJsonlRecord(RATE_LIMIT_LINE_NO_TIMESTAMP, 0);
+    expect(record?.rateLimited).toBe(true);
+    expect(record?.rateLimitResetAtMs).toBeUndefined();
+  });
+
+  it("anchors the parse to the record's own timestamp when present", () => {
+    const record = parseJsonlRecord(RATE_LIMIT_LINE_WITH_TIMESTAMP, 0);
+    expect(record?.rateLimited).toBe(true);
+    expect(record?.rateLimitResetAtMs).toBe(Date.parse("2026-07-12T19:00:00.000Z"));
+  });
+
+  it("leaves rateLimitResetAtMs undefined on a normal (non-rate-limit) assistant record", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-07-12T18:18:45.588Z",
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "Done." }],
+      },
+    });
+    const record = parseJsonlRecord(line, 0);
+    expect(record?.rateLimited).toBeUndefined();
+    expect(record?.rateLimitResetAtMs).toBeUndefined();
+  });
+});
+
 // ── hasTrailingClaudeServerError ──────────────────────────────────────
 
 describe("hasTrailingClaudeServerError", () => {
@@ -513,7 +570,11 @@ describe("readClaudeJsonlState rate limit detection", () => {
         if (!result) {
           throw new Error("expected fixture result");
         }
-        expect(result.rateLimit).toEqual({ limited: true, reason: "claude rate_limit" });
+        expect(result.rateLimit).toEqual({
+          limited: true,
+          reason: "claude rate_limit",
+          resetAtMs: Date.parse("2026-07-12T19:00:00.000Z"),
+        });
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }
