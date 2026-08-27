@@ -5642,7 +5642,7 @@ projects:
     expect(branchInvalidOutput).toContain(
       'branch "Bad_Branch.Name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
     );
-    expect(outerWrapper).toContain(`--config ${configPath}`);
+    expect(outerWrapper).toContain(`--config '${configPath}'`);
     expect(outerWrapper).not.toContain("spur-isolated-daemon.");
   });
 

@@ -109,7 +109,11 @@ for file_name in ${DIST_FILE_NAMES}; do
   fi
 done
 if [[ "$1" == "$SPUR_TEST_REPO/v2/dist/cli.js" && "\${2:-}" == "--version" ]]; then
-  echo "cli-probe" >> "$SPUR_TEST_LOG"
+  runtime_state=missing
+  if [[ -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
+    runtime_state=present
+  fi
+  echo "cli-probe runtime=$runtime_state" >> "$SPUR_TEST_LOG"
   if [[ "\${SPUR_TEST_CLI_UNLOADABLE:-}" == "1" ]]; then
     exit 1
   fi
@@ -180,7 +184,7 @@ describe("spur-isolated-daemon build guard", () => {
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
       "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
-      "cli-probe",
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -194,7 +198,7 @@ describe("spur-isolated-daemon build guard", () => {
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
       "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
-      "cli-probe",
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -225,7 +229,7 @@ describe("spur-isolated-daemon build guard", () => {
     writeDistFiles(worktree.repoDir);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "cli-probe",
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -246,7 +250,7 @@ describe("spur-isolated-daemon build guard", () => {
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
       "build SPUR_DISABLE_AUTOSTART=1 runtime=missing",
-      "cli-probe",
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -285,7 +289,9 @@ describe("spur-isolated-daemon build guard", () => {
       runIsolatedDaemon(worktree, { SPUR_TEST_CLI_UNLOADABLE: "1" }),
     ).rejects.toBeTruthy();
 
-    expect(readFileSync(worktree.logPath, "utf8").trim().split("\n")).toEqual(["cli-probe"]);
+    expect(readFileSync(worktree.logPath, "utf8").trim().split("\n")).toEqual([
+      "cli-probe runtime=missing",
+    ]);
     expect(existsSync(join(worktree.toolDir, "isolated-env.sh"))).toBe(false);
     expect(existsSync(join(worktree.toolDir, "spur-isolated"))).toBe(false);
     expect(readFileSync(join(worktree.toolDir, "spur"), "utf8")).toBe(HOST_WRAPPER_SOURCE);
