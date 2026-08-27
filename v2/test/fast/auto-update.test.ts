@@ -1,15 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
+import type { WriteAutoUpdateResult } from "../../src/auto-update-config.js";
 import { runAutoUpdateTick, type RunAutoUpdateTickDeps } from "../../src/auto-update.js";
 import type { DeploySwitchResult } from "../../src/deploy-switch.js";
-import type { DeploySwitchState } from "../../src/deploy-switch-state.js";
+import type {
+  DeployFailureKind,
+  DeployInitiator,
+  DeploySwitchState,
+} from "../../src/deploy-switch-state.js";
+import type { UpdateLedger } from "../../src/update-ledger.js";
+
+function ledger(entries: { blocked?: string[]; disarmed?: string[] } = {}): UpdateLedger {
+  const at = "2026-01-01T00:00:00Z";
+  return {
+    blocked: new Map(
+      (entries.blocked ?? []).map((version) => [
+        version,
+        { kind: "blocked", version, failureKind: "rolled_back", at } as const,
+      ]),
+    ),
+    disarmed: new Map(
+      (entries.disarmed ?? []).map((version) => [
+        version,
+        { kind: "disarmed", version, at } as const,
+      ]),
+    ),
+  };
+}
 
 function baseDeps(overrides: Partial<RunAutoUpdateTickDeps> = {}): RunAutoUpdateTickDeps {
   return {
     configPath: "/tmp/spur-config.yaml",
     statePath: "/tmp/spur-deploy-switch.json",
+    ledgerPath: "/tmp/spur-update-ledger.jsonl",
     currentVersion: "1.0.0",
     readFlag: () => ({ autoUpdate: true, error: null }),
     readState: () => null,
+    readLedger: () => ledger(),
+    appendLedger: vi.fn(),
+    disarm: vi.fn((): WriteAutoUpdateResult => ({ ok: true, autoUpdate: false })),
     getReleases: async () => ({
       entries: [{ tag: "1.1.0", publishedAt: "2026-01-01T00:00:00Z" }],
       stale: false,
@@ -30,10 +58,16 @@ function runningState(version: string): DeploySwitchState {
     pid: 1234,
     processStartTime: "100",
     startedAt: "2026-01-01T00:00:00Z",
+    initiator: "auto",
   };
 }
 
-function terminalState(phase: "succeeded" | "failed", version: string): DeploySwitchState {
+function terminalState(
+  phase: "succeeded" | "failed",
+  version: string,
+  failureKind?: DeployFailureKind,
+  initiator: DeployInitiator = "auto",
+): DeploySwitchState {
   return {
     phase,
     version,
@@ -41,6 +75,8 @@ function terminalState(phase: "succeeded" | "failed", version: string): DeploySw
     startedAt: "2026-01-01T00:00:00Z",
     finishedAt: "2026-01-01T00:05:00Z",
     exitCode: phase === "succeeded" ? 0 : 1,
+    initiator,
+    ...(failureKind ? { failureKind } : {}),
   };
 }
 
@@ -123,22 +159,401 @@ describe("runAutoUpdateTick", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
-  it("does not call start when a terminal succeeded record already names the candidate", async () => {
+  it("suppresses a succeeded record and logs the reason", async () => {
     const start = vi.fn();
-    const deps = baseDeps({ readState: () => terminalState("succeeded", "1.1.0"), start });
+    const log = vi.fn();
+    const disarm = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("succeeded", "1.1.0"),
+      start,
+      log,
+      disarm,
+    });
 
     await runAutoUpdateTick(deps);
 
     expect(start).not.toHaveBeenCalled();
+    // A succeeded switch is not a failure: nothing to disarm.
+    expect(disarm).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        // `info`, not `warn`: a suppressed tick took no action, and it repeats
+        // every 5 minutes for as long as this release is the newest one.
+        level: "info",
+        details: {
+          version: "1.1.0",
+          phase: "succeeded",
+          initiator: "auto",
+          reason: "succeeded_record",
+        },
+      }),
+    );
   });
 
-  it("does not call start when a terminal failed record already names the candidate", async () => {
+  it("suppresses rolled_back and logs the reason", async () => {
     const start = vi.fn();
+    const log = vi.fn();
+    // The flag is on again with the record still standing, i.e. the operator
+    // hand-edited the config after the one disarm this version ever gets.
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "rolled_back"),
+      readLedger: () => ledger({ disarmed: ["1.1.0"] }),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "info",
+        details: {
+          version: "1.1.0",
+          phase: "failed",
+          failureKind: "rolled_back",
+          initiator: "auto",
+          reason: "no_retry_kind",
+        },
+      }),
+    );
+  });
+
+  it("never retries an interrupted_unknown record", async () => {
+    const start = vi.fn();
+    const log = vi.fn();
+    const disarm = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "interrupted_unknown", "manual"),
+      start,
+      log,
+      disarm,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(disarm).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "info",
+        details: {
+          version: "1.1.0",
+          phase: "failed",
+          failureKind: "interrupted_unknown",
+          initiator: "manual",
+          reason: "no_retry_kind",
+        },
+      }),
+    );
+  });
+
+  it("suppresses install_unhealthy and logs the reason", async () => {
+    const start = vi.fn();
+    const log = vi.fn();
+    const disarm = vi.fn();
+    // `spur update` rolled this version back and left `autoUpdate` alone —
+    // there was nothing to disable on the manual path.
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_unhealthy", "manual"),
+      start,
+      log,
+      disarm,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(disarm).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "info",
+        details: expect.objectContaining({
+          failureKind: "install_unhealthy",
+          initiator: "manual",
+          reason: "no_retry_kind",
+        }),
+      }),
+    );
+  });
+
+  it("disarms after an auto-initiated rollback and never fetches releases", async () => {
+    const start = vi.fn();
+    const log = vi.fn();
+    const appendLedger = vi.fn();
+    const disarm = vi.fn((): WriteAutoUpdateResult => ({ ok: true, autoUpdate: false }));
+    const getReleases = vi.fn(async () => ({ entries: [], stale: false, error: null }));
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "rolled_back"),
+      appendLedger,
+      disarm,
+      start,
+      log,
+      getReleases,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(disarm).toHaveBeenCalledTimes(1);
+    expect(disarm).toHaveBeenCalledWith("/tmp/spur-config.yaml");
+    expect(getReleases).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(appendLedger).toHaveBeenCalledTimes(1);
+    expect(appendLedger).toHaveBeenCalledWith(
+      "/tmp/spur-update-ledger.jsonl",
+      expect.objectContaining({ kind: "disarmed", version: "1.1.0" }),
+    );
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.paused",
+      expect.objectContaining({
+        level: "warn",
+        details: { version: "1.1.0", failureKind: "rolled_back" },
+      }),
+    );
+  });
+
+  it("disarms for install_unhealthy too", async () => {
+    const disarm = vi.fn((): WriteAutoUpdateResult => ({ ok: true, autoUpdate: false }));
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_unhealthy"),
+      disarm,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(disarm).toHaveBeenCalledTimes(1);
+  });
+
+  it("disarms after an interrupted auto attempt", async () => {
+    const disarm = vi.fn((): WriteAutoUpdateResult => ({ ok: true, autoUpdate: false }));
+    const appendLedger = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "interrupted_unknown"),
+      disarm,
+      appendLedger,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(disarm).toHaveBeenCalledTimes(1);
+    expect(appendLedger).toHaveBeenCalledWith(
+      "/tmp/spur-update-ledger.jsonl",
+      expect.objectContaining({ kind: "disarmed", version: "1.1.0" }),
+    );
+  });
+
+  it("does not disarm for a manual-initiated rollback", async () => {
+    const disarm = vi.fn();
+    const appendLedger = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "rolled_back", "manual"),
+      disarm,
+      appendLedger,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(disarm).not.toHaveBeenCalled();
+    expect(appendLedger).not.toHaveBeenCalled();
+  });
+
+  it("does not disarm for a kind that installed nothing", async () => {
+    const disarm = vi.fn();
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_failed"),
+      disarm,
+      start,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(disarm).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledWith("1.1.0");
+  });
+
+  it("does not re-disarm a version already marked disarmed", async () => {
+    const disarm = vi.fn();
+    const appendLedger = vi.fn();
+    // Hand-edited back to `autoUpdate: true` with the record untouched: the
+    // marker is the only thing that stops the daemon rewriting the file on
+    // every tick, forever.
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "rolled_back"),
+      readLedger: () => ledger({ disarmed: ["1.1.0"] }),
+      disarm,
+      appendLedger,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(disarm).not.toHaveBeenCalled();
+    expect(appendLedger).not.toHaveBeenCalled();
+  });
+
+  it("appends no marker and logs disarm_failed when the config write fails", async () => {
+    const appendLedger = vi.fn();
+    const log = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "rolled_back"),
+      disarm: () => ({ ok: false, reason: "conflict", message: "config changed on disk" }),
+      appendLedger,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(appendLedger).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.disarm_failed",
+      expect.objectContaining({
+        level: "warn",
+        details: { reason: "conflict", message: "config changed on disk" },
+      }),
+    );
+  });
+
+  it("suppresses a blocked version with no matching record", async () => {
+    const start = vi.fn();
+    const log = vi.fn<RunAutoUpdateTickDeps["log"]>();
+    // The record behind the notice was cleared by a Switch or by re-arming
+    // AUTO; the ledger is what keeps the version off the auto path.
+    const deps = baseDeps({
+      readState: () => null,
+      readLedger: () => ledger({ blocked: ["1.1.0"] }),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "info",
+        details: { version: "1.1.0", reason: "blocked_version" },
+      }),
+    );
+    // A tick that suppressed the newest release repeats every 5 minutes for as
+    // long as that release stands: nothing on it may reach `warn`.
+    expect(log.mock.calls.map(([, entry]) => entry.level)).toEqual(["info"]);
+  });
+
+  it("does not fall back to an older unblocked release when the newest is blocked", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
+    const log = vi.fn();
+    // 1.1.0 is unblocked and newer than 1.0.0, so a fallback would install it.
+    // By design there is none: the auto path only ever considers the newest
+    // release, and sliding a host onto an older version than the one the
+    // operator reads as `latest` is worse than stopping.
+    const deps = baseDeps({
+      getReleases: async () => ({
+        entries: [
+          { tag: "1.2.0", publishedAt: "2026-02-01T00:00:00Z" },
+          { tag: "1.1.0", publishedAt: "2026-01-01T00:00:00Z" },
+        ],
+        stale: false,
+        error: null,
+      }),
+      readLedger: () => ledger({ blocked: ["1.2.0"] }),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        details: { version: "1.2.0", reason: "blocked_version" },
+      }),
+    );
+  });
+
+  it("still starts a newer candidate that the ledger does not name", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
+    const deps = baseDeps({
+      readLedger: () => ledger({ blocked: ["1.0.9"], disarmed: ["1.0.9"] }),
+      start,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).toHaveBeenCalledWith("1.1.0");
+  });
+
+  it("retries a failed install_failed record", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_failed"),
+      start,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith("1.1.0");
+  });
+
+  it("retries a failed record with no failureKind", async () => {
+    const start = vi.fn(
+      async (version: string): Promise<DeploySwitchResult> => ({ status: "accepted", version }),
+    );
     const deps = baseDeps({ readState: () => terminalState("failed", "1.1.0"), start });
 
     await runAutoUpdateTick(deps);
 
-    expect(start).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith("1.1.0");
+  });
+
+  it("logs retry before starting a previously failed candidate", async () => {
+    const calls: string[] = [];
+    const start = vi.fn(async (version: string): Promise<DeploySwitchResult> => {
+      calls.push(`start:${version}`);
+      return { status: "accepted", version };
+    });
+    const log = vi.fn((event: string) => {
+      calls.push(`log:${event}`);
+    });
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "install_failed"),
+      start,
+      log,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.retry",
+      expect.objectContaining({
+        level: "info",
+        details: {
+          version: "1.1.0",
+          failureKind: "install_failed",
+          previousExitCode: 1,
+        },
+      }),
+    );
+    expect(calls).toEqual([
+      "log:daemon.auto_update.retry",
+      "start:1.1.0",
+      "log:daemon.auto_update.started",
+    ]);
   });
 
   it("does not suppress when a terminal record names a different version", async () => {
