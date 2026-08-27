@@ -3086,6 +3086,148 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByText("agent-history-first.jsonl")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /system \(/i })).toHaveCount(0);
   });
+
+  test("switches the artifacts panel between grid and list and persists the mode", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-mode",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "trace.log",
+          name: "trace.log",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T09:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByAltText("shot.png")).toBeVisible();
+    await expect(page.getByRole("table")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "List" }).click();
+    await expect(page.getByRole("table")).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Name" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Size" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Type" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Updated" })).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByRole("table")).toBeVisible();
+  });
+
+  test("sorts the artifact list by every column", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("spur:artifact-view-mode", "list");
+    });
+    const session = makeWorkingSession({
+      id: "detail-s4b-sort",
+      artifacts: [
+        {
+          id: "beta.txt",
+          name: "beta.txt",
+          size: 300,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T09:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+        {
+          id: "alpha.txt",
+          name: "alpha.txt",
+          size: 100,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T11:00:00.000Z",
+          updatedAt: "2026-04-02T11:00:00.000Z",
+        },
+        {
+          id: "gamma.png",
+          name: "gamma.png",
+          size: 200,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByRole("table")).toBeVisible();
+
+    const rowName = (index: number) =>
+      page
+        .locator("tbody tr td")
+        .nth(index * 5)
+        .innerText();
+
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Name" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "beta.txt", "gamma.png"]);
+
+    await page.getByRole("button", { name: "Name" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["gamma.png", "beta.txt", "alpha.txt"]);
+
+    await page.reload();
+    await expect(page.getByRole("table")).toBeVisible();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+  });
+
+  test("opens the same artifact viewer from a list row", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("spur:artifact-view-mode", "list");
+    });
+    const session = makeWorkingSession({
+      id: "detail-s4b-list-view",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByRole("table")).toBeVisible();
+
+    await page.getByRole("button", { name: "Preview shot.png" }).click();
+    await expect(page.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeVisible();
+  });
 });
 
 // S5: Runtime sidebar
