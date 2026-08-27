@@ -69,7 +69,10 @@ describe("todo error branches log http.request.failed", () => {
       throw new TodoOpenWorkError([{ sessionId, openItemIds: ["item-1"], heldItemIds: [] }]);
     };
     try {
-      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       runningServers.push(server);
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
         method: "POST",
@@ -104,7 +107,10 @@ describe("todo error branches log http.request.failed", () => {
       throw new TodoEmptyLedgerError([sessionId]);
     };
     try {
-      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       runningServers.push(server);
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
         method: "POST",
@@ -164,7 +170,10 @@ describe("todo error branches log http.request.failed", () => {
       throw new TodoTransitionConflictError(sessionId, "item-1", "item already resolved");
     };
     try {
-      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       runningServers.push(server);
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/todo`, {
         method: "POST",
@@ -199,7 +208,10 @@ describe("todo error branches log http.request.failed", () => {
       throw new TodoLedgerCorruptError(sessionId, "unparsable line", 3);
     };
     try {
-      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       runningServers.push(server);
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/todo`, {
         method: "POST",
