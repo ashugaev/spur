@@ -641,6 +641,86 @@ test.describe("Spur ToDo audit", () => {
     ).toBeVisible();
     await page.screenshot({ path: join(screenshotDir, "todo-resolved.png"), fullPage: true });
   });
+
+  test("collapsed ToDo item text clips to one line and expands without horizontal overflow", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const session = makeCompletedSession({ id: "detail-todo-overflow" });
+    await mockSessionDetail(page, session);
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    await page.route(`**/api/sessions/${session.id}/todo`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          revision: "event-1",
+          status: "active",
+          counts: { total: 1, open: 1, held: 0, completed: 0, cancelled: 0 },
+          items: [
+            {
+              id: "item-overflow1",
+              text: longToken,
+              status: "open",
+              added: {
+                reason: "Session objective requires it",
+                actor: { kind: "agent", agent: "codex", sessionId: session.id },
+                at: "2026-08-20T10:00:00.000Z",
+              },
+              history: [
+                {
+                  eventId: "event-1",
+                  type: "item_added",
+                  reason: "Session objective requires it",
+                  actor: { kind: "agent", agent: "codex", sessionId: session.id },
+                  at: "2026-08-20T10:00:00.000Z",
+                },
+              ],
+            },
+          ],
+          finishOverrides: [],
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    const toggle = page.getByRole("button", { name: new RegExp(longToken.slice(0, 30)) });
+    await expect(toggle).toBeVisible();
+    const textSpan = toggle.getByText(longToken, { exact: true });
+    await expect(textSpan).toHaveCount(1);
+
+    const collapsed = await textSpan.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      height: element.getBoundingClientRect().height,
+    }));
+    expect(collapsed.scrollWidth).toBeGreaterThan(collapsed.clientWidth);
+
+    const collapsedButtonOverflow = await toggle.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    expect(collapsedButtonOverflow.scrollWidth).toBe(collapsedButtonOverflow.clientWidth);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    const expanded = await textSpan.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      height: element.getBoundingClientRect().height,
+    }));
+    // Expanded text must no longer clip horizontally, and must grow tall
+    // enough to hold more than a single line of the collapsed height.
+    expect(expanded.scrollWidth).toBeLessThanOrEqual(expanded.clientWidth + 1);
+    expect(expanded.height).toBeGreaterThan(collapsed.height * 1.5);
+
+    const expandedButtonOverflow = await toggle.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    expect(expandedButtonOverflow.scrollWidth).toBe(expandedButtonOverflow.clientWidth);
+  });
 });
 
 // S2: Actions bar
