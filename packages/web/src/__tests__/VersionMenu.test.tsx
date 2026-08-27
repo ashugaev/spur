@@ -418,7 +418,7 @@ describe("VersionMenu", () => {
       });
     });
 
-    it("rejects a payload whose failureKind is not one of the two kinds", async () => {
+    it("rejects a payload whose failureKind is not one of the four kinds", async () => {
       mockWithFailure({ autoUpdate: false, failureKind: "install_failed" });
 
       render(<VersionMenu />);
@@ -431,6 +431,46 @@ describe("VersionMenu", () => {
       expect(screen.queryByTestId("version-rollback-icon")).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: /Show Spur version information/ }));
       expect(screen.queryByTestId("version-update-failure")).not.toBeInTheDocument();
+    });
+
+    it("renders an interrupted_unknown payload instead of rejecting it (A10)", async () => {
+      // An unrecognised failureKind used to fail isRuntimeVersionsResponse and
+      // throw, killing the version label and the Auto checkbox along with the
+      // notice. This kind must not do that.
+      mockWithFailure({ autoUpdate: false, failureKind: "interrupted_unknown" });
+
+      render(<VersionMenu />);
+
+      const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
+      expect(await screen.findByText("1.4.2")).toBeInTheDocument();
+
+      fireEvent.click(trigger);
+      const notice = await screen.findByTestId("version-update-failure");
+      expect(notice.textContent).toBe(
+        "Update to 1.5.0 was interrupted, the host may have been changed, auto-update is suspended",
+      );
+      expect(screen.getByRole("checkbox", { name: "Auto update" })).toBeInTheDocument();
+    });
+
+    it("asks for a restart when an install succeeded but the services were not restarted (A9)", async () => {
+      mockWithFailure({ autoUpdate: true, failureKind: "restart_skipped" });
+
+      render(<VersionMenu />);
+
+      const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
+      await waitFor(() => {
+        expect(screen.getByTestId("version-rollback-icon")).toBeInTheDocument();
+      });
+      expect(trigger).toHaveAccessibleName(
+        "Show Spur version information, update installed, restart required",
+      );
+
+      fireEvent.click(trigger);
+      const notice = await screen.findByTestId("version-update-failure");
+      expect(notice.textContent).toBe(
+        "Update to 1.5.0 installed but the services were not restarted — restart Spur to finish",
+      );
+      expect(screen.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
     });
 
     it("picks up a daemon-side disarm and the notice on the next poll, with no reload", async () => {
@@ -508,6 +548,42 @@ describe("VersionMenu", () => {
       });
       expect(screen.queryByTestId("version-rollback-icon")).not.toBeInTheDocument();
       expect(screen.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
+      expect(versionsFetchCount).toBe(1);
+    });
+
+    it("does not drop a restart_skipped notice when Auto is re-enabled, unlike a rollback notice", async () => {
+      // Re-enabling Auto only clears a `failed` record server-side
+      // (clearFailedDeploySwitchRecord never touches a `succeeded` one); a
+      // restart_skipped notice rides a `succeeded` record and must survive
+      // the optimistic write, or it flickers off until the next 60s poll.
+      let versionsFetchCount = 0;
+      mockFetch({
+        info: { payload: { version: "1.4.2" } },
+        versions: {
+          payload: {
+            current: "1.4.2",
+            autoUpdate: false,
+            available: AVAILABLE,
+            updateFailure: { version: "1.5.0", failureKind: "restart_skipped", initiator: "auto" },
+          },
+        },
+        autoUpdate: { payload: { autoUpdate: true } },
+        onVersionsFetch: () => {
+          versionsFetchCount += 1;
+        },
+      });
+
+      render(<VersionMenu />);
+      fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
+      await screen.findByTestId("version-update-failure");
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto update" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
+      });
+      expect(screen.getByTestId("version-update-failure")).toBeInTheDocument();
+      expect(screen.getByTestId("version-rollback-icon")).toBeInTheDocument();
       expect(versionsFetchCount).toBe(1);
     });
 

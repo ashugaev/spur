@@ -221,6 +221,36 @@ describe("runAutoUpdateTick", () => {
     );
   });
 
+  it("never retries an interrupted_unknown record", async () => {
+    const start = vi.fn();
+    const log = vi.fn();
+    const disarm = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "interrupted_unknown", "manual"),
+      start,
+      log,
+      disarm,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(disarm).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        level: "info",
+        details: {
+          version: "1.1.0",
+          phase: "failed",
+          failureKind: "interrupted_unknown",
+          initiator: "manual",
+          reason: "no_retry_kind",
+        },
+      }),
+    );
+  });
+
   it("suppresses install_unhealthy and logs the reason", async () => {
     const start = vi.fn();
     const log = vi.fn();
@@ -296,6 +326,24 @@ describe("runAutoUpdateTick", () => {
     await runAutoUpdateTick(deps);
 
     expect(disarm).toHaveBeenCalledTimes(1);
+  });
+
+  it("disarms after an interrupted auto attempt", async () => {
+    const disarm = vi.fn((): WriteAutoUpdateResult => ({ ok: true, autoUpdate: false }));
+    const appendLedger = vi.fn();
+    const deps = baseDeps({
+      readState: () => terminalState("failed", "1.1.0", "interrupted_unknown"),
+      disarm,
+      appendLedger,
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(disarm).toHaveBeenCalledTimes(1);
+    expect(appendLedger).toHaveBeenCalledWith(
+      "/tmp/spur-update-ledger.jsonl",
+      expect.objectContaining({ kind: "disarmed", version: "1.1.0" }),
+    );
   });
 
   it("does not disarm for a manual-initiated rollback", async () => {

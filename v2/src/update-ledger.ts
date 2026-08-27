@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { isNoRetryFailureKind, type NoRetryFailureKind } from "./deploy-switch-state.js";
+import { isHostChangedFailureKind, type HostChangedFailureKind } from "./deploy-switch-state.js";
 import { iterLiveLines, parseJsonLine } from "./jsonl-log-io.js";
 
 // Append-only policy memory for the update path, written by three processes
@@ -19,7 +19,7 @@ const UPDATE_LEDGER_FILE = "update-ledger.jsonl";
 export interface BlockedLedgerEntry {
   kind: "blocked";
   version: string;
-  failureKind: NoRetryFailureKind;
+  failureKind: HostChangedFailureKind;
   at: string;
 }
 
@@ -51,15 +51,16 @@ export function appendUpdateLedgerLine(path: string, entry: UpdateLedgerEntry): 
 // `parseJsonLine` casts without validating, so admit a line only when every
 // field of the entry type is there: a truncated or corrupt line must never
 // enter the never-retry set nor fake a disarm. `at` is checked as a parseable
-// date and a `blocked` line's `failureKind` against the same predicate the tick
-// asks of the status record, so a garbage kind cannot block a version.
+// date and a `blocked` line's `failureKind` against the host-changed subset,
+// narrower than what the tick asks of the status record: interrupted_unknown
+// never installed provably, so it must never permanently block a version.
 function isLedgerLine(value: unknown): value is UpdateLedgerEntry {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const line = value as Record<string, unknown>;
   if (typeof line.version !== "string" || line.version.length === 0) return false;
   if (typeof line.at !== "string" || Number.isNaN(Date.parse(line.at))) return false;
   if (line.kind === "disarmed") return true;
-  return line.kind === "blocked" && isNoRetryFailureKind(line.failureKind);
+  return line.kind === "blocked" && isHostChangedFailureKind(line.failureKind);
 }
 
 export function readUpdateLedger(path: string): UpdateLedger {

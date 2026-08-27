@@ -28,10 +28,20 @@ interface ReleaseEntry {
   publishedAt: string;
 }
 
-// Present while the daemon holds a failed switch record whose recorded kind
-// says the version installed and left the host changed. Cleared server-side by
-// the operator acting on the update path — re-arming Auto, or any Switch.
-type UpdateFailureKind = "rolled_back" | "install_unhealthy";
+// Present while the daemon holds a record the operator must see:
+//   rolled_back/install_unhealthy — a failed switch that changed the host.
+//   interrupted_unknown           — a failed switch that died unattributed;
+//                                   whether it changed the host is unknown.
+// The above three clear server-side by the operator acting on the update
+// path — re-arming Auto, or any Switch.
+//   restart_skipped                — a SUCCEEDED switch that installed but
+//                                   could not restart the services. Clears on
+//                                   its own once the running version matches.
+type UpdateFailureKind =
+  | "rolled_back"
+  | "install_unhealthy"
+  | "interrupted_unknown"
+  | "restart_skipped";
 
 interface UpdateFailure {
   version: string;
@@ -78,7 +88,10 @@ function isUpdateFailure(value: unknown): value is UpdateFailure {
   const failure = value as { version: unknown; failureKind: unknown; initiator: unknown };
   return (
     typeof failure.version === "string" &&
-    (failure.failureKind === "rolled_back" || failure.failureKind === "install_unhealthy") &&
+    (failure.failureKind === "rolled_back" ||
+      failure.failureKind === "install_unhealthy" ||
+      failure.failureKind === "interrupted_unknown" ||
+      failure.failureKind === "restart_skipped") &&
     (failure.initiator === "auto" || failure.initiator === "manual")
   );
 }
@@ -107,10 +120,15 @@ function updateSuspended(failure: UpdateFailure, autoUpdateOn: boolean): boolean
 }
 
 function updateFailureMessage(failure: UpdateFailure, autoUpdateOn: boolean): string {
+  if (failure.failureKind === "restart_skipped") {
+    return `Update to ${failure.version} installed but the services were not restarted — restart Spur to finish`;
+  }
   const outcome =
     failure.failureKind === "rolled_back"
       ? `Update to ${failure.version} failed, an automatic rollback happened`
-      : `Update to ${failure.version} failed and was not rolled back`;
+      : failure.failureKind === "install_unhealthy"
+        ? `Update to ${failure.version} failed and was not rolled back`
+        : `Update to ${failure.version} was interrupted, the host may have been changed`;
   return updateSuspended(failure, autoUpdateOn) ? `${outcome}, auto-update is suspended` : outcome;
 }
 
@@ -249,9 +267,15 @@ export function VersionMenu() {
           ? {
               ...old,
               autoUpdate: result.autoUpdate,
-              // Re-arming is the operator answering the rollback, and the
-              // daemon clears the record on that same request.
-              ...(result.autoUpdate ? { updateFailure: undefined } : {}),
+              // Re-arming is the operator answering a failed record, and the
+              // daemon clears it on that same request — but only a `failed`
+              // record (clearFailedDeploySwitchRecord never touches a
+              // `succeeded` one). A restart_skipped notice rides a `succeeded`
+              // record, so it survives this write and must stay on screen,
+              // not flicker off until the next 60s poll brings it back.
+              ...(result.autoUpdate && old.updateFailure?.failureKind !== "restart_skipped"
+                ? { updateFailure: undefined }
+                : {}),
             }
           : old,
       );
@@ -317,9 +341,11 @@ export function VersionMenu() {
         aria-haspopup="true"
         aria-label={`Show Spur version information${
           updateFailure
-            ? updateSuspended(updateFailure, autoUpdateOn)
-              ? ", update failed, auto-update is suspended"
-              : ", update failed"
+            ? updateFailure.failureKind === "restart_skipped"
+              ? ", update installed, restart required"
+              : updateSuspended(updateFailure, autoUpdateOn)
+                ? ", update failed, auto-update is suspended"
+                : ", update failed"
             : severity === "major"
               ? ", major update available"
               : severity === "update"

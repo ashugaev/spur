@@ -8,7 +8,7 @@ import { assertConfigMayUseProdSlot } from "./config.js";
 import {
   clearFailedDeploySwitchRecord,
   deploySwitchStatePath,
-  readRollbackNotice,
+  readUpdateNotice,
   reconcileDeploySwitchState,
 } from "./deploy-switch-state.js";
 import { startDeploySwitch } from "./deploy-switch.js";
@@ -769,13 +769,14 @@ export async function startServer(
             message: autoUpdateFlag.error,
           });
         }
-        // The operator's rollback notice rides the same payload as the flag,
-        // so an unchecked box and the notice can never disagree. Read, never
+        // The operator's update notice rides the same payload as the flag, so
+        // an unchecked box and the notice can never disagree. Read, never
         // reconciled: a polled GET writes nothing to disk, and reconciliation
         // adds no `failureKind` anyway.
-        const updateFailure = readRollbackNotice(switchStatePath);
+        const current = getVersion();
+        const updateFailure = readUpdateNotice(switchStatePath, current);
         sendJson(response, 200, {
-          current: getVersion(),
+          current,
           available: releases.entries,
           autoUpdate: autoUpdateFlag.autoUpdate,
           ...(releases.stale ? { stale: true } : {}),

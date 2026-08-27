@@ -7,6 +7,7 @@ import {
   clearFailedDeploySwitchRecord,
   readDeploySwitchState,
   readProcessStartTime,
+  readUpdateNotice,
   reconcileDeploySwitchState,
   writeDeploySwitchState,
   type DeploySwitchState,
@@ -52,7 +53,14 @@ describe("deploy switch state", () => {
       initiator: "auto",
     });
     expect(reconcileDeploySwitchState(path)).toEqual(
-      expect.objectContaining({ phase: "failed", exitCode: -1, initiator: "auto" }),
+      expect.objectContaining({
+        phase: "failed",
+        exitCode: -1,
+        initiator: "auto",
+        // A4: the run's trap never got to name what happened, so the record
+        // itself, not the exit code, must say "unknown".
+        failureKind: "interrupted_unknown",
+      }),
     );
   });
 
@@ -71,7 +79,7 @@ describe("deploy switch state", () => {
     expect(readDeploySwitchState(path)).toBeNull();
   });
 
-  it("rejects a record whose failureKind is not one of the three kinds", async () => {
+  it("rejects a record whose failureKind is not one of the four kinds", async () => {
     const path = await newStatePath();
     const record = { ...TERMINAL, initiator: "auto", failureKind: "something_else" };
     await writeFile(path, `${JSON.stringify(record)}\n`, "utf8");
@@ -89,6 +97,38 @@ describe("deploy switch state", () => {
       expect(existsSync(path)).toBe(false);
       expect(readDeploySwitchState(path)).toBeNull();
     }
+  });
+
+  it("clears an interrupted_unknown record", async () => {
+    const path = await newStatePath();
+    writeDeploySwitchState(path, {
+      ...TERMINAL,
+      initiator: "auto",
+      failureKind: "interrupted_unknown",
+    });
+
+    clearFailedDeploySwitchRecord(path);
+
+    expect(existsSync(path)).toBe(false);
+    expect(readDeploySwitchState(path)).toBeNull();
+  });
+
+  it("leaves a restart-skipped success in place", async () => {
+    const path = await newStatePath();
+    writeDeploySwitchState(path, {
+      ...TERMINAL,
+      phase: "succeeded",
+      exitCode: 0,
+      initiator: "auto",
+      outcome: "restart_skipped",
+    });
+
+    clearFailedDeploySwitchRecord(path);
+
+    expect(existsSync(path)).toBe(true);
+    expect(readDeploySwitchState(path)).toEqual(
+      expect.objectContaining({ phase: "succeeded", outcome: "restart_skipped" }),
+    );
   });
 
   it("leaves every record the notice is not derived from in place", async () => {
@@ -131,5 +171,46 @@ describe("deploy switch state", () => {
 
     expect(() => clearFailedDeploySwitchRecord(path)).not.toThrow();
     expect(existsSync(path)).toBe(false);
+  });
+
+  it("raises a rollback notice unchanged by the currentVersion argument", async () => {
+    const path = await newStatePath();
+    writeDeploySwitchState(path, { ...TERMINAL, initiator: "auto", failureKind: "rolled_back" });
+
+    expect(readUpdateNotice(path, "9.9.9")).toEqual({
+      version: TERMINAL.version,
+      failureKind: "rolled_back",
+      initiator: "auto",
+    });
+  });
+
+  it("raises a restart_skipped notice only while the running version differs", async () => {
+    const path = await newStatePath();
+    writeDeploySwitchState(path, {
+      ...TERMINAL,
+      phase: "succeeded",
+      exitCode: 0,
+      initiator: "auto",
+      outcome: "restart_skipped",
+    });
+
+    expect(readUpdateNotice(path, "0.1.0")).toEqual({
+      version: TERMINAL.version,
+      failureKind: "restart_skipped",
+      initiator: "auto",
+    });
+    expect(readUpdateNotice(path, TERMINAL.version)).toBeNull();
+  });
+
+  it("raises no notice for a succeeded record without a restart_skipped outcome", async () => {
+    const path = await newStatePath();
+    writeDeploySwitchState(path, {
+      ...TERMINAL,
+      phase: "succeeded",
+      exitCode: 0,
+      initiator: "auto",
+    });
+
+    expect(readUpdateNotice(path, "0.1.0")).toBeNull();
   });
 });

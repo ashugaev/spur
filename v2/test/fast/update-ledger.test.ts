@@ -111,10 +111,13 @@ describe("update ledger", () => {
         '{"kind":"blocked","version":"","failureKind":"rolled_back","at":"2026-08-24T15:17:02Z"}',
         // A kind this module does not know, every other field valid.
         '{"kind":"unblocked","version":"9.9.9","failureKind":"rolled_back","at":"2026-08-24T15:17:02Z"}',
-        // `blocked` lines: no failureKind, a retryable one, and garbage.
+        // `blocked` lines: no failureKind, a retryable one, garbage, and
+        // interrupted_unknown — never auto-retried, but never provably
+        // host-changed either, so it must never block a version.
         '{"kind":"blocked","version":"9.9.9","at":"2026-08-24T15:17:02Z"}',
         '{"kind":"blocked","version":"9.9.9","failureKind":"install_failed","at":"2026-08-24T15:17:02Z"}',
         '{"kind":"blocked","version":"9.9.9","failureKind":"nonsense","at":"2026-08-24T15:17:02Z"}',
+        '{"kind":"blocked","version":"9.9.9","failureKind":"interrupted_unknown","at":"2026-08-24T15:17:02Z"}',
         // `at` missing, unparseable, empty, and not a string.
         '{"kind":"disarmed","version":"9.9.9"}',
         '{"kind":"disarmed","version":"9.9.9","at":"not-a-date"}',

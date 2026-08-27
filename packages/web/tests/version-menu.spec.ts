@@ -9,7 +9,7 @@ interface VersionsFixture {
   available: Array<{ tag: string; publishedAt: string }>;
   updateFailure?: {
     version: string;
-    failureKind: "rolled_back" | "install_unhealthy";
+    failureKind: "rolled_back" | "install_unhealthy" | "interrupted_unknown" | "restart_skipped";
     initiator: "auto" | "manual";
   };
 }
@@ -253,6 +253,36 @@ test.describe("Version menu Auto checkbox", () => {
     if (!noticeBox || !headerBox) throw new Error("unreachable");
     expect(noticeBox.y).toBeLessThan(headerBox.y);
     await expect(checkbox).not.toBeChecked();
+  });
+
+  test("an installed-but-not-restarted update asks for a restart", async ({ page }) => {
+    await mockSessions(page, [], DEFAULT_PROJECTS);
+    await mockVersionMenu(page, {
+      current: "1.4.2",
+      autoUpdate: true,
+      available: [
+        { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+        { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+      ],
+      updateFailure: { version: "1.5.0", failureKind: "restart_skipped", initiator: "auto" },
+    });
+
+    await page.goto("/");
+
+    const glyph = page.getByTestId("version-rollback-icon");
+    await expect(glyph).toBeVisible();
+    await expect(page.getByTestId("version-alert-icon")).toHaveCount(0);
+
+    await page
+      .getByRole("button", {
+        name: "Show Spur version information, update installed, restart required",
+      })
+      .click();
+    const notice = page.getByTestId("version-update-failure");
+    await expect(notice).toHaveText(
+      "Update to 1.5.0 installed but the services were not restarted — restart Spur to finish",
+    );
+    await expect(page.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
   });
 
   test("re-enabling Auto clears the notice", async ({ page }) => {

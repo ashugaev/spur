@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
 import { startServer } from "../../src/server.js";
+import { getVersion } from "../../src/version.js";
 import { findFreePort } from "../helpers/common.js";
 
 interface DeployVersionsResponse {
@@ -253,6 +254,47 @@ describe("GET /deploy/versions", () => {
       expect(noKind.updateFailure).toBeUndefined();
       expect(succeeded.updateFailure).toBeUndefined();
       expect(absent.updateFailure).toBeUndefined();
+    });
+
+    it("names the version and kind for an interrupted, unattributed run", async () => {
+      const body = await readVersions({
+        ...TERMINAL,
+        phase: "failed",
+        failureKind: "interrupted_unknown",
+      });
+
+      expect(body.updateFailure).toEqual({
+        version: "0.67.2",
+        failureKind: "interrupted_unknown",
+        initiator: "auto",
+      });
+    });
+
+    it("raises restart_skipped for a succeeded install newer than the running version", async () => {
+      const body = await readVersions({
+        ...TERMINAL,
+        phase: "succeeded",
+        exitCode: 0,
+        outcome: "restart_skipped",
+      });
+
+      expect(body.updateFailure).toEqual({
+        version: "0.67.2",
+        failureKind: "restart_skipped",
+        initiator: "auto",
+      });
+    });
+
+    it("stays absent for restart_skipped once the running version matches", async () => {
+      const body = await readVersions({
+        ...TERMINAL,
+        version: getVersion(),
+        phase: "succeeded",
+        exitCode: 0,
+        outcome: "restart_skipped",
+      });
+
+      expect(body.updateFailure).toBeUndefined();
     });
 
     it("stays absent while a switch is running, and the GET writes nothing", async () => {
