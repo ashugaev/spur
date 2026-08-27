@@ -4,10 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
-    <title>Spur — run Claude, Codex and Cursor agents in tmux</title>
+    <title>Spur — reach your Claude, Codex and Cursor agents from any device</title>
     <meta
       name="description"
-      content="Open-source local daemon. Runs claude, codex, cursor and opencode as tmux sessions, one git worktree each. They survive a closed laptop. One mobile dashboard."
+      content="Open-source local daemon. Runs claude, codex, cursor and opencode as tmux sessions on your own machine, one git worktree each. Drive every one from your phone, tablet or any browser."
     />
     <link rel="canonical" href="https://spur.dev/" />
     <meta name="theme-color" content="#0d0d0e" />
@@ -16,24 +16,21 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Spur" />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:title" content="Spur — close the laptop, the agents keep working" />
+    <meta property="og:title" content="Spur — agents on your box, control in your pocket" />
     <meta
       property="og:description"
-      content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions, one git worktree each. Survives a closed lid and a reboot. One dashboard, any device."
+      content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions on your own machine. Dashboard, real terminal and Telegram reach them from any device."
     />
     <meta property="og:url" content="https://spur.dev/" />
     <meta property="og:image" content="https://spur.dev/og.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta
-      property="og:image:alt"
-      content="Spur — one dashboard listing four AI coding agents running in tmux"
-    />
+    <meta property="og:image:alt" content="Spur — agents on your box, control in your pocket" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Spur — close the laptop, the agents keep working" />
+    <meta name="twitter:title" content="Spur — agents on your box, control in your pocket" />
     <meta
       name="twitter:description"
-      content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions, one git worktree each. One dashboard, any device."
+      content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions on your own machine. Reach them from any device."
     />
     <meta name="twitter:image" content="https://spur.dev/og.png" />
 
@@ -175,9 +172,10 @@
         --bg: #0d0d0e;
         --surface: rgba(17, 17, 18, 0.8);
         --term: #0a0a0f;
-        --b-sub: rgba(35, 35, 38, 0.6);
-        --b: rgba(35, 35, 38, 1);
-        --b-strong: rgba(50, 50, 54, 1);
+        --b-sub: rgba(48, 48, 52, 0.75);
+        --b: rgba(52, 52, 57, 1);
+        --b-strong: rgba(78, 78, 84, 1);
+        --t0: #ffffff;
         --t1: #e1e1e1;
         --t2: #a1a1a1;
         --t3: #8b8b90;
@@ -242,21 +240,6 @@
         pointer-events: none;
         opacity: 0.55;
       }
-      .halo {
-        position: fixed;
-        z-index: 0;
-        pointer-events: none;
-        filter: blur(100px);
-        opacity: 0.2;
-        width: 56vw;
-        height: 56vw;
-        max-width: 700px;
-        max-height: 700px;
-        border-radius: 50%;
-        background: radial-gradient(circle, rgba(163, 113, 247, 0.7), transparent 66%);
-        top: -16vw;
-        left: -8vw;
-      }
       .wrap {
         position: relative;
         z-index: 2;
@@ -266,7 +249,7 @@
       .shell {
         max-width: var(--max);
         margin: 0 auto;
-        padding: 0 var(--gut);
+        padding-inline: var(--gut);
         position: relative;
       }
       .shell::before,
@@ -298,6 +281,7 @@
         margin: 0;
         font-weight: 700;
         line-height: 1.05;
+        color: var(--t0);
       }
       p {
         margin: 0;
@@ -440,7 +424,7 @@
 
       /* ── hero ──────────────────────────────────────────────────────── */
       header.hero {
-        padding: clamp(56px, 12vh, 132px) 0 clamp(48px, 8vh, 88px);
+        padding-block: clamp(64px, 13vh, 144px) clamp(56px, 9vh, 104px);
       }
       .eyebrow {
         display: flex;
@@ -529,36 +513,87 @@
         margin-top: 34px;
       }
 
-      .cmd {
-        margin-top: 26px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        border: 1px solid var(--b);
-        background: var(--term);
-        padding: 13px 15px;
-        max-width: 660px;
-        overflow-x: auto;
-        scrollbar-width: none;
+      .hero-grid {
+        display: grid;
+        gap: clamp(36px, 5vw, 72px);
+        margin-top: clamp(28px, 4vh, 44px);
       }
-      .cmd::-webkit-scrollbar {
-        display: none;
+      @media (min-width: 980px) {
+        .hero-grid {
+          grid-template-columns: minmax(0, 1fr) minmax(0, 400px);
+          align-items: start;
+        }
+      }
+      .reach {
+        list-style: none;
+        margin: 18px 0 0;
+        padding: 0;
+      }
+      .reach li {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--b-sub);
+        color: var(--t1);
+      }
+      .reach i {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        transform: translateY(-1px);
+      }
+      .c-working {
+        background: var(--working);
+      }
+      .c-ready {
+        background: var(--ready);
+      }
+      .c-attention {
+        background: var(--attention);
+      }
+      .c-violet {
+        background: var(--violet);
+      }
+
+      .cmd {
+        margin-top: clamp(40px, 6vh, 68px);
+        position: relative;
+        display: grid;
+        gap: 18px;
+        border: 1px solid var(--b-strong);
+        border-left: 3px solid var(--violet);
+        background: var(--term);
+        padding: 22px 24px;
+      }
+      @media (min-width: 860px) {
+        .cmd {
+          grid-template-columns: 190px minmax(0, 1fr);
+          gap: 32px;
+          align-items: start;
+        }
+      }
+      .cmd-tag {
+        display: block;
+        font-size: 10.5px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        line-height: 1.9;
+        color: var(--violet);
       }
       .cmd code {
+        display: block;
         background: none;
-        padding: 0;
+        padding: 0 66px 0 0;
+        color: var(--t1);
         font-size: 12.5px;
-        white-space: nowrap;
-      }
-      .cmd .caret {
-        color: var(--violet);
-        flex: none;
+        line-height: 1.8;
+        overflow-wrap: break-word;
       }
       .copy {
-        margin-left: auto;
-        position: sticky;
-        right: 0;
-        flex: none;
+        position: absolute;
+        top: 12px;
+        right: 12px;
         border: 1px solid var(--b);
         background: var(--term);
         color: var(--t2);
@@ -581,7 +616,7 @@
 
       /* ── section frame ─────────────────────────────────────────────── */
       section {
-        padding: clamp(64px, 11vh, 120px) 0;
+        padding-block: clamp(84px, 13vh, 152px);
         position: relative;
       }
       section + section::before {
@@ -599,24 +634,27 @@
         scroll-margin-top: 74px;
       }
       #dashboard {
-        padding-block: clamp(88px, 15vh, 160px);
+        padding-block: clamp(96px, 16vh, 176px);
       }
       .sec-head {
         display: flex;
         flex-direction: column;
-        gap: 14px;
-        margin-bottom: clamp(28px, 5vh, 56px);
+        gap: 16px;
+        margin-bottom: clamp(40px, 7vh, 76px);
         max-width: 64ch;
         position: relative;
       }
       .sec-head::before {
         content: attr(data-n);
         position: absolute;
-        left: -58px;
-        top: 5px;
+        left: -64px;
+        top: 0;
         font-size: var(--step--1);
-        color: var(--t4);
-        letter-spacing: 0.22em;
+        color: #0d0d0e;
+        background: var(--violet);
+        padding: 4px 7px;
+        letter-spacing: 0.14em;
+        font-weight: 700;
       }
       @media (max-width: 1180px) {
         .sec-head::before {
@@ -701,7 +739,7 @@
       }
       .pipe-col {
         background: var(--bg);
-        padding: 26px 22px;
+        padding: 32px 28px 36px;
         position: relative;
         overflow: hidden;
       }
@@ -761,10 +799,9 @@
 
       /* ── dashboard mock ────────────────────────────────────────────── */
       .mock {
-        border: 1px solid var(--b);
+        border: 1px solid var(--b-strong);
         background: var(--surface);
         overflow: hidden;
-        box-shadow: 0 40px 90px -50px rgba(0, 0, 0, 0.9);
       }
       .mock-bar {
         display: flex;
@@ -895,16 +932,25 @@
       }
       .cell {
         background: var(--bg);
-        padding: 26px 22px;
+        padding: 32px 28px 36px;
         position: relative;
         overflow: hidden;
         transition: background 0.3s;
       }
       .cell .ic {
-        width: 26px;
-        height: 26px;
-        margin-bottom: 16px;
-        color: var(--t2);
+        width: 28px;
+        height: 28px;
+        margin-bottom: 20px;
+        color: var(--violet);
+      }
+      .cell:nth-child(4n + 2) .ic {
+        color: var(--working);
+      }
+      .cell:nth-child(4n + 3) .ic {
+        color: var(--ready);
+      }
+      .cell:nth-child(4n + 4) .ic {
+        color: var(--attention);
       }
       .cell h3 {
         font-size: var(--step-1);
@@ -918,10 +964,7 @@
       }
       @media (hover: hover) and (pointer: fine) {
         .cell:hover {
-          background: rgba(255, 255, 255, 0.02);
-        }
-        .cell:hover .ic {
-          color: var(--violet);
+          background: rgba(255, 255, 255, 0.035);
         }
         .pipe-col:hover {
           background: rgba(255, 255, 255, 0.02);
@@ -1070,7 +1113,6 @@
     <a class="skip" href="#main">Skip to content</a>
 
     <canvas id="grid" aria-hidden="true"></canvas>
-    <div class="halo" aria-hidden="true"></div>
 
     <div class="wrap">
       <nav id="nav" aria-label="Primary">
@@ -1105,34 +1147,50 @@
           </div>
 
           <h1>
-            <span class="line"><span>Close the laptop.</span></span>
+            <span class="line"><span>Agents on your box.</span></span>
             <span class="line"
-              ><span>The agents <em>keep working</em>.</span></span
+              ><span>Control <em>in your pocket</em>.</span></span
             >
           </h1>
 
-          <p class="lede">
-            Spur is a local daemon that runs <b>claude</b>, <b>codex</b>, <b>cursor</b> and
-            <b>opencode</b>
-            as tmux sessions — one git worktree and branch each. They survive a closed lid, a
-            dropped SSH connection and a reboot. One dashboard shows all of them, from any device on
-            your tailnet.
-          </p>
+          <div class="hero-grid">
+            <div>
+              <p class="lede">
+                Spur runs <b>claude</b>, <b>codex</b>, <b>cursor</b> and <b>opencode</b> as tmux
+                sessions on your own machine, one git worktree each. You reach every one of them
+                from wherever you are.
+              </p>
 
-          <div class="hero-cta">
-            <a class="btn primary" href="https://github.com/ashugaev/spur#install" rel="noopener"
-              >Get Spur &rarr;</a
-            >
-            <a class="btn" href="#dashboard">See it running</a>
+              <div class="hero-cta">
+                <a
+                  class="btn primary"
+                  href="https://github.com/ashugaev/spur#install"
+                  rel="noopener"
+                  >Get Spur &rarr;</a
+                >
+                <a class="btn" href="#dashboard">See it running</a>
+              </div>
+            </div>
+
+            <div>
+              <span class="mono-label">Reach it from</span>
+              <ul class="reach">
+                <li><i class="c-working"></i>Dashboard, phone or desktop browser</li>
+                <li><i class="c-ready"></i>The tmux pane itself, in that browser</li>
+                <li><i class="c-attention"></i>Telegram, text or voice note</li>
+                <li><i class="c-violet"></i>CLI, over SSH</li>
+              </ul>
+            </div>
           </div>
 
           <div class="cmd">
-            <span class="caret">$</span>
+            <span class="cmd-tag">Install prompt<br />paste into your agent</span>
             <code id="installcmd"
-              >npm config set prefix ~/.local &amp;&amp; npm i -g @shugaev/spur@latest &amp;&amp;
-              spur init</code
+              >Read https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md
+              and install and run Spur on this machine end to end, following the guide. Do the steps
+              yourself; don't ask me to run what you can run.</code
             >
-            <button class="copy" data-copy="#installcmd" aria-label="Copy install command">
+            <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
               copy
             </button>
           </div>
@@ -1143,8 +1201,8 @@
             <span class="mono-label">Control surface</span>
             <h2 id="dashboard-h">One list. Every agent. Live.</h2>
             <p>
-              State, branch and PR per session. Tap one and you get the tmux pane itself in the
-              browser — scrollback, keys, clickable links.
+              State, branch and PR per session. Tap one, get the tmux pane itself — scrollback,
+              keys, clickable links.
             </p>
           </div>
 
@@ -1269,8 +1327,8 @@
               </svg>
               <h3>Worktree per session</h3>
               <p>
-                Each agent gets its own git worktree and branch. Ten agents, ten checkouts, one
-                repo. Point several at the shared path when you want them in the same tree.
+                Own git worktree, own branch. Ten agents, ten checkouts, one repo. The shared path
+                is opt-in.
               </p>
             </article>
             <article class="cell">
@@ -1305,8 +1363,8 @@
               </svg>
               <h3>Nothing dies with your shell</h3>
               <p>
-                The daemon owns the tmux sessions. Close the lid, drop the SSH connection, reboot
-                the box — sessions come back and keep their transcript.
+                The daemon owns the tmux sessions. Close the lid, drop SSH, reboot — they come back
+                with their transcript.
               </p>
             </article>
             <article class="cell">
@@ -1324,8 +1382,8 @@
               </svg>
               <h3>Telegram &amp; voice</h3>
               <p>
-                Bind a chat or forum topic to a session with <code>/watch</code>, then talk to the
-                agent from your phone. Voice notes transcribe too, once you set a provider key.
+                Bind a chat or forum topic with <code>/watch</code>, then talk to the agent from
+                your phone. Voice notes transcribe once you set a provider key.
               </p>
             </article>
             <article class="cell">
@@ -1418,8 +1476,8 @@
               </svg>
               <h3>Never leaves your machine</h3>
               <p>
-                The daemon binds to loopback; <code>spur init</code> opens it to your tailnet and
-                nothing else. Your hardware, your agent subscriptions, no seats to buy.
+                Daemon binds to loopback. <code>spur init</code> opens it to your tailnet, nothing
+                else. Your hardware, your agent subscriptions, no seats.
               </p>
             </article>
           </div>
@@ -1508,8 +1566,8 @@
           <div class="endcta rv">
             <h2>Stop babysitting one terminal.</h2>
             <p>
-              npm install, <code>spur init</code>, point it at a repo. Tested on Ubuntu; elsewhere
-              expect to sort out host differences.
+              Hand the install prompt to a coding agent and let it do the whole thing. Tested on
+              Ubuntu; elsewhere expect to sort out host differences.
             </p>
             <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap">
               <a class="btn primary" href="https://github.com/ashugaev/spur#install" rel="noopener"
@@ -1581,7 +1639,14 @@
           btn.addEventListener("click", function () {
             var target = document.querySelector(btn.dataset.copy);
             if (!target) return;
-            var text = target.textContent.replace(/\s+/g, " ").trim();
+            var lines = target.querySelectorAll(".ln");
+            var text = lines.length
+              ? Array.prototype.map
+                  .call(lines, function (l) {
+                    return l.textContent.replace(/\s+/g, " ").trim();
+                  })
+                  .join("\n")
+              : target.textContent.replace(/\s+/g, " ").trim();
             function ok() {
               btn.textContent = "copied";
               btn.classList.add("done");
