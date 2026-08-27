@@ -2813,6 +2813,62 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("lets a block opt out of a spawn-level restrictWrites default", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: "/tmp/spur-data",
+        projects: {
+          api: {
+            sources: {
+              morning: { type: "cron" },
+            },
+            triggers: {
+              kickoff: {
+                source: "morning",
+                event: "cron:tick",
+                spawn: {
+                  restrictWrites: true,
+                  blocks: [
+                    { prompt: "review only" },
+                    { prompt: "write access", restrictWrites: false },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        prompt: "review only",
+        restrictWrites: true,
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        prompt: "write access",
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("passes allowedTriggers through to the session service", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
     const { startConfiguredTriggers } = await loadTriggersModule();

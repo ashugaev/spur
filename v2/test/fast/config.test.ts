@@ -2591,8 +2591,7 @@ projects:
       source: "pr-watch",
       event: "github:work_item.new",
       spawn: {
-        blocks: [{ prompt: "Review only." }],
-        restrictWrites: true,
+        blocks: [{ prompt: "Review only.", restrictWrites: true }],
       },
     });
   });
@@ -2617,6 +2616,100 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.triggers.review.spawn.restrictWrites must be a boolean",
+    );
+  });
+
+  it("parses per-block restrictWrites overrides in blocks form", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          restrictWrites: true
+          blocks:
+            - agent: claude
+              prompt: "review it"
+              restrictWrites: false
+            - agent: cursor
+              prompt: "test it"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
+      spawn: {
+        restrictWrites: true,
+        blocks: [
+          { agent: "claude", prompt: "review it", restrictWrites: false },
+          { agent: "cursor", prompt: "test it" },
+        ],
+      },
+    });
+  });
+
+  it("parses per-block restrictWrites overrides in array form", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          - agent: claude
+            prompt: "review it"
+            restrictWrites: true
+          - agent: cursor
+            prompt: "test it"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toEqual({
+      source: "prs",
+      event: "github:work_item.new",
+      spawn: {
+        blocks: [
+          { agent: "claude", prompt: "review it", restrictWrites: true },
+          { agent: "cursor", prompt: "test it" },
+        ],
+      },
+    });
+  });
+
+  it("rejects non-boolean blocks[].restrictWrites", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          blocks:
+            - agent: claude
+              prompt: "review it"
+              restrictWrites: yes
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.blocks[0].restrictWrites must be a boolean",
     );
   });
 

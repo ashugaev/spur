@@ -311,6 +311,7 @@ async function runSpawnTrigger(
       }
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
+        const blockRestrictWrites = block.restrictWrites ?? restrictWrites;
         const session = await service.spawn({
           project: projectId,
           prompt: renderedPrompt,
@@ -321,7 +322,7 @@ async function runSpawnTrigger(
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
-          ...(restrictWrites === true ? { restrictWrites: true } : {}),
+          ...(blockRestrictWrites === true ? { restrictWrites: true } : {}),
           ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
           ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
           ...(deskGroup === true && anchorSessionId !== undefined
