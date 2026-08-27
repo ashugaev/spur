@@ -35,7 +35,10 @@ import type { SpurSessionState } from "@/lib/types";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import {
   areTerminalLinksEqual,
+  composeTerminalLinkDisplay,
   extractTerminalLinks,
+  mergeTerminalLinkDiscoveries,
+  TERMINAL_LINK_DISCOVERY_LIMIT,
   type TerminalLink,
 } from "@/lib/terminal-links";
 
@@ -248,6 +251,7 @@ export function DirectTerminal({
   const [arrowsOpen, setArrowsOpen] = useState(false);
   const [terminalLinks, setTerminalLinks] = useState<TerminalLink[]>([]);
   const terminalLinksRef = useRef<TerminalLink[]>([]);
+  const discoveredTerminalLinksRef = useRef<TerminalLink[]>([]);
   const [terminalLinksOpen, setTerminalLinksOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -556,6 +560,7 @@ export function DirectTerminal({
 
   useEffect(() => {
     terminalLinksRef.current = [];
+    discoveredTerminalLinksRef.current = [];
     setTerminalLinks([]);
     setTerminalLinksOpen(false);
 
@@ -622,7 +627,7 @@ export function DirectTerminal({
         terminal.focus();
         fit.fit();
 
-        const scanTerminalLinks = () => {
+        const scanTerminalLinks = (mode: "merge" | "keep" | "reset") => {
           if (!mounted || !terminal) return;
           const activeBuffer = terminal.buffer.active;
           const startIndex = Math.max(0, activeBuffer.length - 100);
@@ -638,17 +643,30 @@ export function DirectTerminal({
                 : undefined,
             );
           }
-          const nextLinks = extractTerminalLinks(rows, terminal.cols);
+          const scanned = extractTerminalLinks(rows, terminal.cols);
+
+          if (mode === "reset") {
+            discoveredTerminalLinksRef.current = [];
+          }
+          if (mode !== "keep") {
+            discoveredTerminalLinksRef.current = mergeTerminalLinkDiscoveries(
+              discoveredTerminalLinksRef.current,
+              scanned,
+              TERMINAL_LINK_DISCOVERY_LIMIT,
+            );
+          }
+
+          const nextLinks = composeTerminalLinkDisplay(scanned, discoveredTerminalLinksRef.current);
           if (areTerminalLinksEqual(terminalLinksRef.current, nextLinks)) return;
           terminalLinksRef.current = nextLinks;
           setTerminalLinks(nextLinks);
           if (nextLinks.length === 0) setTerminalLinksOpen(false);
         };
 
-        scanTerminalLinks();
-        parsedWriteDisposable = terminal.onWriteParsed(scanTerminalLinks);
-        terminalResizeDisposable = terminal.onResize(scanTerminalLinks);
-        bufferChangeDisposable = terminal.buffer.onBufferChange(scanTerminalLinks);
+        scanTerminalLinks("merge");
+        parsedWriteDisposable = terminal.onWriteParsed(() => scanTerminalLinks("merge"));
+        terminalResizeDisposable = terminal.onResize(() => scanTerminalLinks("keep"));
+        bufferChangeDisposable = terminal.buffer.onBufferChange(() => scanTerminalLinks("reset"));
 
         // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
         // using native drag semantics, so finger movement matches terminal content movement.

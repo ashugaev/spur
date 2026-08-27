@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   areTerminalLinksEqual,
+  composeTerminalLinkDisplay,
   extractTerminalLinks,
   groupTerminalRows,
+  mergeTerminalLinkDiscoveries,
   type TerminalBufferRow,
+  type TerminalLink,
 } from "@/lib/terminal-links";
 
 const row = (text: string, isWrapped = false): TerminalBufferRow => ({ text, isWrapped });
@@ -261,6 +264,141 @@ describe("extractTerminalLinks", () => {
     );
 
     expect(links.map((link) => link.url)).toEqual([url]);
+  });
+
+  it("joins a hard-wrap continuation whose head row stops short of the wrap column (TUI absolute-CUP redraw)", () => {
+    const COLS120 = 120;
+    const tail = "https://alt.example";
+    const head = ("x".repeat(118 - tail.length) + tail).padEnd(COLS120, " ");
+    expect(head.trimEnd()).toHaveLength(118);
+    const continuation = ".com/path/x".padEnd(COLS120, " ");
+
+    const links = extractTerminalLinks([row(head, false), row(continuation, false)], COLS120);
+
+    expect(links.map((link) => link.url)).toEqual(["https://alt.example.com/path/x"]);
+  });
+
+  it("does not join a letter-leading continuation onto a short head row", () => {
+    const COLS120 = 120;
+    const tail = "https://short.example";
+    const head = ("x".repeat(118 - tail.length) + tail).padEnd(COLS120, " ");
+    expect(head.trimEnd()).toHaveLength(118);
+
+    for (const continuationText of ["package.json", "done.", "v1.2.3"]) {
+      const links = extractTerminalLinks(
+        [row(head, false), row(continuationText.padEnd(COLS120, " "), false)],
+        COLS120,
+      );
+      expect(links.map((link) => link.url)).toEqual(["https://short.example"]);
+    }
+  });
+
+  it("does not join a continuation row that carries leading whitespace", () => {
+    const COLS120 = 120;
+    const tail = "https://short.example";
+    const head = ("x".repeat(118 - tail.length) + tail).padEnd(COLS120, " ");
+    expect(head.trimEnd()).toHaveLength(118);
+
+    const links = extractTerminalLinks(
+      [row(head, false), row("  /path/x".padEnd(COLS120, " "), false)],
+      COLS120,
+    );
+
+    expect(links.map((link) => link.url)).toEqual(["https://short.example"]);
+  });
+
+  it("does not join a continuation onto a URL-ending head row that stops far short of the wrap column (reviewer adversarial repro)", () => {
+    const COLS120 = 120;
+    const cases: Array<[string, string, string]> = [
+      ["Docs: https://example.com", ".gitignore", "https://example.com"],
+      ["See https://example.com", "./scripts/deploy.sh", "https://example.com"],
+      ["repo https://github.com/o/r", "/etc/hosts", "https://github.com/o/r"],
+      ["link https://example.com", "#heading", "https://example.com"],
+      ["url https://example.com", "=value", "https://example.com"],
+    ];
+
+    for (const [headText, continuationText, expectedUrl] of cases) {
+      expect(headText.length).toBeLessThan(COLS120 - 90);
+      const links = extractTerminalLinks(
+        [
+          row(headText.padEnd(COLS120, " "), false),
+          row(continuationText.padEnd(COLS120, " "), false),
+        ],
+        COLS120,
+      );
+      expect(links.map((link) => link.url)).toEqual([expectedUrl]);
+    }
+  });
+
+  it("does not join a continuation row with interior whitespace onto a short head row", () => {
+    const COLS120 = 120;
+    const tail = "https://short.example";
+    const head = ("x".repeat(118 - tail.length) + tail).padEnd(COLS120, " ");
+    expect(head.trimEnd()).toHaveLength(118);
+
+    const links = extractTerminalLinks(
+      [row(head, false), row(".com/path more".padEnd(COLS120, " "), false)],
+      COLS120,
+    );
+
+    expect(links.map((link) => link.url)).toEqual(["https://short.example"]);
+  });
+});
+
+describe("mergeTerminalLinkDiscoveries", () => {
+  const link = (url: string): TerminalLink => ({ url, hostname: new URL(url).hostname });
+
+  it("dedupes by exact url and keeps discovery order (oldest first)", () => {
+    const discovered = [link("https://a.example"), link("https://b.example")];
+    const scanned = [link("https://c.example"), link("https://b.example")];
+
+    const merged = mergeTerminalLinkDiscoveries(discovered, scanned, 100);
+
+    expect(merged.map((entry) => entry.url)).toEqual([
+      "https://a.example",
+      "https://b.example",
+      "https://c.example",
+    ]);
+  });
+
+  it("evicts the oldest entry once over the limit", () => {
+    const discovered = [link("https://a.example"), link("https://b.example")];
+    const scanned = [link("https://c.example")];
+
+    const merged = mergeTerminalLinkDiscoveries(discovered, scanned, 2);
+
+    expect(merged.map((entry) => entry.url)).toEqual(["https://b.example", "https://c.example"]);
+  });
+
+  it("protects an on-screen url from eviction, evicting the oldest off-screen entry instead", () => {
+    const discovered = [link("https://a.example"), link("https://b.example")];
+    const scanned = [link("https://a.example"), link("https://c.example")];
+
+    const merged = mergeTerminalLinkDiscoveries(discovered, scanned, 2);
+
+    expect(merged.map((entry) => entry.url)).toEqual(["https://a.example", "https://c.example"]);
+  });
+});
+
+describe("composeTerminalLinkDisplay", () => {
+  const link = (url: string): TerminalLink => ({ url, hostname: new URL(url).hostname });
+
+  it("orders the current scan first, then remaining discoveries in discovery order", () => {
+    const discovered = [link("https://a.example"), link("https://b.example")];
+    const scanned = [link("https://b.example")];
+
+    const composed = composeTerminalLinkDisplay(scanned, discovered);
+
+    expect(composed.map((entry) => entry.url)).toEqual(["https://b.example", "https://a.example"]);
+  });
+
+  it("filters out scanned urls unknown to discovered", () => {
+    const discovered = [link("https://a.example")];
+    const scanned = [link("https://a.example"), link("https://unknown.example")];
+
+    const composed = composeTerminalLinkDisplay(scanned, discovered);
+
+    expect(composed.map((entry) => entry.url)).toEqual(["https://a.example"]);
   });
 });
 

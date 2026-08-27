@@ -23,12 +23,27 @@ const DELIMITER_PAIRS = {
 
 const LEADING_WHITESPACE = /^\s+/u;
 const INTERIOR_WHITESPACE = /\s/u;
+const URL_CONTINUATION_LEADING = /^[/.?#&=%]/u;
 
-// A row reaches the wrap boundary once its trimmed content fills the row, with
-// one column of slack: a TUI (e.g. an agent CLI) wraps its own output one
-// column before the terminal's hard-wrap column.
+export const TERMINAL_LINK_DISCOVERY_LIMIT = 100;
+
+// The measured shortfall between a TUI's own hanging-indent wrap column and
+// the terminal's hard-wrap column is 2 (head row trimEnd 118 at cols 120).
+// Adversarial short lines — a URL-ending sentence followed by an unrelated
+// token starting `/ . ? # & = %`, e.g. a bare `.gitignore` under a "Docs:"
+// line — stop 93+ columns short. A slack of 2 covers the measured case and
+// excludes every adversarial one; do not widen it without a new measurement.
+const TERMINAL_LINK_CONTINUATION_SLACK = 2;
+
+// A row reaches a boundary once its trimmed content fills the row within
+// `slack` columns: a TUI (e.g. an agent CLI) wraps its own output some
+// columns before the terminal's hard-wrap column.
+function isWithinSlackOfWrap(text: string, cols: number, slack: number): boolean {
+  return text.trimEnd().length >= cols - slack;
+}
+
 function isWrapBoundary(text: string, cols: number): boolean {
-  return text.trimEnd().length >= cols - 1;
+  return isWithinSlackOfWrap(text, cols, 1);
 }
 
 // A genuine hard-wrapped URL continuation is one unbroken token once its
@@ -38,6 +53,42 @@ function isUnbrokenToken(text: string): boolean {
   return !INTERIOR_WHITESPACE.test(text.trim());
 }
 
+// A continuation row joins the pending logical line when either the head row
+// reached the wrap boundary (PR #711's rule), or the head row stopped short
+// of it but within TERMINAL_LINK_CONTINUATION_SLACK columns, the pending text
+// still ends mid-URL, and the row below reads as a bare continuation: no
+// leading whitespace on the raw row, one unbroken token, no scheme of its
+// own, and a first character drawn from the URL path/query grammar rather
+// than prose. The slack condition (`nearWrapBoundary`) is what keeps a URL
+// row far short of the wrap column — a sentence followed by an unrelated
+// `.gitignore` or `/etc/hosts` row — from being folded into it.
+function shouldJoinContinuation(
+  current: string,
+  rowText: string,
+  continuation: string,
+  atWrapBoundary: boolean,
+  nearWrapBoundary: boolean,
+): boolean {
+  const trimmedCurrent = current.trimEnd();
+
+  const branchA =
+    atWrapBoundary &&
+    UNTERMINATED_URL_TAIL.test(trimmedCurrent) &&
+    URL_CHAR_LEADING.test(continuation) &&
+    !URL_SCHEME_LEADING.test(continuation) &&
+    isUnbrokenToken(continuation);
+
+  const branchB =
+    nearWrapBoundary &&
+    UNTERMINATED_URL_TAIL.test(trimmedCurrent) &&
+    !LEADING_WHITESPACE.test(rowText) &&
+    isUnbrokenToken(continuation) &&
+    !URL_SCHEME_LEADING.test(continuation) &&
+    URL_CONTINUATION_LEADING.test(continuation);
+
+  return branchA || branchB;
+}
+
 export function groupTerminalRows(
   rows: Array<TerminalBufferRow | undefined>,
   cols: number,
@@ -45,12 +96,14 @@ export function groupTerminalRows(
   const lines: string[] = [];
   let current: string | null = null;
   let atWrapBoundary = false;
+  let nearWrapBoundary = false;
 
   const finishCurrent = () => {
     if (current === null) return;
     lines.push(current.trimEnd());
     current = null;
     atWrapBoundary = false;
+    nearWrapBoundary = false;
   };
 
   for (const row of rows) {
@@ -64,6 +117,7 @@ export function groupTerminalRows(
         current += row.text;
       }
       atWrapBoundary = isWrapBoundary(row.text, cols);
+      nearWrapBoundary = isWithinSlackOfWrap(row.text, cols, TERMINAL_LINK_CONTINUATION_SLACK);
       continue;
     }
 
@@ -71,20 +125,18 @@ export function groupTerminalRows(
 
     if (
       current !== null &&
-      atWrapBoundary &&
-      UNTERMINATED_URL_TAIL.test(current.trimEnd()) &&
-      URL_CHAR_LEADING.test(continuation) &&
-      !URL_SCHEME_LEADING.test(continuation) &&
-      isUnbrokenToken(continuation)
+      shouldJoinContinuation(current, row.text, continuation, atWrapBoundary, nearWrapBoundary)
     ) {
       current = current.trimEnd() + continuation;
       atWrapBoundary = isWrapBoundary(row.text, cols);
+      nearWrapBoundary = isWithinSlackOfWrap(row.text, cols, TERMINAL_LINK_CONTINUATION_SLACK);
       continue;
     }
 
     finishCurrent();
     current = row.text;
     atWrapBoundary = isWrapBoundary(row.text, cols);
+    nearWrapBoundary = isWithinSlackOfWrap(row.text, cols, TERMINAL_LINK_CONTINUATION_SLACK);
   }
 
   finishCurrent();
@@ -162,4 +214,50 @@ export function areTerminalLinksEqual(left: TerminalLink[], right: TerminalLink[
   return (
     left.length === right.length && left.every((link, index) => link.url === right[index]?.url)
   );
+}
+
+// Folds a fresh scan (newest-first) into the accumulated discovery list
+// (oldest-first), deduped by exact URL. Over the limit, evicts oldest-first
+// among entries the current scan does not corroborate — never a URL still on
+// screen — repeating until at or under the limit or every remaining entry is
+// in the scan. A quiescent terminal can therefore sit above the limit by at
+// most the scan size; that is preferred over dropping a URL still visible.
+export function mergeTerminalLinkDiscoveries(
+  discovered: TerminalLink[],
+  scanned: TerminalLink[],
+  limit: number,
+): TerminalLink[] {
+  const scannedUrls = new Set(scanned.map((link) => link.url));
+  const merged = [...discovered];
+  const mergedUrls = new Set(merged.map((link) => link.url));
+
+  for (let index = scanned.length - 1; index >= 0; index -= 1) {
+    const link = scanned[index];
+    if (!link || mergedUrls.has(link.url)) continue;
+    mergedUrls.add(link.url);
+    merged.push(link);
+  }
+
+  while (merged.length > limit) {
+    const evictIndex = merged.findIndex((link) => !scannedUrls.has(link.url));
+    if (evictIndex === -1) break;
+    merged.splice(evictIndex, 1);
+  }
+
+  return merged;
+}
+
+// Composes the displayed list: the current scan's URLs in scan order (newest
+// first), followed by earlier discoveries (in discovery order) whose rows
+// have left the buffer. Unknown-to-the-scan discoveries are appended, never
+// dropped — this is what keeps a link listed after its row scrolls out.
+export function composeTerminalLinkDisplay(
+  scanned: TerminalLink[],
+  discovered: TerminalLink[],
+): TerminalLink[] {
+  const discoveredUrls = new Set(discovered.map((link) => link.url));
+  const visible = scanned.filter((link) => discoveredUrls.has(link.url));
+  const visibleUrls = new Set(visible.map((link) => link.url));
+  const leftovers = discovered.filter((link) => !visibleUrls.has(link.url));
+  return [...visible, ...leftovers];
 }

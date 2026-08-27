@@ -389,10 +389,16 @@ describe("DirectTerminal scroll integration", () => {
     normalBuffer.rows = [{ text: "https://resized.example https://newest.example" }];
     act(() => terminalResizeCallback?.());
     fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+      "https://parsed.example",
+    ]);
+
+    act(() => parsedWriteCallback?.());
     const links = screen.getAllByRole("link");
     expect(links.map((link) => link.getAttribute("href"))).toEqual([
       "https://newest.example",
       "https://resized.example",
+      "https://parsed.example",
     ]);
 
     alternateBuffer.rows = [{ text: "https://alternate.example" }];
@@ -433,7 +439,7 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
   });
 
-  it("closes and removes the disclosure when a scan becomes empty", async () => {
+  it("keeps discovered links when a scan becomes empty", async () => {
     normalBuffer.rows = [{ text: "https://example.com" }];
     await mountTerminal();
     fireEvent.click(await screen.findByRole("button", { name: "Open terminal links" }));
@@ -441,8 +447,9 @@ describe("DirectTerminal scroll integration", () => {
 
     normalBuffer.rows = [];
     act(() => parsedWriteCallback?.());
-    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open terminal links" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Terminal links" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /example\.com/i })).toBeInTheDocument();
   });
 
   it("rejoins a URL split across hard-wrapped (isWrapped: false) rows into one link", async () => {
@@ -511,6 +518,59 @@ describe("DirectTerminal scroll integration", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
     expect(screen.getByRole("link")).toHaveAttribute("href", full);
+  });
+
+  it("keeps a link discovered before its row left the buffer", async () => {
+    normalBuffer.rows = [{ text: "https://a.example" }];
+    await mountTerminal();
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+
+    normalBuffer.rows = [{ text: "https://b.example" }];
+    act(() => parsedWriteCallback?.());
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+      "https://b.example",
+      "https://a.example",
+    ]);
+  });
+
+  it("evicts the oldest off-screen discovery when the cap is exceeded", async () => {
+    normalBuffer.rows = Array.from({ length: 100 }, (_, index) => ({
+      text: `https://cap-${index}.example`,
+    }));
+    await mountTerminal();
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "100",
+    );
+
+    normalBuffer.rows = [{ text: "https://cap-new.example" }];
+    act(() => parsedWriteCallback?.());
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "100",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    const hrefs = screen.getAllByRole("link").map((link) => link.getAttribute("href"));
+    expect(hrefs).toHaveLength(100);
+    expect(hrefs).toContain("https://cap-new.example");
+    expect(hrefs).not.toContain("https://cap-0.example");
+  });
+
+  it("clears discovered links when the session identity changes", async () => {
+    normalBuffer.rows = [{ text: "https://session-a.example" }];
+    const result = await mountTerminal({ sessionId: "session-a" });
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toBeInTheDocument();
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    normalBuffer.rows = [];
+    await act(async () => {
+      result.rerender(<DirectTerminal sessionId="session-b" />);
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
   });
 
   it("resets discovery ownership when the session identity changes", async () => {
