@@ -493,10 +493,9 @@ if systemctl_cmd is-active --quiet spur-web.service; then
   systemctl_cmd stop spur-web.service
 fi
 pnpm -C "$deploy_root" install --frozen-lockfile
-# Build with managed-prod autostart disabled so the build-triggered daemon
-# restart path cannot fork a rogue listener outside systemd during the
-# service restart window.
-SPUR_DISABLE_AUTOSTART=1 pnpm -C "$deploy_root" build
+# The build never restarts a daemon on its own (SPUR_BUILD_RESTART is unset
+# here); this deploy's own systemd restart below is the authoritative one.
+pnpm -C "$deploy_root" build
 install_service_files "$deploy_root"
 # Safe to restart: the systemd unit uses KillMode=process, so only the
 # daemon's node process is stopped. Tmux sessions and agents survive.
