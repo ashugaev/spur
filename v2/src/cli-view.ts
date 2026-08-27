@@ -162,6 +162,20 @@ function describeSidecarAge(session: SessionView): string | null {
   return `sidecar ${oldest.name} ${formatSidecarAgeSeconds(oldest.ageSeconds)}${warnMark}${suffix}`;
 }
 
+// Counts only `messages` (real queued sends), never `pipelineMessages` (a
+// pipeline's own future auto-steps).
+export function queuedMessageCount(session: SessionView): number {
+  return session.queuedMessages?.messages.length ?? 0;
+}
+
+// Compact indicator so a session holding real queued messages is visible in
+// `spur list` without a second command — quiet (no fact added) when the queue
+// is empty or absent.
+function describeQueueDepth(session: SessionView): string | null {
+  const count = queuedMessageCount(session);
+  return count > 0 ? `queued ${count}` : null;
+}
+
 function describeRow(session: SessionView): SessionRow {
   return {
     id: session.id,
@@ -268,6 +282,10 @@ export function describeSession(session: SessionView): string {
     }
   } else if (liveServices.length > 1) {
     facts.push(`${liveServices.length} services live`);
+  }
+  const queueDepth = describeQueueDepth(session);
+  if (queueDepth) {
+    facts.push(queueDepth);
   }
   const sidecarAge = describeSidecarAge(session);
   if (sidecarAge) {
@@ -396,11 +414,13 @@ function renderSessionDetailsPane(args: {
     return `${boldText(label)} ${truncate(value, Math.max(1, width - prefix.length))}`;
   };
 
+  const queueDepth = queuedMessageCount(selected);
   const fields = [
     renderField(
       "branch",
       selected.branchSource ? `${selected.branch} (${selected.branchSource})` : selected.branch,
     ),
+    ...(queueDepth > 0 ? [renderField("queued", String(queueDepth))] : []),
     ...formatSessionAssociations(selected).map((value) => renderField("link", value)),
     renderField("prompt", selected.prompt),
     renderField("tmux", selected.tmuxSession),

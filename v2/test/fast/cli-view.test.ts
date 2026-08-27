@@ -194,6 +194,46 @@ describe("cli-view.describeSession", () => {
 
     expect(output).not.toContain("sidecar");
   });
+
+  it("shows a queued fact for a session with real queued messages (A5)", () => {
+    const output = describeSession(
+      session({ queuedMessages: { messages: ["a", "b"], awaitingPrompt: false } }),
+    );
+
+    expect(output).toContain("queued 2");
+  });
+
+  it("adds no queued fact when queuedMessages is absent (A6)", () => {
+    const output = describeSession(session({}));
+
+    expect(output).not.toContain("queued");
+  });
+
+  it("adds no queued fact when only pipelineMessages is set (A7)", () => {
+    const output = describeSession(
+      session({
+        queuedMessages: { messages: [], awaitingPrompt: false, pipelineMessages: ["auto-step"] },
+      }),
+    );
+
+    expect(output).not.toContain("queued");
+  });
+
+  it("adds no queued fact for the real post-delivery shape {messages: [], awaitingPrompt: true} (A10)", () => {
+    const output = describeSession(
+      session({ queuedMessages: { messages: [], awaitingPrompt: true } }),
+    );
+
+    expect(output).not.toContain("queued");
+  });
+
+  it("shows queued 2 while the agent is mid-turn (A12)", () => {
+    const output = describeSession(
+      session({ queuedMessages: { messages: ["a", "b"], awaitingPrompt: true } }),
+    );
+
+    expect(output).toContain("queued 2");
+  });
 });
 
 describe("session-link-display", () => {
@@ -298,5 +338,44 @@ describe("cli-view.renderInteractiveSessionList", () => {
 
     expect(output).toContain("jira OPS-9");
     expect(output).not.toContain("https://jira.example.com/browse/OPS-9");
+  });
+
+  it("shows a queued detail field for the selected session with 2 real queued messages at maxDetailLines 3 (A5/A1.1)", () => {
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [session({ queuedMessages: { messages: ["a", "b"], awaitingPrompt: false } })],
+      selectedSessionId: "api-1",
+      totalSessions: 1,
+      windowStart: 0,
+      maxDetailLines: 3,
+    });
+
+    expect(output).toContain("queued 2");
+  });
+
+  it("shows no queued detail field for a selected session with no queuedMessages", () => {
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [session({})],
+      selectedSessionId: "api-1",
+      totalSessions: 1,
+      windowStart: 0,
+      maxDetailLines: 3,
+    });
+
+    expect(output).not.toContain("queued");
+  });
+
+  it("shows no queued detail field for the real post-delivery shape {messages: [], awaitingPrompt: true} (A11)", () => {
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [session({ queuedMessages: { messages: [], awaitingPrompt: true } })],
+      selectedSessionId: "api-1",
+      totalSessions: 1,
+      windowStart: 0,
+      maxDetailLines: 3,
+    });
+
+    expect(output).not.toContain("queued");
   });
 });
