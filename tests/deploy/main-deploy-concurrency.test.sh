@@ -298,10 +298,10 @@ test_slow_cold_start_does_not_fatal() {
 
 # --- Case (d): full build path, build hook does not abort the deploy --------
 # Drives the deploy's build branch (no stamp -> deployed != remote). A pnpm stub
-# stands in for install/build. The build runs the REAL bin mjs under
-# SPUR_DISABLE_AUTOSTART=1 (which, post-fix, exits 0 instead of aborting the
-# deploy) and seeds the temp .next + served chunks consistently. Asserts the
-# deploy reaches restart_and_verify and spur-web ends active & consistent.
+# stands in for install/build. The build runs the REAL bin mjs, which exits 0
+# without restarting anything (SPUR_BUILD_RESTART is unset) and seeds the temp
+# .next + served chunks consistently. Asserts the deploy reaches
+# restart_and_verify and spur-web ends active & consistent.
 test_build_hook_no_abort() {
   local work
   work="$(mktemp -d)"
@@ -312,8 +312,8 @@ test_build_hook_no_abort() {
   printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
 
   local ref="/_next/static/chunks/main-abc123.js"
-  # pnpm stub: install is a no-op; build runs the real mjs under the deploy's
-  # SPUR_DISABLE_AUTOSTART=1 export, then seeds the fresh .next + served HTML.
+  # pnpm stub: install is a no-op; build runs the real mjs (no restart, opt-in
+  # env unset), then seeds the fresh .next + served HTML.
   local pnpm_stub="$work/sudobin/pnpm"
   cat >"$pnpm_stub" <<EOF
 #!/usr/bin/env bash
@@ -334,7 +334,8 @@ EOF
   # The build runs the REAL bin mjs from the deploy root. The deploy does
   # `reset --hard origin/main` + `clean -fd` first, wiping untracked files, so
   # the mjs (and a minimal ../dist/config.js it imports) must be COMMITTED.
-  # config.js is never reached when SPUR_DISABLE_AUTOSTART=1 (skip is first).
+  # config.js is never reached: SPUR_BUILD_RESTART is unset, so the opt-in
+  # guard exits first.
   mkdir -p "$MAIN_DEPLOY_ROOT/v2/bin" "$MAIN_DEPLOY_ROOT/v2/dist"
   cp "$repo_root/v2/bin/restart-daemon-if-running.mjs" "$MAIN_DEPLOY_ROOT/v2/bin/"
   printf 'export function instanceConfigExists(){return false}\nexport function resolveInstanceConfigPath(){return ""}\n' \

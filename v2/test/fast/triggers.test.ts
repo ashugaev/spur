@@ -239,7 +239,19 @@ function spawnFanoutConfig() {
   };
 }
 
-function spawnDeskGroupConfig() {
+function spawnDeskGroupConfig(options?: { thirdBlock?: boolean }) {
+  const thirdBlock = options?.thirdBlock
+    ? [
+        {
+          prompt: "tests for {{task}}",
+          steps: ["verify"],
+          agent: "cursor",
+          overrides: {
+            worktree: false,
+          },
+        },
+      ]
+    : [];
   return {
     dataDir: "/tmp/spur-data",
     projects: {
@@ -272,6 +284,7 @@ function spawnDeskGroupConfig() {
                     worktree: false,
                   },
                 },
+                ...thirdBlock,
               ],
             },
           },
@@ -2010,13 +2023,17 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("blocks desk-group children when anchor spawn fails", async () => {
-    const spawnMock = vi.fn().mockRejectedValueOnce(new Error("anchor failed"));
+  it("promotes the next desk-group block to anchor when the anchor spawn fails", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("anchor failed"))
+      .mockResolvedValueOnce({ id: "api-8" })
+      .mockResolvedValueOnce({ id: "api-9" });
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
-      config: spawnDeskGroupConfig() as never,
+      config: spawnDeskGroupConfig({ thirdBlock: true }) as never,
       bus,
       sessionService: {
         spawn: spawnMock,
@@ -2029,11 +2046,19 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(warnMock).toHaveBeenCalledWith(
-          "[trigger:api/kickoff] failed to spawn claude: anchor failed",
-        );
+        expect(spawnMock).toHaveBeenCalledTimes(3);
       });
-      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/kickoff] failed to spawn claude: anchor failed",
+      );
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/kickoff] promoting spawn block 1 to desk anchor: earlier anchor spawn failed",
+      );
+      expect(spawnMock.mock.calls[1]?.[0]).not.toHaveProperty("reuseWorkspaceSessionId");
+      expect(spawnMock.mock.calls[2]?.[0]).toMatchObject({
+        agent: "cursor",
+        reuseWorkspaceSessionId: "api-8",
+      });
     } finally {
       await controller.stop();
     }
@@ -2782,6 +2807,62 @@ describe("startConfiguredTriggers", () => {
           prompt: "review only",
           restrictWrites: true,
         });
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("lets a block opt out of a spawn-level restrictWrites default", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: "/tmp/spur-data",
+        projects: {
+          api: {
+            sources: {
+              morning: { type: "cron" },
+            },
+            triggers: {
+              kickoff: {
+                source: "morning",
+                event: "cron:tick",
+                spawn: {
+                  restrictWrites: true,
+                  blocks: [
+                    { prompt: "review only" },
+                    { prompt: "write access", restrictWrites: false },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        prompt: "review only",
+        restrictWrites: true,
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        prompt: "write access",
       });
     } finally {
       await controller.stop();

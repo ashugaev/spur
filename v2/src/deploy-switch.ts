@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath, URL } from "node:url";
 import {
+  readDeploySwitchState,
   readProcessStartTime,
   reconcileDeploySwitchState,
   writeDeploySwitchState,
+  type DeployInitiator,
 } from "./deploy-switch-state.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import { getVersion } from "./version.js";
@@ -29,9 +31,11 @@ export type DeploySwitchResult =
 
 export async function startDeploySwitch(args: {
   version: string;
+  initiator: DeployInitiator;
   statePath: string;
+  ledgerPath: string;
 }): Promise<DeploySwitchResult> {
-  const { version, statePath } = args;
+  const { version, initiator, statePath, ledgerPath } = args;
   if (!isReleaseVersion(version)) {
     return { status: "invalid_version" };
   }
@@ -66,35 +70,57 @@ export async function startDeploySwitch(args: {
   const child = spawn("bash", [helperPath, version], {
     detached: true,
     stdio: "ignore",
-    env: { ...process.env, SPUR_INSTALL_STATUS_FILE: statePath },
+    env: {
+      ...process.env,
+      SPUR_INSTALL_STATUS_FILE: statePath,
+      SPUR_DEPLOY_INITIATOR: initiator,
+      SPUR_UPDATE_LEDGER_FILE: ledgerPath,
+    },
   });
   if (child.pid === undefined) {
     return { status: "spawn_failed", message: "failed to start deploy switch" };
   }
+  const pid = child.pid;
   const startedAt = new Date().toISOString();
-  const processStartTime = readProcessStartTime(child.pid);
+  const processStartTime = readProcessStartTime(pid);
   if (!processStartTime) {
     return { status: "spawn_failed", message: "failed to identify deploy switch process" };
   }
   writeDeploySwitchState(statePath, {
     phase: "running",
     version,
-    pid: child.pid,
+    pid,
     processStartTime,
+    initiator,
     startedAt,
   });
   // The helper writes its own terminal status, but only after it arms the
-  // trap: this covers a spawn error and the exits before that (bad version,
-  // lock timeout). Losing the race to the helper is harmless — both writes
-  // carry the same outcome.
+  // trap: this covers a spawn error and the exit before that (bad version —
+  // the only pre-trap exit left; a lock timeout now runs under the armed
+  // trap and writes its own install_failed record). The helper's write is
+  // authoritative when it exists — it
+  // is the only process that knows which branch it took, so it is the only
+  // one that can set `failureKind`. Its EXIT trap runs before the process
+  // exits, so this handler normally observes that record; overwriting it
+  // would erase the kind and make a rolled-back version look retryable.
   const finishSwitch = (exitCode: number): void => {
+    const current = readDeploySwitchState(statePath);
+    if (
+      current &&
+      current.phase !== "running" &&
+      current.version === version &&
+      current.pid === pid
+    ) {
+      return;
+    }
     writeDeploySwitchState(statePath, {
       phase: exitCode === 0 ? "succeeded" : "failed",
       version,
-      pid: child.pid ?? process.pid,
+      pid,
       startedAt,
       finishedAt: new Date().toISOString(),
       exitCode,
+      initiator,
     });
   };
   child.once("error", () => finishSwitch(-1));

@@ -7,6 +7,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { updateSeverity, type UpdateSeverity } from "@/lib/semver";
 import { AlertIcon } from "@/components/icons/AlertIcon";
+import { RollbackIcon } from "@/components/icons/RollbackIcon";
 import {
   isRuntimeInfoResponse,
   useVersionSwitch,
@@ -27,12 +28,34 @@ interface ReleaseEntry {
   publishedAt: string;
 }
 
+// Present while the daemon holds a record the operator must see:
+//   rolled_back/install_unhealthy — a failed switch that changed the host.
+//   interrupted_unknown           — a failed switch that died unattributed;
+//                                   whether it changed the host is unknown.
+// The above three clear server-side by the operator acting on the update
+// path — re-arming Auto, or any Switch.
+//   restart_skipped                — a SUCCEEDED switch that installed but
+//                                   could not restart the services. Clears on
+//                                   its own once the running version matches.
+type UpdateFailureKind =
+  | "rolled_back"
+  | "install_unhealthy"
+  | "interrupted_unknown"
+  | "restart_skipped";
+
+interface UpdateFailure {
+  version: string;
+  failureKind: UpdateFailureKind;
+  initiator: "auto" | "manual";
+}
+
 interface RuntimeVersionsResponse {
   current: string;
   available: ReleaseEntry[];
   autoUpdate?: boolean;
   stale?: boolean;
   registryError?: string;
+  updateFailure?: UpdateFailure;
 }
 
 interface SwitchSuccess {
@@ -60,13 +83,53 @@ function isReleaseEntry(value: unknown): value is ReleaseEntry {
   );
 }
 
+function isUpdateFailure(value: unknown): value is UpdateFailure {
+  if (typeof value !== "object" || value === null) return false;
+  const failure = value as { version: unknown; failureKind: unknown; initiator: unknown };
+  return (
+    typeof failure.version === "string" &&
+    (failure.failureKind === "rolled_back" ||
+      failure.failureKind === "install_unhealthy" ||
+      failure.failureKind === "interrupted_unknown" ||
+      failure.failureKind === "restart_skipped") &&
+    (failure.initiator === "auto" || failure.initiator === "manual")
+  );
+}
+
 function isRuntimeVersionsResponse(value: unknown): value is RuntimeVersionsResponse {
   if (typeof value !== "object" || value === null) return false;
-  const record = value as { current: unknown; available: unknown; autoUpdate?: unknown };
+  const record = value as {
+    current: unknown;
+    available: unknown;
+    autoUpdate?: unknown;
+    updateFailure?: unknown;
+  };
   if (typeof record.current !== "string") return false;
   if (!Array.isArray(record.available)) return false;
   if (record.autoUpdate !== undefined && typeof record.autoUpdate !== "boolean") return false;
+  if (record.updateFailure !== undefined && !isUpdateFailure(record.updateFailure)) return false;
   return record.available.every(isReleaseEntry);
+}
+
+// The suspension clause only where it is true. The daemon disarms `autoUpdate`
+// for its own attempts only, and `autoUpdate` is off by default, so "off" alone
+// proves nothing: a manual rollback on a host that never armed it suspended
+// nothing, and an auto one the operator re-armed by hand is no longer suspended.
+function updateSuspended(failure: UpdateFailure, autoUpdateOn: boolean): boolean {
+  return failure.initiator === "auto" && !autoUpdateOn;
+}
+
+function updateFailureMessage(failure: UpdateFailure, autoUpdateOn: boolean): string {
+  if (failure.failureKind === "restart_skipped") {
+    return `Update to ${failure.version} installed but the services were not restarted — restart Spur to finish`;
+  }
+  const outcome =
+    failure.failureKind === "rolled_back"
+      ? `Update to ${failure.version} failed, an automatic rollback happened`
+      : failure.failureKind === "install_unhealthy"
+        ? `Update to ${failure.version} failed and was not rolled back`
+        : `Update to ${failure.version} was interrupted, the host may have been changed`;
+  return updateSuspended(failure, autoUpdateOn) ? `${outcome}, auto-update is suspended` : outcome;
 }
 
 function isSwitchSuccess(value: unknown): value is SwitchSuccess {
@@ -147,6 +210,10 @@ export function VersionMenu() {
     },
     staleTime: 60_000,
     refetchOnMount: true,
+    // The footer never unmounts, so without this nothing ever refetches: a
+    // daemon-side disarm and the rollback notice behind it would only show up
+    // after a reload.
+    refetchInterval: 60_000,
   });
 
   const switchMutation = useMutation<SwitchSuccess, Error, string>({
@@ -168,8 +235,11 @@ export function VersionMenu() {
       // 30 attempts the page never reloads (version-switch-context.tsx's
       // poll-exhaustion path), so the 60s-stale versions cache would
       // otherwise show a checked box against a daemon that already disarmed.
+      // Same reason drops `updateFailure`: the daemon supersedes the failed
+      // record with the `running` one for this switch, and the operator is
+      // owed the notice going away the moment they act on it.
       queryClient.setQueryData<RuntimeVersionsResponse>(["runtime", "versions"], (old) =>
-        old ? { ...old, autoUpdate: result.autoUpdate ?? false } : old,
+        old ? { ...old, autoUpdate: result.autoUpdate ?? false, updateFailure: undefined } : old,
       );
       startSwitch(result.version);
       setPending(null);
@@ -193,7 +263,21 @@ export function VersionMenu() {
     },
     onSuccess: (result) => {
       queryClient.setQueryData<RuntimeVersionsResponse>(["runtime", "versions"], (old) =>
-        old ? { ...old, autoUpdate: result.autoUpdate } : old,
+        old
+          ? {
+              ...old,
+              autoUpdate: result.autoUpdate,
+              // Re-arming is the operator answering a failed record, and the
+              // daemon clears it on that same request — but only a `failed`
+              // record (clearFailedDeploySwitchRecord never touches a
+              // `succeeded` one). A restart_skipped notice rides a `succeeded`
+              // record, so it survives this write and must stay on screen,
+              // not flicker off until the next 60s poll brings it back.
+              ...(result.autoUpdate && old.updateFailure?.failureKind !== "restart_skipped"
+                ? { updateFailure: undefined }
+                : {}),
+            }
+          : old,
       );
     },
   });
@@ -210,6 +294,10 @@ export function VersionMenu() {
   const severity = updateSeverity(latest, current);
   const updateAvailable = severity !== "none";
   const autoUpdateOn = versionsQuery.data?.autoUpdate ?? false;
+  // Gated on the notice, never on severity: an install that failed and was not
+  // rolled back leaves the host running the newest release, i.e. severity
+  // "none", and that is exactly the state that must not stay invisible.
+  const updateFailure = versionsQuery.data?.updateFailure ?? null;
 
   const { dismiss } = popover;
   useEffect(() => {
@@ -252,23 +340,44 @@ export function VersionMenu() {
         aria-expanded={popover.open}
         aria-haspopup="true"
         aria-label={`Show Spur version information${
-          severity === "major"
-            ? ", major update available"
-            : severity === "update"
-              ? ", update available"
-              : ""
+          updateFailure
+            ? updateFailure.failureKind === "restart_skipped"
+              ? ", update installed, restart required"
+              : updateSuspended(updateFailure, autoUpdateOn)
+                ? ", update failed, auto-update is suspended"
+                : ", update failed"
+            : severity === "major"
+              ? ", major update available"
+              : severity === "update"
+                ? ", update available"
+                : ""
         }`}
         className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
         type="button"
         onClick={popover.toggle}
       >
         <span
-          className={severity === "none" ? undefined : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`}
+          className={
+            updateFailure
+              ? "font-bold text-[var(--color-status-error)]"
+              : severity === "none"
+                ? undefined
+                : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`
+          }
           data-severity={severity}
         >
           {triggerLabel}
         </span>
-        {severity === "none" ? null : (
+        {/* The notice wins the icon slot: one glyph, never two. The popover
+            still lists every release, so no severity information is lost.
+            The colour is the token, not SEVERITY_TEXT_CLASS: a rollback is not
+            a severity, so a recolour of `major` must not drag it along. */}
+        {updateFailure ? (
+          <RollbackIcon
+            className="h-3 w-3 text-[var(--color-status-error)]"
+            data-testid="version-rollback-icon"
+          />
+        ) : severity === "none" ? null : (
           <AlertIcon
             aggressive={severity === "major"}
             className={`h-3 w-3 ${SEVERITY_TEXT_CLASS[severity]}`}
@@ -278,6 +387,25 @@ export function VersionMenu() {
       </button>
       {popover.open && switchPhase === "idle" ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+          {updateFailure ? (
+            <div
+              className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]"
+              data-testid="version-update-failure"
+            >
+              {updateFailureMessage(updateFailure, autoUpdateOn)}
+            </div>
+          ) : null}
+          {/* The checkbox is the operator's way to clear the notice, so a
+              refused write cannot be silent: the box snaps back to the server
+              value and this says why. */}
+          {autoUpdateMutation.isError ? (
+            <div
+              className="mb-2 normal-case tracking-normal text-[var(--color-status-error)]"
+              data-testid="version-auto-update-error"
+            >
+              {autoUpdateMutation.error.message}
+            </div>
+          ) : null}
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <div className="flex items-center gap-2">
               <span className="text-[var(--color-text-secondary)]">Spur</span>

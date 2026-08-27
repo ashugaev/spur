@@ -79,6 +79,25 @@ if ! grep -q "systemctl not available, manual restart required" "$LOG_FILE"; the
   exit 1
 fi
 
+# Case 3b: no systemctl records restart_skipped on the status file (A3) — same
+# branch as Case 3, with a status file to see what it wrote after a real install.
+rm -f "$LOG_FILE"
+STATUS_FILE3B="$LOG_DIR/restart-skipped-status.json"
+LEDGER_FILE3B="$LOG_DIR/restart-skipped-ledger.jsonl"
+rm -f "$STATUS_FILE3B" "$LEDGER_FILE3B"
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  SPUR_INSTALL_STATUS_FILE="$STATUS_FILE3B" SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE3B" \
+  NPM=echo SYSTEMCTL=spur-no-such-systemctl \
+  bash "$HELPER" 1.2.3
+grep -q '"phase":"succeeded"' "$STATUS_FILE3B" || fail "no-systemctl run recorded no success status"
+grep -q '"outcome":"restart_skipped"' "$STATUS_FILE3B" || fail "no-systemctl run recorded no restart_skipped outcome"
+if grep -q 'failureKind' "$STATUS_FILE3B"; then
+  fail "a restart_skipped status must carry no failureKind"
+fi
+if [ -e "$LEDGER_FILE3B" ]; then
+  fail "a restart_skipped run must never block its own version: $(cat "$LEDGER_FILE3B")"
+fi
+
 # Case 4: multi-word SYSTEMCTL override (the real default is "systemctl --user")
 # splits into command + args.
 rm -f "$LOG_FILE"
@@ -89,10 +108,16 @@ if ! grep -q -- "--user restart spur-daemon.service spur-web.service" "$LOG_FILE
   exit 1
 fi
 
-# Case 5: a failing restart propagates its exit code instead of masking it.
+# Case 5: a failing restart propagates its exit code instead of masking it, and
+# records install_unhealthy — this branch has no rollback, so the host is left
+# on the newly installed version and must never be auto-retried.
 rm -f "$LOG_FILE"
+STATUS_FILE5="$LOG_DIR/deploy-switch-5.json"
+rm -f "$STATUS_FILE5"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=false bash "$HELPER" 1.2.3
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE5" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=false \
+  bash "$HELPER" 1.2.3
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then
@@ -100,6 +125,9 @@ if [ "$rc" -eq 0 ]; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE5" ||
+  fail "case 5 status must record failureKind install_unhealthy: $(cat "$STATUS_FILE5")"
+grep -q '"initiator":"auto"' "$STATUS_FILE5" || fail "case 5 status lost the initiator"
 
 # Case 6: default user scope (SYSTEMCTL unset) with a resolvable spur binary
 # converges on `spur reinit` instead of the bare systemctl restart.
@@ -258,27 +286,50 @@ second_pid=$!
 wait "$first_pid" "$second_pid"
 [ "$(tr '\n' ' ' <"$LOCK_TRACE")" = "start end start end " ] || fail "concurrent installs overlapped"
 
-# Case 14: a held lock makes the helper give up instead of waiting forever.
-flock "$LOCK_FILE" -c "sleep 3" &
+# Case 14: a held lock makes the helper give up instead of waiting forever,
+# and records install_failed so a record-less retry can never happen (a lock
+# give-up now runs under the armed trap; A1). No daemon writes the "running"
+# record here, so the :64-78 wait loop spins its full ~2s before the lock is
+# even attempted — acceptable, noted in the spec's test plan. Held long enough
+# (5s) to outlast that 2s wait plus the 1s lock-wait timeout below.
+flock "$LOCK_FILE" -c "sleep 5" &
 holder_pid=$!
 sleep 0.2
+STATUS_FILE14="$PREFIX_DIR/lock-give-up-status.json"
+LEDGER_FILE14="$PREFIX_DIR/lock-give-up-ledger.jsonl"
+rm -f "$STATUS_FILE14" "$LEDGER_FILE14"
 set +e
 SPUR_INSTALL_LOCK_WAIT_SECONDS=1 SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" \
+  SPUR_INSTALL_STATUS_FILE="$STATUS_FILE14" SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE14" \
   NPM=echo SYSTEMCTL=echo bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
 lock_rc=$?
 set -e
 [ "$lock_rc" -eq 1 ] || fail "helper did not give up on a held lock (rc=$lock_rc)"
 grep -q "install-and-restart lock failed" "$LOG_DIR/install-and-restart.log" || fail "missing lock failure log"
+grep -q '"phase":"failed"' "$STATUS_FILE14" || fail "a lock give-up recorded no terminal status"
+grep -q '"failureKind":"install_failed"' "$STATUS_FILE14" || fail "a lock give-up recorded no failureKind"
+if [ -e "$LEDGER_FILE14" ]; then
+  fail "a lock give-up must never write a ledger line: $(cat "$LEDGER_FILE14")"
+fi
 wait "$holder_pid"
 
 # Case 15: detached deploy runs replace the durable running record with terminal status.
 STATUS_FILE="$PREFIX_DIR/deploy-switch.json"
+LEDGER_FILE15="$PREFIX_DIR/update-ledger.jsonl"
 printf '%s\n' '{"phase":"running"}' >"$STATUS_FILE"
-SPUR_INSTALL_STATUS_FILE="$STATUS_FILE" SPUR_INSTALL_LOG_DIR="$LOG_DIR" \
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE" SPUR_DEPLOY_INITIATOR=auto SPUR_INSTALL_LOG_DIR="$LOG_DIR" \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE15" \
   SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo SYSTEMCTL=echo \
   bash "$PKG_SCRIPTS_DIR/install-and-restart.sh" 1.2.3
 grep -q '"phase":"succeeded"' "$STATUS_FILE" || fail "helper did not persist success status"
 grep -q '"version":"1.2.3"' "$STATUS_FILE" || fail "helper status lost target version"
+grep -q '"initiator":"auto"' "$STATUS_FILE" || fail "helper status lost the initiator"
+if grep -q 'failureKind' "$STATUS_FILE"; then
+  fail "a succeeded status must carry no failureKind"
+fi
+if [ -e "$LEDGER_FILE15" ]; then
+  fail "a succeeded run must never block its own version: $(cat "$LEDGER_FILE15")"
+fi
 
 # Case 9: install layout with required files missing -> non-zero exit, rollback
 # install logged, no spur reinit, no systemctl restart.
@@ -303,8 +354,15 @@ EOF
 chmod +x "$PREFIX_DIR9/bin/spur"
 
 rm -f "$LOG_FILE"
+# The status file is what carries failureKind, so this case must ask for one:
+# without SPUR_INSTALL_STATUS_FILE the EXIT trap writes nothing at all. No
+# daemon is here to write the "running" record, so the helper pays its 2s wait.
+STATUS_FILE9="$PREFIX_DIR9/deploy-switch.json"
+LEDGER_FILE9="$PREFIX_DIR9/update-ledger.jsonl"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE9" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE9" \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
   env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR9/install-and-restart.sh" 1.3.0
 rc9=$?
 set -e
@@ -333,6 +391,18 @@ if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+# NPM=echo makes the rollback install return 0, and this branch never reinits,
+# so the previous version is restored: rolled_back, never auto-retried.
+grep -q '"failureKind":"rolled_back"' "$STATUS_FILE9" ||
+  fail "case 9 status must record failureKind rolled_back: $(cat "$STATUS_FILE9")"
+grep -q '"initiator":"auto"' "$STATUS_FILE9" || fail "case 9 status lost the initiator"
+# The record can be cleared by the operator; the ledger line is what keeps this
+# version off the auto path for good.
+ledger_lines9="$(wc -l <"$LEDGER_FILE9")"
+[ "$ledger_lines9" -eq 1 ] ||
+  fail "case 9 must append exactly one ledger line, got $ledger_lines9: $(cat "$LEDGER_FILE9")"
+grep -q '{"kind":"blocked","version":"1.3.0","failureKind":"rolled_back"' "$LEDGER_FILE9" ||
+  fail "case 9 ledger line does not block 1.3.0 as rolled_back: $(cat "$LEDGER_FILE9")"
 
 # Case 10: all required files present, spur exits 1 -> health rollback: rollback
 # install of 1.0.0, second reinit, exit non-zero. Two spur reinit rc= log lines.
@@ -358,8 +428,12 @@ EOF
 chmod +x "$PREFIX_DIR10/bin/spur"
 
 rm -f "$LOG_FILE"
+STATUS_FILE10="$PREFIX_DIR10/deploy-switch.json"
+LEDGER_FILE10="$PREFIX_DIR10/nested/update-ledger.jsonl"
 set +e
-SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE10" SPUR_DEPLOY_INITIATOR=manual \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE10" \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
   env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR10/install-and-restart.sh" 1.1.0
 rc10=$?
 set -e
@@ -384,6 +458,18 @@ if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+# The spur stub exits 1 unconditionally, so the post-rollback reinit fails too:
+# installed, failed, and NOT restored -> install_unhealthy, not rolled_back.
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE10" ||
+  fail "case 10 status must record failureKind install_unhealthy: $(cat "$STATUS_FILE10")"
+grep -q '"initiator":"manual"' "$STATUS_FILE10" || fail "case 10 status lost the initiator"
+# Nested path on purpose: the daemon hands over a path under dataDir that may
+# not exist yet on a host that has never blocked a version.
+ledger_lines10="$(wc -l <"$LEDGER_FILE10")"
+[ "$ledger_lines10" -eq 1 ] ||
+  fail "case 10 must append exactly one ledger line, got $ledger_lines10: $(cat "$LEDGER_FILE10")"
+grep -q '{"kind":"blocked","version":"1.1.0","failureKind":"install_unhealthy"' "$LEDGER_FILE10" ||
+  fail "case 10 ledger line does not block 1.1.0 as install_unhealthy: $(cat "$LEDGER_FILE10")"
 
 # Case 11: downgrade to a version whose tree lacks scripts/verify-package-files.sh.
 # The validator was copied from the current (pre-install) package into a temp dir
@@ -440,5 +526,169 @@ if grep -q "package validation failed" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
+
+# Case 16: a failed npm install records install_failed — nothing was installed,
+# so the daemon's tick may attempt this version again on the next tick.
+STATUS_FILE16="$LOG_DIR/deploy-switch-16.json"
+LEDGER_FILE16="$LOG_DIR/update-ledger-16.jsonl"
+rm -f "$LOG_FILE" "$STATUS_FILE16" "$LEDGER_FILE16"
+set +e
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE16" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE16" \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=false SYSTEMCTL=echo \
+  bash "$HELPER" 1.4.0
+rc16=$?
+set -e
+[ "$rc16" -ne 0 ] || fail "case 16 expected a non-zero exit when npm install fails"
+grep -q "npm install failed" "$LOG_FILE" || fail "case 16 log missing the npm install failure line"
+grep -q '"failureKind":"install_failed"' "$STATUS_FILE16" ||
+  fail "case 16 status must record failureKind install_failed: $(cat "$STATUS_FILE16")"
+grep -q '"phase":"failed"' "$STATUS_FILE16" || fail "case 16 status must be phase failed"
+grep -q '"initiator":"auto"' "$STATUS_FILE16" || fail "case 16 status lost the initiator"
+if grep -q "restart spur-daemon.service" "$LOG_FILE"; then
+  fail "case 16 must not restart anything after a failed install"
+fi
+if [ -e "$LEDGER_FILE16" ]; then
+  fail "case 16 must not block a version that never installed: $(cat "$LEDGER_FILE16")"
+fi
+
+# Case 17: package validation fails AND the rollback install fails too. Same
+# branch as case 9, opposite outcome: the previous version was not restored, so
+# the kind stays install_unhealthy and must not be upgraded to rolled_back.
+PREFIX_DIR17="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR" "$PREFIX_DIR9" "$PREFIX_DIR10" "$PREFIX_DIR11" "$PREFIX_DIR17"' EXIT
+PKG_DIR17="$PREFIX_DIR17/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR17="$PKG_DIR17/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR17" "$PKG_DIR17/deploy" "$PKG_DIR17/dist" "$PKG_DIR17/web/dist-server" "$PREFIX_DIR17/bin"
+cp "$HELPER" "$PKG_SCRIPTS_DIR17/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR17/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR17/required-package-files.txt"
+: >"$PKG_DIR17/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR17/deploy/spur-web.npm.service"
+: >"$PKG_DIR17/dist/cli.js"
+: >"$PKG_DIR17/spur.yaml.reference"
+printf '{"version":"1.2.3"}' >"$PKG_DIR17/package.json"
+cat >"$PREFIX_DIR17/bin/spur" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+EOF
+chmod +x "$PREFIX_DIR17/bin/spur"
+
+# Installs the target, refuses the rollback back to 1.2.3.
+FAKE_NPM17="$(mktemp)"
+cat >"$FAKE_NPM17" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+for arg in "$@"; do
+  if [ "$arg" = "@shugaev/spur@1.2.3" ]; then
+    exit 1
+  fi
+done
+exit 0
+EOF
+chmod +x "$FAKE_NPM17"
+
+STATUS_FILE17="$PREFIX_DIR17/deploy-switch.json"
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE17" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM="$FAKE_NPM17" \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR17/install-and-restart.sh" 1.3.0
+rc17=$?
+set -e
+rm -f "$FAKE_NPM17"
+[ "$rc17" -ne 0 ] || fail "case 17 expected a non-zero exit for a failed validation"
+grep -q "rollback install rc=1" "$LOG_FILE" ||
+  fail "case 17 log missing the failed rollback install line"
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE17" ||
+  fail "case 17 status must stay install_unhealthy: $(cat "$STATUS_FILE17")"
+if grep -q "rolled_back" "$STATUS_FILE17"; then
+  fail "case 17 must not claim a rollback that failed: $(cat "$STATUS_FILE17")"
+fi
+
+# Case 18: the reinit branch's other half. Rollback install FAILS while the
+# post-rollback reinit SUCCEEDS — the only input that separates the two
+# conjuncts at install-and-restart.sh's `_rollback_rc -eq 0 &&
+# _rollback_reinit_rc -eq 0`. Previous version not reinstalled, so the kind
+# stays install_unhealthy no matter how well the reinit went.
+PREFIX_DIR18="$(mktemp -d)"
+trap 'rm -rf "$LOG_DIR" "$STUB_BIN_DIR" "$PREFIX_DIR" "$PREFIX_DIR9" "$PREFIX_DIR10" "$PREFIX_DIR11" "$PREFIX_DIR17" "$PREFIX_DIR18"' EXIT
+PKG_DIR18="$PREFIX_DIR18/lib/node_modules/@shugaev/spur"
+PKG_SCRIPTS_DIR18="$PKG_DIR18/scripts"
+mkdir -p "$PKG_SCRIPTS_DIR18" "$PKG_DIR18/deploy" "$PKG_DIR18/dist" "$PKG_DIR18/web/dist-server" "$PKG_DIR18/skills/spur" "$PREFIX_DIR18/bin"
+cp "$HELPER" "$PKG_SCRIPTS_DIR18/install-and-restart.sh"
+cp "$HERE/../scripts/verify-package-files.sh" "$PKG_SCRIPTS_DIR18/verify-package-files.sh"
+cp "$HERE/../required-package-files.txt" "$PKG_DIR18/required-package-files.txt"
+: >"$PKG_DIR18/deploy/spur-daemon.npm.service"
+: >"$PKG_DIR18/deploy/spur-web.npm.service"
+: >"$PKG_DIR18/dist/cli.js"
+: >"$PKG_DIR18/web/dist-server/web-server.js"
+: >"$PKG_DIR18/spur.yaml.reference"
+: >"$PKG_DIR18/skills/spur/SKILL.md"
+printf '{"version":"1.0.0"}' >"$PKG_DIR18/package.json"
+
+# First reinit (the new version) fails, the second one (after the rollback
+# install) succeeds.
+SPUR_COUNT18="$LOG_DIR/spur-count-18"
+rm -f "$SPUR_COUNT18"
+cat >"$PREFIX_DIR18/bin/spur" <<EOF
+#!/usr/bin/env bash
+echo "\$@"
+count=\$(cat "$SPUR_COUNT18" 2>/dev/null || echo 0)
+count=\$((count + 1))
+printf '%s' "\$count" >"$SPUR_COUNT18"
+[ "\$count" -eq 1 ] && exit 1
+exit 0
+EOF
+chmod +x "$PREFIX_DIR18/bin/spur"
+
+# Installs the new version, refuses the rollback back to 1.0.0.
+FAKE_NPM18="$(mktemp)"
+cat >"$FAKE_NPM18" <<'EOF'
+#!/usr/bin/env bash
+echo "$@"
+for arg in "$@"; do
+  if [ "$arg" = "@shugaev/spur@1.0.0" ]; then
+    exit 1
+  fi
+done
+exit 0
+EOF
+chmod +x "$FAKE_NPM18"
+
+STATUS_FILE18="$PREFIX_DIR18/deploy-switch.json"
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_STATUS_FILE="$STATUS_FILE18" SPUR_DEPLOY_INITIATOR=auto \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM="$FAKE_NPM18" \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR18/install-and-restart.sh" 1.1.0
+rc18=$?
+set -e
+rm -f "$FAKE_NPM18"
+[ "$rc18" -ne 0 ] || fail "case 18 expected a non-zero exit when the first reinit fails"
+grep -q "rollback install rc=1" "$LOG_FILE" ||
+  fail "case 18 log missing the failed rollback install line"
+grep -q "spur reinit rc=0" "$LOG_FILE" ||
+  fail "case 18 expected the post-rollback reinit to succeed"
+grep -q '"failureKind":"install_unhealthy"' "$STATUS_FILE18" ||
+  fail "case 18 status must stay install_unhealthy: $(cat "$STATUS_FILE18")"
+if grep -q "rolled_back" "$STATUS_FILE18"; then
+  fail "case 18 must not claim a rollback whose install failed: $(cat "$STATUS_FILE18")"
+fi
+
+# Case 19: the ledger line does not depend on the status file. Same fixture as
+# case 10, run with no SPUR_INSTALL_STATUS_FILE at all: the never-retry memory
+# still lands, so a lost or buried status record cannot re-arm this version.
+LEDGER_FILE19="$LOG_DIR/update-ledger-19.jsonl"
+rm -f "$LOG_FILE" "$LEDGER_FILE19"
+set +e
+SPUR_UPDATE_LEDGER_FILE="$LEDGER_FILE19" \
+  SPUR_INSTALL_LOG_DIR="$LOG_DIR" SPUR_INSTALL_LOCK_FILE="$LOCK_FILE" NPM=echo \
+  env -u SYSTEMCTL bash "$PKG_SCRIPTS_DIR10/install-and-restart.sh" 1.1.0
+rc19=$?
+set -e
+[ "$rc19" -ne 0 ] || fail "case 19 expected a non-zero exit when reinit fails"
+grep -q '{"kind":"blocked","version":"1.1.0","failureKind":"install_unhealthy"' "$LEDGER_FILE19" ||
+  fail "case 19 must append the ledger line with no status file: $(cat "$LEDGER_FILE19" 2>&1)"
 
 echo "install-and-restart.test.sh: OK"

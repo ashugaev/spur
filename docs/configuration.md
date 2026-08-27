@@ -202,7 +202,7 @@ triggers:
           defaultBranch: main
 ```
 
-`spawnDeskGroup: true` requires multiple flat spawn entries, rejects `autoComplete`, and attaches all children to one parent desk. Every entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch`.
+`spawnDeskGroup: true` requires multiple flat spawn entries, rejects `autoComplete`, and attaches all children to one parent desk. Every entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch`. The desk anchor is the first entry that spawns successfully; if an entry fails, the next one becomes the anchor and the remaining entries join it.
 
 A desk group is any set of sessions sharing one workspace: the children of a `spawnDeskGroup` trigger, and the two sides of a handoff.
 
@@ -310,6 +310,8 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `spawn.branch` / `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
 - `spawn.overrides.worktree` / `spawn[].overrides.worktree`: optional boolean.
 - `spawn.overrides.defaultBranch` / `spawn[].overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
+- `spawn.restrictWrites`: optional boolean, default `false`; when `true`, every spawned block runs restricted to read-only tools unless the block sets its own `restrictWrites`.
+- `spawn[].restrictWrites`: optional boolean per block; overrides the spawn-level default for that block only — `true` restricts the block regardless of the spawn-level value, `false` opts the block out of a spawn-level `true`, and omitting it inherits the spawn-level default.
 - `spawn.autoComplete`: when `true`, Spur completes the spawned session only after it has existed 5+ minutes and is `waiting`; `working`, `needs_input`, paused, and spawning block completion.
 - `spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk, and rejects mixed resolved `overrides.worktree`/`overrides.defaultBranch`.
 - `send.interrupt`: optional boolean, default `false`. The first event opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`); merged events keep it. `false` queues while `working`/`needs_input`, dedupes, delivers once the window expired and the session is idle `waiting`. `true` interrupts immediately while `working` only; `waiting` delivers normally, `needs_input` stays queued until `waiting`. `cursor` never gets the `Ctrl-C` keystroke — the message is typed into the running turn and cursor-agent queues it; `claude` and `codex` are interrupted first. Signals gone from the source snapshot before the window expires are pruned at flush; an emptied batch is dropped as `snapshot_pruned`.
@@ -458,7 +460,28 @@ Unit files here are templates. Source deployments apply them through [install-fr
 
 Toggle from the `Auto` checkbox in the web version popover, or by hand: `autoUpdate: true`/`false` in `~/.spur/config.yaml`, re-read from disk every reaper tick — a hand edit takes effect on the next tick, no restart. Detection lag up to ~15 minutes (5-minute reaper tick plus the 10-minute registry cache), not immediate.
 
-An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release. A candidate already holding a terminal (`succeeded` or `failed`) status record is never retried. Events: `daemon.auto_update.started`, `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`.
+An accepted `POST /deploy/switch` — what `Switch` sends — also sets `autoUpdate: false`. The daemon's own auto-update switch does not: a self-updated host stays armed for the next release.
+
+The daemon writes `autoUpdate: false` itself once one of its own attempts installs a version and leaves the host changed (`failureKind` `rolled_back` or `install_unhealthy`), or dies without reporting what it did (`failureKind` `interrupted_unknown`), and logs `daemon.auto_update.paused`. At most once per version, ever: a hand edit back to `autoUpdate: true` holds. Only the daemon's own attempt disarms this way; [`spur update`](install-from-npm.md#upgrade) never touches the flag.
+
+`<dataDir>/update-ledger.jsonl` is append-only, never pruned or rotated: one `blocked` line per version that installed and left the host changed, one `disarmed` line per disarm. A `blocked` version is never auto-attempted again on that host, even after the status record is gone — suppression logs `reason` `blocked_version`.
+
+The web version popover names that version — `rolled_back`, `install_unhealthy`, or `interrupted_unknown`, any initiator — and says auto-update is suspended only where that is true, i.e. an auto-initiated failure with the flag now off. The notice clears on the next operator action on the update path: re-enable `Auto`, or any accepted `Switch`. A later such failure raises it again, naming the new version. A separate, unrelated notice — `restart_skipped` — shows a succeeded install that could not restart the services (no `systemctl`); it clears on its own once the daemon's running version matches the installed one, no operator action needed. Field: [`updateFailure`](daemon-api.md#daemon-http-api).
+
+Retry rule, keyed on the failed attempt's [`failureKind`](daemon-api.md#daemon-http-api):
+
+- `install_failed` — target never installed, including a lock timeout that gave up before the install started. Retried every tick, no cap, no backoff.
+- no `failureKind` — a record written by the daemon's own spawn-error path, or the helper died before it armed its own trap (invalid version, or killed during its pre-trap wait for the daemon's `running` record). Nothing installed. Retried the same way.
+- `rolled_back` — installed, failed, previous version reinstalled. Never auto-retried.
+- `install_unhealthy` — installed, failed, previous version not restored. Never auto-retried.
+- `interrupted_unknown` — the run died without reporting what it did (killed, OOM, reboot); whether it installed is unknown. Never auto-retried, disarms `autoUpdate` once for an auto-initiated attempt same as the two kinds above; re-enabling `Auto` clears the record and unblocks one further attempt.
+- `succeeded` — never retried, even when the running version is still the older one; a `restart_skipped` outcome on that record only adds a notice, it never changes this rule.
+
+Only the newest release is ever a candidate: a suppressed or blocked newest release stops the auto path until the registry publishes a newer one, never falls back to an older release.
+
+Update events, every initiator: `daemon.auto_update.started`, `daemon.auto_update.retry`, `daemon.auto_update.suppressed` (with `reason` `succeeded_record`, `no_retry_kind`, or `blocked_version`), `daemon.auto_update.skipped`, `daemon.auto_update.failed`, `daemon.auto_update.paused`, `daemon.auto_update.config_invalid`, `daemon.auto_update.disarm_failed`, `daemon.deploy_switch.started`, `daemon.deploy_switch.rejected`, `cli.update.started`, `cli.update.rolled_back`, `cli.update.abandoned`. All in the [event log](#event-log-retention).
+
+`daemon.auto_update.suppressed` is `info` — it repeats every tick while the suppressed release is the newest one. `paused` and `disarm_failed` are `warn`.
 
 Rollback reaches only failures the switch helper itself detects ([daemon-api.md](daemon-api.md#daemon-http-api)). A failure surfacing minutes after a healthy restart is caught by neither the deploy-switch path nor `spur update`'s monitor; auto-update inherits that gap, does not widen it.
 

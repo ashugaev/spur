@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,13 @@ import { startServer } from "../../src/server.js";
 import { findFreePort } from "../helpers/common.js";
 
 async function setupConfig(port: number, autoUpdate?: boolean): Promise<string> {
+  return (await setupInstance(port, autoUpdate)).configPath;
+}
+
+async function setupInstance(
+  port: number,
+  autoUpdate?: boolean,
+): Promise<{ configPath: string; dataDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "spur-auto-update-route-"));
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
@@ -28,7 +36,7 @@ async function setupConfig(port: number, autoUpdate?: boolean): Promise<string> 
     ].join("\n"),
     "utf8",
   );
-  return configPath;
+  return { configPath, dataDir };
 }
 
 describe("POST /deploy/auto-update", () => {
@@ -98,6 +106,78 @@ describe("POST /deploy/auto-update", () => {
     } finally {
       await server.stop();
     }
+  });
+
+  describe("clearing the rollback notice", () => {
+    const TERMINAL = {
+      version: "0.67.2",
+      pid: 4242,
+      startedAt: "2026-08-24T15:17:00Z",
+      finishedAt: "2026-08-24T15:17:02Z",
+      exitCode: 1,
+      initiator: "auto",
+    } as const;
+
+    async function postEnabled(
+      enabled: boolean,
+      record: unknown,
+    ): Promise<{ statePath: string; recordAfter: string | null }> {
+      const port = await findFreePort();
+      const { configPath, dataDir } = await setupInstance(port, !enabled);
+      await mkdir(dataDir, { recursive: true });
+      const statePath = join(dataDir, "deploy-switch.json");
+      await writeFile(statePath, `${JSON.stringify(record)}\n`, "utf8");
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/deploy/auto-update`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        expect(response.status).toBe(200);
+        return {
+          statePath,
+          recordAfter: existsSync(statePath) ? await readFile(statePath, "utf8") : null,
+        };
+      } finally {
+        await server.stop();
+      }
+    }
+
+    it("enabled true clears a rolled-back record", async () => {
+      const { recordAfter } = await postEnabled(true, {
+        ...TERMINAL,
+        phase: "failed",
+        failureKind: "rolled_back",
+      });
+
+      expect(recordAfter).toBeNull();
+    });
+
+    it("enabled false leaves the same record alone", async () => {
+      // Unchecking the box is not the operator answering the rollback, and it
+      // is the only checkbox action available while the notice already stands
+      // with the flag on.
+      const record = { ...TERMINAL, phase: "failed", failureKind: "rolled_back" };
+      const { recordAfter } = await postEnabled(false, record);
+
+      expect(recordAfter).toBe(`${JSON.stringify(record)}\n`);
+    });
+
+    it("enabled true leaves a succeeded record and a retryable failure alone", async () => {
+      const succeeded = { ...TERMINAL, phase: "succeeded", exitCode: 0 };
+      const retryable = { ...TERMINAL, phase: "failed", failureKind: "install_failed" };
+
+      expect((await postEnabled(true, succeeded)).recordAfter).toBe(
+        `${JSON.stringify(succeeded)}\n`,
+      );
+      expect((await postEnabled(true, retryable)).recordAfter).toBe(
+        `${JSON.stringify(retryable)}\n`,
+      );
+    });
   });
 
   describe("write failure mapping", () => {
