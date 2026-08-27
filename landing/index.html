@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Spur — run Claude, Codex and Cursor agents in tmux</title>
+<meta name="description" content="Open-source local daemon. Runs claude, codex, cursor and opencode as tmux sessions, one git worktree each. They survive a closed laptop. One mobile dashboard." />
+<link rel="canonical" href="https://spur.dev/" />
+<meta name="theme-color" content="#0d0d0e" />
+<meta name="robots" content="index,follow,max-image-preview:large" />
+
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Spur" />
+<meta property="og:locale" content="en_US" />
+<meta property="og:title" content="Spur — close the laptop, the agents keep working" />
+<meta property="og:description" content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions, one git worktree each. Survives a closed lid and a reboot. One dashboard, any device." />
+<meta property="og:url" content="https://spur.dev/" />
+<meta property="og:image" content="https://spur.dev/og.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="Spur — one dashboard listing four AI coding agents running in tmux" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Spur — close the laptop, the agents keep working" />
+<meta name="twitter:description" content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions, one git worktree each. One dashboard, any device." />
+<meta name="twitter:image" content="https://spur.dev/og.png" />
+
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' fill='%230d0d0e'/%3E%3Cpath d='M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" onload="this.rel='stylesheet'" />
+<noscript>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" />
+<style>.rv{opacity:1;transform:none}h1 .line>span{transform:none}.flow{transform:scaleX(1)}</style>
+</noscript>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://spur.dev/#website",
+      "url": "https://spur.dev/",
+      "name": "Spur",
+      "publisher": { "@id": "https://spur.dev/#org" }
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://spur.dev/#org",
+      "name": "Spur",
+      "url": "https://spur.dev/",
+      "sameAs": ["https://github.com/ashugaev/spur"]
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://spur.dev/#app",
+      "name": "Spur",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux, macOS",
+      "description": "Local daemon and CLI that runs AI coding agents (claude, codex, cursor, opencode) as tmux sessions with a git worktree each, routes GitHub, CI, Sentry, cron and Telegram events into them, and shows the fleet on a mobile web dashboard.",
+      "license": "https://www.apache.org/licenses/LICENSE-2.0",
+      "codeRepository": "https://github.com/ashugaev/spur",
+      "softwareHelp": "https://github.com/ashugaev/spur/blob/main/README.md",
+      "image": "https://spur.dev/og.png",
+      "url": "https://spur.dev/",
+      "isAccessibleForFree": true
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Which agents does Spur run?",
+          "acceptedAnswer": { "@type": "Answer", "text": "claude, codex, cursor, opencode. Each gets its own tmux session and a default model from config." }
+        },
+        {
+          "@type": "Question",
+          "name": "What do I need on the host?",
+          "acceptedAnswer": { "@type": "Answer", "text": "A Linux box you control, Node 20+, tmux, git, and the agent CLIs installed and logged in. Daemon and web UI install as systemd user services. Verified on Ubuntu 24.04, 2 GB RAM." }
+        },
+        {
+          "@type": "Question",
+          "name": "Do parallel agents step on each other?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. A session owns a git worktree and branch — ten agents, ten checkouts. The shared project path is opt-in." }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I use it from my phone?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. The dashboard is mobile-first, the terminal takes touch input, and Telegram spawns sessions and relays text and voice." }
+        },
+        {
+          "@type": "Question",
+          "name": "What can trigger an agent automatically?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Seven pollers: cron, GitHub, GitHub CI, GitLab, Sentry, systemd service logs, Telegram. A trigger spawns a session or sends a message into a live one." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does my code leave the box?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Only where your agent already sends it. Spur itself is a local daemon on loopback; spur init opens the UI to your tailnet. There is no Spur cloud, no account, no seat." }
+        }
+      ]
+    }
+  ]
+}
+</script>
+
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{margin:0}
+
+:root{
+  color-scheme:dark;
+  --bg:#0d0d0e;
+  --surface:rgba(17,17,18,.8);
+  --term:#0a0a0f;
+  --b-sub:rgba(35,35,38,.6);
+  --b:rgba(35,35,38,1);
+  --b-strong:rgba(50,50,54,1);
+  --t1:#e1e1e1;
+  --t2:#a1a1a1;
+  --t3:#8b8b90;
+  --t4:#555558;
+  --violet:#a371f7;
+  --working:#58a6ff;
+  --ready:#3fb950;
+  --attention:#ffd700;
+  --mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --gut:clamp(16px,4vw,40px);
+  --max:1180px;
+
+  --step--1:11px;
+  --step-0:13px;
+  --step-1:clamp(15px,1.1vw,17px);
+  --step-2:clamp(21px,2.6vw,28px);
+  --step-3:clamp(28px,4.4vw,44px);
+  --step-4:clamp(32px,6.2vw,66px);
+
+  font-variant-numeric:tabular-nums;
+}
+
+body{
+  font-family:var(--mono);
+  background:var(--bg);
+  color:var(--t1);
+  font-size:var(--step-0);
+  letter-spacing:.02em;
+  line-height:1.6;
+  overflow-x:clip;
+  -webkit-font-smoothing:antialiased;
+}
+
+::selection{background:var(--violet);color:#0d0d0e}
+:focus-visible{outline:1px solid var(--t1);outline-offset:3px}
+
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:var(--gut);top:12px;z-index:99;background:var(--bg);border:1px solid var(--t1);padding:8px 12px;text-decoration:none}
+
+/* ── background ────────────────────────────────────────────────── */
+#grid{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.55}
+.halo{
+  position:fixed;z-index:0;pointer-events:none;filter:blur(100px);opacity:.2;
+  width:56vw;height:56vw;max-width:700px;max-height:700px;border-radius:50%;
+  background:radial-gradient(circle,rgba(163,113,247,.7),transparent 66%);
+  top:-16vw;left:-8vw;
+}
+.wrap{position:relative;z-index:2}
+
+/* ── primitives ────────────────────────────────────────────────── */
+.shell{max-width:var(--max);margin:0 auto;padding:0 var(--gut);position:relative}
+.shell::before,.shell::after{
+  content:"";position:absolute;top:0;bottom:0;width:1px;
+  background:var(--b-sub);pointer-events:none;
+}
+.shell::before{left:calc(var(--gut) - 1px)}
+.shell::after{right:calc(var(--gut) - 1px)}
+@media(max-width:760px){.shell::before,.shell::after{display:none}}
+
+h1,h2,h3{margin:0;font-weight:700;line-height:1.05}
+p{margin:0}
+a{color:inherit}
+code{font-family:var(--mono);color:var(--t1);background:rgba(255,255,255,.06);padding:1px 5px}
+
+.mono-label{font-size:var(--step--1);letter-spacing:.22em;text-transform:uppercase;color:var(--t3)}
+
+.btn{
+  display:inline-flex;align-items:center;gap:10px;
+  padding:13px 22px;border:1px solid var(--b-strong);background:transparent;
+  color:var(--t1);text-decoration:none;font:inherit;font-weight:500;
+  letter-spacing:.04em;cursor:pointer;
+  transition:color .18s,border-color .18s,background-color .18s,letter-spacing .18s;
+}
+.btn.primary{background:var(--t1);color:var(--bg);border-color:var(--t1)}
+@media(hover:hover) and (pointer:fine){
+  .btn:hover{letter-spacing:.09em;border-color:var(--t1)}
+  .btn.primary:hover{background:var(--violet);border-color:var(--violet);color:#0d0d0e}
+}
+.btn:focus-visible{outline-color:var(--violet)}
+
+/* ── nav ───────────────────────────────────────────────────────── */
+nav{
+  position:sticky;top:0;z-index:40;
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  background:rgba(13,13,14,.62);border-bottom:1px solid transparent;
+  transition:border-color .3s,background .3s;
+}
+nav.stuck{border-bottom-color:var(--b-sub);background:rgba(13,13,14,.88)}
+.nav-in{display:flex;align-items:center;gap:20px;height:58px}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;font-weight:700;letter-spacing:-.02em;font-size:var(--step-1)}
+.brand svg{width:20px;height:20px}
+.nav-links{display:none;gap:26px;margin-left:auto;font-size:var(--step--1);letter-spacing:.14em;text-transform:uppercase;color:var(--t3)}
+.nav-links a{text-decoration:none;position:relative;transition:color .2s}
+.nav-links a::after{content:"";position:absolute;left:0;bottom:-5px;width:0;height:1px;background:var(--t1);transition:width .25s}
+.nav-cta{margin-left:auto}
+@media(hover:hover) and (pointer:fine){
+  .nav-links a:hover{color:var(--t1)}
+  .nav-links a:hover::after{width:100%}
+}
+@media(min-width:860px){.nav-links{display:flex}.nav-cta{margin-left:0}}
+
+/* ── hero ──────────────────────────────────────────────────────── */
+header.hero{padding:clamp(56px,12vh,132px) 0 clamp(48px,8vh,88px)}
+.eyebrow{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:28px}
+.pill{
+  display:inline-flex;align-items:center;gap:7px;padding:5px 11px;
+  border:1px solid var(--b);font-size:10.5px;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--t2);
+}
+.dot{width:6px;height:6px;background:var(--ready);box-shadow:0 0 0 0 rgba(63,185,80,.6);animation:pulse 2.4s infinite}
+@keyframes pulse{70%{box-shadow:0 0 0 7px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
+
+h1{font-size:var(--step-4);letter-spacing:-.045em;text-indent:-.06em;max-width:26ch}
+@media(max-width:600px){h1{letter-spacing:-.03em}}
+h1 .line{display:block;overflow:hidden;padding-bottom:.12em;margin-bottom:-.12em}
+h1 .line>span{display:block;transform:translateY(105%);animation:rise .9s cubic-bezier(.16,1,.3,1) forwards}
+h1 .line:nth-child(2)>span{animation-delay:.09s}
+@keyframes rise{to{transform:translateY(0)}}
+h1 em{font-style:normal;color:var(--violet)}
+
+.lede{margin-top:28px;max-width:62ch;color:var(--t2);font-size:var(--step-1);line-height:1.7}
+.lede b{color:var(--t1);font-weight:500}
+.hero-cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:34px}
+
+.cmd{
+  margin-top:26px;display:flex;align-items:center;gap:12px;
+  border:1px solid var(--b);background:var(--term);padding:13px 15px;max-width:660px;
+  overflow-x:auto;scrollbar-width:none;
+}
+.cmd::-webkit-scrollbar{display:none}
+.cmd code{background:none;padding:0;font-size:12.5px;white-space:nowrap}
+.cmd .caret{color:var(--violet);flex:none}
+.copy{
+  margin-left:auto;position:sticky;right:0;flex:none;
+  border:1px solid var(--b);background:var(--term);color:var(--t2);
+  font:inherit;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  padding:6px 10px;cursor:pointer;transition:.2s;
+}
+.copy:hover{color:var(--t1);border-color:var(--b-strong)}
+.copy.done{color:var(--ready);border-color:rgba(63,185,80,.4)}
+
+/* ── section frame ─────────────────────────────────────────────── */
+section{padding:clamp(64px,11vh,120px) 0;position:relative}
+section+section::before{
+  content:"";position:absolute;top:0;left:50%;width:100vw;
+  transform:translateX(-50%);height:1px;background:var(--b-sub);
+}
+section[id],header[id]{scroll-margin-top:74px}
+#dashboard{padding-block:clamp(88px,15vh,160px)}
+.sec-head{display:flex;flex-direction:column;gap:14px;margin-bottom:clamp(28px,5vh,56px);max-width:64ch;position:relative}
+.sec-head::before{
+  content:attr(data-n);position:absolute;left:-58px;top:5px;
+  font-size:var(--step--1);color:var(--t4);letter-spacing:.22em;
+}
+@media(max-width:1180px){.sec-head::before{display:none}}
+.sec-head h2{font-size:var(--step-3);letter-spacing:-.035em}
+.sec-head p{color:var(--t2);line-height:1.7}
+
+/* ── reveal ────────────────────────────────────────────────────── */
+.rv{opacity:0;transform:translateY(22px);transition:opacity .7s cubic-bezier(.16,1,.3,1),transform .7s cubic-bezier(.16,1,.3,1)}
+.rv.in{opacity:1;transform:none}
+
+/* ── scenario timeline ─────────────────────────────────────────── */
+.tl{list-style:none;margin:0 0 48px;padding:0;border-left:1px solid var(--b)}
+.tl li{display:flex;gap:16px;align-items:baseline;padding:11px 0 11px 22px;position:relative;flex-wrap:wrap}
+.tl li::before{content:"";position:absolute;left:-4px;top:19px;width:7px;height:7px;background:var(--b-strong)}
+.tl li:last-child::before{background:var(--violet)}
+.tl .t{color:var(--violet);font-size:12px;letter-spacing:.06em;flex:none;width:52px}
+.tl .e{color:var(--t2);font-size:var(--step-0);line-height:1.65;flex:1;min-width:220px}
+
+/* ── pipeline ──────────────────────────────────────────────────── */
+.pipe{display:grid;gap:1px;background:var(--b-sub);border:1px solid var(--b-sub)}
+@media(min-width:900px){.pipe{grid-template-columns:1fr 1fr 1fr}}
+.pipe-col{background:var(--bg);padding:26px 22px;position:relative;overflow:hidden}
+.pipe-col h3{font-size:var(--step-1);letter-spacing:-.02em;margin-bottom:6px}
+.pipe-col .step{font-size:10.5px;letter-spacing:.22em;color:var(--violet);text-transform:uppercase;margin-bottom:14px}
+.pipe-col p{color:var(--t2);font-size:var(--step-0);margin-bottom:18px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--b);padding:4px 9px;font-size:11px;color:var(--t2);transition:.2s}
+.flow{position:absolute;left:0;bottom:0;height:1px;width:100%;background:var(--violet);transform:scaleX(0);transform-origin:left}
+.pipe.in .flow{animation:handoff .55s cubic-bezier(.16,1,.3,1) forwards}
+.pipe.in .pipe-col:nth-child(2) .flow{animation-delay:.5s}
+.pipe.in .pipe-col:nth-child(3) .flow{animation-delay:1s}
+@keyframes handoff{to{transform:scaleX(1)}}
+
+/* ── dashboard mock ────────────────────────────────────────────── */
+.mock{border:1px solid var(--b);background:var(--surface);overflow:hidden;box-shadow:0 40px 90px -50px rgba(0,0,0,.9)}
+.mock-bar{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--b-sub);font-size:11px;color:var(--t3)}
+.mock-body{display:grid;grid-template-columns:1fr}
+@media(min-width:900px){.mock-body{grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}}
+.rows{border-right:1px solid var(--b-sub);min-width:0}
+.row{display:flex;align-items:center;gap:11px;padding:12px 15px;border-bottom:1px solid var(--b-sub);font-size:12px;min-width:0;transition:background .2s}
+.row .sd{width:7px;height:7px;flex:none;transition:background .35s}
+.row .nm{color:var(--t1);flex:none}
+.row .ag{color:var(--t2);font-size:11px;flex:none}
+.row .br{color:var(--t3);margin-left:auto;font-size:11px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd.working{background:var(--working);animation:pulse2 1.6s infinite}
+.sd.ready{background:var(--ready)}
+.sd.attention{background:var(--attention);animation:pulse2 1.2s infinite}
+.sd.idle{background:var(--t4)}
+@keyframes pulse2{50%{opacity:.25}}
+.term{background:var(--term);padding:15px;font-size:11.5px;line-height:1.75;color:var(--t2);height:252px;overflow:hidden}
+.term .g{color:var(--ready)}
+.term .v{color:var(--violet)}
+.term .b{color:var(--working)}
+.term .y{color:var(--attention)}
+.cursorblk{display:inline-block;width:7px;height:13px;background:var(--t1);vertical-align:-2px;animation:blink 1.05s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* ── bento ─────────────────────────────────────────────────────── */
+.bento{display:grid;gap:1px;background:var(--b-sub);border:1px solid var(--b-sub)}
+@media(min-width:700px){.bento{grid-template-columns:repeat(2,1fr)}}
+@media(min-width:1000px){.bento{grid-template-columns:repeat(3,1fr)}}
+.cell{background:var(--bg);padding:26px 22px;position:relative;overflow:hidden;transition:background .3s}
+.cell .ic{width:26px;height:26px;margin-bottom:16px;color:var(--t2)}
+.cell h3{font-size:var(--step-1);letter-spacing:-.02em;margin-bottom:9px}
+.cell p{color:var(--t2);font-size:var(--step-0);line-height:1.65}
+@media(hover:hover) and (pointer:fine){
+  .cell:hover{background:rgba(255,255,255,.02)}
+  .cell:hover .ic{color:var(--violet)}
+  .pipe-col:hover{background:rgba(255,255,255,.02)}
+  .chip:hover{color:var(--t1);border-color:var(--violet)}
+  .row:hover{background:rgba(255,255,255,.03)}
+}
+
+/* ── cli ───────────────────────────────────────────────────────── */
+.cli{border:1px solid var(--b);background:var(--term);padding:clamp(18px,3vw,30px);overflow-x:auto}
+.cli pre{margin:0;font:inherit;font-size:12.5px;line-height:2}
+.cli .p{color:var(--violet)}
+.cli .c{color:var(--t3)}
+.cli .f{color:var(--working)}
+
+/* ── faq ───────────────────────────────────────────────────────── */
+.faq details{border-bottom:1px solid var(--b-sub)}
+.faq details:first-child{border-top:1px solid var(--b-sub)}
+.faq summary{
+  list-style:none;cursor:pointer;padding:20px 0;display:flex;align-items:center;gap:14px;
+  font-size:var(--step-1);font-weight:500;transition:color .2s;
+}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary:hover{color:var(--violet)}
+.faq summary:focus-visible{outline:1px solid var(--violet);outline-offset:-2px}
+.faq summary .pm{margin-left:auto;color:var(--t2);transition:transform .3s}
+.faq details[open] summary .pm{transform:rotate(45deg);color:var(--violet)}
+.faq .ans{padding:0 0 22px;color:var(--t2);line-height:1.75;max-width:70ch}
+
+/* ── cta + footer ──────────────────────────────────────────────── */
+.endcta{text-align:center;border:1px solid var(--b);background:var(--surface);padding:clamp(40px,7vw,72px) clamp(18px,4vw,40px)}
+.endcta h2{font-size:var(--step-3);letter-spacing:-.035em;margin-bottom:16px}
+.endcta p{color:var(--t2);margin:0 auto 30px;max-width:56ch}
+footer{border-top:1px solid var(--b-sub);padding:30px 0 46px;color:var(--t3);font-size:var(--step--1)}
+.foot-in{display:flex;flex-wrap:wrap;gap:16px;align-items:center}
+.foot-links{display:flex;gap:20px;margin-left:auto;flex-wrap:wrap}
+.foot-links a{text-decoration:none;transition:color .2s}
+.foot-links a:hover{color:var(--t1)}
+
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+  html{scroll-behavior:auto!important}
+  .rv{opacity:1;transform:none}
+  h1 .line>span{transform:none}
+  .flow{transform:scaleX(1)}
+}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<canvas id="grid" aria-hidden="true"></canvas>
+<div class="halo" aria-hidden="true"></div>
+
+<div class="wrap">
+
+<nav id="nav" aria-label="Primary">
+  <div class="shell nav-in">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>Spur</span>
+    </a>
+    <div class="nav-links">
+      <a href="#dashboard">Dashboard</a>
+      <a href="#pipeline">Automation</a>
+      <a href="#features">Features</a>
+      <a href="#cli">CLI</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <a class="btn nav-cta" href="https://github.com/ashugaev/spur" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main">
+
+<header class="hero shell" id="top">
+  <div class="eyebrow">
+    <span class="pill"><i class="dot"></i> Runs on your machine</span>
+    <span class="pill">Open source</span>
+  </div>
+
+  <h1>
+    <span class="line"><span>Close the laptop.</span></span>
+    <span class="line"><span>The agents <em>keep working</em>.</span></span>
+  </h1>
+
+  <p class="lede">
+    Spur is a local daemon that runs <b>claude</b>, <b>codex</b>, <b>cursor</b> and <b>opencode</b>
+    as tmux sessions — one git worktree and branch each. They survive a closed lid, a dropped SSH
+    connection and a reboot. One dashboard shows all of them, from any device on your tailnet.
+  </p>
+
+  <div class="hero-cta">
+    <a class="btn primary" href="https://github.com/ashugaev/spur#install" rel="noopener">Get Spur &rarr;</a>
+    <a class="btn" href="#dashboard">See it running</a>
+  </div>
+
+  <div class="cmd">
+    <span class="caret">$</span>
+    <code id="installcmd">npm config set prefix ~/.local &amp;&amp; npm i -g @shugaev/spur@latest &amp;&amp; spur init</code>
+    <button class="copy" data-copy="#installcmd" aria-label="Copy install command">copy</button>
+  </div>
+</header>
+
+<section id="dashboard" class="shell" aria-labelledby="dashboard-h">
+  <div class="sec-head rv" data-n="01">
+    <span class="mono-label">Control surface</span>
+    <h2 id="dashboard-h">One list. Every agent. Live.</h2>
+    <p>State, branch and PR per session. Tap one and you get the tmux pane itself in the browser — scrollback, keys, clickable links.</p>
+  </div>
+
+  <div class="mock rv">
+    <div class="mock-bar">
+      <span>spur &mdash; dashboard</span>
+      <span style="margin-left:auto" id="clock">2 running &middot; 1 needs input</span>
+    </div>
+    <div class="mock-body">
+      <div class="rows" id="rows">
+        <div class="row"><i class="sd idle"></i><span class="nm">ses_a41f</span><span class="ag">claude</span><span class="br">feature/flaky-auth-test</span></div>
+        <div class="row"><i class="sd attention"></i><span class="nm">ses_9c02</span><span class="ag">codex</span><span class="br">feature/todo-ledger</span></div>
+        <div class="row"><i class="sd ready"></i><span class="nm">ses_77bd</span><span class="ag">cursor</span><span class="br">feature/web-terminal</span></div>
+        <div class="row"><i class="sd working"></i><span class="nm">ses_1e58</span><span class="ag">opencode</span><span class="br">feature/source-poller</span></div>
+        <div class="row"><i class="sd idle"></i><span class="nm">ses_b300</span><span class="ag">claude</span><span class="br">feature/landing-page</span></div>
+      </div>
+      <div class="term" id="term" aria-hidden="true"></div>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline" class="shell" aria-labelledby="pipeline-h">
+  <div class="sec-head rv" data-n="02">
+    <span class="mono-label">Sources &amp; triggers</span>
+    <h2 id="pipeline-h">Something happens. An agent is already on it.</h2>
+    <p>You write the rule once in <code>spur.yaml</code>. After that nobody has to be awake.</p>
+  </div>
+
+  <ol class="tl rv">
+    <li><span class="t">02:41</span><span class="e">CI goes red on <code>main</code>.</span></li>
+    <li><span class="t">02:41</span><span class="e">A trigger fires. Spur spawns claude on a fresh worktree, branched off origin.</span></li>
+    <li><span class="t">02:58</span><span class="e">It reads the failing job, fixes the test, opens a PR.</span></li>
+    <li><span class="t">08:10</span><span class="e">Telegram hands you the link over breakfast.</span></li>
+  </ol>
+
+  <div class="pipe rv">
+    <article class="pipe-col">
+      <div class="step">01 &mdash; Source</div>
+      <h3>Seven pollers</h3>
+      <p>Turn the outside world into events.</p>
+      <div class="chips">
+        <span class="chip">cron</span><span class="chip">github</span><span class="chip">github-ci</span><span class="chip">gitlab</span>
+        <span class="chip">sentry</span><span class="chip">service logs</span><span class="chip">telegram</span>
+      </div>
+      <span class="flow"></span>
+    </article>
+    <article class="pipe-col">
+      <div class="step">02 &mdash; Trigger</div>
+      <h3>Two actions</h3>
+      <p>Match event, pick agent and model, then:</p>
+      <div class="chips">
+        <span class="chip">spawn a session</span><span class="chip">send into a live one</span>
+      </div>
+      <span class="flow"></span>
+    </article>
+    <article class="pipe-col">
+      <div class="step">03 &mdash; Session</div>
+      <h3>Own worktree</h3>
+      <p>A tmux pane with its own checkout, branch and dev servers.</p>
+      <div class="chips">
+        <span class="chip">worktree</span><span class="chip">branch</span>
+        <span class="chip">sidecars</span><span class="chip">step ledger</span>
+      </div>
+      <span class="flow"></span>
+    </article>
+  </div>
+</section>
+
+<section id="features" class="shell" aria-labelledby="features-h">
+  <div class="sec-head rv" data-n="03">
+    <span class="mono-label">What you get</span>
+    <h2 id="features-h">The tenth agent costs the same as the first.</h2>
+  </div>
+
+  <div class="bento rv">
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M6 3v12a3 3 0 003 3h9M6 21a3 3 0 100-6 3 3 0 000 6zM18 12a3 3 0 100-6 3 3 0 000 6z"/></svg>
+      <h3>Worktree per session</h3>
+      <p>Each agent gets its own git worktree and branch. Ten agents, ten checkouts, one repo. Point several at the shared path when you want them in the same tree.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><rect x="2" y="4" width="20" height="16"/><path d="M6 9l3 3-3 3M12 15h5"/></svg>
+      <h3>tmux, in the browser</h3>
+      <p>Attaches to the live pane. Scrollback, keys, clickable links, on a phone.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12"/><path d="M8 20h8M12 16v4"/><path d="M7 10l2 2 5-5"/></svg>
+      <h3>Nothing dies with your shell</h3>
+      <p>The daemon owns the tmux sessions. Close the lid, drop the SSH connection, reboot the box — sessions come back and keep their transcript.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M4 4h16v13H7l-3 3z"/><path d="M8 9h8M8 13h5"/></svg>
+      <h3>Telegram &amp; voice</h3>
+      <p>Bind a chat or forum topic to a session with <code>/watch</code>, then talk to the agent from your phone. Voice notes transcribe too, once you set a provider key.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l3 3M15 15l3 3M18 6l-3 3M9 15l-3 3"/></svg>
+      <h3>Four agents, one API</h3>
+      <p>Same spawn, wake, send and dashboard across claude, codex, cursor and opencode. Model set per session.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14"/><path d="M3 10h18M8 5v14"/></svg>
+      <h3>Sidecars</h3>
+      <p>Dev servers and compose stacks on reserved ports. They start and die with the session.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+      <h3>Wake &amp; subscribe</h3>
+      <p><code>wake --in 30m</code>, or every morning at 09:00. <code>subscribe</code> pings you the moment another session hits <code>needs_input</code>.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M4 8a8 8 0 0113-4M20 16a8 8 0 01-13 4"/><path d="M4 4v4h4M20 20v-4h-4"/></svg>
+      <h3>Rate-limit failover</h3>
+      <p>Store several Claude logins. A rate-limited session swaps credentials in place. No kill, no relaunch.</p>
+    </article>
+    <article class="cell">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      <h3>Never leaves your machine</h3>
+      <p>The daemon binds to loopback; <code>spur init</code> opens it to your tailnet and nothing else. Your hardware, your agent subscriptions, no seats to buy.</p>
+    </article>
+  </div>
+</section>
+
+<section id="cli" class="shell" aria-labelledby="cli-h">
+  <div class="sec-head rv" data-n="04">
+    <span class="mono-label">CLI</span>
+    <h2 id="cli-h">Spawn, wake, message and audit from the shell.</h2>
+  </div>
+  <div class="cli rv">
+<pre><span class="c"># start an agent on its own worktree</span>
+<span class="p">$</span> spur spawn backend-api "Fix flaky auth test" <span class="f">--agent</span> claude <span class="f">--model</span> opus <span class="f">--worktree</span>
+
+<span class="c"># see the fleet</span>
+<span class="p">$</span> spur list
+
+<span class="c"># talk to a running one</span>
+<span class="p">$</span> spur send ses_123 "rebase on main and push"
+
+<span class="c"># queue a message for later, or on a schedule</span>
+<span class="p">$</span> spur wake ses_123 <span class="f">--in</span> 30m "check CI"
+
+<span class="c"># get pinged when another session stalls</span>
+<span class="p">$</span> spur subscribe ses_123 <span class="f">--state</span> needs_input <span class="f">--message</span> "target needs a decision"
+
+<span class="c"># check the host</span>
+<span class="p">$</span> spur doctor</pre>
+  </div>
+</section>
+
+<section id="faq" class="shell" aria-labelledby="faq-h">
+  <div class="sec-head rv" data-n="05">
+    <span class="mono-label">FAQ</span>
+    <h2 id="faq-h">Before you install.</h2>
+  </div>
+  <div class="faq rv">
+    <details open>
+      <summary>Which agents does Spur run?<span class="pm">+</span></summary>
+      <div class="ans">claude, codex, cursor, opencode. Each gets its own tmux session and a default model from config.</div>
+    </details>
+    <details>
+      <summary>What do I need on the host?<span class="pm">+</span></summary>
+      <div class="ans">A Linux box you control, Node 20+, tmux, git, and the agent CLIs installed and logged in. Daemon and web UI install as systemd user services. Verified on Ubuntu 24.04, 2 GB RAM.</div>
+    </details>
+    <details>
+      <summary>Do parallel agents step on each other?<span class="pm">+</span></summary>
+      <div class="ans">No. A session owns a git worktree and branch — ten agents, ten checkouts. The shared project path is opt-in.</div>
+    </details>
+    <details>
+      <summary>Can I use it from my phone?<span class="pm">+</span></summary>
+      <div class="ans">Yes. The dashboard is mobile-first, the terminal takes touch input, and Telegram spawns sessions and relays text and voice.</div>
+    </details>
+    <details>
+      <summary>What can trigger an agent automatically?<span class="pm">+</span></summary>
+      <div class="ans">Seven pollers: cron, GitHub, GitHub CI, GitLab, Sentry, systemd service logs, Telegram. A trigger spawns a session or sends a message into a live one.</div>
+    </details>
+    <details>
+      <summary>Does my code leave the box?<span class="pm">+</span></summary>
+      <div class="ans">Only where your agent already sends it. Spur itself is a local daemon on loopback; <code>spur init</code> opens the UI to your tailnet. There is no Spur cloud, no account, no seat.</div>
+    </details>
+  </div>
+</section>
+
+<section class="shell" aria-label="Get started">
+  <div class="endcta rv">
+    <h2>Stop babysitting one terminal.</h2>
+    <p>npm install, <code>spur init</code>, point it at a repo. Tested on Ubuntu; elsewhere expect to sort out host differences.</p>
+    <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+      <a class="btn primary" href="https://github.com/ashugaev/spur#install" rel="noopener">Install guide &rarr;</a>
+      <a class="btn" href="https://github.com/ashugaev/spur/stargazers" rel="noopener">Star on GitHub</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="shell foot-in">
+    <span>Spur &mdash; Apache-2.0</span>
+    <span class="foot-links">
+      <a href="https://github.com/ashugaev/spur" rel="noopener">Source on GitHub</a>
+      <a href="https://github.com/ashugaev/spur/blob/main/docs/commands.md" rel="noopener">Command reference</a>
+      <a href="https://github.com/ashugaev/spur/blob/main/docs/configuration.md" rel="noopener">Configuration reference</a>
+      <a href="https://github.com/ashugaev/spur/blob/main/docs/daemon-api.md" rel="noopener">Daemon HTTP API</a>
+    </span>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function(){
+  var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var fine = matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+  /* nav */
+  var nav = document.getElementById("nav");
+  addEventListener("scroll", function(){ nav.classList.toggle("stuck", scrollY > 12); }, {passive:true});
+
+  /* reveal */
+  var io = new IntersectionObserver(function(es){
+    es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target); } });
+  }, {threshold:.12, rootMargin:"0px 0px -8% 0px"});
+  document.querySelectorAll(".rv").forEach(function(el, i){
+    el.style.transitionDelay = (i % 3) * 60 + "ms";
+    io.observe(el);
+  });
+
+  /* copy */
+  document.querySelectorAll(".copy").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var target = document.querySelector(btn.dataset.copy);
+      if (!target) return;
+      var text = target.textContent.trim();
+      function ok(){
+        btn.textContent = "copied";
+        btn.classList.add("done");
+        btn.setAttribute("aria-live", "polite");
+        setTimeout(function(){ btn.textContent = "copy"; btn.classList.remove("done"); }, 1600);
+      }
+      function fail(){ btn.textContent = "select it"; }
+      if (navigator.clipboard && isSecureContext) {
+        navigator.clipboard.writeText(text).then(ok, fail);
+        return;
+      }
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); ok(); } catch (e) { fail(); }
+      document.body.removeChild(ta);
+    });
+  });
+
+  /* terminal drives the session rows */
+  var term = document.getElementById("term");
+  var dots = document.querySelectorAll("#rows .sd");
+  var clock = document.getElementById("clock");
+  var STATES = ["working","ready","attention","idle"];
+
+  function setRow(i, state){
+    var d = dots[i];
+    if (!d) return;
+    STATES.forEach(function(s){ d.classList.remove(s); });
+    d.classList.add(state);
+    syncClock();
+  }
+  function syncClock(){
+    var w = 0, a = 0;
+    dots.forEach(function(d){
+      if (d.classList.contains("working")) w++;
+      if (d.classList.contains("attention")) a++;
+    });
+    clock.textContent = w + " running · " + a + " needs input";
+  }
+  syncClock();
+
+  var steps = [
+    { html: '<span class="v">$</span> spur spawn backend-api "Fix flaky auth test" --worktree' },
+    { html: '<span class="g">✓</span> worktree  feature/flaky-auth-test' },
+    { html: '<span class="g">✓</span> tmux      ses_a41f' },
+    { html: '<span class="b">→</span> claude    working', row: [0, "working"] },
+    { html: '' },
+    { html: '<span class="v">$</span> spur list' },
+    { html: '  ses_a41f  <span class="b">working</span>      claude  feature/flaky-auth-test' },
+    { html: '  ses_9c02  <span class="y">needs input</span>  codex   feature/todo-ledger' },
+    { html: '' },
+    { html: '<span class="v">$</span> spur send ses_9c02 "use the queue, not a retry"' },
+    { html: '<span class="g">✓</span> delivered', row: [1, "ready"] }
+  ];
+
+  if (reduce) {
+    term.innerHTML = steps.map(function(s){ return s.html; }).join("<br>");
+    setRow(0, "working");
+    setRow(1, "ready");
+  } else {
+    var done = document.createElement("div");
+    var cur = document.createElement("div");
+    var text = document.createTextNode("");
+    var caret = document.createElement("span");
+    caret.className = "cursorblk";
+    cur.appendChild(text);
+    cur.appendChild(caret);
+    term.appendChild(done);
+    term.appendChild(cur);
+
+    var probe = document.createElement("div");
+    var li = 0, ci = 0;
+
+    function tick(){
+      if (li >= steps.length) {
+        setTimeout(reset, 4200);
+        return;
+      }
+      probe.innerHTML = steps[li].html;
+      var plain = probe.textContent;
+      if (ci <= plain.length) {
+        text.nodeValue = plain.slice(0, ci);
+        ci++;
+        setTimeout(tick, plain.length ? 17 : 0);
+        return;
+      }
+      done.insertAdjacentHTML("beforeend", steps[li].html + "<br>");
+      text.nodeValue = "";
+      if (steps[li].row) setRow(steps[li].row[0], steps[li].row[1]);
+      li++;
+      ci = 0;
+      setTimeout(tick, 280);
+    }
+
+    function reset(){
+      done.innerHTML = "";
+      text.nodeValue = "";
+      li = 0;
+      ci = 0;
+      setRow(0, "idle");
+      setRow(1, "attention");
+      tick();
+    }
+
+    var tio = new IntersectionObserver(function(es){
+      if (es[0].isIntersecting) { tio.disconnect(); tick(); }
+    }, {threshold:.3});
+    tio.observe(term);
+  }
+
+  /* canvas grid — paused when off-screen or the tab is hidden */
+  var cv = document.getElementById("grid");
+  if (reduce) {
+    cv.remove();
+  } else {
+    var cx = cv.getContext("2d");
+    var dpr = Math.min(devicePixelRatio || 1, 2);
+    var W = 0, H = 0, S = 44, t = 0, raf = 0, live = false;
+    var mx = -9999, my = -9999;
+
+    function size(){
+      W = cv.width = innerWidth * dpr;
+      H = cv.height = innerHeight * dpr;
+      cv.style.width = innerWidth + "px";
+      cv.style.height = innerHeight + "px";
+    }
+    size();
+    addEventListener("resize", size);
+    if (fine) {
+      addEventListener("pointermove", function(e){ mx = e.clientX * dpr; my = e.clientY * dpr; }, {passive:true});
+    }
+
+    function draw(){
+      cx.clearRect(0, 0, W, H);
+      var s = S * dpr;
+      var reach = 190 * dpr;
+      for (var x = 0; x < W + s; x += s) {
+        for (var y = 0; y < H + s; y += s) {
+          var dx = x - mx, dy = y - my;
+          var near = Math.max(0, 1 - Math.sqrt(dx * dx + dy * dy) / reach);
+          var wave = 0.5 + 0.5 * Math.sin((x + y) / (150 * dpr) + t);
+          var a = 0.05 + wave * 0.05 + near * 0.5;
+          cx.fillStyle = near > 0.25 ? "rgba(163,113,247," + a + ")" : "rgba(225,225,225," + a + ")";
+          var r = (1 + near * 1.6) * dpr;
+          cx.fillRect(x, y, r, r);
+        }
+      }
+      t += 0.012;
+      raf = requestAnimationFrame(draw);
+    }
+    function start(){ if (!live) { live = true; raf = requestAnimationFrame(draw); } }
+    function stop(){ live = false; cancelAnimationFrame(raf); }
+
+    document.addEventListener("visibilitychange", function(){
+      if (document.hidden) stop(); else start();
+    });
+    new IntersectionObserver(function(es){
+      if (es[0].isIntersecting) start(); else stop();
+    }, {threshold:0}).observe(document.querySelector("header.hero"));
+  }
+})();
+</script>
+</body>
+</html>
