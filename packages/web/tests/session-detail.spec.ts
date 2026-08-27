@@ -3275,6 +3275,36 @@ test.describe("S4b: Artifacts section", () => {
       .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
       .toEqual(["gamma.png", "beta.txt", "alpha.txt"]);
 
+    await page.getByRole("button", { name: "Size" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Size" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Type" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Type" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Updated" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Updated" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
     await page.reload();
     await expect(page.getByRole("table")).toBeVisible();
     await expect

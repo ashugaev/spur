@@ -36,6 +36,8 @@ import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { ArtifactList } from "@/components/ArtifactList";
+import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
+import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
@@ -257,25 +259,6 @@ function PromptSectionCopyButton({
   );
 }
 
-function ArtifactDownloadIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.7"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 4v12" />
-      <path d="m6 12 6 6 6-6" />
-      <path d="M4 20h16" />
-    </svg>
-  );
-}
-
 function ArtifactOpenExternalIcon() {
   return (
     <svg
@@ -291,14 +274,6 @@ function ArtifactOpenExternalIcon() {
       <path d="M14 4h6v6" />
       <path d="m20 4-8 8" />
       <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
-    </svg>
-  );
-}
-
-function ArtifactPreviewIcon() {
-  return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
     </svg>
   );
 }
