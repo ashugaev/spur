@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -11,6 +10,7 @@ import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./curso
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
 import { killProcessTree } from "./process-tree.js";
+import { resolveTempDir } from "./temp-dir.js";
 import type { AgentName } from "./types.js";
 
 // ── Session survival across daemon restarts ──
@@ -747,7 +747,7 @@ async function pasteLiteral(
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   const bufferName = `spur-${randomUUID()}`;
-  const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
+  const tempPath = join(resolveTempDir(), `spur-${randomUUID()}.txt`);
   writeFileSync(tempPath, payload, { encoding: "utf-8", mode: 0o600 });
   try {
     await tmux("load-buffer", "-b", bufferName, tempPath);

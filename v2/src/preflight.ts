@@ -4,7 +4,6 @@ import {
   type ExecFileOptionsWithStringEncoding,
 } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
@@ -13,6 +12,7 @@ import { opencodeCommand } from "./agents/opencode.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
+import { resolveTempDir } from "./temp-dir.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
 const PREFLIGHT_TIMEOUT_MS = 60_000;
@@ -163,7 +163,7 @@ async function runCodexPreflight(
   cwd: string,
   codexArgs: string[] | undefined,
 ): Promise<string> {
-  const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-"));
+  const tempDir = await mkdtemp(join(resolveTempDir(), "spur-preflight-"));
   const outputPath = join(tempDir, "output.txt");
   const codexHomePath = join(tempDir, "codex-home");
 
@@ -220,7 +220,7 @@ async function runCodexPreflight(
 }
 
 async function runCursorPreflight(prompt: string, cwd: string): Promise<string> {
-  const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-cursor-"));
+  const tempDir = await mkdtemp(join(resolveTempDir(), "spur-preflight-cursor-"));
   const model = await resolveCursorLaunchModel();
 
   try {
