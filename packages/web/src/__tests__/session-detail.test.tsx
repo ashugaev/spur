@@ -3277,6 +3277,139 @@ describe("SessionDetail artifacts", () => {
     );
   });
 
+  it("renders a nested artifact under its relative path", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "design/design-spec.md",
+                  name: "design/design-spec.md",
+                  size: 400,
+                  mimeType: "text/markdown; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("design/design-spec.md")).toBeInTheDocument();
+    const downloadLink = screen.getByRole("link", { name: "Download design/design-spec.md" });
+    expect(downloadLink).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/design/design-spec.md",
+    );
+    expect(downloadLink).toHaveAttribute("download", "design-spec.md");
+  });
+
+  it("shows the truncation line when artifactsTruncated is set", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "shot.png",
+                  name: "shot.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+              artifactsTruncated: true,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/truncated/i)).toBeInTheDocument();
+  });
+
+  it("shows no truncation line without the flag", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "shot.png",
+                  name: "shot.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(/truncated/i)).not.toBeInTheDocument();
+  });
+
   it("navigates image, video, and file artifacts in session order from the lightbox", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

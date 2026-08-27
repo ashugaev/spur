@@ -289,6 +289,8 @@ export interface SpurSessionView {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
+  /** True only when a nested-artifact budget cut the daemon's walk short. */
+  artifactsTruncated?: boolean;
   sidecars?: SpurSessionSidecarView[];
   runningSidecarNames?: string[];
   slots?: {
@@ -634,6 +636,8 @@ export interface DashboardSession {
   worktreePath: string;
   services: SpurServiceView[];
   artifacts: SpurSessionArtifact[];
+  /** True only when a nested-artifact budget cut the daemon's walk short. */
+  artifactsTruncated?: boolean;
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
@@ -718,6 +722,7 @@ export function toDashboardSession(
     worktreePath: session.worktreePath,
     services: session.services ?? [],
     artifacts: session.artifacts ?? [],
+    ...(session.artifactsTruncated ? { artifactsTruncated: true } : {}),
     queuedMessages,
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,

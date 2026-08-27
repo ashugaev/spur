@@ -1457,7 +1457,7 @@ describe("SessionService", () => {
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     deleteSessionArtifactsExceptMock.mockReset();
-    listSessionArtifactsMock.mockReset().mockReturnValue([]);
+    listSessionArtifactsMock.mockReset().mockReturnValue({ artifacts: [], truncated: false });
     readSessionArtifactMock.mockReset().mockReturnValue(null);
     setSessionArtifactOriginMock.mockReset();
     setSessionArtifactUserAddedMock.mockReset();
@@ -15211,9 +15211,10 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:00:00.000Z",
     };
-    listSessionArtifactsMock.mockImplementation((_dataDir: string, sessionId: string) =>
-      sessionId === "api-1" ? [sharedArtifact] : [],
-    );
+    listSessionArtifactsMock.mockImplementation((_dataDir: string, sessionId: string) => ({
+      artifacts: sessionId === "api-1" ? [sharedArtifact] : [],
+      truncated: false,
+    }));
     readSessionArtifactMock.mockImplementation(
       (_dataDir: string, sessionId: string, artifactId: string) =>
         sessionId === "api-1" && artifactId === "shot.png"
@@ -15231,6 +15232,24 @@ describe("SessionService", () => {
     const artifact = service.getArtifact("api-2", "shot.png");
     expect(artifact.id).toBe("shot.png");
     expect(readSessionArtifactMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", "shot.png");
+  });
+
+  it("flags a truncated artifact listing on the session view", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    listSessionArtifactsMock.mockReturnValue({ artifacts: [], truncated: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+    expect(view.artifactsTruncated).toBe(true);
+
+    listSessionArtifactsMock.mockReturnValue({ artifacts: [], truncated: false });
+    const untruncatedView = await service.get("api-1");
+    expect(untruncatedView.artifactsTruncated).toBeUndefined();
+    expect(Object.keys(untruncatedView)).not.toContain("artifactsTruncated");
   });
 
   it("reuses the dashboard-cache classification for desk siblings instead of re-classifying them per viewer", async () => {

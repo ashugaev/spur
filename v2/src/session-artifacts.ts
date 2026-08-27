@@ -1,17 +1,35 @@
 import {
+  type Dirent,
+  type Stats,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
+  rmdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, extname, join } from "node:path";
+import { basename, extname, join, resolve, sep } from "node:path";
 import type { SessionArtifact, SessionArtifactKind, SessionArtifactOrigin } from "./types.js";
 
 const ARTIFACTS_DIR = "session-artifacts";
 const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
+
+// Every readdir entry examined below the root (depth >= 2) costs one tick, whether it
+// becomes a file, a skipped symlink, or an enqueued directory. Directories count too, so
+// this bounds syscalls below the root, not only rows. The root level is never capped: see
+// listSessionArtifacts.
+export const MAX_NESTED_ARTIFACT_WALK_ENTRIES = 2000;
+// Emitted SessionArtifact objects at depth >= 2. Depth-1 rows never consume this.
+export const MAX_NESTED_ARTIFACT_ROWS = 200;
+
+// A synthetic root used only to run the final containment check a relative artifact path
+// must pass. The prior lexical rules (no "..", no ".", no empty segment) already make this
+// check redundant on any id they accept, but it is cheap and it is the literal invariant:
+// resolve(join(root, id)) must stay at or under root.
+const PATH_CONTAINMENT_SENTINEL = "/spur-artifact-root";
 
 const MIME_BY_EXT: Record<string, string> = {
   ".gif": "image/gif",
@@ -117,12 +135,12 @@ function artifactAddedByUser(metadata: ArtifactMetadataMap, name: string): boole
   return metadata[name]?.addedByUser === true;
 }
 
-function artifactFromFile(
+function artifactFromStat(
   path: string,
   name: string,
+  stat: Stats,
   metadata: ArtifactMetadataMap,
 ): SessionArtifactFile {
-  const stat = statSync(path);
   const mimeType = artifactMimeType(name);
   return {
     id: name,
@@ -138,15 +156,54 @@ function artifactFromFile(
   };
 }
 
-function validateArtifactId(artifactId: string): string {
+function artifactFromFile(
+  path: string,
+  name: string,
+  metadata: ArtifactMetadataMap,
+): SessionArtifactFile {
+  return artifactFromStat(path, name, statSync(path), metadata);
+}
+
+/**
+ * Parses a raw artifact id into the POSIX path relative to the artifacts root, or returns
+ * null when the id is unsafe. Pure: does not touch the filesystem. Rejects an empty id, a
+ * NUL byte, a backslash, a "." or ".." segment, an empty segment (a leading/trailing/double
+ * "/"), and the reserved metadata filename. Every accepted id resolves lexically inside the
+ * artifacts root; readSessionArtifact additionally enforces realpath containment before it
+ * reads (a lexically clean id can still be a symlink pointing outside the root).
+ */
+export function parseArtifactRelativePath(artifactId: string): string | null {
   const trimmed = artifactId.trim();
-  if (!trimmed || trimmed !== basename(trimmed) || trimmed === "." || trimmed === "..") {
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.includes("\u0000") || trimmed.includes("\\")) {
+    return null;
+  }
+  const segments = trimmed.split("/");
+  if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+    return null;
+  }
+  const relativePath = segments.join("/");
+  if (relativePath === ARTIFACT_METADATA_FILE) {
+    return null;
+  }
+  const resolved = resolve(PATH_CONTAINMENT_SENTINEL, relativePath);
+  if (
+    resolved !== PATH_CONTAINMENT_SENTINEL &&
+    !resolved.startsWith(`${PATH_CONTAINMENT_SENTINEL}${sep}`)
+  ) {
+    return null;
+  }
+  return relativePath;
+}
+
+export function validateArtifactRelativePath(artifactId: string): string {
+  const parsed = parseArtifactRelativePath(artifactId);
+  if (parsed === null) {
     throw new Error(`Invalid artifact id: ${artifactId}`);
   }
-  if (trimmed.includes("/") || trimmed.includes("\\")) {
-    throw new Error(`Invalid artifact id: ${artifactId}`);
-  }
-  return trimmed;
+  return parsed;
 }
 
 export function sessionArtifactsDir(dataDir: string, sessionId: string): string {
@@ -166,6 +223,14 @@ export function deleteSessionArtifactsDir(dataDir: string, sessionId: string): v
   });
 }
 
+/**
+ * Deletes every artifact not in `keepArtifactIds`, then prunes emptied directories.
+ * Walks with `withFileTypes` (lstat semantics): it never descends into a symlinked
+ * directory (a followed link would `rmSync` outside the artifacts root); a symlink entry
+ * is unlinked as itself. Directories are removed bottom-up with non-recursive `rmdirSync`,
+ * which is atomic with respect to a concurrent write — ENOTEMPTY (a file landed there after
+ * the file pass, or it still holds a kept file) and ENOENT are both swallowed.
+ */
 export function deleteSessionArtifactsExcept(
   dataDir: string,
   sessionId: string,
@@ -175,36 +240,201 @@ export function deleteSessionArtifactsExcept(
   if (!existsSync(dir)) {
     return;
   }
-  const keep = new Set(keepArtifactIds.map((artifactId) => validateArtifactId(artifactId)));
+  const keep = new Set(
+    keepArtifactIds.map((artifactId) => validateArtifactRelativePath(artifactId)),
+  );
   const metadata = readArtifactMetadata(dir);
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isFile() || entry.name === ARTIFACT_METADATA_FILE || keep.has(entry.name)) {
-      continue;
+
+  // Post-order: a directory is pushed only after every entry inside it (including nested
+  // subdirectories) has been visited, so the removal pass below is naturally bottom-up.
+  const directories: string[] = [];
+
+  const walk = (currentDir: string, relPrefix: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
     }
-    rmSync(join(dir, entry.name), { force: true });
+    for (const entry of entries) {
+      const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      const entryPath = join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        walk(entryPath, relPath);
+        directories.push(relPath);
+        continue;
+      }
+      if (relPath === ARTIFACT_METADATA_FILE || keep.has(relPath)) {
+        continue;
+      }
+      rmSync(entryPath, { force: true });
+    }
+  };
+  walk(dir, "");
+
+  for (const relPath of directories) {
+    try {
+      rmdirSync(join(dir, relPath));
+    } catch {
+      // ENOTEMPTY (a kept file, or one written concurrently, still lives here) or ENOENT
+      // (already removed via an ancestor) — both are fine, the directory stays or is gone.
+    }
   }
+
   writeArtifactMetadata(
     dir,
     Object.fromEntries(Object.entries(metadata).filter(([artifactId]) => keep.has(artifactId))),
   );
 }
 
-export function listSessionArtifacts(dataDir: string, sessionId: string): SessionArtifact[] {
+interface ArtifactWalkResult {
+  artifacts: SessionArtifact[];
+  truncated: boolean;
+}
+
+/**
+ * Lists every artifact under the session's artifacts directory, breadth-first by depth.
+ * The root level (depth 1) is never capped — every root file is always enumerated and
+ * emitted. Below the root, the walk is bounded by two budgets (MAX_NESTED_ARTIFACT_WALK_
+ * ENTRIES, MAX_NESTED_ARTIFACT_ROWS); hitting either stops the walk and sets `truncated`.
+ * Symlinks are followed, behind a realpath containment check against the artifacts root; a
+ * directory-graph cycle is caught by a `dev:ino` visited set spanning the whole walk, seeded
+ * with the root's own `dev:ino` so a symlink pointing back at the root cannot re-list it.
+ */
+export function listSessionArtifacts(dataDir: string, sessionId: string): ArtifactWalkResult {
   const dir = sessionArtifactsDir(dataDir, sessionId);
   if (!existsSync(dir)) {
-    return [];
+    return { artifacts: [], truncated: false };
   }
 
+  let resolvedRoot: string;
+  let rootStat: Stats;
+  let rootEntries: Dirent[];
   try {
-    const metadata = readArtifactMetadata(dir);
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name !== ARTIFACT_METADATA_FILE)
-      .map((entry) => artifactFromFile(join(dir, entry.name), entry.name, metadata))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .map(({ path: _path, ...artifact }) => artifact);
+    resolvedRoot = realpathSync(dir);
+    rootStat = statSync(resolvedRoot);
+    rootEntries = readdirSync(dir, { withFileTypes: true });
   } catch {
-    return [];
+    return { artifacts: [], truncated: false };
   }
+
+  const metadata = readArtifactMetadata(dir);
+  const files: SessionArtifactFile[] = [];
+  const visited = new Set<string>([`${rootStat.dev}:${rootStat.ino}`]);
+
+  const isInsideRoot = (resolvedPath: string): boolean =>
+    resolvedPath === resolvedRoot || resolvedPath.startsWith(`${resolvedRoot}${sep}`);
+
+  rootEntries.sort((left, right) => left.name.localeCompare(right.name));
+
+  let nextLevel: { dir: string; relPath: string }[] = [];
+
+  for (const entry of rootEntries) {
+    if (entry.name === ARTIFACT_METADATA_FILE) {
+      continue;
+    }
+    if (entry.isFile()) {
+      // A depth-1 entry readdir reports as a plain file (not a symlink) is already
+      // inside the already-realpathed root; no realpathSync needed to contain it.
+      try {
+        files.push(artifactFromFile(join(dir, entry.name), entry.name, metadata));
+      } catch {
+        // Stat failure on one entry skips that entry; it does not abort the listing.
+      }
+      continue;
+    }
+    const entryPath = join(dir, entry.name);
+    let resolvedEntry: string;
+    let entryStat: Stats;
+    try {
+      resolvedEntry = realpathSync(entryPath);
+      if (!isInsideRoot(resolvedEntry)) {
+        continue;
+      }
+      entryStat = statSync(resolvedEntry);
+    } catch {
+      continue;
+    }
+    if (entryStat.isDirectory()) {
+      const key = `${entryStat.dev}:${entryStat.ino}`;
+      if (visited.has(key)) {
+        continue;
+      }
+      visited.add(key);
+      nextLevel.push({ dir: resolvedEntry, relPath: entry.name });
+    } else if (entryStat.isFile()) {
+      try {
+        files.push(artifactFromStat(resolvedEntry, entry.name, entryStat, metadata));
+      } catch {
+        // Skip this entry only.
+      }
+    }
+  }
+
+  let walkEntriesExamined = 0;
+  let nestedRowsEmitted = 0;
+  let truncated = false;
+
+  walkLevels: while (nextLevel.length > 0) {
+    const level = nextLevel;
+    nextLevel = [];
+    for (const item of level) {
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(item.dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      for (const entry of entries) {
+        if (walkEntriesExamined >= MAX_NESTED_ARTIFACT_WALK_ENTRIES) {
+          truncated = true;
+          break walkLevels;
+        }
+        walkEntriesExamined++;
+
+        const relPath = `${item.relPath}/${entry.name}`;
+        const entryPath = join(item.dir, entry.name);
+        let resolvedEntry: string;
+        let entryStat: Stats;
+        try {
+          resolvedEntry = realpathSync(entryPath);
+          if (!isInsideRoot(resolvedEntry)) {
+            continue;
+          }
+          entryStat = statSync(resolvedEntry);
+        } catch {
+          continue;
+        }
+        if (entryStat.isDirectory()) {
+          const key = `${entryStat.dev}:${entryStat.ino}`;
+          if (visited.has(key)) {
+            continue;
+          }
+          visited.add(key);
+          nextLevel.push({ dir: resolvedEntry, relPath });
+        } else if (entryStat.isFile()) {
+          if (nestedRowsEmitted >= MAX_NESTED_ARTIFACT_ROWS) {
+            truncated = true;
+            break walkLevels;
+          }
+          nestedRowsEmitted++;
+          try {
+            files.push(artifactFromStat(resolvedEntry, relPath, entryStat, metadata));
+          } catch {
+            // Skip this entry only.
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    artifacts: files
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map(({ path: _path, ...artifact }) => artifact),
+    truncated,
+  };
 }
 
 export function readSessionArtifact(
@@ -212,19 +442,33 @@ export function readSessionArtifact(
   sessionId: string,
   artifactId: string,
 ): SessionArtifactFile | null {
-  const normalizedId = validateArtifactId(artifactId);
-  if (normalizedId === ARTIFACT_METADATA_FILE) {
+  const normalizedId = parseArtifactRelativePath(artifactId);
+  if (normalizedId === null) {
     return null;
   }
-  const path = join(sessionArtifactsDir(dataDir, sessionId), normalizedId);
-  if (!existsSync(path) || !statSync(path).isFile()) {
+  const dir = sessionArtifactsDir(dataDir, sessionId);
+  const path = join(dir, normalizedId);
+  let resolvedRoot: string;
+  let resolvedPath: string;
+  try {
+    resolvedRoot = realpathSync(dir);
+    resolvedPath = realpathSync(path);
+  } catch {
     return null;
   }
-  return artifactFromFile(
-    path,
-    normalizedId,
-    readArtifactMetadata(sessionArtifactsDir(dataDir, sessionId)),
-  );
+  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(`${resolvedRoot}${sep}`)) {
+    return null;
+  }
+  let stat: Stats;
+  try {
+    stat = statSync(resolvedPath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) {
+    return null;
+  }
+  return artifactFromStat(resolvedPath, normalizedId, stat, readArtifactMetadata(dir));
 }
 
 export function setSessionArtifactOrigin(
@@ -233,7 +477,7 @@ export function setSessionArtifactOrigin(
   artifactId: string,
   origin: SessionArtifactOrigin,
 ): void {
-  const normalizedId = validateArtifactId(artifactId);
+  const normalizedId = validateArtifactRelativePath(artifactId);
   const dir = ensureSessionArtifactsDir(dataDir, sessionId);
   const metadata = readArtifactMetadata(dir);
   metadata[normalizedId] = { ...metadata[normalizedId], origin };
@@ -246,7 +490,7 @@ export function setSessionArtifactUserAdded(
   artifactId: string,
   addedByUser: boolean,
 ): void {
-  const normalizedId = validateArtifactId(artifactId);
+  const normalizedId = validateArtifactRelativePath(artifactId);
   const dir = ensureSessionArtifactsDir(dataDir, sessionId);
   const metadata = readArtifactMetadata(dir);
   metadata[normalizedId] = { ...metadata[normalizedId], addedByUser };
@@ -266,5 +510,5 @@ Session artifacts:
 - Files written there are not committed from the repo workspace and are tied to this Spur session.
 - Images, videos, and text files (including .txt, .md, .json) written there appear inline in Spur UI. Other files appear as download links.
 - HTML files render as a live preview in Spur UI, with a button that opens the page standalone at its artifact URL.
-- Prefer direct child files with stable names and overwrite them when updating an artifact.`;
+- A file written in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).`;
 }

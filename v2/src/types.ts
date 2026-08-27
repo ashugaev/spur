@@ -958,6 +958,8 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   hasUnseenAttention?: boolean;
   lastActivityAt: string;
   artifacts: SessionArtifact[];
+  /** True only when a nested-artifact budget cut the walk short; omitted otherwise. */
+  artifactsTruncated?: boolean;
   services: ServiceInstanceView[];
   sidecars: SessionSidecarView[];
   workspaceAccess?: SessionWorkspaceAccess;

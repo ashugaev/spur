@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { basename } from "node:path";
 import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
@@ -1385,12 +1386,13 @@ export async function startServer(
         return;
       }
 
-      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
+      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
-        const artifact = service.getArtifact(
-          decodeURIComponent(artifactMatch[1]),
-          decodeURIComponent(artifactMatch[2]),
-        );
+        const artifactId = artifactMatch[2]
+          .split("/")
+          .map((segment) => decodeURIComponent(segment))
+          .join("/");
+        const artifact = service.getArtifact(decodeURIComponent(artifactMatch[1]), artifactId);
         // An SVG opened as a top-level document runs its own scripts on Spur's origin,
         // and browsers ignore a CSP sandbox on image documents, so hand it over as a
         // download instead. <img> previews ignore content-disposition and still render.
@@ -1398,7 +1400,7 @@ export async function startServer(
         response.writeHead(200, {
           "content-type": artifact.mimeType,
           "content-length": String(artifact.size),
-          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(artifact.name)}"`,
+          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(basename(artifact.name))}"`,
           "cache-control": "no-store",
           // Artifact HTML is agent-authored: render it in an opaque origin so it can
           // never read Spur's storage or call the API with the operator's session.

@@ -14916,6 +14916,7 @@ export class SessionService {
     );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+    const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
 
     const view: SessionView = {
       ...session,
@@ -14932,7 +14933,8 @@ export class SessionService {
       ...(history.length > 0 ? { stateHistory: history } : {}),
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
-      artifacts: listSessionArtifacts(this.config.dataDir, workspaceIdOf(session)),
+      artifacts: artifactWalk.artifacts,
+      ...(artifactWalk.truncated ? { artifactsTruncated: true } : {}),
       services,
       sidecars,
       ...(workspaceAccess ? { workspaceAccess } : {}),

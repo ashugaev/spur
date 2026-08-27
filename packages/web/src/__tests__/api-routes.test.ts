@@ -67,7 +67,7 @@ import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { GET as getSessionTodo } from "@/app/api/sessions/[id]/todo/route";
-import { GET as getArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
+import { GET as getArtifact } from "@/app/api/sessions/[id]/artifacts/[...artifactId]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { POST as diagnoseUpdate } from "@/app/api/diagnose-update/route";
@@ -330,7 +330,7 @@ describe("Spur web API routes", () => {
 
     const response = await getArtifact(
       new Request("http://localhost:3000/api/sessions/api-a1/artifacts/report.html"),
-      { params: Promise.resolve({ id: "api-a1", artifactId: "report.html" }) },
+      { params: Promise.resolve({ id: "api-a1", artifactId: ["report.html"] }) },
     );
 
     expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/artifacts/report.html");
@@ -349,7 +349,7 @@ describe("Spur web API routes", () => {
 
     const response = await getArtifact(
       new Request("http://localhost:3000/api/sessions/api-a1/artifacts/report.html"),
-      { params: Promise.resolve({ id: "api-a1", artifactId: "report.html" }) },
+      { params: Promise.resolve({ id: "api-a1", artifactId: ["report.html"] }) },
     );
 
     expect(response.headers.get("content-security-policy")).toBe(
@@ -367,10 +367,29 @@ describe("Spur web API routes", () => {
 
     const response = await getArtifact(
       new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
-      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+      { params: Promise.resolve({ id: "api-a1", artifactId: ["shot.png"] }) },
     );
 
     expect(response.headers.get("content-security-policy")).toBeNull();
+  });
+
+  it("GET /api/sessions/:id/artifacts/:path forwards nested segments to the daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("# Spec", {
+        status: 200,
+        headers: { "content-type": "text/markdown; charset=utf-8" },
+      }),
+    );
+
+    const response = await getArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/design/design-spec.md"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: ["design", "design-spec.md"] }) },
+    );
+
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/artifacts/design/design-spec.md",
+    );
+    expect(response.status).toBe(200);
   });
 
   // ── POST /api/spawn ────────────────────────────────────────────────────

@@ -457,6 +457,9 @@ const COPY_TEXT_LABELS = {
 } as const;
 
 const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
+// Mirrors MAX_NESTED_ARTIFACT_ROWS in v2/src/session-artifacts.ts. Display-only: the daemon
+// owns the real cap and reports whether it tripped via `artifactsTruncated`.
+const ARTIFACTS_NESTED_ROW_CAP = 200;
 const ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX = 48;
 const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
   "a,button,input,textarea,select,video,pre,[data-artifact-lightbox-interactive]";
@@ -464,11 +467,20 @@ const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
 type SessionArtifact = DashboardSession["artifacts"][number];
 
 function artifactUrl(sessionId: string, artifactId: string): string {
-  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
+  const encodedPath = artifactId
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodedPath}`;
+}
+
+function artifactBasename(name: string): string {
+  const segments = name.split("/");
+  return segments[segments.length - 1] || name;
 }
 
 function artifactExtension(name: string): string {
-  const ext = name.split(".").pop();
+  const ext = artifactBasename(name).split(".").pop();
   return ext ? ext.toUpperCase() : "FILE";
 }
 
@@ -737,7 +749,7 @@ function ArtifactCard({
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
-            download={artifact.name}
+            download={artifactBasename(artifact.name)}
             href={artifactHref}
             onClick={(event) => event.stopPropagation()}
           >
@@ -1213,7 +1225,7 @@ function ArtifactLightbox({
             <a
               aria-label={`Download ${artifact.name}`}
               className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-              download={artifact.name}
+              download={artifactBasename(artifact.name)}
               href={artifactHref}
             >
               <ArtifactDownloadIcon />
@@ -1320,7 +1332,7 @@ function ArtifactLightbox({
                 </div>
                 <a
                   className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                  download={artifact.name}
+                  download={artifactBasename(artifact.name)}
                   href={artifactHref}
                 >
                   <ArtifactDownloadIcon />
@@ -3284,6 +3296,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         );
                       })}
                     </div>
+                  ) : null}
+                  {session.artifactsTruncated ? (
+                    <p className="pb-2 text-[var(--color-text-secondary)]">
+                      Nested artifacts were truncated at the MAX_NESTED_ARTIFACT_ROWS limit (
+                      {ARTIFACTS_NESTED_ROW_CAP}); every root-level artifact is still listed.
+                    </p>
                   ) : null}
                   {visibleArtifacts.length > 0 ? (
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
