@@ -2757,7 +2757,12 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "sending message",
         action: () =>
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
-        success: (session) => `Sent message to ${session.id}.`,
+        success: (session) => {
+          const pending = session.queuedMessages?.messages.length ?? 0;
+          return pending > 0
+            ? `Queued message for ${session.id} (${pending} pending).`
+            : `Delivered message to ${session.id}.`;
+        },
         render: renderSessionCard,
       });
     });
