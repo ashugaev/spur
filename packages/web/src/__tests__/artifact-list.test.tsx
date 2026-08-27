@@ -63,12 +63,12 @@ describe("ArtifactList", () => {
     expect(nameOrder()).toEqual(["gamma.txt", "beta.txt", "alpha.txt"]);
   });
 
-  it("sorts by Size ascending then descending", () => {
+  it("sorts by Size descending then ascending", () => {
     render(<ArtifactList artifacts={artifacts} hrefFor={hrefFor} onPreview={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Size" }));
-    expect(nameOrder()).toEqual(["alpha.txt", "gamma.txt", "beta.txt"]);
-    fireEvent.click(screen.getByRole("button", { name: "Size" }));
     expect(nameOrder()).toEqual(["beta.txt", "gamma.txt", "alpha.txt"]);
+    fireEvent.click(screen.getByRole("button", { name: "Size" }));
+    expect(nameOrder()).toEqual(["alpha.txt", "gamma.txt", "beta.txt"]);
   });
 
   it("sorts by Type ascending then descending", () => {
@@ -85,6 +85,33 @@ describe("ArtifactList", () => {
     expect(nameOrder()).toEqual(["beta.txt", "gamma.txt", "alpha.txt"]);
     fireEvent.click(screen.getByRole("button", { name: "Updated" }));
     expect(nameOrder()).toEqual(["alpha.txt", "gamma.txt", "beta.txt"]);
+  });
+
+  it("gives each column its own default direction when first selected", () => {
+    render(<ArtifactList artifacts={artifacts} hrefFor={hrefFor} onPreview={vi.fn()} />);
+    // name defaults to ascending
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    expect(nameOrder()).toEqual(["alpha.txt", "beta.txt", "gamma.txt"]);
+    // type defaults to ascending
+    fireEvent.click(screen.getByRole("button", { name: "Type" }));
+    expect(nameOrder()).toEqual(["alpha.txt", "gamma.txt", "beta.txt"]);
+    // size defaults to descending
+    fireEvent.click(screen.getByRole("button", { name: "Size" }));
+    expect(nameOrder()).toEqual(["beta.txt", "gamma.txt", "alpha.txt"]);
+    // updatedAt defaults to descending
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    fireEvent.click(screen.getByRole("button", { name: "Updated" }));
+    expect(nameOrder()).toEqual(["alpha.txt", "gamma.txt", "beta.txt"]);
+  });
+
+  it("preserves payload order for ties in the default desc view (regression)", () => {
+    const tiedArtifacts: SpurSessionArtifact[] = [
+      makeArtifact({ id: "t1", name: "tied-1.txt", updatedAt: "2026-04-02T10:00:00.000Z" }),
+      makeArtifact({ id: "t2", name: "tied-2.txt", updatedAt: "2026-04-02T10:00:00.000Z" }),
+      makeArtifact({ id: "t3", name: "tied-3.txt", updatedAt: "2026-04-02T10:00:00.000Z" }),
+    ];
+    render(<ArtifactList artifacts={tiedArtifacts} hrefFor={hrefFor} onPreview={vi.fn()} />);
+    expect(nameOrder()).toEqual(["tied-1.txt", "tied-2.txt", "tied-3.txt"]);
   });
 
   it("marks aria-sort on the th, not the button", () => {

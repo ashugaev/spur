@@ -4505,6 +4505,10 @@ describe("SessionDetail artifacts", () => {
     });
 
     expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("link", { name: "Download shot.png" })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/shot.png",
+    );
   });
 
   it("renders the tile grid when the stored mode value is garbage", async () => {
