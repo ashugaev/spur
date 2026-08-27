@@ -8,6 +8,7 @@ import {
   isTmuxAvailable,
   killTmuxSessionsByPrefix,
   syncTmuxEnvironment,
+  waitForCleanTodoLedger,
   type RuntimeTestContext,
 } from "../helpers/runtime.js";
 
@@ -181,6 +182,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const { context, configPath, port } = await setup("claude-cpl");
     const session = await spawnSession(context, configPath, "claude");
     await waitForState(port, session.id, "waiting");
+    await waitForCleanTodoLedger(context, session.id);
 
     await context.execCli(["--config", configPath, "complete", session.id, "--json"]);
     const view = await waitForState(port, session.id, "stopped");
@@ -296,6 +298,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const { context, configPath, port } = await setup("codex-cpl");
     const session = await spawnSession(context, configPath, "codex");
     await waitForState(port, session.id, "waiting", 45_000);
+    await waitForCleanTodoLedger(context, session.id);
 
     await context.execCli(["--config", configPath, "complete", session.id, "--json"]);
     const view = await waitForState(port, session.id, "stopped");
@@ -358,6 +361,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   it("Cursor: complete → stopped", async () => {
     const { context, configPath, port } = await setup("cursor-cpl");
     const session = await spawnSession(context, configPath, "cursor");
+    await waitForCleanTodoLedger(context, session.id);
 
     await context.execCli(["--config", configPath, "complete", session.id, "--json"]);
     const view = await waitForState(port, session.id, "stopped");

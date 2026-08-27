@@ -32,6 +32,7 @@ import {
   stopDaemonByPid,
   syncTmuxEnvironment,
   tmuxSessionExists,
+  waitForCleanTodoLedger,
   type RuntimeTestContext,
 } from "../helpers/runtime.js";
 
@@ -1486,13 +1487,12 @@ projects:
     });
 
     // The complete gate is unconditional on session state: it 409s while the
-    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
-    // "waiting" (which lands strictly after its own resolve_initial_todo
-    // call) before completing, or this races the fixture's todo resolution.
-    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
-      timeoutMs: 15_000,
-      accept: (value) => value.state === "waiting",
-    });
+    // fixture's seeded ToDo item is still open. The fixture resolves it via a
+    // backgrounded add-then-complete round trip that can still be in flight
+    // after the session reaches "waiting" (record_fixture_todo in
+    // helpers/runtime.ts), so wait for the ledger itself to go clean before
+    // completing.
+    await waitForCleanTodoLedger(context, spawned.id);
 
     const completed = JSON.parse(
       (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
@@ -1544,13 +1544,12 @@ projects:
     ) as SessionView;
 
     // The complete gate is unconditional on session state: it 409s while the
-    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
-    // "waiting" (which lands strictly after its own resolve_initial_todo
-    // call) before completing, or this races the fixture's todo resolution.
-    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${completeSession.id}`), {
-      timeoutMs: 15_000,
-      accept: (value) => value.state === "waiting",
-    });
+    // fixture's seeded ToDo item is still open. The fixture resolves it via a
+    // backgrounded add-then-complete round trip that can still be in flight
+    // after the session reaches "waiting" (record_fixture_todo in
+    // helpers/runtime.ts), so wait for the ledger itself to go clean before
+    // completing.
+    await waitForCleanTodoLedger(context, completeSession.id);
 
     await writeFile(
       configPath,
@@ -2453,6 +2452,7 @@ projects:
       timeoutMs: 15_000,
       accept: (value) => value.includes("resume after pause"),
     });
+    await waitForCleanTodoLedger(context, spawned.id);
 
     const completed = JSON.parse(
       (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
@@ -5486,13 +5486,11 @@ projects:
 
       // Wait for the fixture to actually resolve the session's seeded Spur
       // ToDo item before completing — the sidecar link landing is unrelated
-      // to the fixture's own todo-resolution CLI calls, so completing right
+      // to the fixture's backgrounded add-then-complete todo round trip
+      // (record_fixture_todo in helpers/runtime.ts), so completing right
       // after the link appears can still 409 on an open item that hasn't
       // landed yet.
-      await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
-        timeoutMs: 15_000,
-        accept: (value) => value.state === "waiting",
-      });
+      await waitForCleanTodoLedger(context, spawned.id);
 
       const closed =
         action === "complete"
