@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
 
 type TodoOverrideDialogProps = (
@@ -26,12 +27,19 @@ export function TodoOverrideDialog(props: TodoOverrideDialogProps) {
         aria-labelledby="todo-override-title"
         className="w-full max-w-lg border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] p-4"
       >
-        <h2
-          id="todo-override-title"
-          className="font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]"
-        >
-          {props.empty ? "Empty ToDo" : "Unfinished ToDo"}
-        </h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2
+            id="todo-override-title"
+            className="font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]"
+          >
+            {props.empty ? "Empty ToDo" : "Unfinished ToDo"}
+          </h2>
+          <IconCloseButton
+            label="Dismiss ToDo override dialog"
+            onClick={onCancel}
+            disabled={busy}
+          />
+        </div>
         <p className="py-3 text-[var(--color-text-secondary)]">
           {props.empty
             ? "This session recorded no ToDo items. Completing keeps the ledger empty in audit history."
@@ -49,7 +57,7 @@ export function TodoOverrideDialog(props: TodoOverrideDialogProps) {
           value={reason}
           onChange={(event) => setReason(event.target.value)}
         />
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
           <button
             type="button"
             className="border border-[var(--color-border-default)] px-2 py-1.5 font-bold uppercase"

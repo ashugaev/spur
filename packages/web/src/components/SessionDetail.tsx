@@ -98,6 +98,8 @@ import {
   isRestorable,
   isSessionNotRestorablePayload,
   isTerminalSession,
+  isTodoLedgerEmptyPayload,
+  isTodoOpenWorkPayload,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
@@ -1929,40 +1931,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       const payload = await readResponsePayload(response);
       if (!response.ok) {
-        if (
-          action === "complete" &&
-          payload &&
-          typeof payload === "object" &&
-          "code" in payload &&
-          (payload as { code?: unknown }).code === "todo_open_work" &&
-          "sessions" in payload &&
-          Array.isArray((payload as { sessions?: unknown }).sessions)
-        ) {
-          const sessions = (
-            payload as { sessions: Array<{ openItemIds?: unknown; heldItemIds?: unknown }> }
-          ).sessions;
+        if (action === "complete" && isTodoOpenWorkPayload(payload)) {
+          const { sessions } = payload;
           setTodoOverride({
             body,
-            openCount: sessions.reduce(
-              (count, entry) =>
-                count + (Array.isArray(entry.openItemIds) ? entry.openItemIds.length : 0),
-              0,
-            ),
-            heldCount: sessions.reduce(
-              (count, entry) =>
-                count + (Array.isArray(entry.heldItemIds) ? entry.heldItemIds.length : 0),
-              0,
-            ),
+            openCount: sessions.reduce((count, entry) => count + entry.openItemIds.length, 0),
+            heldCount: sessions.reduce((count, entry) => count + entry.heldItemIds.length, 0),
           });
           return false;
         }
-        if (
-          action === "complete" &&
-          payload &&
-          typeof payload === "object" &&
-          "code" in payload &&
-          (payload as { code?: unknown }).code === "todo_ledger_empty"
-        ) {
+        if (action === "complete" && isTodoLedgerEmptyPayload(payload)) {
           setTodoOverride({ body, empty: true });
           return false;
         }
