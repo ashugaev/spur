@@ -3197,6 +3197,7 @@ describe("SessionDetail logs", () => {
 describe("SessionDetail artifacts", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.localStorage.clear();
   });
 
   it("renders image, video, and download artifacts from the session payload", async () => {
@@ -4406,6 +4407,266 @@ describe("SessionDetail artifacts", () => {
     expect(screen.queryByText("agent-history.jsonl")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /system \(/i })).not.toBeInTheDocument();
   }, 12_000);
+
+  function threeArtifactsFixture() {
+    return sessionFixture({
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1200,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+        {
+          id: "run.webm",
+          name: "run.webm",
+          size: 2200,
+          mimeType: "video/webm",
+          kind: "video",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T11:00:00.000Z",
+        },
+        {
+          id: "trace.log",
+          name: "trace.log",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+  }
+
+  function mockThreeArtifacts() {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(threeArtifactsFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  it("renders the tile grid by default with empty localStorage", async () => {
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Grid" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("clicking LIST writes the view-mode key and renders the table", async () => {
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    expect(window.localStorage.getItem("spur:artifact-view-mode")).toBe("list");
+    expect(screen.getByText("shot.png")).toBeInTheDocument();
+  });
+
+  it("renders the table on first paint when the stored mode is list", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("renders the tile grid when the stored mode value is garbage", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "not-a-real-mode");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("opens the same artifact viewer dialog from a list row as the tile click", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+    });
+  });
+
+  it("resets list sort to updatedAt desc after switching category away and back", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "agent-output.txt",
+                  name: "agent-output.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T09:00:00.000Z",
+                },
+                {
+                  id: "agent-newer.txt",
+                  name: "agent-newer.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T11:00:00.000Z",
+                },
+                {
+                  id: "agent-history.jsonl",
+                  name: "agent-history.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    const rowNamesInOrder = () =>
+      screen.getAllByTitle(/\.(txt|jsonl)$/).map((el) => el.textContent ?? "");
+
+    expect(rowNamesInOrder()).toEqual(["agent-newer.txt", "agent-output.txt"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    expect(rowNamesInOrder()).toEqual(["agent-newer.txt", "agent-output.txt"]);
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    expect(rowNamesInOrder()).toEqual(["agent-output.txt", "agent-newer.txt"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+    await waitFor(() => {
+      expect(screen.getByText("agent-history.jsonl")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent (2)" }));
+
+    await waitFor(() => {
+      expect(rowNamesInOrder()).toEqual(["agent-newer.txt", "agent-output.txt"]);
+    });
+  });
+
+  it("renders exactly one None. paragraph for an empty category in grid and list", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "system-only.jsonl",
+                  name: "system-only.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("None.")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("None.")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("None.")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("None.")).toHaveLength(1);
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail load state", () => {
