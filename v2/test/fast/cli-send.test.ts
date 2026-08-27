@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SessionView } from "../../src/types.js";
 
 const getJsonMock = vi.fn();
 const postJsonMock = vi.fn();
@@ -47,7 +48,7 @@ async function parseSend(args: string[]): Promise<void> {
   await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", ...args]);
 }
 
-function baseSession(overrides: Record<string, unknown> = {}) {
+function baseSession(overrides: Partial<SessionView> = {}): SessionView {
   return {
     id: "api-1",
     project: "api",

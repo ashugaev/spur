@@ -162,12 +162,17 @@ function describeSidecarAge(session: SessionView): string | null {
   return `sidecar ${oldest.name} ${formatSidecarAgeSeconds(oldest.ageSeconds)}${warnMark}${suffix}`;
 }
 
+// Counts only `messages` (real queued sends), never `pipelineMessages` (a
+// pipeline's own future auto-steps).
+export function queuedMessageCount(session: SessionView): number {
+  return session.queuedMessages?.messages.length ?? 0;
+}
+
 // Compact indicator so a session holding real queued messages is visible in
 // `spur list` without a second command — quiet (no fact added) when the queue
-// is empty or absent. Counts only `messages` (real queued sends), never
-// `pipelineMessages` (a pipeline's own future auto-steps).
+// is empty or absent.
 function describeQueueDepth(session: SessionView): string | null {
-  const count = session.queuedMessages?.messages.length ?? 0;
+  const count = queuedMessageCount(session);
   return count > 0 ? `queued ${count}` : null;
 }
 
@@ -409,7 +414,7 @@ function renderSessionDetailsPane(args: {
     return `${boldText(label)} ${truncate(value, Math.max(1, width - prefix.length))}`;
   };
 
-  const queueDepth = selected.queuedMessages?.messages.length ?? 0;
+  const queueDepth = queuedMessageCount(selected);
   const fields = [
     renderField(
       "branch",
