@@ -56,14 +56,18 @@ import {
   runUpdate,
   type UpdateDeps,
 } from "../../src/update.js";
+import type { SpurLogEntry } from "../../src/event-log.js";
 import type { ProbeResult, ProbeTarget } from "../../src/update-health.js";
 import type { RollbackState } from "../../src/update-state.js";
 
 const EMPTY_STATE: RollbackState = { version: 1, lastKnownGood: null, inProgress: null };
 
+type LoggedEvent = Omit<SpurLogEntry, "timestamp">;
+
 interface RunFake {
   deps: UpdateDeps;
   events: string[];
+  loggedEvents: LoggedEvent[];
   installLog: string[];
   lockCounts: { acquired: number; released: number };
   state: () => RollbackState;
@@ -77,6 +81,7 @@ function buildRunFake(opts: {
 }): RunFake {
   let state = opts.initialState;
   const events: string[] = [];
+  const loggedEvents: LoggedEvent[] = [];
   const installLog: string[] = [];
   const lockCounts = { acquired: 0, released: 0 };
   const current = opts.currentVersion ?? "0.1.5";
@@ -111,6 +116,13 @@ function buildRunFake(opts: {
     pidAlive: () => opts.pidAlive ?? false,
     unitActive: () => false,
     log: () => undefined,
+    logEvent: (event, entry) => {
+      loggedEvents.push({ event, ...entry });
+      events.push(`event:${event}`);
+    },
+    recordDeployFailure: (failure) => {
+      events.push(`deploy-failure:${failure.version}:${failure.failureKind}`);
+    },
     acquireUpdateLock: () => {
       lockCounts.acquired += 1;
       return () => {
@@ -118,7 +130,7 @@ function buildRunFake(opts: {
       };
     },
   };
-  return { deps, events, installLog, lockCounts, state: () => state };
+  return { deps, events, loggedEvents, installLog, lockCounts, state: () => state };
 }
 
 function monitoringState(pid: number): RollbackState {
@@ -186,11 +198,27 @@ describe("runUpdate", () => {
     expect(fake.state().inProgress?.phase).toBe("monitoring");
   });
 
+  it("logs cli.update.started before installing", async () => {
+    const fake = buildRunFake({ initialState: EMPTY_STATE });
+    await runUpdate("/tmp/cli.js", { force: true }, fake.deps);
+    expect(fake.loggedEvents).toEqual([
+      {
+        event: "cli.update.started",
+        level: "info",
+        details: { from: "0.1.5", to: "latest", force: true },
+      },
+    ]);
+    expect(fake.events.indexOf("event:cli.update.started")).toBeLessThan(
+      fake.events.indexOf("install:latest"),
+    );
+  });
+
   it("on a healthy host records the anchor, installs, then launches the monitor in order", async () => {
     const fake = buildRunFake({ initialState: EMPTY_STATE });
     await runUpdate("/tmp/cli.js", {}, fake.deps);
     expect(fake.events).toEqual([
       "write:installing",
+      "event:cli.update.started",
       "install:latest",
       "reinit",
       "launch",

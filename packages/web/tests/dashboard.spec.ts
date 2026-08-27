@@ -1666,11 +1666,17 @@ test.describe("D6: Attention zone sections", () => {
     await expect(rateLimitedZone).toBeVisible();
     await expect(needsInputZone).toBeVisible();
 
-    const errorsY = (await errorsZone.boundingBox())!.y;
-    const rateLimitedY = (await rateLimitedZone.boundingBox())!.y;
-    const needsInputY = (await needsInputZone.boundingBox())!.y;
-    expect(rateLimitedY).toBeGreaterThan(errorsY);
-    expect(needsInputY).toBeGreaterThan(rateLimitedY);
+    const errorsBox = await errorsZone.boundingBox();
+    const rateLimitedBox = await rateLimitedZone.boundingBox();
+    const needsInputBox = await needsInputZone.boundingBox();
+    expect(errorsBox).not.toBeNull();
+    expect(rateLimitedBox).not.toBeNull();
+    expect(needsInputBox).not.toBeNull();
+    if (!errorsBox || !rateLimitedBox || !needsInputBox) {
+      throw new Error("Attention zone layout missing bounds");
+    }
+    expect(rateLimitedBox.y).toBeGreaterThan(errorsBox.y);
+    expect(needsInputBox.y).toBeGreaterThan(rateLimitedBox.y);
 
     await expect(page.getByText("Rate limited zone session")).toBeVisible();
     await expectStatusCount(page, "Rate Limited", 1);

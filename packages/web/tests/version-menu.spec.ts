@@ -7,6 +7,11 @@ interface VersionsFixture {
   current: string;
   autoUpdate: boolean;
   available: Array<{ tag: string; publishedAt: string }>;
+  updateFailure?: {
+    version: string;
+    failureKind: "rolled_back" | "install_unhealthy" | "interrupted_unknown" | "restart_skipped";
+    initiator: "auto" | "manual";
+  };
 }
 
 async function mockVersionMenu(
@@ -209,6 +214,139 @@ test.describe("Version menu Auto checkbox", () => {
 
     const dialog = page.getByRole("dialog", { name: "Switch Spur version" });
     await expect(dialog).not.toContainText("Auto update will be turned off.");
+  });
+
+  test("a rolled-back update shows the red rollback glyph, not the severity triangle", async ({
+    page,
+  }) => {
+    await mockSessions(page, [], DEFAULT_PROJECTS);
+    await mockVersionMenu(page, {
+      current: "1.4.2",
+      autoUpdate: false,
+      available: [
+        { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+        { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+      ],
+      updateFailure: { version: "1.5.0", failureKind: "rolled_back", initiator: "auto" },
+    });
+
+    await page.goto("/");
+
+    const glyph = page.getByTestId("version-rollback-icon");
+    await expect(glyph).toBeVisible();
+    await expect(page.getByTestId("version-alert-icon")).toHaveCount(0);
+    await expect(glyph).toHaveCSS("color", "rgb(255, 77, 77)");
+
+    await page.getByRole("button", { name: /Show Spur version information/ }).click();
+    const notice = page.getByTestId("version-update-failure");
+    await expect(notice).toHaveText(
+      "Update to 1.5.0 failed, an automatic rollback happened, auto-update is suspended",
+    );
+    const checkbox = page.getByRole("checkbox", { name: "Auto update" });
+    const headerRow = checkbox.locator("..").locator("..");
+    const [noticeBox, headerBox] = await Promise.all([
+      notice.boundingBox(),
+      headerRow.boundingBox(),
+    ]);
+    expect(noticeBox).not.toBeNull();
+    expect(headerBox).not.toBeNull();
+    if (!noticeBox || !headerBox) throw new Error("unreachable");
+    expect(noticeBox.y).toBeLessThan(headerBox.y);
+    await expect(checkbox).not.toBeChecked();
+  });
+
+  test("an installed-but-not-restarted update asks for a restart", async ({ page }) => {
+    await mockSessions(page, [], DEFAULT_PROJECTS);
+    await mockVersionMenu(page, {
+      current: "1.4.2",
+      autoUpdate: true,
+      available: [
+        { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+        { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+      ],
+      updateFailure: { version: "1.5.0", failureKind: "restart_skipped", initiator: "auto" },
+    });
+
+    await page.goto("/");
+
+    const glyph = page.getByTestId("version-rollback-icon");
+    await expect(glyph).toBeVisible();
+    await expect(page.getByTestId("version-alert-icon")).toHaveCount(0);
+
+    await page
+      .getByRole("button", {
+        name: "Show Spur version information, update installed, restart required",
+      })
+      .click();
+    const notice = page.getByTestId("version-update-failure");
+    await expect(notice).toHaveText(
+      "Update to 1.5.0 installed but the services were not restarted — restart Spur to finish",
+    );
+    await expect(page.getByRole("checkbox", { name: "Auto update" })).toBeChecked();
+  });
+
+  test("re-enabling Auto clears the notice", async ({ page }) => {
+    await mockSessions(page, [], DEFAULT_PROJECTS);
+    await mockVersionMenu(
+      page,
+      {
+        current: "1.4.2",
+        autoUpdate: false,
+        available: [{ tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" }],
+        updateFailure: { version: "1.5.0", failureKind: "install_unhealthy", initiator: "auto" },
+      },
+      { autoUpdateResponse: { status: 200, body: { autoUpdate: true } } },
+    );
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /Show Spur version information/ }).click();
+    await expect(page.getByTestId("version-update-failure")).toBeVisible();
+
+    await page.getByRole("checkbox", { name: "Auto update" }).click();
+
+    await expect(page.getByTestId("version-update-failure")).toHaveCount(0);
+    await expect(page.getByTestId("version-rollback-icon")).toHaveCount(0);
+  });
+
+  test("a manual rollback on a host with Auto off claims no suspension", async ({ page }) => {
+    await mockSessions(page, [], DEFAULT_PROJECTS);
+    await mockVersionMenu(page, {
+      current: "1.4.2",
+      autoUpdate: false,
+      available: [{ tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" }],
+      updateFailure: { version: "1.5.0", failureKind: "rolled_back", initiator: "manual" },
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /Show Spur version information/ }).click();
+
+    await expect(page.getByTestId("version-update-failure")).toHaveText(
+      "Update to 1.5.0 failed, an automatic rollback happened",
+    );
+  });
+
+  test("a refused Auto write says why instead of silently snapping back", async ({ page }) => {
+    await mockSessions(page, [], DEFAULT_PROJECTS);
+    await mockVersionMenu(
+      page,
+      {
+        current: "1.4.2",
+        autoUpdate: false,
+        available: [{ tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" }],
+        updateFailure: { version: "1.5.0", failureKind: "rolled_back", initiator: "auto" },
+      },
+      { autoUpdateResponse: { status: 409, body: { error: "config changed on disk" } } },
+    );
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /Show Spur version information/ }).click();
+    await page.getByRole("checkbox", { name: "Auto update" }).click();
+
+    await expect(page.getByTestId("version-auto-update-error")).toHaveText(
+      "config changed on disk",
+    );
+    await expect(page.getByTestId("version-update-failure")).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Auto update" })).not.toBeChecked();
   });
 
   test("after a confirmed switch disarms auto-update, the reloaded page reopens with the box unchecked", async ({
