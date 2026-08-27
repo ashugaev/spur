@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { argvWithoutStrayHelpFlags, createProgram } from "../../src/cli.js";
+import { describe, expect, it, vi } from "vitest";
+import { argvWithoutStrayHelpFlags, createProgram, run } from "../../src/cli.js";
 
 function buildProgram() {
   return createProgram("/tmp/dist/cli.js");
@@ -350,6 +350,47 @@ describe("argvWithoutStrayHelpFlags", () => {
 
     for (const argv of unchanged) {
       expect(argvWithoutStrayHelpFlags(program, argv)).toEqual(argv);
+    }
+  });
+});
+
+describe("run", () => {
+  it("exits 1 with commander's unknown-command error for `spur bogus --help`", async () => {
+    // process.exit is mocked so it can't actually terminate the test
+    // process, which means a stray earlier `_outputHelpIfRequested` exit(0)
+    // would NOT stop execution here the way it does for a real CLI
+    // invocation — commander would fall through to unknownCommand() and
+    // call exit(1) right after anyway, making a bare `toHaveBeenCalledWith`
+    // pass whether or not the strip actually ran. Assert the exact call
+    // list instead: exactly one exit(1), no exit(0) help-then-fallthrough.
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdoutChunks.push(String(chunk));
+        return true;
+      });
+    const stderrChunks: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderrChunks.push(String(chunk));
+        return true;
+      });
+
+    try {
+      await run(["node", "/tmp/dist/cli.js", "bogus", "--help"]);
+      // Assert before mockRestore(): restoring a spy also clears its call
+      // history, so an assertion after the finally block would always see
+      // zero calls regardless of what actually happened.
+      expect(exitSpy.mock.calls).toEqual([[1]]);
+      expect(stderrChunks.join("")).toContain("error: unknown command 'bogus'");
+      expect(stdoutChunks.join("")).not.toContain("𖤓 Spur");
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+      exitSpy.mockRestore();
     }
   });
 });

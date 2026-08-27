@@ -22385,7 +22385,8 @@ describe("SessionService", () => {
 
       await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
       const error = await service.reopen("api-1").catch((caught: unknown) => caught);
-      expect((error as Error).message).toContain("spur restore");
+      expect((error as Error).message).toContain("spur restore api-1");
+      expect((error as Error).message).toContain("spur respawn api-1");
       expect((error as Error).message).toContain("conversation");
       expect((error as Error).message).not.toContain("use restore or respawn");
     });
