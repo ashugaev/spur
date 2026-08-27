@@ -85,28 +85,17 @@ const openPrActionPayload = {
   pr: { number: 3938, title: "Foreign PR", url: "https://github.com/other/web/pull/3938" },
 };
 
-function mockFetchOpenWork(completeBodies: unknown[]) {
-  vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-    const url = typeof input === "string" ? input : (input as Request).url;
-    if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
-    if (url === "/api/runtime/voice")
-      return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
-    if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
-    if (url === "/api/sessions/api-c9e9/complete") {
-      const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
-      completeBodies.push(body);
-      const record = body as Record<string, unknown>;
-      if (typeof record["todoOverrideReason"] === "string" && record["todoOverrideReason"]) {
-        return new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
-      }
-      return new Response(JSON.stringify(todoOpenWorkPayload), { status: 409 });
-    }
-    throw new Error(`Unexpected fetch: ${url}`);
-  });
-}
+const openWork409 = () => new Response(JSON.stringify(todoOpenWorkPayload), { status: 409 });
+const ledgerEmpty409 = () => new Response(JSON.stringify(todoLedgerEmptyPayload), { status: 409 });
+const openPrAction409 = () => new Response(JSON.stringify(openPrActionPayload), { status: 409 });
+const completedOk = () => new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
 
-function mockFetchLedgerEmpty(completeBodies: unknown[]) {
+// One fetch mock for every scenario: each POST to /complete consumes the next
+// reply in `replies` (the last entry repeats once exhausted), so a test names
+// its whole exchange as a short response sequence instead of a bespoke
+// duplicated mock function.
+function mockFetchComplete(completeBodies: unknown[], replies: ReadonlyArray<() => Response>) {
+  let callIndex = 0;
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
@@ -117,56 +106,9 @@ function mockFetchLedgerEmpty(completeBodies: unknown[]) {
     if (url === "/api/sessions/api-c9e9/complete") {
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
       completeBodies.push(body);
-      const record = body as Record<string, unknown>;
-      if (typeof record["todoOverrideReason"] === "string" && record["todoOverrideReason"]) {
-        return new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
-      }
-      return new Response(JSON.stringify(todoLedgerEmptyPayload), { status: 409 });
-    }
-    throw new Error(`Unexpected fetch: ${url}`);
-  });
-}
-
-// A second 409 hits after the override reason is sent — the dialog must
-// reopen and accept a new reason, not dead-end.
-function mockFetchOpenWorkTwice(completeBodies: unknown[]) {
-  vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-    const url = typeof input === "string" ? input : (input as Request).url;
-    if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
-    if (url === "/api/runtime/voice")
-      return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
-    if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
-    if (url === "/api/sessions/api-c9e9/complete") {
-      const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
-      completeBodies.push(body);
-      if (completeBodies.length >= 3) {
-        return new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
-      }
-      return new Response(JSON.stringify(todoOpenWorkPayload), { status: 409 });
-    }
-    throw new Error(`Unexpected fetch: ${url}`);
-  });
-}
-
-// A todo override retry that then trips open_pr_action_required must leave
-// only the PR dialog mounted.
-function mockFetchOpenWorkThenOpenPrAction(completeBodies: unknown[]) {
-  vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-    const url = typeof input === "string" ? input : (input as Request).url;
-    if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
-    if (url === "/api/runtime/voice")
-      return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
-    if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
-    if (url === "/api/sessions/api-c9e9/complete") {
-      const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
-      completeBodies.push(body);
-      const record = body as Record<string, unknown>;
-      if (typeof record["todoOverrideReason"] === "string" && record["todoOverrideReason"]) {
-        return new Response(JSON.stringify(openPrActionPayload), { status: 409 });
-      }
-      return new Response(JSON.stringify(todoOpenWorkPayload), { status: 409 });
+      const reply = replies[Math.min(callIndex, replies.length - 1)];
+      callIndex += 1;
+      return reply();
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -196,7 +138,7 @@ describe("Dashboard complete with a todo override", () => {
 
   // AC1
   it("opens the Unfinished ToDo dialog with the summed open/held counts, no toast", async () => {
-    mockFetchOpenWork([]);
+    mockFetchComplete([], [openWork409]);
     render(<Dashboard />);
 
     await clickDone();
@@ -213,7 +155,7 @@ describe("Dashboard complete with a todo override", () => {
   // AC2
   it("re-POSTs complete exactly once with the original body plus a reason, and completes", async () => {
     const completeBodies: unknown[] = [];
-    mockFetchOpenWork(completeBodies);
+    mockFetchComplete(completeBodies, [openWork409, completedOk]);
     render(<Dashboard />);
 
     await clickDone();
@@ -236,7 +178,7 @@ describe("Dashboard complete with a todo override", () => {
   // AC3
   it("opens the Empty ToDo dialog and the same retry works", async () => {
     const completeBodies: unknown[] = [];
-    mockFetchLedgerEmpty(completeBodies);
+    mockFetchComplete(completeBodies, [ledgerEmpty409, completedOk]);
     render(<Dashboard />);
 
     await clickDone();
@@ -259,7 +201,7 @@ describe("Dashboard complete with a todo override", () => {
   // AC4
   it("cancelling sends no further POST and leaves the row present and enabled", async () => {
     const completeBodies: unknown[] = [];
-    mockFetchOpenWork(completeBodies);
+    mockFetchComplete(completeBodies, [openWork409]);
     render(<Dashboard />);
 
     await clickDone();
@@ -274,7 +216,7 @@ describe("Dashboard complete with a todo override", () => {
   // AC5
   it("reopens the dialog on a second 409 after an override and accepts a new reason", async () => {
     const completeBodies: unknown[] = [];
-    mockFetchOpenWorkTwice(completeBodies);
+    mockFetchComplete(completeBodies, [openWork409, openWork409, completedOk]);
     render(<Dashboard />);
 
     await clickDone();
@@ -301,10 +243,10 @@ describe("Dashboard complete with a todo override", () => {
     );
   });
 
-  // AC11
+  // AC11, todo -> PR direction
   it("clears the ToDo dialog when the override retry trips a PR dialog instead", async () => {
     const completeBodies: unknown[] = [];
-    mockFetchOpenWorkThenOpenPrAction(completeBodies);
+    mockFetchComplete(completeBodies, [openWork409, openPrAction409]);
     render(<Dashboard />);
 
     await clickDone();
@@ -318,5 +260,67 @@ describe("Dashboard complete with a todo override", () => {
       expect(screen.getByRole("dialog", { name: "Open Pull Request" })).toBeInTheDocument(),
     );
     expect(screen.queryByRole("dialog", { name: "Unfinished ToDo" })).not.toBeInTheDocument();
+  });
+
+  // AC11, PR -> todo direction: a PR-dialog retry that then trips a todo 409
+  // must leave only the ToDo dialog mounted, not stack both.
+  it("clears the PR dialog when its retry trips a todo dialog instead", async () => {
+    const completeBodies: unknown[] = [];
+    mockFetchComplete(completeBodies, [openPrAction409, openWork409]);
+    render(<Dashboard />);
+
+    await clickDone();
+    await screen.findByRole("dialog", { name: "Open Pull Request" });
+    fireEvent.click(screen.getByRole("button", { name: "Close Pull Request" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("dialog", { name: "Unfinished ToDo" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument();
+  });
+
+  // A 409 never leaves the optimistic desk-wide write in place. The finally
+  // block's invalidateQueries refetch would otherwise mask a missing
+  // rollback, so the second /api/sessions call (the refetch) is gated open
+  // only after the assertion, proving the restore itself — not a later
+  // refetch — put the row back.
+  it("restores the optimistic write before the refetch settles", async () => {
+    const completeBodies: unknown[] = [];
+    let releaseSecondSessionsFetch: (() => void) | undefined;
+    const secondSessionsGate = new Promise<void>((resolve) => {
+      releaseSecondSessionsFetch = resolve;
+    });
+    let sessionsCallCount = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        sessionsCallCount += 1;
+        if (sessionsCallCount > 1) await secondSessionsGate;
+        return new Response(JSON.stringify(sessionsResponse));
+      }
+      if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
+      if (url === "/api/sessions/api-c9e9/complete") {
+        const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
+        completeBodies.push(body);
+        return openWork409();
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    render(<Dashboard />);
+
+    await clickDone();
+    await screen.findByRole("dialog", { name: "Unfinished ToDo" });
+
+    // A missing rollback would leave the row's status "completed", hiding
+    // Done (canComplete gates on isTerminalSession) until the gated refetch
+    // below resolves and masks the gap.
+    expect(screen.getByRole("button", { name: "Mark api-c9e9 as done" })).toBeInTheDocument();
+
+    releaseSecondSessionsFetch?.();
+    await waitFor(() => expect(sessionsCallCount).toBeGreaterThan(1));
   });
 });
