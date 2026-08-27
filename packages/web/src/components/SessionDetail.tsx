@@ -457,9 +457,6 @@ const COPY_TEXT_LABELS = {
 } as const;
 
 const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
-// Mirrors MAX_NESTED_ARTIFACT_ROWS in v2/src/session-artifacts.ts. Display-only: the daemon
-// owns the real cap and reports whether it tripped via `artifactsTruncated`.
-const ARTIFACTS_NESTED_ROW_CAP = 200;
 const ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX = 48;
 const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
   "a,button,input,textarea,select,video,pre,[data-artifact-lightbox-interactive]";
@@ -765,7 +762,7 @@ function ArtifactCard({
           dir="rtl"
           title={artifact.name}
         >
-          {artifact.name}
+          <bdi dir="ltr">{artifact.name}</bdi>
         </div>
         {polishedAttachedImage ? (
           <div className="flex flex-wrap gap-1.5">
@@ -1189,8 +1186,9 @@ function ArtifactLightbox({
             <h2
               className="truncate text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
               dir="rtl"
+              title={artifact.name}
             >
-              {artifact.name}
+              <bdi dir="ltr">{artifact.name}</bdi>
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
               {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
@@ -1332,7 +1330,7 @@ function ArtifactLightbox({
                   dir="rtl"
                   title={artifact.name}
                 >
-                  {artifact.name}
+                  <bdi dir="ltr">{artifact.name}</bdi>
                 </div>
                 <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                   {artifactExtension(artifact.name)} · {artifact.mimeType}
@@ -3306,8 +3304,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ) : null}
                   {session.artifactsTruncated ? (
                     <p className="pb-2 text-[var(--color-text-secondary)]">
-                      Nested artifacts were truncated at {ARTIFACTS_NESTED_ROW_CAP} files; every
-                      root-level artifact is still listed.
+                      Nested artifacts were truncated; every root-level artifact is still listed.
                     </p>
                   ) : null}
                   {visibleArtifacts.length > 0 ? (

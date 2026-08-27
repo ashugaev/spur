@@ -1401,7 +1401,7 @@ export async function startServer(
             .map((segment) => decodeURIComponent(segment))
             .join("/");
         } catch {
-          sendError(response, 404, "Artifact not found");
+          sendError(response, 404, `Artifact not found: ${artifactMatch[1]}/${artifactMatch[2]}`);
           return;
         }
         const artifact = service.getArtifact(sessionId, artifactId);

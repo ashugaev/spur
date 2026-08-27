@@ -2099,6 +2099,8 @@ describe("startServer", () => {
         `http://127.0.0.1:${port}/sessions/demo-bad-encoding/artifacts/%E0%A4%A`,
       );
       expect(response.status).toBe(404);
+      const body = await response.text();
+      expect(body).toContain("Artifact not found:");
     } finally {
       await server.stop();
     }
@@ -2120,28 +2122,6 @@ describe("startServer", () => {
     expect(webFlags).toBeTruthy();
     expect(daemonPolicy).toBe(`sandbox ${webFlags}`);
     expect(daemonPolicy).not.toContain("allow-same-origin");
-  });
-
-  it("keeps the web nested-artifact row cap identical to the daemon's real cap", async () => {
-    // The web package cannot import from v2, so the row cap exists twice — once as the
-    // daemon's real enforcement, once as a display-only mirror used to word the
-    // truncation banner. A bump to one side without the other must fail here, not ship a
-    // banner that states the wrong number.
-    const daemonSource = await readFile(
-      new URL("../../src/session-artifacts.ts", import.meta.url),
-      "utf8",
-    );
-    const webSource = await readFile(
-      new URL("../../../packages/web/src/components/SessionDetail.tsx", import.meta.url),
-      "utf8",
-    );
-
-    const daemonCap = daemonSource.match(/MAX_NESTED_ARTIFACT_ROWS = (\d+)/)?.[1];
-    const webCap = webSource.match(/ARTIFACTS_NESTED_ROW_CAP = (\d+)/)?.[1];
-
-    expect(daemonCap).toBeTruthy();
-    expect(webCap).toBeTruthy();
-    expect(webCap).toBe(daemonCap);
   });
 
   it("hands SVG artifacts over as downloads so they never render on Spur's origin", async () => {
