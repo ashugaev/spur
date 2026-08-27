@@ -198,11 +198,13 @@ describe("SessionTodo", () => {
     expect(collapsedItemText).toHaveClass("min-w-0");
     expect(collapsedItemText).toHaveClass("truncate");
     expect(collapsedItemText).not.toHaveClass("[overflow-wrap:anywhere]");
+    expect(collapsedItemText).not.toHaveClass("whitespace-pre-wrap");
 
     fireEvent.click(screen.getByRole("button", { name: new RegExp(longToken) }));
     const expandedItemText = screen.getByText(longToken, { selector: "span" });
     expect(expandedItemText).toHaveClass("min-w-0");
     expect(expandedItemText).toHaveClass("[overflow-wrap:anywhere]");
+    expect(expandedItemText).toHaveClass("whitespace-pre-wrap");
     expect(expandedItemText).not.toHaveClass("truncate");
 
     const reason = screen.getAllByText(longToken, { selector: "div" })[0] as HTMLElement;
