@@ -277,7 +277,20 @@ done
 if [[ ! -f "$runtime_file" ]]; then
   exit 1
 fi
-"$SPUR_SESSION_TOOL_DIR/spur-isolated" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
+set +e
+list_status=1
+for _ in $(seq 1 30); do
+  "$SPUR_SESSION_TOOL_DIR/spur-isolated" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
+  list_status=$?
+  if [[ "$list_status" -eq 0 ]]; then
+    break
+  fi
+  sleep 1
+done
+set -e
+if [[ "$list_status" -ne 0 ]]; then
+  exit 1
+fi
 printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
 set +e
 valid_status=1
