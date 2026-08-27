@@ -1972,7 +1972,7 @@ describe("startServer", () => {
       // encoded (WHATWG URL normalization decodes a segment to check for "." and ".." before
       // it decides whether to remove it). Encoding the SLASH instead keeps the whole tail one
       // opaque segment through the client parser; the daemon route captures it whole and only
-      // decodes once it owns the string, so the traversal survives to validateArtifactId.
+      // decodes once it owns the string, so the traversal survives to parseArtifactRelativePath.
       const response = await fetch(
         `http://127.0.0.1:${port}/sessions/demo-escape/artifacts/..%2F..%2Fetc%2Fpasswd`,
       );
@@ -2046,6 +2046,64 @@ describe("startServer", () => {
     }
   });
 
+  it("answers 404, not 500, for an artifact id with an invalid percent-encoding", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-bad-encoding",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-bad-encoding",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-bad-encoding"),
+      tmuxSession: "demo-bad-encoding",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+    await mkdir(sessionArtifactsDir(dataDir, session.id), { recursive: true });
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      // "%E0%A4%A" is a truncated UTF-8 sequence: decodeURIComponent throws a URIError on
+      // it. That's an artifact id nothing can ever match, so it must answer 404 like any
+      // other unknown id — never the generic 500 an uncaught URIError falls through to.
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-bad-encoding/artifacts/%E0%A4%A`,
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("keeps the html artifact sandbox identical to the web preview frames", async () => {
     // The web package cannot import from v2, so the flag list exists twice. Drift
     // between the CSP header and the iframe sandbox must fail here, not in a browser.
@@ -2062,6 +2120,28 @@ describe("startServer", () => {
     expect(webFlags).toBeTruthy();
     expect(daemonPolicy).toBe(`sandbox ${webFlags}`);
     expect(daemonPolicy).not.toContain("allow-same-origin");
+  });
+
+  it("keeps the web nested-artifact row cap identical to the daemon's real cap", async () => {
+    // The web package cannot import from v2, so the row cap exists twice — once as the
+    // daemon's real enforcement, once as a display-only mirror used to word the
+    // truncation banner. A bump to one side without the other must fail here, not ship a
+    // banner that states the wrong number.
+    const daemonSource = await readFile(
+      new URL("../../src/session-artifacts.ts", import.meta.url),
+      "utf8",
+    );
+    const webSource = await readFile(
+      new URL("../../../packages/web/src/components/SessionDetail.tsx", import.meta.url),
+      "utf8",
+    );
+
+    const daemonCap = daemonSource.match(/MAX_NESTED_ARTIFACT_ROWS = (\d+)/)?.[1];
+    const webCap = webSource.match(/ARTIFACTS_NESTED_ROW_CAP = (\d+)/)?.[1];
+
+    expect(daemonCap).toBeTruthy();
+    expect(webCap).toBeTruthy();
+    expect(webCap).toBe(daemonCap);
   });
 
   it("hands SVG artifacts over as downloads so they never render on Spur's origin", async () => {

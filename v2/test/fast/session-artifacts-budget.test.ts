@@ -30,8 +30,12 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-const { MAX_NESTED_ARTIFACT_WALK_ENTRIES, listSessionArtifacts, sessionArtifactsDir } =
-  await import("../../src/session-artifacts.js");
+const {
+  MAX_NESTED_ARTIFACT_ROWS,
+  MAX_NESTED_ARTIFACT_WALK_ENTRIES,
+  listSessionArtifacts,
+  sessionArtifactsDir,
+} = await import("../../src/session-artifacts.js");
 const { createTempDir } = await import("../helpers/common.js");
 
 const tempDirs: string[] = [];
@@ -46,6 +50,42 @@ afterEach(() => {
 });
 
 describe("session artifact walk budget", () => {
+  it("stops on the entry budget when entries greatly outnumber emitted rows", async () => {
+    const dataDir = await createTempDir("spur-artifacts-budget-");
+    tempDirs.push(dataDir);
+    const sessionId = "api-budget-entries";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    mkdirSync(dir, { recursive: true });
+
+    // A single depth-1 directory holding 3,000 EMPTY depth-2 subdirectories: below the
+    // root, the walk examines 3,000 entries but emits zero SessionArtifact rows (none of
+    // them are files). This is the case MAX_NESTED_ARTIFACT_ROWS cannot bind on — only the
+    // entry budget can stop the walk here, so a truncated result proves that budget fires.
+    const parent = join(dir, "parent");
+    mkdirSync(parent, { recursive: true });
+    const subdirCount = 3000;
+    for (let index = 0; index < subdirCount; index++) {
+      mkdirSync(join(parent, `sub-${index}`), { recursive: true });
+    }
+    counts.readdirSync = 0;
+    counts.realpathSync = 0;
+    counts.statSync = 0;
+
+    const { artifacts, truncated } = listSessionArtifacts(dataDir, sessionId);
+
+    expect(truncated).toBe(true);
+    // Zero nested rows were emitted (no files exist below the root at all), which is well
+    // under MAX_NESTED_ARTIFACT_ROWS — proving this truncation came from the entry budget,
+    // not the row budget.
+    expect(artifacts.length).toBe(0);
+    expect(artifacts.length).toBeLessThan(MAX_NESTED_ARTIFACT_ROWS);
+
+    // The walk must have stopped at (or just past) the entry budget, not walked all 3,000
+    // subdirectories.
+    expect(counts.realpathSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 10);
+    expect(counts.statSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 10);
+  });
+
   it("examines at most MAX_NESTED_ARTIFACT_WALK_ENTRIES entries below the root", async () => {
     const dataDir = await createTempDir("spur-artifacts-budget-");
     tempDirs.push(dataDir);

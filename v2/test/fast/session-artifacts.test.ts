@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -311,14 +312,22 @@ describe("session artifact cleanup", () => {
     const dir = sessionArtifactsDir(dataDir, sessionId);
     await mkdir(join(dir, "design"), { recursive: true });
     await mkdir(join(dir, "notes"), { recursive: true });
+    await mkdir(join(dir, "deep", "a", "b"), { recursive: true });
     await writeFile(join(dir, "shot.png"), "png", "utf8");
     await writeFile(join(dir, "design", "design-spec.md"), "spec", "utf8");
     await writeFile(join(dir, "notes", "scratch.md"), "scratch", "utf8");
+    await writeFile(join(dir, "deep", "a", "b", "buried.md"), "buried", "utf8");
 
     deleteSessionArtifactsExcept(dataDir, sessionId, ["shot.png"]);
 
     const { artifacts } = listSessionArtifacts(dataDir, sessionId);
     expect(artifacts.map((artifact) => artifact.id)).toEqual(["shot.png"]);
+    // The invariant this cleanup owns: no emptied directory is left behind, at any depth.
+    expect(existsSync(join(dir, "design"))).toBe(false);
+    expect(existsSync(join(dir, "notes"))).toBe(false);
+    expect(existsSync(join(dir, "deep"))).toBe(false);
+    expect(existsSync(join(dir, "deep", "a"))).toBe(false);
+    expect(existsSync(join(dir, "deep", "a", "b"))).toBe(false);
   });
 
   it("keeps the directory holding a nested kept file", async () => {
@@ -335,5 +344,10 @@ describe("session artifact cleanup", () => {
 
     const { artifacts } = listSessionArtifacts(dataDir, sessionId);
     expect(artifacts.map((artifact) => artifact.id)).toEqual(["design/design-spec.md"]);
+    // "design/" is kept — it still holds the kept file — but "notes/" is emptied and pruned.
+    expect(existsSync(join(dir, "design"))).toBe(true);
+    expect(existsSync(join(dir, "design", "design-spec.md"))).toBe(true);
+    expect(existsSync(join(dir, "design", "scratch.md"))).toBe(false);
+    expect(existsSync(join(dir, "notes"))).toBe(false);
   });
 });

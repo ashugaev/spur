@@ -1388,11 +1388,23 @@ export async function startServer(
 
       const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
-        const artifactId = artifactMatch[2]
-          .split("/")
-          .map((segment) => decodeURIComponent(segment))
-          .join("/");
-        const artifact = service.getArtifact(decodeURIComponent(artifactMatch[1]), artifactId);
+        // An invalid percent-encoding in any segment (decodeURIComponent throws URIError)
+        // is not a malformed request — it just can never match a real artifact id. Treat
+        // it as a not-found id, same as any other id the store doesn't recognize, rather
+        // than letting it fall through to the generic 500 handler.
+        let sessionId: string;
+        let artifactId: string;
+        try {
+          sessionId = decodeURIComponent(artifactMatch[1]);
+          artifactId = artifactMatch[2]
+            .split("/")
+            .map((segment) => decodeURIComponent(segment))
+            .join("/");
+        } catch {
+          sendError(response, 404, "Artifact not found");
+          return;
+        }
+        const artifact = service.getArtifact(sessionId, artifactId);
         // An SVG opened as a top-level document runs its own scripts on Spur's origin,
         // and browsers ignore a CSP sandbox on image documents, so hand it over as a
         // download instead. <img> previews ignore content-disposition and still render.

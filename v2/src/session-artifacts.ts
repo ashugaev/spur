@@ -11,7 +11,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, extname, join, resolve, sep } from "node:path";
+import { basename, extname, join, sep } from "node:path";
 import type { SessionArtifact, SessionArtifactKind, SessionArtifactOrigin } from "./types.js";
 
 const ARTIFACTS_DIR = "session-artifacts";
@@ -24,12 +24,6 @@ const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
 export const MAX_NESTED_ARTIFACT_WALK_ENTRIES = 2000;
 // Emitted SessionArtifact objects at depth >= 2. Depth-1 rows never consume this.
 export const MAX_NESTED_ARTIFACT_ROWS = 200;
-
-// A synthetic root used only to run the final containment check a relative artifact path
-// must pass. The prior lexical rules (no "..", no ".", no empty segment) already make this
-// check redundant on any id they accept, but it is cheap and it is the literal invariant:
-// resolve(join(root, id)) must stay at or under root.
-const PATH_CONTAINMENT_SENTINEL = "/spur-artifact-root";
 
 const MIME_BY_EXT: Record<string, string> = {
   ".gif": "image/gif",
@@ -186,13 +180,6 @@ export function parseArtifactRelativePath(artifactId: string): string | null {
   }
   const relativePath = segments.join("/");
   if (relativePath === ARTIFACT_METADATA_FILE) {
-    return null;
-  }
-  const resolved = resolve(PATH_CONTAINMENT_SENTINEL, relativePath);
-  if (
-    resolved !== PATH_CONTAINMENT_SENTINEL &&
-    !resolved.startsWith(`${PATH_CONTAINMENT_SENTINEL}${sep}`)
-  ) {
     return null;
   }
   return relativePath;

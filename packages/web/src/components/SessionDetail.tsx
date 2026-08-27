@@ -480,8 +480,9 @@ function artifactBasename(name: string): string {
 }
 
 function artifactExtension(name: string): string {
-  const ext = artifactBasename(name).split(".").pop();
-  return ext ? ext.toUpperCase() : "FILE";
+  const base = artifactBasename(name);
+  const dotIndex = base.lastIndexOf(".");
+  return dotIndex > 0 ? base.slice(dotIndex + 1).toUpperCase() : "FILE";
 }
 
 function isMarkdownArtifact(artifact: SessionArtifact): boolean {
@@ -760,7 +761,8 @@ function ArtifactCard({
 
       <div className="flex flex-col gap-1 px-3 py-2">
         <div
-          className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[var(--color-text-primary)]"
+          className="overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-[var(--color-text-primary)]"
+          dir="rtl"
           title={artifact.name}
         >
           {artifact.name}
@@ -1184,7 +1186,10 @@ function ArtifactLightbox({
       <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+            <h2
+              className="truncate text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+              dir="rtl"
+            >
               {artifact.name}
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -1323,7 +1328,9 @@ function ArtifactLightbox({
                   <ArtifactFileIcon />
                 </div>
                 <div
-                  className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
+                  className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-[var(--color-text-primary)]"
+                  dir="rtl"
+                  title={artifact.name}
                 >
                   {artifact.name}
                 </div>
@@ -3299,8 +3306,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ) : null}
                   {session.artifactsTruncated ? (
                     <p className="pb-2 text-[var(--color-text-secondary)]">
-                      Nested artifacts were truncated at the MAX_NESTED_ARTIFACT_ROWS limit (
-                      {ARTIFACTS_NESTED_ROW_CAP}); every root-level artifact is still listed.
+                      Nested artifacts were truncated at {ARTIFACTS_NESTED_ROW_CAP} files; every
+                      root-level artifact is still listed.
                     </p>
                   ) : null}
                   {visibleArtifacts.length > 0 ? (

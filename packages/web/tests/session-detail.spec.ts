@@ -2530,6 +2530,70 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
+  test("renders a nested artifact under its relative path and opens it through the same URL", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-nested",
+      artifacts: [
+        {
+          id: "design/design-spec.md",
+          name: "design/design-spec.md",
+          size: 512,
+          mimeType: "text/markdown; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.route(
+      "**/api/sessions/detail-s4b-nested/artifacts/design/design-spec.md",
+      (route) => {
+        route.fulfill({ status: 200, contentType: "text/markdown", body: "# spec" });
+      },
+    );
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    // The card renders the full relative path, not just the basename.
+    await expect(page.getByText("design/design-spec.md")).toBeVisible();
+    const downloadLink = page.getByRole("link", { name: "Download design/design-spec.md" });
+    await expect(downloadLink).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-nested/artifacts/design/design-spec.md",
+    );
+    await expect(downloadLink).toHaveAttribute("download", "design-spec.md");
+  });
+
+  test("shows the truncation banner when artifactsTruncated is set", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-truncated",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+      artifactsTruncated: true,
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: "Artifacts" })).toBeVisible();
+    await expect(page.getByText(/truncated at 200 files/i)).toBeVisible();
+    // The banner never names the underscored constant.
+    await expect(page.getByText(/MAX_NESTED_ARTIFACT_ROWS/)).toHaveCount(0);
+  });
+
   test("image lightbox zoom buttons scale and reset the preview", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4b-zoom",
