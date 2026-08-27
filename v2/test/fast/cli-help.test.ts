@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createProgram } from "../../src/cli.js";
+import { argvWithoutStrayHelpFlags, createProgram } from "../../src/cli.js";
 
 function buildProgram() {
   return createProgram("/tmp/dist/cli.js");
@@ -25,6 +25,7 @@ describe("spur help", () => {
     expect(help).toContain("todo");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
+    expect(help).toContain("restore [options] <sessionId>");
     expect(help).toContain("reopen [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("memory <set|get|list|rm>");
@@ -302,5 +303,53 @@ describe("spur help", () => {
     expect(help).toContain("--scope <scope>");
     expect(help).toContain("--file <path>");
     expect(help).toContain("--session <id>");
+  });
+});
+
+describe("argvWithoutStrayHelpFlags", () => {
+  it("strips -h/--help from an unknown top-level command word", () => {
+    const program = createProgram("/tmp/dist/cli.js");
+
+    expect(argvWithoutStrayHelpFlags(program, ["node", "spur", "bogus", "--help"])).toEqual([
+      "node",
+      "spur",
+      "bogus",
+    ]);
+    expect(
+      argvWithoutStrayHelpFlags(program, ["node", "spur", "--config=/p", "bogus", "-h"]),
+    ).toEqual(["node", "spur", "--config=/p", "bogus"]);
+    expect(argvWithoutStrayHelpFlags(program, ["node", "spur", "bogus", "-h", "--force"])).toEqual([
+      "node",
+      "spur",
+      "bogus",
+      "--force",
+    ]);
+    // "start" is a subcommand of daemon/sidecar, not top-level, so this
+    // deliberately flips from root-help/exit-0 to unknown-command/exit-1.
+    expect(argvWithoutStrayHelpFlags(program, ["node", "spur", "start", "--help"])).toEqual([
+      "node",
+      "spur",
+      "start",
+    ]);
+  });
+
+  it("leaves argv unchanged for known commands and non-help invocations", () => {
+    const program = createProgram("/tmp/dist/cli.js");
+    const unchanged: string[][] = [
+      ["node", "spur", "reopn", "x"],
+      ["node", "spur", "--help"],
+      ["node", "spur", "-h"],
+      ["node", "spur"],
+      ["node", "spur", "--config", "/p", "--help"],
+      ["node", "spur", "reopen", "--help"],
+      ["node", "spur", "ls"],
+      ["node", "spur", "restore", "x"],
+      ["node", "spur", "daemon", "start", "--help"],
+      ["node", "spur", "slots", "--help"],
+    ];
+
+    for (const argv of unchanged) {
+      expect(argvWithoutStrayHelpFlags(program, argv)).toEqual(argv);
+    }
   });
 });

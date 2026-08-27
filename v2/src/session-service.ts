@@ -12405,7 +12405,7 @@ export class SessionService {
     }
     if (session.status !== "completed") {
       throw new SessionNotReopenableError(
-        `Session ${sessionId} is ${session.status}, not completed — use restore or respawn`,
+        `Session ${sessionId} is ${session.status}, not completed — \`spur restore ${sessionId}\` resumes it with its conversation; \`spur respawn ${sessionId}\` starts a fresh session (conversation not carried over)`,
       );
     }
 

@@ -22377,6 +22377,19 @@ describe("SessionService", () => {
       };
     }
 
+    it("refuses a non-completed session with a message naming restore and respawn", async () => {
+      seedReopenableSession({ status: "stopped" });
+
+      const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
+      const error = await service.reopen("api-1").catch((caught: unknown) => caught);
+      expect((error as Error).message).toContain("spur restore");
+      expect((error as Error).message).toContain("conversation");
+      expect((error as Error).message).not.toContain("use restore or respawn");
+    });
+
     it("rebuilds a missing worktree with the spawn-shaped input and returns a running view", async () => {
       seedReopenableSession();
       let worktreeCreated = false;
