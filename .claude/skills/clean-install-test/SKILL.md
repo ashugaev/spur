@@ -67,6 +67,8 @@ Launch with a sanitized environment so its child shells see the node-free box un
 
 Verified: a planted Claude launched this way runs `command -v node` and gets NO-NODE. Same itest-only credential caveat as cursor-agent applies.
 
+`env -i` also drops `XDG_RUNTIME_DIR`, so the agent's first `spur init` exits 1 with `npm-init: user systemd is unavailable`. Harness artifact, not doc friction — a plain `ssh host '<cmd>'` shell gets that variable from pam_systemd, so a real operator never sees it. An agent that exports `XDG_RUNTIME_DIR=/run/user/$(id -u)` and re-runs still counts as single-shot.
+
 4 RUN THE TEST — README INSTALL BLOCK, SINGLE-SHOT, NO HINTS
 
 Run twice per cycle, once per agent, with a full reset (step 2) between the two runs — a box dirtied by one agent's run is not a clean box for the other's.
