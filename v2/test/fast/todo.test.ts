@@ -207,8 +207,8 @@ describe("Spur ToDo ledger", () => {
 
   it("records a human override with the HUMAN_BYPASS_REASON constant and leaves item status unchanged", async () => {
     const { dataDir, session } = await fixture();
-    let projection = ensureTodoLedger(dataDir, session);
-    projection = mutateTodo(
+    ensureTodoLedger(dataDir, session);
+    const projection = mutateTodo(
       dataDir,
       requiredSession(dataDir, session.id),
       { action: "add", text: "Implement native ToDo", reason: "Session objective" },

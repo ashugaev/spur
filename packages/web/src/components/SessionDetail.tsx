@@ -45,7 +45,6 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { SessionTodo } from "@/components/SessionTodo";
-import { TodoOverrideDialog } from "@/components/TodoOverrideDialog";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
@@ -98,8 +97,6 @@ import {
   isRestorable,
   isSessionNotRestorablePayload,
   isTerminalSession,
-  isTodoLedgerEmptyPayload,
-  isTodoOpenWorkPayload,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
@@ -1602,11 +1599,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
-  const [todoOverride, setTodoOverride] = useState<
-    | { body?: Record<string, unknown>; empty: true }
-    | { body?: Record<string, unknown>; openCount: number; heldCount: number }
-    | null
-  >(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
     action: "complete" | "kill";
     body?: Record<string, unknown>;
@@ -1931,19 +1923,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       const payload = await readResponsePayload(response);
       if (!response.ok) {
-        if (action === "complete" && isTodoOpenWorkPayload(payload)) {
-          const { sessions } = payload;
-          setTodoOverride({
-            body,
-            openCount: sessions.reduce((count, entry) => count + entry.openItemIds.length, 0),
-            heldCount: sessions.reduce((count, entry) => count + entry.heldItemIds.length, 0),
-          });
-          return false;
-        }
-        if (action === "complete" && isTodoLedgerEmptyPayload(payload)) {
-          setTodoOverride({ body, empty: true });
-          return false;
-        }
         if (
           (action === "complete" || action === "kill") &&
           isOpenPrActionRequiredPayload(payload)
@@ -3622,20 +3601,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
-            />
-          ) : null}
-          {todoOverride ? (
-            <TodoOverrideDialog
-              {...("empty" in todoOverride
-                ? { empty: true }
-                : { openCount: todoOverride.openCount, heldCount: todoOverride.heldCount })}
-              busy={busyAction === "complete"}
-              onCancel={() => setTodoOverride(null)}
-              onSubmit={(reason) => {
-                const body = { ...(todoOverride.body ?? {}), todoOverrideReason: reason };
-                setTodoOverride(null);
-                void handleAction("complete", body);
-              }}
             />
           ) : null}
           {prCheckUnavailable ? (

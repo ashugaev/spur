@@ -67,27 +67,6 @@ const sessionsResponse = {
   daemonAlive: true,
 };
 
-const todoOpenWorkPayload = {
-  code: "todo_open_work",
-  sessions: [{ sessionId: "api-c9e9", openItemIds: ["item-1"], heldItemIds: ["item-2"] }],
-  error: "Spur ToDo has open or held items.",
-};
-
-const todoLedgerEmptyPayload = {
-  code: "todo_ledger_empty",
-  sessionId: "api-c9e9",
-  error: "Spur ToDo ledger is empty.",
-};
-
-const openPrActionPayload = {
-  code: "open_pr_action_required",
-  sessionId: "api-c9e9",
-  pr: { number: 3938, title: "Foreign PR", url: "https://github.com/other/web/pull/3938" },
-};
-
-const openWork409 = () => new Response(JSON.stringify(todoOpenWorkPayload), { status: 409 });
-const ledgerEmpty409 = () => new Response(JSON.stringify(todoLedgerEmptyPayload), { status: 409 });
-const openPrAction409 = () => new Response(JSON.stringify(openPrActionPayload), { status: 409 });
 const completedOk = () => new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
 
 // One fetch mock for every scenario: each POST to /complete consumes the next
@@ -136,154 +115,24 @@ describe("Dashboard complete with a todo override", () => {
     });
   });
 
-  // AC1
-  it("opens the Unfinished ToDo dialog with the summed open/held counts, no toast", async () => {
-    mockFetchComplete([], [openWork409]);
-    render(<Dashboard />);
-
-    await clickDone();
-
-    await waitFor(() =>
-      expect(screen.getByRole("dialog", { name: "Unfinished ToDo" })).toBeInTheDocument(),
-    );
-    expect(
-      screen.getByText("1 open and 1 held items remain.", { exact: false }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Failed to complete Spur session")).not.toBeInTheDocument();
-  });
-
-  // AC2
-  it("re-POSTs complete exactly once with the original body plus a reason, and completes", async () => {
+  it("completes a session with open ToDo items in a single POST and no dialog", async () => {
     const completeBodies: unknown[] = [];
-    mockFetchComplete(completeBodies, [openWork409, completedOk]);
+    mockFetchComplete(completeBodies, [completedOk]);
     render(<Dashboard />);
 
     await clickDone();
-    await screen.findByRole("dialog", { name: "Unfinished ToDo" });
-    fireEvent.change(screen.getByLabelText("Override reason"), {
-      target: { value: "shipping now" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Complete anyway" }));
 
-    await waitFor(() => expect(completeBodies).toHaveLength(2));
-    expect(completeBodies).toEqual([
-      { scope: "desk" },
-      { scope: "desk", todoOverrideReason: "shipping now" },
-    ]);
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Unfinished ToDo" })).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(completeBodies).toHaveLength(1));
+    expect(completeBodies).toEqual([{ scope: "desk" }]);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  // AC3
-  it("opens the Empty ToDo dialog and the same retry works", async () => {
-    const completeBodies: unknown[] = [];
-    mockFetchComplete(completeBodies, [ledgerEmpty409, completedOk]);
-    render(<Dashboard />);
-
-    await clickDone();
-    await waitFor(() =>
-      expect(screen.getByRole("dialog", { name: "Empty ToDo" })).toBeInTheDocument(),
-    );
-
-    fireEvent.change(screen.getByLabelText("Override reason"), {
-      target: { value: "empty by design" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Complete anyway" }));
-
-    await waitFor(() => expect(completeBodies).toHaveLength(2));
-    expect(completeBodies[1]).toEqual({ scope: "desk", todoOverrideReason: "empty by design" });
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Empty ToDo" })).not.toBeInTheDocument(),
-    );
-  });
-
-  // AC4
-  it("cancelling sends no further POST and leaves the row present and enabled", async () => {
-    const completeBodies: unknown[] = [];
-    mockFetchComplete(completeBodies, [openWork409]);
-    render(<Dashboard />);
-
-    await clickDone();
-    await screen.findByRole("dialog", { name: "Unfinished ToDo" });
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    expect(completeBodies).toHaveLength(1);
-    const done = await screen.findByRole("button", { name: "Mark api-c9e9 as done" });
-    await waitFor(() => expect(done).not.toBeDisabled());
-  });
-
-  // AC5
-  it("reopens the dialog on a second 409 after an override and accepts a new reason", async () => {
-    const completeBodies: unknown[] = [];
-    mockFetchComplete(completeBodies, [openWork409, openWork409, completedOk]);
-    render(<Dashboard />);
-
-    await clickDone();
-    await screen.findByRole("dialog", { name: "Unfinished ToDo" });
-    fireEvent.change(screen.getByLabelText("Override reason"), {
-      target: { value: "first reason" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Complete anyway" }));
-
-    await waitFor(() => expect(completeBodies).toHaveLength(2));
-    await waitFor(() =>
-      expect(screen.getByRole("dialog", { name: "Unfinished ToDo" })).toBeInTheDocument(),
-    );
-
-    fireEvent.change(screen.getByLabelText("Override reason"), {
-      target: { value: "second reason" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Complete anyway" }));
-
-    await waitFor(() => expect(completeBodies).toHaveLength(3));
-    expect(completeBodies[2]).toEqual({ scope: "desk", todoOverrideReason: "second reason" });
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Unfinished ToDo" })).not.toBeInTheDocument(),
-    );
-  });
-
-  // AC11, todo -> PR direction
-  it("clears the ToDo dialog when the override retry trips a PR dialog instead", async () => {
-    const completeBodies: unknown[] = [];
-    mockFetchComplete(completeBodies, [openWork409, openPrAction409]);
-    render(<Dashboard />);
-
-    await clickDone();
-    await screen.findByRole("dialog", { name: "Unfinished ToDo" });
-    fireEvent.change(screen.getByLabelText("Override reason"), {
-      target: { value: "shipping now" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Complete anyway" }));
-
-    await waitFor(() =>
-      expect(screen.getByRole("dialog", { name: "Open Pull Request" })).toBeInTheDocument(),
-    );
-    expect(screen.queryByRole("dialog", { name: "Unfinished ToDo" })).not.toBeInTheDocument();
-  });
-
-  // AC11, PR -> todo direction: a PR-dialog retry that then trips a todo 409
-  // must leave only the ToDo dialog mounted, not stack both.
-  it("clears the PR dialog when its retry trips a todo dialog instead", async () => {
-    const completeBodies: unknown[] = [];
-    mockFetchComplete(completeBodies, [openPrAction409, openWork409]);
-    render(<Dashboard />);
-
-    await clickDone();
-    await screen.findByRole("dialog", { name: "Open Pull Request" });
-    fireEvent.click(screen.getByRole("button", { name: "Close Pull Request" }));
-
-    await waitFor(() =>
-      expect(screen.getByRole("dialog", { name: "Unfinished ToDo" })).toBeInTheDocument(),
-    );
-    expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument();
-  });
-
-  // A 409 never leaves the optimistic desk-wide write in place. The finally
-  // block's invalidateQueries refetch would otherwise mask a missing
+  // A failed complete never leaves the optimistic desk-wide write in place. The
+  // finally block's invalidateQueries refetch would otherwise mask a missing
   // rollback, so the second /api/sessions call (the refetch) is gated open
   // only after the assertion, proving the restore itself — not a later
-  // refetch — put the row back.
+  // refetch — put the row back. The failure is a plain 500 (no ToDo coupling):
+  // the daemon-side ToDo gate no longer surfaces through this UI at all.
   it("restores the optimistic write before the refetch settles", async () => {
     const completeBodies: unknown[] = [];
     let releaseSecondSessionsFetch: (() => void) | undefined;
@@ -306,14 +155,14 @@ describe("Dashboard complete with a todo override", () => {
       if (url === "/api/sessions/api-c9e9/complete") {
         const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
         completeBodies.push(body);
-        return openWork409();
+        return new Response("Internal Server Error", { status: 500 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
     render(<Dashboard />);
 
     await clickDone();
-    await screen.findByRole("dialog", { name: "Unfinished ToDo" });
+    await waitFor(() => expect(completeBodies).toHaveLength(1));
 
     // A missing rollback would leave the row's status "completed", hiding
     // Done (canComplete gates on isTerminalSession) until the gated refetch
