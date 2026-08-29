@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { watch } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
+import { clearTimeout, setTimeout } from "node:timers";
 
 const root = resolve(process.argv[2] ?? "landing");
 const port = Number(process.env.SPUR_RESERVED_PORT_LANDING ?? process.argv[3] ?? 5700);
