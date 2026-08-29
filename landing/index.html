@@ -4,10 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
-    <title>Spur — reach your Claude, Codex and Cursor agents from any device</title>
+    <title>Spur — orchestrator for the CLI coding agents you already run</title>
     <meta
       name="description"
-      content="Open-source local daemon. Runs claude, codex, cursor and opencode as tmux sessions on your own machine, one git worktree each. Drive every one from your phone, tablet or any browser."
+      content="Open-source local daemon that orchestrates the claude, codex, cursor and opencode CLIs you already run. Same binaries, same auth. Adds a git worktree per agent, event triggers and one dashboard. Nothing to migrate."
     />
     <link rel="canonical" href="https://spur.dev/" />
     <meta name="theme-color" content="#0d0d0e" />
@@ -16,21 +16,24 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Spur" />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:title" content="Spur — agents on your box, control in your pocket" />
+    <meta property="og:title" content="Spur — not another agent, a layer over the ones you run" />
     <meta
       property="og:description"
-      content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions on your own machine. Dashboard, real terminal and Telegram reach them from any device."
+      content="Local daemon that orchestrates the claude, codex, cursor and opencode CLIs you already run. Same binaries, same auth, a git worktree per agent, one dashboard. Nothing to migrate."
     />
     <meta property="og:url" content="https://spur.dev/" />
     <meta property="og:image" content="https://spur.dev/og.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Spur — agents on your box, control in your pocket" />
+    <meta
+      property="og:image:alt"
+      content="Spur — not another agent, a layer over the ones you run"
+    />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Spur — agents on your box, control in your pocket" />
+    <meta name="twitter:title" content="Spur — not another agent, a layer over the ones you run" />
     <meta
       name="twitter:description"
-      content="Local daemon that runs claude, codex, cursor and opencode as tmux sessions on your own machine. Reach them from any device."
+      content="Local daemon that orchestrates the claude, codex, cursor and opencode CLIs you already run. Same binaries, same auth. Nothing to migrate."
     />
     <meta name="twitter:image" content="https://spur.dev/og.png" />
 
@@ -109,6 +112,14 @@
               },
               {
                 "@type": "Question",
+                "name": "Do I have to change how I use my agents?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Spur launches the same binary with your auth and your model config, in a real tmux pane. Anything the agent does in your terminal it does here. Stop the daemon and you are left with ordinary git worktrees."
+                }
+              },
+              {
+                "@type": "Question",
                 "name": "What do I need on the host?",
                 "acceptedAnswer": {
                   "@type": "Answer",
@@ -180,7 +191,7 @@
         --t2: #a1a1a1;
         --t3: #8b8b90;
         --t4: #555558;
-        --violet: #a371f7;
+        --brand: #ff5c33;
         --working: #58a6ff;
         --ready: #3fb950;
         --attention: #ffd700;
@@ -210,7 +221,7 @@
       }
 
       ::selection {
-        background: var(--violet);
+        background: var(--brand);
         color: #0d0d0e;
       }
       :focus-visible {
@@ -252,29 +263,6 @@
         padding-inline: var(--gut);
         position: relative;
       }
-      .shell::before,
-      .shell::after {
-        content: "";
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        width: 1px;
-        background: var(--b-sub);
-        pointer-events: none;
-      }
-      .shell::before {
-        left: calc(var(--gut) - 1px);
-      }
-      .shell::after {
-        right: calc(var(--gut) - 1px);
-      }
-      @media (max-width: 760px) {
-        .shell::before,
-        .shell::after {
-          display: none;
-        }
-      }
-
       h1,
       h2,
       h3 {
@@ -333,13 +321,13 @@
           border-color: var(--t1);
         }
         .btn.primary:hover {
-          background: var(--violet);
-          border-color: var(--violet);
+          background: var(--brand);
+          border-color: var(--brand);
           color: #0d0d0e;
         }
       }
       .btn:focus-visible {
-        outline-color: var(--violet);
+        outline-color: var(--brand);
       }
 
       /* ── nav ───────────────────────────────────────────────────────── */
@@ -413,7 +401,7 @@
           width: 100%;
         }
       }
-      @media (min-width: 860px) {
+      @media (min-width: 1000px) {
         .nav-links {
           display: flex;
         }
@@ -492,7 +480,7 @@
       }
       h1 em {
         font-style: normal;
-        color: var(--violet);
+        color: var(--brand);
       }
 
       .lede {
@@ -552,8 +540,8 @@
       .c-attention {
         background: var(--attention);
       }
-      .c-violet {
-        background: var(--violet);
+      .c-brand {
+        background: var(--brand);
       }
 
       .cmd {
@@ -562,7 +550,7 @@
         display: grid;
         gap: 18px;
         border: 1px solid var(--b-strong);
-        border-left: 3px solid var(--violet);
+        border-left: 3px solid var(--brand);
         background: var(--term);
         padding: 22px 24px;
       }
@@ -579,7 +567,7 @@
         letter-spacing: 0.16em;
         text-transform: uppercase;
         line-height: 1.9;
-        color: var(--violet);
+        color: var(--brand);
       }
       .cmd code {
         display: block;
@@ -651,7 +639,7 @@
         top: 0;
         font-size: var(--step--1);
         color: #0d0d0e;
-        background: var(--violet);
+        background: var(--brand);
         padding: 4px 7px;
         letter-spacing: 0.14em;
         font-weight: 700;
@@ -708,10 +696,10 @@
         background: var(--b-strong);
       }
       .tl li:last-child::before {
-        background: var(--violet);
+        background: var(--brand);
       }
       .tl .t {
-        color: var(--violet);
+        color: var(--brand);
         font-size: 12px;
         letter-spacing: 0.06em;
         flex: none;
@@ -751,7 +739,7 @@
       .pipe-col .step {
         font-size: 10.5px;
         letter-spacing: 0.22em;
-        color: var(--violet);
+        color: var(--brand);
         text-transform: uppercase;
         margin-bottom: 14px;
       }
@@ -778,7 +766,7 @@
         bottom: 0;
         height: 1px;
         width: 100%;
-        background: var(--violet);
+        background: var(--brand);
         transform: scaleX(0);
         transform-origin: left;
       }
@@ -794,6 +782,169 @@
       @keyframes handoff {
         to {
           transform: scaleX(1);
+        }
+      }
+
+      /* ── architecture diagram ──────────────────────────────────────── */
+      .arch {
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(18px, 3vw, 34px);
+      }
+      .arch svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        overflow: visible;
+      }
+      .arch text {
+        font-family: var(--mono);
+        font-size: 13px;
+        fill: var(--t2);
+      }
+      .a-dev rect,
+      .a-dev line {
+        fill: none;
+        stroke: var(--b-strong);
+        stroke-width: 1.5;
+      }
+      .a-dev text {
+        text-anchor: middle;
+        font-size: 12px;
+        fill: var(--t3);
+      }
+      .a-wire path {
+        fill: none;
+        stroke: var(--b);
+        stroke-width: 1.5;
+      }
+      .a-node rect {
+        fill: none;
+        stroke: var(--brand);
+        stroke-width: 1.5;
+      }
+      .a-node-t {
+        text-anchor: middle;
+        fill: var(--brand);
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+      }
+      .a-node-s {
+        text-anchor: middle;
+        fill: var(--t3);
+        font-size: 11px;
+      }
+      .a-pkt {
+        fill: var(--brand);
+      }
+      .a-pkt-in {
+        animation: pktin 2.6s linear infinite;
+      }
+      .a-pkt-out {
+        animation: pktout 2.6s linear infinite;
+        animation-delay: 1.3s;
+        fill: var(--working);
+      }
+      @keyframes pktin {
+        from {
+          transform: translateX(384px);
+          opacity: 0;
+        }
+        12% {
+          opacity: 1;
+        }
+        88% {
+          opacity: 1;
+        }
+        to {
+          transform: translateX(512px);
+          opacity: 0;
+        }
+      }
+      @keyframes pktout {
+        from {
+          transform: translateX(512px);
+          opacity: 0;
+        }
+        12% {
+          opacity: 1;
+        }
+        88% {
+          opacity: 1;
+        }
+        to {
+          transform: translateX(384px);
+          opacity: 0;
+        }
+      }
+      .a-box > rect,
+      .a-box line {
+        fill: none;
+        stroke: var(--b-strong);
+        stroke-width: 1.5;
+      }
+      .a-box-t {
+        fill: var(--t1);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.16em;
+      }
+      .a-box > rect.a-daemon {
+        fill: rgba(255, 92, 51, 0.12);
+        stroke: var(--brand);
+        stroke-width: 1.5;
+      }
+      .a-daemon-t {
+        fill: var(--brand);
+        font-size: 12px;
+      }
+      .a-ses rect:first-child {
+        fill: none;
+        stroke: var(--b);
+        stroke-width: 1.5;
+      }
+      .a-ses text {
+        fill: var(--t1);
+        font-size: 12px;
+      }
+      .a-ag {
+        fill: var(--t3) !important;
+        font-size: 11px !important;
+      }
+      .a-br {
+        fill: var(--t3) !important;
+        font-size: 11px !important;
+        text-anchor: end;
+      }
+      .d-working {
+        fill: var(--working);
+        animation: pulse2 1.6s infinite;
+      }
+      .d-attention {
+        fill: var(--attention);
+        animation: pulse2 1.2s infinite;
+      }
+      .d-ready {
+        fill: var(--ready);
+      }
+      .a-foot {
+        fill: var(--t3);
+        font-size: 11px;
+        letter-spacing: 0.08em;
+      }
+      .arch-note {
+        margin-top: 22px;
+        color: var(--t2);
+        font-size: var(--step-0);
+        max-width: 64ch;
+      }
+      @media (max-width: 720px) {
+        .arch {
+          overflow-x: auto;
+        }
+        .arch svg {
+          min-width: 660px;
         }
       }
 
@@ -891,7 +1042,7 @@
         color: var(--ready);
       }
       .term .v {
-        color: var(--violet);
+        color: var(--brand);
       }
       .term .b {
         color: var(--working);
@@ -941,16 +1092,13 @@
         width: 28px;
         height: 28px;
         margin-bottom: 20px;
-        color: var(--violet);
+        color: var(--brand);
       }
-      .cell:nth-child(4n + 2) .ic {
+      .cell:nth-child(3n + 2) .ic {
         color: var(--working);
       }
-      .cell:nth-child(4n + 3) .ic {
+      .cell:nth-child(3n + 3) .ic {
         color: var(--ready);
-      }
-      .cell:nth-child(4n + 4) .ic {
-        color: var(--attention);
       }
       .cell h3 {
         font-size: var(--step-1);
@@ -971,7 +1119,7 @@
         }
         .chip:hover {
           color: var(--t1);
-          border-color: var(--violet);
+          border-color: var(--brand);
         }
         .row:hover {
           background: rgba(255, 255, 255, 0.03);
@@ -992,7 +1140,7 @@
         line-height: 2;
       }
       .cli .p {
-        color: var(--violet);
+        color: var(--brand);
       }
       .cli .c {
         color: var(--t3);
@@ -1023,10 +1171,10 @@
         display: none;
       }
       .faq summary:hover {
-        color: var(--violet);
+        color: var(--brand);
       }
       .faq summary:focus-visible {
-        outline: 1px solid var(--violet);
+        outline: 1px solid var(--brand);
         outline-offset: -2px;
       }
       .faq summary .pm {
@@ -1036,7 +1184,7 @@
       }
       .faq details[open] summary .pm {
         transform: rotate(45deg);
-        color: var(--violet);
+        color: var(--brand);
       }
       .faq .ans {
         padding: 0 0 22px;
@@ -1129,6 +1277,7 @@
             <span>Spur</span>
           </a>
           <div class="nav-links">
+            <a href="#architecture">Access</a>
             <a href="#dashboard">Dashboard</a>
             <a href="#pipeline">Automation</a>
             <a href="#features">Features</a>
@@ -1147,18 +1296,18 @@
           </div>
 
           <h1>
-            <span class="line"><span>Agents on your box.</span></span>
+            <span class="line"><span>Not another agent.</span></span>
             <span class="line"
-              ><span>Control <em>in your pocket</em>.</span></span
+              ><span>A <em>layer</em> over the ones you run.</span></span
             >
           </h1>
 
           <div class="hero-grid">
             <div>
               <p class="lede">
-                Spur runs <b>claude</b>, <b>codex</b>, <b>cursor</b> and <b>opencode</b> as tmux
-                sessions on your own machine, one git worktree each. You reach every one of them
-                from wherever you are.
+                Spur launches <b>claude</b>, <b>codex</b>, <b>cursor</b> and <b>opencode</b> exactly
+                as they ship, then gives them what a terminal cannot: a git worktree each, event
+                triggers, and one dashboard you reach from any device. Nothing to migrate.
               </p>
 
               <div class="hero-cta">
@@ -1173,12 +1322,14 @@
             </div>
 
             <div>
-              <span class="mono-label">Reach it from</span>
+              <span class="mono-label">What it does not change</span>
               <ul class="reach">
-                <li><i class="c-working"></i>Dashboard, phone or desktop browser</li>
-                <li><i class="c-ready"></i>The tmux pane itself, in that browser</li>
-                <li><i class="c-attention"></i>Telegram, text or voice note</li>
-                <li><i class="c-violet"></i>CLI, over SSH</li>
+                <li><i class="c-brand"></i>The same binaries you already type</li>
+                <li><i class="c-working"></i>Your auth, your keys, your model config</li>
+                <li><i class="c-ready"></i>Sessions are plain tmux and git worktrees</li>
+                <li>
+                  <i class="c-attention"></i>One repo at a time. The rest of the box is untouched
+                </li>
               </ul>
             </div>
           </div>
@@ -1196,8 +1347,108 @@
           </div>
         </header>
 
-        <section id="dashboard" class="shell" aria-labelledby="dashboard-h">
+        <section id="architecture" class="shell" aria-labelledby="architecture-h">
           <div class="sec-head rv" data-n="01">
+            <span class="mono-label">How you reach them</span>
+            <h2 id="architecture-h">Your box holds the agents. Your tailnet is the door.</h2>
+            <p>
+              The agents never stop when you walk away. They live in tmux on a machine you own, and
+              every device you carry attaches to the same running session.
+            </p>
+          </div>
+
+          <div class="arch rv">
+            <svg viewBox="0 0 960 400" role="img" aria-labelledby="arch-title arch-desc">
+              <title id="arch-title">Spur access architecture</title>
+              <desc id="arch-desc">
+                A phone, a tablet and a laptop connect over Tailscale to a machine you own, which
+                runs the Spur daemon and long-lived tmux agent sessions.
+              </desc>
+
+              <!-- device column -->
+              <g class="a-dev">
+                <rect x="20" y="54" width="52" height="92" />
+                <line x1="32" y1="136" x2="60" y2="136" />
+                <text x="46" y="170">Phone</text>
+
+                <rect x="14" y="196" width="64" height="86" />
+                <line x1="28" y1="272" x2="64" y2="272" />
+                <text x="46" y="306">Tablet</text>
+
+                <rect x="10" y="326" width="72" height="44" />
+                <line x1="2" y1="372" x2="90" y2="372" />
+                <text x="46" y="394">Laptop</text>
+              </g>
+
+              <!-- device to bus -->
+              <g class="a-wire">
+                <path d="M78 100 H150 V228 H210" />
+                <path d="M84 239 H210" />
+                <path d="M88 348 H150 V250 H210" />
+              </g>
+
+              <!-- tailscale node -->
+              <g class="a-node">
+                <rect x="210" y="204" width="170" height="70" />
+                <text class="a-node-t" x="295" y="234">TAILSCALE</text>
+                <text class="a-node-s" x="295" y="256">private network</text>
+              </g>
+
+              <!-- tailscale to machine -->
+              <g class="a-wire">
+                <path id="a-trunk" d="M380 239 H520" />
+              </g>
+              <g class="a-flow">
+                <rect class="a-pkt a-pkt-in" x="0" y="235" width="8" height="8" />
+                <rect class="a-pkt a-pkt-out" x="0" y="235" width="8" height="8" />
+              </g>
+
+              <!-- machine -->
+              <g class="a-box">
+                <rect x="520" y="34" width="430" height="332" />
+                <text class="a-box-t" x="544" y="64">YOUR MACHINE</text>
+                <line x1="520" y1="82" x2="950" y2="82" />
+
+                <rect class="a-daemon" x="544" y="102" width="382" height="34" />
+                <text class="a-daemon-t" x="560" y="124">spur daemon</text>
+
+                <g class="a-ses">
+                  <rect x="544" y="156" width="382" height="42" />
+                  <rect class="d-working" x="562" y="173" width="8" height="8" />
+                  <text x="586" y="182">ses_a41f</text>
+                  <text class="a-ag" x="690" y="182">claude</text>
+                  <text class="a-br" x="910" y="182">feature/queue-flush</text>
+                </g>
+                <g class="a-ses">
+                  <rect x="544" y="208" width="382" height="42" />
+                  <rect class="d-attention" x="562" y="225" width="8" height="8" />
+                  <text x="586" y="234">ses_9c02</text>
+                  <text class="a-ag" x="690" y="234">codex</text>
+                  <text class="a-br" x="910" y="234">feature/todo-ledger</text>
+                </g>
+                <g class="a-ses">
+                  <rect x="544" y="260" width="382" height="42" />
+                  <rect class="d-ready" x="562" y="277" width="8" height="8" />
+                  <text x="586" y="286">ses_77bd</text>
+                  <text class="a-ag" x="690" y="286">cursor</text>
+                  <text class="a-br" x="910" y="286">feature/web-terminal</text>
+                </g>
+
+                <text class="a-foot" x="544" y="340">
+                  tmux &middot; one git worktree each &middot; always on
+                </text>
+              </g>
+            </svg>
+
+            <p class="arch-note">
+              Nothing binds to a public interface. The tailnet is the only way in, and the agents
+              keep running between visits.
+            </p>
+          </div>
+        </section>
+
+        <section id="dashboard" class="shell" aria-labelledby="dashboard-h">
+          <div class="sec-head rv" data-n="02">
             <span class="mono-label">Control surface</span>
             <h2 id="dashboard-h">One list. Every agent. Live.</h2>
             <p>
@@ -1240,7 +1491,7 @@
         </section>
 
         <section id="pipeline" class="shell" aria-labelledby="pipeline-h">
-          <div class="sec-head rv" data-n="02">
+          <div class="sec-head rv" data-n="03">
             <span class="mono-label">Sources &amp; triggers</span>
             <h2 id="pipeline-h">Something happens. An agent is already on it.</h2>
             <p>
@@ -1305,7 +1556,7 @@
         </section>
 
         <section id="features" class="shell" aria-labelledby="features-h">
-          <div class="sec-head rv" data-n="03">
+          <div class="sec-head rv" data-n="04">
             <span class="mono-label">What you get</span>
             <h2 id="features-h">The tenth agent costs the same as the first.</h2>
           </div>
@@ -1398,10 +1649,10 @@
               >
                 <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l3 3M15 15l3 3M18 6l-3 3M9 15l-3 3" />
               </svg>
-              <h3>Four agents, one API</h3>
+              <h3>Your CLIs, unchanged</h3>
               <p>
-                Same spawn, wake, send and dashboard across claude, codex, cursor and opencode.
-                Model set per session.
+                Spur launches the same binary you type, with your auth and your model config. One
+                spawn, wake and send across all four.
               </p>
             </article>
             <article class="cell">
@@ -1484,7 +1735,7 @@
         </section>
 
         <section id="cli" class="shell" aria-labelledby="cli-h">
-          <div class="sec-head rv" data-n="04">
+          <div class="sec-head rv" data-n="05">
             <span class="mono-label">CLI</span>
             <h2 id="cli-h">Spawn, wake, message and audit from the shell.</h2>
           </div>
@@ -1510,7 +1761,7 @@
         </section>
 
         <section id="faq" class="shell" aria-labelledby="faq-h">
-          <div class="sec-head rv" data-n="05">
+          <div class="sec-head rv" data-n="06">
             <span class="mono-label">FAQ</span>
             <h2 id="faq-h">Before you install.</h2>
           </div>
@@ -1520,6 +1771,14 @@
               <div class="ans">
                 claude, codex, cursor, opencode. Each gets its own tmux session and a default model
                 from config.
+              </div>
+            </details>
+            <details>
+              <summary>Do I have to change how I use my agents?<span class="pm">+</span></summary>
+              <div class="ans">
+                No. Spur launches the same binary with your auth and your model config, in a real
+                tmux pane. Anything the agent does in your terminal it does here. Stop the daemon
+                and you are left with ordinary git worktrees.
               </div>
             </details>
             <details>
