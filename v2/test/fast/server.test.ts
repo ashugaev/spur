@@ -2111,15 +2111,17 @@ describe("startServer", () => {
 
   describe("resolveLifecycleTodoActor", () => {
     it("classifies no header + cli origin as human/cli", () => {
-      expect(
-        resolveLifecycleTodoActor({ origin: "cli", callerHeader: undefined }),
-      ).toEqual({ kind: "human", origin: "cli" });
+      expect(resolveLifecycleTodoActor({ origin: "cli", callerHeader: undefined })).toEqual({
+        kind: "human",
+        origin: "cli",
+      });
     });
 
     it("classifies no header + ui origin as human/ui", () => {
-      expect(
-        resolveLifecycleTodoActor({ origin: "ui", callerHeader: undefined }),
-      ).toEqual({ kind: "human", origin: "ui" });
+      expect(resolveLifecycleTodoActor({ origin: "ui", callerHeader: undefined })).toEqual({
+        kind: "human",
+        origin: "ui",
+      });
     });
 
     it("gates when the caller-session header is present", () => {
@@ -2179,7 +2181,10 @@ describe("startServer", () => {
         calls.push(options);
         throw new TodoEmptyLedgerError(["demo-1"]);
       };
-      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       try {
         await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
           method: "POST",
@@ -2230,7 +2235,10 @@ describe("startServer", () => {
           sidecars: [],
         } satisfies SessionView;
       };
-      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       try {
         await fetch(`http://127.0.0.1:${port}/sessions/demo-1/self-destruct`, {
           method: "POST",
@@ -2279,7 +2287,10 @@ describe("startServer", () => {
           sidecars: [],
         } satisfies SessionView;
       };
-      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       try {
         await fetch(`http://127.0.0.1:${port}/sessions/demo-1/handoff`, {
           method: "POST",

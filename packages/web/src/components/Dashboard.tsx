@@ -2389,13 +2389,7 @@ export function Dashboard() {
         !event.shiftKey &&
         ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
       if (!exactFindShortcut || event.isComposing) return;
-      if (
-        spawnOpen ||
-        newProjectOpen ||
-        terminalSession ||
-        openPrAction ||
-        prCheckUnavailable
-      )
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction || prCheckUnavailable)
         return;
 
       const target = event.target;

@@ -10451,10 +10451,7 @@ export class SessionService {
     });
   }
 
-  async selfDestruct(
-    sessionId: string,
-    options?: { todoActor?: TodoActor },
-  ): Promise<SessionView> {
+  async selfDestruct(sessionId: string, options?: { todoActor?: TodoActor }): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) {
