@@ -4,10 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
-    <title>Spur — orchestrator for the CLI coding agents you already run</title>
+    <title>Spur — the missing layer between you and your CLI agents</title>
     <meta
       name="description"
-      content="Open-source local daemon that orchestrates the claude, codex, cursor and opencode CLIs you already run. Same binaries, same auth. Adds a git worktree per agent, event triggers and one dashboard. Nothing to migrate."
+      content="A tool for software engineers who already run claude, codex, cursor or opencode. Spur launches the same binaries, then adds a git worktree per agent, event triggers and one dashboard you reach from any device. Nothing to migrate."
     />
     <link rel="canonical" href="https://spur.dev/" />
     <meta name="theme-color" content="#0d0d0e" />
@@ -16,10 +16,10 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Spur" />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:title" content="Spur — not another agent, a layer over the ones you run" />
+    <meta property="og:title" content="Spur — the missing layer between you and your CLI agents" />
     <meta
       property="og:description"
-      content="Local daemon that orchestrates the claude, codex, cursor and opencode CLIs you already run. Same binaries, same auth, a git worktree per agent, one dashboard. Nothing to migrate."
+      content="A tool for software engineers who already run claude, codex, cursor or opencode. Same binaries, same auth, a git worktree per agent, one dashboard. Nothing to migrate."
     />
     <meta property="og:url" content="https://spur.dev/" />
     <meta property="og:image" content="https://spur.dev/og.png" />
@@ -27,13 +27,13 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="Spur — not another agent, a layer over the ones you run"
+      content="Spur — the missing layer between you and your CLI agents"
     />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Spur — not another agent, a layer over the ones you run" />
+    <meta name="twitter:title" content="Spur — the missing layer between you and your CLI agents" />
     <meta
       name="twitter:description"
-      content="Local daemon that orchestrates the claude, codex, cursor and opencode CLIs you already run. Same binaries, same auth. Nothing to migrate."
+      content="A tool for software engineers who already run claude, codex, cursor or opencode. Same binaries, same auth. Nothing to migrate."
     />
     <meta name="twitter:image" content="https://spur.dev/og.png" />
 
@@ -115,7 +115,7 @@
                 "name": "Do I have to change how I use my agents?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "No. Spur launches the same binary with your auth and your model config, in a real tmux pane. Anything the agent does in your terminal it does here. Stop the daemon and you are left with ordinary git worktrees."
+                  "text": "No. Same binary, your auth, your model config, in a real tmux pane. Stop the daemon and you are left with ordinary git worktrees."
                 }
               },
               {
@@ -546,18 +546,17 @@
 
       .cmd {
         margin-top: clamp(40px, 6vh, 68px);
-        position: relative;
         display: grid;
-        gap: 18px;
+        gap: 22px;
         border: 1px solid var(--b-strong);
-        border-left: 3px solid var(--brand);
+        border-left: 4px solid var(--brand);
         background: var(--term);
-        padding: 22px 24px;
+        padding: clamp(24px, 3vw, 34px);
       }
-      @media (min-width: 860px) {
+      @media (min-width: 900px) {
         .cmd {
-          grid-template-columns: 190px minmax(0, 1fr);
-          gap: 32px;
+          grid-template-columns: 220px minmax(0, 1fr);
+          gap: 40px;
           align-items: start;
         }
       }
@@ -568,38 +567,49 @@
         text-transform: uppercase;
         line-height: 1.9;
         color: var(--brand);
+        margin-bottom: 18px;
       }
       .cmd code {
         display: block;
         background: none;
-        padding: 0 66px 0 0;
-        color: var(--t1);
-        font-size: 12.5px;
-        line-height: 1.8;
+        padding: 0;
+        color: var(--t0);
+        font-size: clamp(14px, 1.2vw, 15.5px);
+        line-height: 1.85;
         overflow-wrap: break-word;
       }
+      .cmd code .u {
+        color: var(--brand);
+        overflow-wrap: anywhere;
+      }
       .copy {
-        position: absolute;
-        top: 12px;
-        right: 12px;
-        border: 1px solid var(--b);
-        background: var(--term);
-        color: var(--t2);
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        border: 1px solid var(--brand);
+        background: var(--brand);
+        color: #0d0d0e;
         font: inherit;
-        font-size: 10.5px;
-        letter-spacing: 0.14em;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
-        padding: 6px 10px;
+        padding: 12px 20px;
         cursor: pointer;
-        transition: 0.2s;
+        transition: 0.18s;
+      }
+      .copy svg {
+        width: 14px;
+        height: 14px;
+        flex: none;
       }
       .copy:hover {
-        color: var(--t1);
-        border-color: var(--b-strong);
+        background: #ff7a55;
+        border-color: #ff7a55;
       }
       .copy.done {
-        color: var(--ready);
-        border-color: rgba(63, 185, 80, 0.4);
+        background: var(--ready);
+        border-color: var(--ready);
       }
 
       /* ── section frame ─────────────────────────────────────────────── */
@@ -1429,18 +1439,18 @@
           </div>
 
           <h1>
-            <span class="line"><span>Not another agent.</span></span>
             <span class="line"
-              ><span>A <em>layer</em> over the ones you run.</span></span
+              ><span>The <em>missing layer</em></span></span
             >
+            <span class="line"><span>between you and your CLI agents.</span></span>
           </h1>
 
           <div class="hero-grid">
             <div>
               <p class="lede">
-                Spur launches <b>claude</b>, <b>codex</b>, <b>cursor</b> and <b>opencode</b> exactly
-                as they ship, then gives them what a terminal cannot: a git worktree each, event
-                triggers, and one dashboard you reach from any device. Nothing to migrate.
+                For engineers already running <b>claude</b>, <b>codex</b>, <b>cursor</b> or
+                <b>opencode</b>. Same binaries, plus a worktree each, event triggers and one
+                dashboard. Nothing to migrate.
               </p>
 
               <div class="hero-cta">
@@ -1457,26 +1467,40 @@
             <div>
               <span class="mono-label">What it does not change</span>
               <ul class="reach">
-                <li><i class="c-brand"></i>The same binaries you already type</li>
+                <li><i class="c-brand"></i>Same binaries you already type</li>
                 <li><i class="c-working"></i>Your auth, your keys, your model config</li>
-                <li><i class="c-ready"></i>Sessions are plain tmux and git worktrees</li>
-                <li>
-                  <i class="c-attention"></i>One repo at a time. The rest of the box is untouched
-                </li>
+                <li><i class="c-ready"></i>Plain tmux and git worktrees</li>
+                <li><i class="c-attention"></i>One repo at a time. Rest of the box untouched</li>
               </ul>
             </div>
           </div>
 
           <div class="cmd">
-            <span class="cmd-tag">Install prompt<br />paste into your agent</span>
+            <div>
+              <span class="cmd-tag">Install prompt<br />paste into your agent</span>
+              <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <rect x="9" y="9" width="12" height="12" />
+                  <path d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
+                </svg>
+                <span class="copy-t">Copy prompt</span>
+              </button>
+            </div>
             <code id="installcmd"
-              >Read https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md
+              >Read
+              <span class="u"
+                >https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md</span
+              >
               and install and run Spur on this machine end to end, following the guide. Do the steps
               yourself; don't ask me to run what you can run.</code
             >
-            <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
-              copy
-            </button>
           </div>
         </header>
 
@@ -1485,8 +1509,8 @@
             <span class="mono-label">How you reach them</span>
             <h2 id="architecture-h">Your box holds the agents. Your tailnet is the door.</h2>
             <p>
-              The agents never stop when you walk away. They live in tmux on a machine you own, and
-              every device you carry attaches to the same running session.
+              Agents live in tmux on a machine you own. Every device attaches to the same running
+              session.
             </p>
           </div>
 
@@ -1574,8 +1598,7 @@
             </svg>
 
             <p class="arch-note">
-              Nothing binds to a public interface. The tailnet is the only way in, and the agents
-              keep running between visits.
+              Nothing binds to a public interface. The tailnet is the only way in.
             </p>
           </div>
         </section>
@@ -1584,10 +1607,7 @@
           <div class="sec-head rv" data-n="02">
             <span class="mono-label">Control surface</span>
             <h2 id="dashboard-h">One list. Every agent. Live.</h2>
-            <p>
-              State, branch and PR per session. Tap one, get the tmux pane itself — scrollback,
-              keys, clickable links.
-            </p>
+            <p>State, branch and PR per session. Tap one, get the tmux pane itself.</p>
           </div>
 
           <div class="mock rv">
@@ -1690,10 +1710,7 @@
           <div class="wf rv">
             <div class="wf-head">
               <span class="mono-label">One ticket, start to merge</span>
-              <p>
-                Each hop is a real event Spur already listens for. The agent keeps the same session,
-                the same worktree and the same branch the whole way down.
-              </p>
+              <p>Every hop is a real event. Same session, same worktree, same branch throughout.</p>
             </div>
 
             <svg viewBox="0 0 960 300" role="img" aria-labelledby="wf-title wf-desc">
@@ -1818,7 +1835,7 @@
               <h3>Nothing dies with your shell</h3>
               <p>
                 The daemon owns the tmux sessions. Close the lid, drop SSH, reboot — they come back
-                with their transcript.
+                with the transcript.
               </p>
             </article>
             <article class="cell">
@@ -1836,8 +1853,8 @@
               </svg>
               <h3>Telegram &amp; voice</h3>
               <p>
-                Bind a chat or forum topic with <code>/watch</code>, then talk to the agent from
-                your phone. Voice notes transcribe once you set a provider key.
+                Bind a chat or topic with <code>/watch</code>, talk to the agent from your phone.
+                Voice notes transcribe with a provider key.
               </p>
             </article>
             <article class="cell">
@@ -1854,8 +1871,8 @@
               </svg>
               <h3>Your CLIs, unchanged</h3>
               <p>
-                Spur launches the same binary you type, with your auth and your model config. One
-                spawn, wake and send across all four.
+                Same binary you type, your auth, your model config. One spawn, wake and send across
+                all four.
               </p>
             </article>
             <article class="cell">
@@ -1931,7 +1948,7 @@
               <h3>Never leaves your machine</h3>
               <p>
                 Daemon binds to loopback. <code>spur init</code> opens it to your tailnet, nothing
-                else. Your hardware, your agent subscriptions, no seats.
+                else. Your hardware, your subscriptions.
               </p>
             </article>
           </div>
@@ -1979,8 +1996,7 @@
             <details>
               <summary>Do I have to change how I use my agents?<span class="pm">+</span></summary>
               <div class="ans">
-                No. Spur launches the same binary with your auth and your model config, in a real
-                tmux pane. Anything the agent does in your terminal it does here. Stop the daemon
+                No. Same binary, your auth, your model config, in a real tmux pane. Stop the daemon
                 and you are left with ordinary git worktrees.
               </div>
             </details>
@@ -2028,8 +2044,8 @@
           <div class="endcta rv">
             <h2>Stop babysitting one terminal.</h2>
             <p>
-              Hand the install prompt to a coding agent and let it do the whole thing. Tested on
-              Ubuntu; elsewhere expect to sort out host differences.
+              Hand the prompt to a coding agent. Tested on Ubuntu; elsewhere expect host
+              differences.
             </p>
             <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap">
               <a class="btn primary" href="https://github.com/ashugaev/spur#install" rel="noopener"
@@ -2109,17 +2125,22 @@
                   })
                   .join("\n")
               : target.textContent.replace(/\s+/g, " ").trim();
+            var label = btn.querySelector(".copy-t") || btn;
+            var idle = label.textContent;
+            function say(word) {
+              label.textContent = word;
+            }
             function ok() {
-              btn.textContent = "copied";
+              say("Copied");
               btn.classList.add("done");
               btn.setAttribute("aria-live", "polite");
               setTimeout(function () {
-                btn.textContent = "copy";
+                say(idle);
                 btn.classList.remove("done");
               }, 1600);
             }
             function fail() {
-              btn.textContent = "select it";
+              say("Select it");
             }
             if (navigator.clipboard && isSecureContext) {
               navigator.clipboard.writeText(text).then(ok, fail);
