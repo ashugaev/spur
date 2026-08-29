@@ -195,6 +195,7 @@
         --working: #58a6ff;
         --ready: #3fb950;
         --attention: #ffd700;
+        --error: #ff4d4d;
         --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
         --gut: clamp(16px, 4vw, 40px);
         --max: 1180px;
@@ -911,10 +912,31 @@
           transform: rotate(360deg);
         }
       }
+      .fo-frame {
+        fill: var(--bg);
+        stroke: var(--b-strong);
+        stroke-width: 1.5;
+      }
       .fo-lbl {
         fill: var(--t3);
         font-family: var(--mono);
         font-size: 11px;
+      }
+      .fo-lbl-hot {
+        fill: var(--t1);
+      }
+      .fo-sig {
+        fill: var(--t4);
+        font-family: var(--mono);
+        font-size: 9.5px;
+        letter-spacing: 0.1em;
+      }
+      .fo-note {
+        fill: var(--t4);
+        font-family: var(--mono);
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-anchor: middle;
       }
       .fo-dot {
         animation: fodot 3.2s linear infinite;
@@ -935,30 +957,42 @@
         offset-rotate: 0deg;
       }
       .fo-in {
-        offset-path: path("M26 160 H110");
-        animation: fomove 3.2s linear infinite;
+        offset-path: path("M26 160 H116");
       }
       .fo-o1 {
-        offset-path: path("M180 160 C 245 160 255 28 318 28");
+        offset-path: path("M174 160 C 245 160 255 28 318 28");
       }
       .fo-o2 {
-        offset-path: path("M180 160 C 245 160 255 72 318 72");
+        offset-path: path("M174 160 C 245 160 255 72 318 72");
       }
       .fo-o3 {
-        offset-path: path("M180 160 C 245 160 255 116 318 116");
+        offset-path: path("M174 160 C 245 160 255 116 318 116");
       }
       .fo-o4 {
-        offset-path: path("M180 160 H318");
+        offset-path: path("M174 160 H318");
       }
       .fo-o5 {
-        offset-path: path("M180 160 C 245 160 255 204 318 204");
+        offset-path: path("M174 160 C 245 160 255 204 318 204");
       }
       .fo-o6 {
-        offset-path: path("M180 160 C 245 160 255 248 318 248");
+        offset-path: path("M174 160 C 245 160 255 248 318 248");
       }
       .fo-o7 {
-        offset-path: path("M180 160 C 245 160 255 292 318 292");
+        offset-path: path("M174 160 C 245 160 255 292 318 292");
       }
+      .fo-r4 {
+        offset-path: path("M174 160 H318");
+        fill: var(--attention);
+      }
+      .fo-r6 {
+        offset-path: path("M174 160 C 245 160 255 248 318 248");
+        fill: var(--error);
+      }
+      .fo-back {
+        offset-path: path("M26 160 H116");
+        fill: var(--attention);
+      }
+      .fo-in,
       .fo-o1,
       .fo-o2,
       .fo-o3,
@@ -966,44 +1000,74 @@
       .fo-o5,
       .fo-o6,
       .fo-o7 {
-        animation: fomove 3.2s linear infinite;
+        animation: fomove 6s linear infinite;
+      }
+      .fo-r4,
+      .fo-r6,
+      .fo-back {
+        animation: fomoveback 6s linear infinite;
       }
       .fo-o1 {
-        animation-delay: 0.5s;
+        animation-delay: 0.8s;
       }
       .fo-o2 {
-        animation-delay: 0.9s;
+        animation-delay: 0.95s;
       }
       .fo-o3 {
-        animation-delay: 1.3s;
+        animation-delay: 1.1s;
       }
       .fo-o4 {
-        animation-delay: 1.7s;
+        animation-delay: 1.25s;
       }
       .fo-o5 {
-        animation-delay: 2.1s;
+        animation-delay: 1.4s;
       }
       .fo-o6 {
-        animation-delay: 2.5s;
+        animation-delay: 1.55s;
       }
       .fo-o7 {
-        animation-delay: 2.9s;
+        animation-delay: 1.7s;
+      }
+      .fo-r4 {
+        animation-delay: 3s;
+      }
+      .fo-r6 {
+        animation-delay: 3.3s;
+      }
+      .fo-back {
+        animation-delay: 4.4s;
       }
       @keyframes fomove {
         0% {
           offset-distance: 0%;
           opacity: 0;
         }
-        8% {
+        3% {
           opacity: 1;
         }
-        34% {
-          offset-distance: 100%;
+        12% {
           opacity: 1;
         }
-        38%,
+        15%,
         100% {
           offset-distance: 100%;
+          opacity: 0;
+        }
+      }
+      @keyframes fomoveback {
+        0% {
+          offset-distance: 100%;
+          opacity: 0;
+        }
+        3% {
+          opacity: 1;
+        }
+        12% {
+          opacity: 1;
+        }
+        15%,
+        100% {
+          offset-distance: 0%;
           opacity: 0;
         }
       }
@@ -1150,6 +1214,10 @@
       }
       .d-ready {
         fill: var(--ready);
+      }
+      .d-error {
+        fill: var(--error);
+        animation: pulse2 1.4s infinite;
       }
       .a-foot {
         fill: var(--t3);
@@ -1677,20 +1745,21 @@
           </div>
 
           <div class="fanout" aria-hidden="true">
-            <svg viewBox="0 0 420 320">
-              <path class="fo-wire" d="M26 160 H110" />
-              <path class="fo-wire" d="M180 160 C 245 160 255 28 318 28" />
-              <path class="fo-wire" d="M180 160 C 245 160 255 72 318 72" />
-              <path class="fo-wire" d="M180 160 C 245 160 255 116 318 116" />
-              <path class="fo-wire" d="M180 160 H318" />
-              <path class="fo-wire" d="M180 160 C 245 160 255 204 318 204" />
-              <path class="fo-wire" d="M180 160 C 245 160 255 248 318 248" />
-              <path class="fo-wire" d="M180 160 C 245 160 255 292 318 292" />
+            <svg viewBox="0 0 420 338">
+              <path class="fo-wire" d="M26 160 H116" />
+              <path class="fo-wire" d="M174 160 C 245 160 255 28 318 28" />
+              <path class="fo-wire" d="M174 160 C 245 160 255 72 318 72" />
+              <path class="fo-wire" d="M174 160 C 245 160 255 116 318 116" />
+              <path class="fo-wire" d="M174 160 H318" />
+              <path class="fo-wire" d="M174 160 C 245 160 255 204 318 204" />
+              <path class="fo-wire" d="M174 160 C 245 160 255 248 318 248" />
+              <path class="fo-wire" d="M174 160 C 245 160 255 292 318 292" />
 
               <rect class="fo-you" x="14" y="154" width="12" height="12" />
               <text class="fo-cap" x="20" y="186">you</text>
 
-              <g transform="translate(121 136) scale(2)">
+              <rect class="fo-frame" x="116" y="131" width="58" height="58" />
+              <g transform="translate(127 142) scale(1.5)">
                 <g class="fo-logo">
                   <path
                     d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4"
@@ -1707,6 +1776,9 @@
                 <rect class="fo-pkt fo-o5" x="0" y="0" width="7" height="7" />
                 <rect class="fo-pkt fo-o6" x="0" y="0" width="7" height="7" />
                 <rect class="fo-pkt fo-o7" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-r4" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-r6" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-back" x="0" y="0" width="7" height="7" />
               </g>
 
               <g class="fo-node" style="--d: 0s">
@@ -1723,20 +1795,24 @@
               </g>
               <g class="fo-node" style="--d: 1.2s">
                 <rect class="fo-dot d-attention" x="318" y="156" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="164">opencode</text>
+                <text class="fo-lbl fo-lbl-hot" x="340" y="164">opencode</text>
+                <text class="fo-sig" x="340" y="178">needs input</text>
               </g>
               <g class="fo-node" style="--d: 1.6s">
                 <rect class="fo-dot d-working" x="318" y="200" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="208">claude</text>
               </g>
               <g class="fo-node" style="--d: 2s">
-                <rect class="fo-dot d-ready" x="318" y="244" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="252">cursor</text>
+                <rect class="fo-dot d-error" x="318" y="244" width="8" height="8" />
+                <text class="fo-lbl fo-lbl-hot" x="340" y="252">cursor</text>
+                <text class="fo-sig" x="340" y="266">error</text>
               </g>
               <g class="fo-node" style="--d: 2.4s">
                 <rect class="fo-dot d-working" x="318" y="288" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="296">codex</text>
               </g>
+
+              <text class="fo-note" x="210" y="330">only what needs you gets through</text>
             </svg>
           </div>
         </header>
