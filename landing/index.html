@@ -900,6 +900,24 @@
         stroke: var(--b);
         stroke-width: 1.5;
       }
+      .fo-you-frame,
+      .fo-frame {
+        transition: stroke 0.25s;
+        transform-box: fill-box;
+        transform-origin: center;
+      }
+      .fo-you-frame.hit,
+      .fo-frame.hit {
+        animation: nodehit 0.42s ease-out;
+      }
+      @keyframes nodehit {
+        40% {
+          transform: scale(1.09);
+        }
+        to {
+          transform: scale(1);
+        }
+      }
       .fo-cap {
         fill: var(--t4);
         font-family: var(--mono);
@@ -2587,7 +2605,20 @@
           var sigs = fanout.querySelectorAll(".fo-sig");
           var pkts = fanout.querySelectorAll(".fo-pkt");
           var link = pkts[0];
+          var youFrame = fanout.querySelector(".fo-you-frame");
+          var hubFrame = fanout.querySelector(".fo-frame");
           var STATES = ["d-idle", "d-working", "d-attention", "d-error", "d-ready"];
+
+          function hit(node, colour) {
+            node.style.stroke = colour;
+            node.classList.remove("hit");
+            void node.getBBox();
+            node.classList.add("hit");
+            setTimeout(function () {
+              node.style.stroke = "";
+              node.classList.remove("hit");
+            }, 420);
+          }
 
           function setState(i, state, sig) {
             var dot = dots[i];
@@ -2645,7 +2676,9 @@
             if (stale()) return;
 
             // you dispatch work, every agent spawns and starts working
+            hit(youFrame, "var(--t1)");
             await flight(link, false, "var(--t1)", 520);
+            hit(hubFrame, "var(--brand)");
             for (var s = 0; s < dots.length; s++) {
               (function (idx) {
                 flight(pkts[idx + 1], false, "var(--brand)", 620).then(function () {
@@ -2669,10 +2702,14 @@
               await wait(600);
               if (stale()) return;
               await flight(pkts[turn.at + 1], true, turn.colour, 620);
+              hit(hubFrame, turn.colour);
               await flight(link, true, turn.colour, 520);
+              hit(youFrame, turn.colour);
               if (stale()) return;
               await wait(1000);
+              hit(youFrame, "var(--t1)");
               await flight(link, false, "var(--t1)", 520);
+              hit(hubFrame, "var(--t1)");
               await flight(pkts[turn.at + 1], false, "var(--t1)", 620);
               if (stale()) return;
               setState(turn.at, "working");
@@ -2683,11 +2720,14 @@
             // work lands, each agent reports done
             for (var d = 0; d < dots.length; d++) {
               setState(d, "ready");
-              flight(pkts[d + 1], true, "var(--ready)", 620);
+              flight(pkts[d + 1], true, "var(--ready)", 620).then(function () {
+                if (!stale()) hit(hubFrame, "var(--ready)");
+              });
               await wait(240);
               if (stale()) return;
             }
             await flight(link, true, "var(--ready)", 520);
+            hit(youFrame, "var(--ready)");
             await wait(2400);
           }
 
