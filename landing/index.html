@@ -948,6 +948,132 @@
         }
       }
 
+      /* ── workflow loop ─────────────────────────────────────────────── */
+      .wf {
+        margin-top: clamp(40px, 6vh, 72px);
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(20px, 3vw, 34px);
+      }
+      .wf-head {
+        margin-bottom: 26px;
+        max-width: 68ch;
+      }
+      .wf-head p {
+        margin-top: 12px;
+        color: var(--t2);
+        font-size: var(--step-0);
+        line-height: 1.7;
+      }
+      .wf svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .wf text {
+        font-family: var(--mono);
+      }
+      .wf-track {
+        stroke: var(--b);
+        stroke-width: 1.5;
+      }
+      .wf-token {
+        fill: var(--brand);
+        animation: wftok 9s steps(1) infinite;
+      }
+      @keyframes wftok {
+        0%,
+        16.6% {
+          transform: translateX(70px);
+        }
+        16.7%,
+        33.3% {
+          transform: translateX(234px);
+        }
+        33.4%,
+        50% {
+          transform: translateX(398px);
+        }
+        50.1%,
+        66.6% {
+          transform: translateX(562px);
+        }
+        66.7%,
+        83.3% {
+          transform: translateX(726px);
+        }
+        83.4%,
+        100% {
+          transform: translateX(890px);
+        }
+      }
+      .wf-dot {
+        fill: var(--t4);
+        animation: wfdot 9s linear infinite;
+        animation-delay: calc(var(--i) * 1.5s);
+      }
+      @keyframes wfdot {
+        0%,
+        16% {
+          fill: var(--brand);
+        }
+        17%,
+        100% {
+          fill: var(--t4);
+        }
+      }
+      .wf-card {
+        fill: none;
+        stroke: var(--b);
+        stroke-width: 1.5;
+        animation: wfcard 9s linear infinite;
+        animation-delay: calc(var(--i) * 1.5s);
+      }
+      @keyframes wfcard {
+        0%,
+        16% {
+          stroke: var(--brand);
+        }
+        17%,
+        100% {
+          stroke: var(--b);
+        }
+      }
+      .wf-t {
+        fill: var(--t1);
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .wf-s {
+        fill: var(--t3);
+        font-size: 11px;
+      }
+      .wf-loop {
+        fill: none;
+        stroke: var(--b);
+        stroke-width: 1.5;
+        stroke-dasharray: 4 5;
+      }
+      .wf-arrow {
+        fill: none;
+        stroke: var(--b-strong);
+        stroke-width: 1.5;
+      }
+      .wf-loopt {
+        fill: var(--t3);
+        font-size: 11px;
+        text-anchor: middle;
+        letter-spacing: 0.1em;
+      }
+      @media (max-width: 860px) {
+        .wf {
+          overflow-x: auto;
+        }
+        .wf svg {
+          min-width: 800px;
+        }
+      }
+
       /* ── dashboard mock ────────────────────────────────────────────── */
       .mock {
         border: 1px solid var(--b-strong);
@@ -1254,6 +1380,13 @@
         .flow {
           transform: scaleX(1);
         }
+        .a-pkt,
+        .wf-token {
+          display: none;
+        }
+        .wf-dot {
+          fill: var(--brand);
+        }
       }
     </style>
   </head>
@@ -1552,6 +1685,76 @@
               </div>
               <span class="flow"></span>
             </article>
+          </div>
+
+          <div class="wf rv">
+            <div class="wf-head">
+              <span class="mono-label">One ticket, start to merge</span>
+              <p>
+                Each hop is a real event Spur already listens for. The agent keeps the same session,
+                the same worktree and the same branch the whole way down.
+              </p>
+            </div>
+
+            <svg viewBox="0 0 960 300" role="img" aria-labelledby="wf-title wf-desc">
+              <title id="wf-title">Spur agent workflow</title>
+              <desc id="wf-desc">
+                An agent picks up a backlog item, opens a pull request, fixes red CI, answers review
+                comments, checks the UI in a real browser, and lands on main.
+              </desc>
+
+              <line class="wf-track" x1="70" y1="56" x2="890" y2="56" />
+              <rect class="wf-token" x="-4" y="52" width="8" height="8" />
+
+              <g class="wf-n" style="--i: 0">
+                <rect class="wf-dot" x="66" y="52" width="8" height="8" />
+                <rect class="wf-card" x="0" y="90" width="140" height="104" />
+                <text class="wf-t" x="16" y="118">Picks up work</text>
+                <text class="wf-s" x="16" y="140">Jira backlog</text>
+                <text class="wf-s" x="16" y="158">or a cron tick</text>
+              </g>
+              <g class="wf-n" style="--i: 1">
+                <rect class="wf-dot" x="230" y="52" width="8" height="8" />
+                <rect class="wf-card" x="164" y="90" width="140" height="104" />
+                <text class="wf-t" x="180" y="118">Opens a PR</text>
+                <text class="wf-s" x="180" y="140">own worktree,</text>
+                <text class="wf-s" x="180" y="158">own branch</text>
+              </g>
+              <g class="wf-n" style="--i: 2">
+                <rect class="wf-dot" x="394" y="52" width="8" height="8" />
+                <rect class="wf-card" x="328" y="90" width="140" height="104" />
+                <text class="wf-t" x="344" y="118">CI goes red</text>
+                <text class="wf-s" x="344" y="140">github-ci event</text>
+                <text class="wf-s" x="344" y="158">fix, push</text>
+              </g>
+              <g class="wf-n" style="--i: 3">
+                <rect class="wf-dot" x="558" y="52" width="8" height="8" />
+                <rect class="wf-card" x="492" y="90" width="140" height="104" />
+                <text class="wf-t" x="508" y="118">Review lands</text>
+                <text class="wf-s" x="508" y="140">changes_requested</text>
+                <text class="wf-s" x="508" y="158">answer, push</text>
+              </g>
+              <g class="wf-n" style="--i: 4">
+                <rect class="wf-dot" x="722" y="52" width="8" height="8" />
+                <rect class="wf-card" x="656" y="90" width="140" height="104" />
+                <text class="wf-t" x="672" y="118">Checks the UI</text>
+                <text class="wf-s" x="672" y="140">playwright MCP</text>
+                <text class="wf-s" x="672" y="158">in a real browser</text>
+              </g>
+              <g class="wf-n" style="--i: 5">
+                <rect class="wf-dot" x="886" y="52" width="8" height="8" />
+                <rect class="wf-card" x="820" y="90" width="140" height="104" />
+                <text class="wf-t" x="836" y="118">Merged</text>
+                <text class="wf-s" x="836" y="140">semantic-release</text>
+                <text class="wf-s" x="836" y="158">ships from main</text>
+              </g>
+
+              <path class="wf-loop" d="M890 238 H70" />
+              <path class="wf-loop" d="M890 194 V238" />
+              <path class="wf-loop" d="M70 238 V210" />
+              <path class="wf-arrow" d="M64 216 L70 206 L76 216" />
+              <text class="wf-loopt" x="480" y="262">next item, same daemon</text>
+            </svg>
           </div>
         </section>
 
