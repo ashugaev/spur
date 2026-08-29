@@ -483,6 +483,34 @@
         font-style: normal;
         color: var(--brand);
       }
+      .blip {
+        animation:
+          blipblink 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite,
+          blipcolor 5.6s steps(1) infinite;
+      }
+      @keyframes blipblink {
+        0%,
+        100% {
+          opacity: 0.12;
+        }
+        45% {
+          opacity: 1;
+        }
+      }
+      @keyframes blipcolor {
+        0% {
+          color: var(--working);
+        }
+        25% {
+          color: var(--ready);
+        }
+        50% {
+          color: var(--attention);
+        }
+        75% {
+          color: var(--brand);
+        }
+      }
 
       .lede {
         margin-top: clamp(28px, 4vh, 44px);
@@ -1629,7 +1657,9 @@
             <span class="line"
               ><span>The <em>missing layer</em></span></span
             >
-            <span class="line"><span>between you and your CLI agents.</span></span>
+            <span class="line"
+              ><span>between you and your CLI agents<span class="blip">.</span></span></span
+            >
           </h1>
 
           <p class="lede">
