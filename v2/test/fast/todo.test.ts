@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readSession, writeSession } from "../../src/metadata.js";
 import {
   ensureTodoLedger,
+  HUMAN_BYPASS_REASON,
   mutateTodo,
   recordTodoFinishOverride,
   replayTodo,
@@ -202,6 +203,27 @@ describe("Spur ToDo ledger", () => {
     );
     expect(after.counts.total).toBe(0);
     expect(after.finishOverrides).toHaveLength(1);
+  });
+
+  it("records a human override with the HUMAN_BYPASS_REASON constant and leaves item status unchanged", async () => {
+    const { dataDir, session } = await fixture();
+    let projection = ensureTodoLedger(dataDir, session);
+    projection = mutateTodo(
+      dataDir,
+      requiredSession(dataDir, session.id),
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
+    const after = recordTodoFinishOverride(
+      dataDir,
+      session.id,
+      HUMAN_BYPASS_REASON,
+      { kind: "human", origin: "cli" },
+      projection,
+    );
+    expect(after.finishOverrides).toHaveLength(1);
+    expect(after.finishOverrides[0]?.reason).toBe(HUMAN_BYPASS_REASON);
+    expect(after.items.map((item) => item.status)).toEqual(["open"]);
   });
 
   it("terminal sessions with no ledger file start empty rather than seeded", async () => {

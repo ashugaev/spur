@@ -320,6 +320,8 @@ export function ensureTodoLedger(dataDir: string, session: SessionRecord): TodoP
   return projection;
 }
 
+export const HUMAN_BYPASS_REASON = "Human action, no reason given";
+
 export function todoLedgerBlock(projection: TodoProjection): "empty" | "unfinished" | null {
   if (projection.counts.total === 0) return "empty";
   const { openItemIds, heldItemIds } = unfinishedTodo(projection);
