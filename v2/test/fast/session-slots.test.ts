@@ -191,6 +191,7 @@ describe("session slots", () => {
     });
 
     const wrapper = readFileSync(join(toolDir, "spur"), "utf8");
+    expect(wrapper).toContain("export SPUR_SESSION='api-1'");
     expect(wrapper).toContain("--config '/tmp/spur.yaml'");
     expect(wrapper).toContain('"$@"');
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(

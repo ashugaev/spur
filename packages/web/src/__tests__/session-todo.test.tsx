@@ -162,6 +162,9 @@ describe("SessionTodo", () => {
     expect(screen.getByLabelText("open")).toBeInTheDocument();
   });
 
+  // The literal below duplicates v2/src/todo.ts's exported HUMAN_BYPASS_REASON.
+  // packages/web has no dependency or tsconfig path onto v2/src, so it can't
+  // import the constant; kept as a literal, pinned by this test.
   it('renders "Human action, no reason given" when a human completes with no reason', async () => {
     const overridden: SpurTodoProjection = {
       ...projection,

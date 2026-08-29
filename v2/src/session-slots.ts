@@ -274,6 +274,7 @@ export function ensureSessionSlotTool(args: {
     join(toolDir, SPUR_WRAPPER_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
+export SPUR_SESSION=${shellEscape(args.sessionId)}
 exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },

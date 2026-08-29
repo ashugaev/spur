@@ -1159,6 +1159,11 @@ async function createDisposedSessionService() {
   return service;
 }
 
+// A static top-level `import { HUMAN_BYPASS_REASON } from "../../src/todo.js"`
+// breaks vitest's vi.mock hoisting in this file: it throws "Cannot access
+// 'archiveSessionsMock' before initialization" from inside the todo.js mock
+// factory at collection time (reproducible). Read it lazily instead — the
+// todo.js mock spreads the real module, so the value is identical.
 async function humanBypassReason(): Promise<string> {
   const todo = await import("../../src/todo.js");
   return todo.HUMAN_BYPASS_REASON;

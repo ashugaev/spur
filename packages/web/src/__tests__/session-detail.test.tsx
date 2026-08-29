@@ -5369,6 +5369,56 @@ describe("SessionDetail ToDo override", () => {
     await waitFor(() => expect(completeBodies).toEqual([{}]));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  // A 409 todo_open_work is no longer a special case: it falls through to the
+  // same generic error toast as any other failed complete, with no dialog.
+  it("shows a generic error toast with no dialog on a 409 todo_open_work", async () => {
+    const completeBodies: unknown[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/todo") {
+        return new Response(
+          JSON.stringify({
+            revision: "todo-1",
+            status: "active",
+            counts: { total: 1, open: 1, held: 0, completed: 0, cancelled: 0 },
+            items: [],
+            finishOverrides: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/complete" && init?.method === "POST") {
+        const body = init.body ? JSON.parse(String(init.body)) : {};
+        completeBodies.push(body);
+        return new Response(
+          JSON.stringify({
+            code: "todo_open_work",
+            sessions: [{ sessionId: "api-a1", openItemIds: ["one"], heldItemIds: [] }],
+            error: "Spur ToDo has open or held items.",
+          }),
+          { status: 409 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Complete" }));
+
+    await waitFor(() => expect(completeBodies).toEqual([{}]));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Spur ToDo has open or held items.");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail GitHub PR check unavailable", () => {

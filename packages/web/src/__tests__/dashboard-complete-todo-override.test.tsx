@@ -127,6 +127,31 @@ describe("Dashboard complete with a todo override", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  // A 409 todo_open_work is no longer a special case in the UI: it falls
+  // through to the same generic error toast as any other failed complete,
+  // with no dialog and no retry affordance.
+  it("shows a generic error toast with no dialog on a 409 todo_open_work", async () => {
+    const completeBodies: unknown[] = [];
+    mockFetchComplete(completeBodies, [
+      () =>
+        new Response(
+          JSON.stringify({
+            code: "todo_open_work",
+            sessions: [{ sessionId: "api-c9e9", openItemIds: ["item-1"], heldItemIds: [] }],
+            error: "Spur ToDo has open or held items.",
+          }),
+          { status: 409 },
+        ),
+    ]);
+    render(<Dashboard />);
+
+    await clickDone();
+
+    await waitFor(() => expect(completeBodies).toHaveLength(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Spur ToDo has open or held items.");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   // A failed complete never leaves the optimistic desk-wide write in place. The
   // finally block's invalidateQueries refetch would otherwise mask a missing
   // rollback, so the second /api/sessions call (the refetch) is gated open
