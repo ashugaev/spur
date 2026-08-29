@@ -222,7 +222,11 @@ describe("Spur ToDo ledger", () => {
       projection,
     );
     expect(after.finishOverrides).toHaveLength(1);
-    expect(after.finishOverrides[0]?.reason).toBe(HUMAN_BYPASS_REASON);
+    const override = after.finishOverrides[0];
+    if (override?.type !== "finish_override_recorded") {
+      throw new Error("Expected a finish_override_recorded event");
+    }
+    expect(override.reason).toBe(HUMAN_BYPASS_REASON);
     expect(after.items.map((item) => item.status)).toEqual(["open"]);
   });
 

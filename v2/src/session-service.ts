@@ -430,6 +430,7 @@ import {
 } from "./types.js";
 import {
   ensureTodoLedger,
+  HUMAN_BYPASS_REASON,
   mutateTodo as applyTodoMutation,
   recordTodoFinishOverride,
   TodoEmptyLedgerError,
@@ -10450,15 +10451,21 @@ export class SessionService {
     });
   }
 
-  async selfDestruct(sessionId: string): Promise<SessionView> {
+  async selfDestruct(
+    sessionId: string,
+    options?: { todoActor?: TodoActor },
+  ): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) {
         throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       }
-      return this.applyManualStatusLocked(sessionId, "completed", {
-        prAction: "leave_open",
-      });
+      return this.applyManualStatusLocked(
+        sessionId,
+        "completed",
+        { prAction: "leave_open" },
+        options,
+      );
     });
   }
 
@@ -10494,9 +10501,7 @@ export class SessionService {
         }
         if (
           (emptySessionIds.length > 0 || unfinishedBlocked.length > 0) &&
-          (!request.todoOverrideReason?.trim() ||
-            !options?.todoActor ||
-            options.todoActor.kind !== "human")
+          options?.todoActor?.kind !== "human"
         ) {
           if (emptySessionIds.length > 0) throw new TodoEmptyLedgerError(emptySessionIds);
           throw new TodoOpenWorkError(unfinishedBlocked);
@@ -11199,15 +11204,14 @@ export class SessionService {
         const projection = ensureTodoLedger(this.config.dataDir, session);
         const block = todoLedgerBlock(projection);
         if (block) {
-          const overrideReason = request.todoOverrideReason?.trim();
-          if (!overrideReason || !options?.todoActor || options.todoActor.kind !== "human") {
+          if (options?.todoActor?.kind !== "human") {
             if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
             throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
           }
           recordTodoFinishOverride(
             this.config.dataDir,
             sessionId,
-            overrideReason,
+            request.todoOverrideReason?.trim() || HUMAN_BYPASS_REASON,
             options.todoActor,
             projection,
           );
@@ -12854,15 +12858,20 @@ export class SessionService {
     return spawned;
   }
 
-  async handoff(sessionId: string, request: HandoffSessionRequest): Promise<SessionView> {
+  async handoff(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options?: { todoActor?: TodoActor },
+  ): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.handoffLocked(sessionId, request),
+      this.handoffLocked(sessionId, request, options),
     );
   }
 
   private async handoffLocked(
     sessionId: string,
     request: HandoffSessionRequest,
+    options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -12883,8 +12892,8 @@ export class SessionService {
     }
     const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
     const handoffBlock = todoLedgerBlock(handoffProjection);
-    if (handoffBlock === "empty") throw new TodoEmptyLedgerError([sessionId]);
-    if (handoffBlock === "unfinished") {
+    if (handoffBlock && options?.todoActor?.kind !== "human") {
+      if (handoffBlock === "empty") throw new TodoEmptyLedgerError([sessionId]);
       throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
     }
     // Gate before any teardown below. The source session is still on-disk as
@@ -13016,7 +13025,7 @@ export class SessionService {
         session.id,
         "completed",
         { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true },
+        { retainInList: true, ...(options?.todoActor ? { todoActor: options.todoActor } : {}) },
       );
 
       return spawned;

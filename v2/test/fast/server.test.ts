@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { logSpurEvent, readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
-import { startServer, type StartedServer } from "../../src/server.js";
+import { resolveLifecycleTodoActor, startServer, type StartedServer } from "../../src/server.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
   OpenPrActionRequiredError,
@@ -2107,6 +2107,200 @@ describe("startServer", () => {
       SessionService.prototype.selfDestruct = originalSelfDestruct;
       await server.stop();
     }
+  });
+
+  describe("resolveLifecycleTodoActor", () => {
+    it("classifies no header + cli origin as human/cli", () => {
+      expect(
+        resolveLifecycleTodoActor({ origin: "cli", callerHeader: undefined }),
+      ).toEqual({ kind: "human", origin: "cli" });
+    });
+
+    it("classifies no header + ui origin as human/ui", () => {
+      expect(
+        resolveLifecycleTodoActor({ origin: "ui", callerHeader: undefined }),
+      ).toEqual({ kind: "human", origin: "ui" });
+    });
+
+    it("gates when the caller-session header is present", () => {
+      expect(
+        resolveLifecycleTodoActor({ origin: "cli", callerHeader: "agent-session-1" }),
+      ).toBeUndefined();
+    });
+
+    it("gates on an unknown origin", () => {
+      expect(
+        resolveLifecycleTodoActor({ origin: "unknown", callerHeader: undefined }),
+      ).toBeUndefined();
+    });
+
+    it("gates on an array-valued caller-session header", () => {
+      expect(
+        resolveLifecycleTodoActor({ origin: "cli", callerHeader: ["a", "b"] }),
+      ).toBeUndefined();
+    });
+  });
+
+  describe("lifecycle routes pass a human todo actor to the service", () => {
+    async function withConfig(): Promise<{ configPath: string; port: number }> {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const dataDir = join(root, "data");
+      const worktreeDir = join(root, "worktrees");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${dataDir}`,
+          `worktreeDir: ${worktreeDir}`,
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
+      return { configPath, port };
+    }
+
+    it("passes a human todo actor to complete with no caller header, and none with one", async () => {
+      const { configPath, port } = await withConfig();
+      const originalComplete = SessionService.prototype.complete;
+      const calls: unknown[] = [];
+      SessionService.prototype.complete = async function mockComplete(
+        _sessionId,
+        _request,
+        options,
+      ) {
+        calls.push(options);
+        throw new TodoEmptyLedgerError(["demo-1"]);
+      };
+      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      try {
+        await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-spur-origin": "cli" },
+          body: "{}",
+        });
+        await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-spur-origin": "cli",
+            "x-spur-caller-session": "demo-1",
+          },
+          body: "{}",
+        });
+        expect(calls).toEqual([{ todoActor: { kind: "human", origin: "cli" } }, undefined]);
+      } finally {
+        SessionService.prototype.complete = originalComplete;
+        await server.stop();
+      }
+    });
+
+    it("passes a human todo actor to self-destruct with no caller header, and none with one", async () => {
+      const { configPath, port } = await withConfig();
+      const originalSelfDestruct = SessionService.prototype.selfDestruct;
+      const calls: unknown[] = [];
+      SessionService.prototype.selfDestruct = async function mockSelfDestruct(_sessionId, options) {
+        calls.push(options);
+        return {
+          id: "demo-1",
+          project: "demo",
+          agent: "claude",
+          prompt: "ship it",
+          branch: "demo-1",
+          worktree: true,
+          worktreePath: "/tmp/demo-1",
+          tmuxSession: "demo-1",
+          launchCommand: "",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+          workspaceExists: false,
+          createdAt: "2026-04-15T00:00:00.000Z",
+          updatedAt: "2026-04-15T00:00:00.000Z",
+          lastActivityAt: "2026-04-15T00:00:00.000Z",
+          artifacts: [],
+          services: [],
+          sidecars: [],
+        } satisfies SessionView;
+      };
+      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      try {
+        await fetch(`http://127.0.0.1:${port}/sessions/demo-1/self-destruct`, {
+          method: "POST",
+          headers: { "x-spur-origin": "cli" },
+        });
+        await fetch(`http://127.0.0.1:${port}/sessions/demo-1/self-destruct`, {
+          method: "POST",
+          headers: { "x-spur-origin": "cli", "x-spur-caller-session": "demo-1" },
+        });
+        expect(calls).toEqual([{ todoActor: { kind: "human", origin: "cli" } }, undefined]);
+      } finally {
+        SessionService.prototype.selfDestruct = originalSelfDestruct;
+        await server.stop();
+      }
+    });
+
+    it("passes a human todo actor to handoff with no caller header, and none with one", async () => {
+      const { configPath, port } = await withConfig();
+      const originalHandoff = SessionService.prototype.handoff;
+      const calls: unknown[] = [];
+      SessionService.prototype.handoff = async function mockHandoff(
+        sessionId: string,
+        _request,
+        options,
+      ) {
+        calls.push(options);
+        return {
+          id: sessionId,
+          project: "demo",
+          agent: "claude",
+          prompt: "ship it",
+          branch: "demo-1",
+          worktree: true,
+          worktreePath: "/tmp/demo-1",
+          tmuxSession: sessionId,
+          launchCommand: "",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+          workspaceExists: false,
+          createdAt: "2026-04-15T00:00:00.000Z",
+          updatedAt: "2026-04-15T00:00:00.000Z",
+          lastActivityAt: "2026-04-15T00:00:00.000Z",
+          artifacts: [],
+          services: [],
+          sidecars: [],
+        } satisfies SessionView;
+      };
+      const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      try {
+        await fetch(`http://127.0.0.1:${port}/sessions/demo-1/handoff`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-spur-origin": "cli" },
+          body: "{}",
+        });
+        await fetch(`http://127.0.0.1:${port}/sessions/demo-1/handoff`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-spur-origin": "cli",
+            "x-spur-caller-session": "demo-1",
+          },
+          body: "{}",
+        });
+        expect(calls).toEqual([{ todoActor: { kind: "human", origin: "cli" } }, undefined]);
+      } finally {
+        SessionService.prototype.handoff = originalHandoff;
+        await server.stop();
+      }
+    });
   });
 
   it("serves session memory routes with validation and missing-key errors", async () => {

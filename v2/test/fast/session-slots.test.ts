@@ -196,10 +196,13 @@ describe("session slots", () => {
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
       'exec "$SCRIPT_DIR/spur" slots --session \'api-1\' "$@"',
     );
-    expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
+    const selfDestructWrapper = readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8");
+    expect(selfDestructWrapper).toContain("export SPUR_SESSION='api-1'");
+    expect(selfDestructWrapper).toContain(
       "exec \"$SCRIPT_DIR/spur\" self-destruct 'api-1' --json",
     );
     const todoWrapper = readFileSync(join(toolDir, TODO_TOOL_NAME), "utf8");
+    expect(todoWrapper).toContain("export SPUR_SESSION='api-1'");
     expect(todoWrapper).toContain('exec "$SCRIPT_DIR/spur" todo "$@" --session \'api-1\'');
     expect(todoWrapper).not.toContain("delete");
   });

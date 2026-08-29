@@ -291,6 +291,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessi
     join(toolDir, SELF_DESTRUCT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
+export SPUR_SESSION=${shellEscape(args.sessionId)}
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.sessionId)} --json
 `,
@@ -300,6 +301,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.session
     join(toolDir, TODO_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
+export SPUR_SESSION=${shellEscape(args.sessionId)}
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" todo "$@" --session ${shellEscape(args.sessionId)}
 `,

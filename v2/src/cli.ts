@@ -2874,7 +2874,10 @@ export function createProgram(cliEntrypoint: string): Command {
       parsePrActionOption,
     )
     .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
-    .option("--todo-override-reason <reason>", "Record a manual override for unfinished ToDo items")
+    .option(
+      "--todo-override-reason <reason>",
+      "Optional audit reason for a human-initiated complete on unfinished ToDo items",
+    )
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -2886,9 +2889,6 @@ export function createProgram(cliEntrypoint: string): Command {
         body.skipPrCheck = true;
       }
       if (options.todoOverrideReason) {
-        if (process.env["SPUR_SESSION"] === sessionId) {
-          throw new Error("A session cannot override its own unfinished ToDo items");
-        }
         body.todoOverrideReason = options.todoOverrideReason;
       }
       await outputResult({

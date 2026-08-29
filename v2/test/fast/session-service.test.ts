@@ -1159,6 +1159,11 @@ async function createDisposedSessionService() {
   return service;
 }
 
+async function humanBypassReason(): Promise<string> {
+  const todo = await import("../../src/todo.js");
+  return todo.HUMAN_BYPASS_REASON;
+}
+
 async function useRealTodoLedger(): Promise<void> {
   const mocked = await import("../../src/todo.js");
   const actual = await vi.importActual<typeof todoModule>("../../src/todo.js");
@@ -1855,7 +1860,7 @@ describe("SessionService", () => {
       await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_ledger_empty" });
       await service.complete(
         "api-1",
-        { todoOverrideReason: "Operator accepts unfinished work", skipPrCheck: true },
+        { skipPrCheck: true },
         { todoActor: { kind: "human", origin: "ui" } },
       );
 
@@ -1864,7 +1869,7 @@ describe("SessionService", () => {
       expect(projection.finishOverrides).toHaveLength(1);
       expect(projection.finishOverrides[0]).toMatchObject({
         type: "finish_override_recorded",
-        reason: "Operator accepts unfinished work",
+        reason: await humanBypassReason(),
       });
       service.dispose();
     });
@@ -1884,7 +1889,7 @@ describe("SessionService", () => {
       await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
       await service.complete(
         "api-1",
-        { todoOverrideReason: "Operator accepts unfinished work", skipPrCheck: true },
+        { skipPrCheck: true },
         { todoActor: { kind: "human", origin: "ui" } },
       );
 
@@ -1892,6 +1897,10 @@ describe("SessionService", () => {
       const projection = await service.readTodo("api-1");
       expect(projection.items[0]?.status).toBe("open");
       expect(projection.finishOverrides).toHaveLength(1);
+      expect(projection.finishOverrides[0]).toMatchObject({
+        type: "finish_override_recorded",
+        reason: await humanBypassReason(),
+      });
       service.dispose();
     });
 
@@ -2044,6 +2053,22 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("self-destruct with a human actor completes an empty-ledger session", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.selfDestruct("api-1", { todoActor: { kind: "human", origin: "cli" } });
+
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      const projection = await service.readTodo("api-1");
+      expect(projection.finishOverrides).toHaveLength(1);
+      expect(projection.finishOverrides[0]).toMatchObject({ reason: await humanBypassReason() });
+      service.dispose();
+    });
+
     it("completeDesk with a human override completes an empty-ledger desk and records one override event", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
@@ -2054,18 +2079,22 @@ describe("SessionService", () => {
 
       await service.completeDesk(
         "api-1",
-        { todoOverrideReason: "Operator accepts the empty desk", skipPrCheck: true },
+        { skipPrCheck: true },
         { todoActor: { kind: "human", origin: "ui" } },
       );
 
       expect(sessions.get("api-1")?.status).toBe("completed");
       expect(sessions.get("api-2")?.status).toBe("completed");
-      const projection = await service.readTodo("api-1");
-      expect(projection.finishOverrides).toHaveLength(1);
+      const projectionOne = await service.readTodo("api-1");
+      expect(projectionOne.finishOverrides).toHaveLength(1);
+      expect(projectionOne.finishOverrides[0]).toMatchObject({ reason: await humanBypassReason() });
+      const projectionTwo = await service.readTodo("api-2");
+      expect(projectionTwo.finishOverrides).toHaveLength(1);
+      expect(projectionTwo.finishOverrides[0]).toMatchObject({ reason: await humanBypassReason() });
       service.dispose();
     });
 
-    it("handoff rejects an empty ledger with no override path", async () => {
+    it("handoff for an agent actor refuses an empty ledger and writes no ledger event", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       const source = sessionRecord({
@@ -2083,6 +2112,36 @@ describe("SessionService", () => {
         code: "todo_ledger_empty",
       });
       expect(sessions.get(source.id)?.status).toBe("running");
+      expect((await service.readTodo(source.id)).finishOverrides).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("hands off an empty ledger for a human actor and records exactly one override", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.handoff(
+        source.id,
+        { agent: "cursor" },
+        { todoActor: { kind: "human", origin: "ui" } },
+      );
+
+      expect(result.id).toBe("api-2");
+      expect(sessions.get(source.id)?.status).toBe("completed");
+      const projection = await service.readTodo(source.id);
+      expect(projection.finishOverrides).toHaveLength(1);
+      expect(projection.finishOverrides[0]).toMatchObject({ reason: await humanBypassReason() });
       service.dispose();
     });
   });
@@ -26916,6 +26975,52 @@ describe("SessionService", () => {
       });
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
       expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("a late open item does not block a human handoff and still writes exactly one event", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const initialId = (
+        await service.mutateTodo(
+          source.id,
+          { action: "add", text: "Initial work", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: source.id },
+        )
+      ).items[0]?.id;
+      if (!initialId) throw new Error("Expected added ToDo item");
+      await service.mutateTodo(
+        source.id,
+        { action: "complete", itemId: initialId, reason: "Initial work done" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
+      );
+      await service.mutateTodo(
+        source.id,
+        { action: "add", text: "Late requested work", reason: "User added scope" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
+      );
+
+      const result = await service.handoff(
+        source.id,
+        { agent: "cursor" },
+        { todoActor: { kind: "human", origin: "ui" } },
+      );
+
+      expect(result.id).toBe("api-2");
+      expect(sessions.get(source.id)?.status).toBe("completed");
+      const projection = await service.readTodo(source.id);
+      expect(projection.finishOverrides).toHaveLength(1);
       service.dispose();
     });
 
