@@ -512,18 +512,30 @@
           align-items: start;
         }
       }
+      .keeps {
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(20px, 2.2vw, 26px);
+      }
+      .keeps .mono-label {
+        color: var(--t3);
+      }
       .reach {
         list-style: none;
-        margin: 18px 0 0;
+        margin: 16px 0 0;
         padding: 0;
       }
       .reach li {
         display: flex;
         align-items: baseline;
         gap: 12px;
-        padding: 9px 0;
+        padding: 10px 0;
         border-bottom: 1px solid var(--b-sub);
         color: var(--t1);
+      }
+      .reach li:last-child {
+        border-bottom: 0;
+        padding-bottom: 0;
       }
       .reach i {
         width: 8px;
@@ -545,28 +557,35 @@
       }
 
       .install {
-        margin-top: clamp(40px, 6vh, 68px);
-      }
-      .install-head {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        flex-wrap: wrap;
-        padding-bottom: 16px;
-        border-bottom: 1px solid var(--b-sub);
+        margin-top: clamp(64px, 10vh, 118px);
+        padding-top: clamp(36px, 5vh, 60px);
+        border-top: 1px solid var(--b-sub);
       }
       .install-head .mono-label {
         color: var(--brand);
       }
       .install-sub {
-        color: var(--t3);
+        margin-top: 12px;
+        color: var(--t2);
         font-size: var(--step-0);
+        max-width: 62ch;
       }
-      .install-head .copy {
-        margin-left: auto;
+      .install-body {
+        margin-top: 26px;
+        display: grid;
+        gap: 24px;
+        align-items: start;
+      }
+      @media (min-width: 900px) {
+        .install-body {
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 40px;
+        }
+      }
+      .install-body .copy {
+        justify-self: start;
       }
       .cmd {
-        margin-top: 20px;
         border-left: 2px solid var(--b-strong);
         padding: 4px 0 4px clamp(18px, 2vw, 26px);
       }
@@ -1462,7 +1481,7 @@
               </div>
             </div>
 
-            <div>
+            <div class="keeps">
               <span class="mono-label">What it does not change</span>
               <ul class="reach">
                 <li><i class="c-brand"></i>Same binaries you already type</li>
@@ -1476,7 +1495,20 @@
           <div class="install">
             <div class="install-head">
               <span class="mono-label">Auto-install</span>
-              <span class="install-sub">Hand it to claude, codex or cursor. It does the rest.</span>
+              <p class="install-sub">
+                No commands to run. Paste this into claude, codex or cursor and it installs Spur end
+                to end.
+              </p>
+            </div>
+            <div class="install-body">
+              <div class="cmd">
+                <code id="installcmd"
+                  >Read
+                  https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md and
+                  install and run Spur on this machine end to end, following the guide. Do the steps
+                  yourself; don't ask me to run what you can run.</code
+                >
+              </div>
               <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
                 <svg
                   viewBox="0 0 24 24"
@@ -1491,13 +1523,6 @@
                 </svg>
                 <span class="copy-t">Copy prompt</span>
               </button>
-            </div>
-            <div class="cmd">
-              <code id="installcmd"
-                >Read https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md
-                and install and run Spur on this machine end to end, following the guide. Do the
-                steps yourself; don't ask me to run what you can run.</code
-              >
             </div>
           </div>
         </header>

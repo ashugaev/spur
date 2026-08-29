@@ -12,4 +12,5 @@ PORT_END=${SPUR_SIDECAR_LANDING_PORT_END:-5749}
 LANDING_PORT=$(resolve_sidecar_port SPUR_RESERVED_PORT_LANDING "$PORT_START" "$PORT_END")
 echo "Serving landing on http://0.0.0.0:$LANDING_PORT"
 
-exec python3 -m http.server "$LANDING_PORT" --bind 0.0.0.0 --directory "$LANDING_DIR"
+exec env SPUR_RESERVED_PORT_LANDING="$LANDING_PORT" \
+  node "$SCRIPT_DIR/landing-dev-server.mjs" "$LANDING_DIR"
