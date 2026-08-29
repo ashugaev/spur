@@ -484,8 +484,8 @@
       }
 
       .lede {
-        margin-top: 28px;
-        max-width: 62ch;
+        margin-top: clamp(28px, 4vh, 44px);
+        max-width: 66ch;
         color: var(--t2);
         font-size: var(--step-1);
         line-height: 1.7;
@@ -501,17 +501,6 @@
         margin-top: 34px;
       }
 
-      .hero-grid {
-        display: grid;
-        gap: clamp(36px, 5vw, 72px);
-        margin-top: clamp(28px, 4vh, 44px);
-      }
-      @media (min-width: 980px) {
-        .hero-grid {
-          grid-template-columns: minmax(0, 1fr) minmax(0, 400px);
-          align-items: start;
-        }
-      }
       .keeps {
         border: 1px solid var(--b);
         background: var(--term);
@@ -1482,29 +1471,15 @@
             <span class="line"><span>between you and your CLI agents.</span></span>
           </h1>
 
-          <div class="hero-grid">
-            <div>
-              <p class="lede">
-                For engineers already running <b>claude</b>, <b>codex</b>, <b>cursor</b> or
-                <b>opencode</b>. Same binaries, plus a worktree each, event triggers and one
-                dashboard. Nothing to migrate.
-              </p>
+          <p class="lede">
+            For engineers already running <b>claude</b>, <b>codex</b>, <b>cursor</b> or
+            <b>opencode</b>. Same binaries, plus a worktree each, event triggers and one dashboard.
+            Nothing to migrate.
+          </p>
 
-              <div class="hero-cta">
-                <a class="btn primary" href="#install">Get Spur &rarr;</a>
-                <a class="btn" href="#dashboard">See it running</a>
-              </div>
-            </div>
-
-            <div class="keeps">
-              <span class="mono-label">What it does not change</span>
-              <ul class="reach">
-                <li><i class="c-brand"></i>Same binaries you already type</li>
-                <li><i class="c-working"></i>Your auth, your keys, your model config</li>
-                <li><i class="c-ready"></i>Plain tmux and git worktrees</li>
-                <li><i class="c-attention"></i>One repo at a time. Rest of the box untouched</li>
-              </ul>
-            </div>
+          <div class="hero-cta">
+            <a class="btn primary" href="#install">Get Spur &rarr;</a>
+            <a class="btn" href="#dashboard">See it running</a>
           </div>
         </header>
 
