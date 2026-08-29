@@ -413,6 +413,7 @@
       /* ── hero ──────────────────────────────────────────────────────── */
       header.hero {
         padding-block: clamp(64px, 13vh, 144px) clamp(56px, 9vh, 104px);
+        position: relative;
       }
       .eyebrow {
         display: flex;
@@ -817,6 +818,162 @@
       @keyframes handoff {
         to {
           transform: scaleX(1);
+        }
+      }
+
+      /* ── hero fan-out ──────────────────────────────────────────────── */
+      .fanout {
+        position: absolute;
+        right: var(--gut);
+        top: 56%;
+        transform: translateY(-46%);
+        width: min(34vw, 380px);
+        pointer-events: none;
+      }
+      @media (min-width: 1121px) {
+        header.hero > .eyebrow,
+        header.hero > h1,
+        header.hero > .lede,
+        header.hero > .hero-cta {
+          max-width: calc(100% - 420px);
+        }
+      }
+      .fanout svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        overflow: visible;
+      }
+      @media (max-width: 1120px) {
+        .fanout {
+          display: none;
+        }
+      }
+      .fo-wire {
+        fill: none;
+        stroke: var(--b);
+        stroke-width: 1.25;
+      }
+      .fo-you {
+        fill: none;
+        stroke: var(--t3);
+        stroke-width: 1.5;
+      }
+      .fo-cap {
+        fill: var(--t4);
+        font-family: var(--mono);
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        text-anchor: middle;
+      }
+      .fo-hub {
+        fill: none;
+        stroke: var(--brand);
+        stroke-width: 1.5;
+      }
+      .fo-hub-t {
+        fill: var(--brand);
+        font-family: var(--mono);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-anchor: middle;
+      }
+      .fo-lbl {
+        fill: var(--t3);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+      .fo-dot {
+        animation: fodot 3.2s linear infinite;
+        animation-delay: var(--d);
+      }
+      @keyframes fodot {
+        0%,
+        86% {
+          opacity: 0.45;
+        }
+        88%,
+        96% {
+          opacity: 1;
+        }
+      }
+      .fo-pkt {
+        fill: var(--brand);
+        offset-rotate: 0deg;
+      }
+      .fo-in {
+        offset-path: path("M26 160 H110");
+        animation: fomove 3.2s linear infinite;
+      }
+      .fo-o1 {
+        offset-path: path("M180 160 C 245 160 255 28 318 28");
+      }
+      .fo-o2 {
+        offset-path: path("M180 160 C 245 160 255 72 318 72");
+      }
+      .fo-o3 {
+        offset-path: path("M180 160 C 245 160 255 116 318 116");
+      }
+      .fo-o4 {
+        offset-path: path("M180 160 H318");
+      }
+      .fo-o5 {
+        offset-path: path("M180 160 C 245 160 255 204 318 204");
+      }
+      .fo-o6 {
+        offset-path: path("M180 160 C 245 160 255 248 318 248");
+      }
+      .fo-o7 {
+        offset-path: path("M180 160 C 245 160 255 292 318 292");
+      }
+      .fo-o1,
+      .fo-o2,
+      .fo-o3,
+      .fo-o4,
+      .fo-o5,
+      .fo-o6,
+      .fo-o7 {
+        animation: fomove 3.2s linear infinite;
+      }
+      .fo-o1 {
+        animation-delay: 0.5s;
+      }
+      .fo-o2 {
+        animation-delay: 0.9s;
+      }
+      .fo-o3 {
+        animation-delay: 1.3s;
+      }
+      .fo-o4 {
+        animation-delay: 1.7s;
+      }
+      .fo-o5 {
+        animation-delay: 2.1s;
+      }
+      .fo-o6 {
+        animation-delay: 2.5s;
+      }
+      .fo-o7 {
+        animation-delay: 2.9s;
+      }
+      @keyframes fomove {
+        0% {
+          offset-distance: 0%;
+          opacity: 0;
+        }
+        8% {
+          opacity: 1;
+        }
+        34% {
+          offset-distance: 100%;
+          opacity: 1;
+        }
+        38%,
+        100% {
+          offset-distance: 100%;
+          opacity: 0;
         }
       }
 
@@ -1416,8 +1573,12 @@
           transform: scaleX(1);
         }
         .a-pkt,
-        .wf-token {
+        .wf-token,
+        .fo-pkt {
           display: none;
+        }
+        .fo-dot {
+          opacity: 1;
         }
         .wf-dot {
           fill: var(--brand);
@@ -1480,6 +1641,65 @@
           <div class="hero-cta">
             <a class="btn primary" href="#install">Get Spur &rarr;</a>
             <a class="btn" href="#dashboard">See it running</a>
+          </div>
+
+          <div class="fanout" aria-hidden="true">
+            <svg viewBox="0 0 420 320">
+              <path class="fo-wire" d="M26 160 H110" />
+              <path class="fo-wire" d="M180 160 C 245 160 255 28 318 28" />
+              <path class="fo-wire" d="M180 160 C 245 160 255 72 318 72" />
+              <path class="fo-wire" d="M180 160 C 245 160 255 116 318 116" />
+              <path class="fo-wire" d="M180 160 H318" />
+              <path class="fo-wire" d="M180 160 C 245 160 255 204 318 204" />
+              <path class="fo-wire" d="M180 160 C 245 160 255 248 318 248" />
+              <path class="fo-wire" d="M180 160 C 245 160 255 292 318 292" />
+
+              <rect class="fo-you" x="14" y="154" width="12" height="12" />
+              <text class="fo-cap" x="20" y="186">you</text>
+
+              <rect class="fo-hub" x="110" y="144" width="70" height="32" />
+              <text class="fo-hub-t" x="145" y="165">SPUR</text>
+
+              <g class="fo-pkt-wrap">
+                <rect class="fo-pkt fo-in" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-o1" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-o2" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-o3" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-o4" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-o5" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-o6" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-o7" x="0" y="0" width="7" height="7" />
+              </g>
+
+              <g class="fo-node" style="--d: 0s">
+                <rect class="fo-dot d-working" x="318" y="24" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="32">claude</text>
+              </g>
+              <g class="fo-node" style="--d: 0.4s">
+                <rect class="fo-dot d-working" x="318" y="68" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="76">codex</text>
+              </g>
+              <g class="fo-node" style="--d: 0.8s">
+                <rect class="fo-dot d-ready" x="318" y="112" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="120">cursor</text>
+              </g>
+              <g class="fo-node" style="--d: 1.2s">
+                <rect class="fo-dot d-attention" x="318" y="156" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="164">opencode</text>
+              </g>
+              <g class="fo-node" style="--d: 1.6s">
+                <rect class="fo-dot d-working" x="318" y="200" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="208">claude</text>
+              </g>
+              <g class="fo-node" style="--d: 2s">
+                <rect class="fo-dot d-ready" x="318" y="244" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="252">cursor</text>
+              </g>
+              <g class="fo-node" style="--d: 2.4s">
+                <rect class="fo-dot d-working" x="318" y="288" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="296">codex</text>
+              </g>
+            </svg>
           </div>
         </header>
 
