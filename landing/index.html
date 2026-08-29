@@ -213,8 +213,6 @@
       body {
         font-family: var(--mono);
         background: var(--bg);
-        background-image: linear-gradient(180deg, #0d0d0e 0%, #101014 45%, #0d0d0e 100%);
-        background-attachment: fixed;
         color: var(--t1);
         font-size: var(--step-0);
         letter-spacing: 0.02em;
@@ -264,17 +262,6 @@
           rgba(0, 0, 0, 1) 0%,
           rgba(0, 0, 0, 0.85) 42%,
           rgba(0, 0, 0, 0.3) 100%
-        );
-      }
-      .scan {
-        position: fixed;
-        inset: 0;
-        z-index: 1;
-        pointer-events: none;
-        background: repeating-linear-gradient(
-          0deg,
-          rgba(255, 255, 255, 0.022) 0 1px,
-          transparent 1px 4px
         );
       }
       .wrap {
@@ -1672,7 +1659,6 @@
     <a class="skip" href="#main">Skip to content</a>
 
     <canvas id="grid" aria-hidden="true"></canvas>
-    <div class="scan" aria-hidden="true"></div>
 
     <div class="wrap">
       <nav id="nav" aria-label="Primary">
@@ -2817,101 +2803,141 @@
           ).observe(fanout);
         })();
 
-        /* canvas grid — paused when off-screen or the tab is hidden */
+        /* background: a scattered crosshair field that reacts to scroll */
         var cv = document.getElementById("grid");
-        if (reduce) {
-          (function () {
-            var c = cv.getContext("2d");
-            var d = Math.min(devicePixelRatio || 1, 2);
-            cv.width = innerWidth * d;
-            cv.height = innerHeight * d;
-            cv.style.width = innerWidth + "px";
-            cv.style.height = innerHeight + "px";
-            var s = 44 * d;
-            var th = Math.max(1, Math.round(d));
-            c.fillStyle = "rgba(225,225,225,0.07)";
-            for (var x = 0; x < cv.width + s; x += s) {
-              for (var y = 0; y < cv.height + s; y += s) {
-                c.fillRect(x - 1.5 * d, y - th / 2, 3 * d, th);
-                c.fillRect(x - th / 2, y - 1.5 * d, th, 3 * d);
-              }
-            }
-          })();
-        } else {
-          var cx = cv.getContext("2d");
-          var dpr = Math.min(devicePixelRatio || 1, 2);
-          var W = 0,
-            H = 0,
-            S = 44,
-            t = 0,
-            raf = 0,
-            live = false;
-          var mx = -9999,
-            my = -9999;
+        var cx = cv.getContext("2d");
+        var dpr = Math.min(devicePixelRatio || 1, 2);
+        var W = 0,
+          H = 0,
+          raf = 0,
+          live = false;
+        var mx = -9999,
+          my = -9999;
+        var marks = [];
+        var energy = 0;
+        var drift = 0;
+        var lastY = window.scrollY || 0;
 
-          function size() {
-            W = cv.width = innerWidth * dpr;
-            H = cv.height = innerHeight * dpr;
-            cv.style.width = innerWidth + "px";
-            cv.style.height = innerHeight + "px";
+        // Fixed seed so the scatter is stable across resizes and repaints.
+        function rng(seed) {
+          return function () {
+            seed |= 0;
+            seed = (seed + 0x6d2b79f5) | 0;
+            var x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+            x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+            return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+          };
+        }
+
+        var CELL = 104;
+        function build() {
+          var rand = rng(0x5eed1a9);
+          var cell = CELL * dpr;
+          marks = [];
+          for (var gx = -cell; gx < W + cell; gx += cell) {
+            for (var gy = -cell; gy < H + cell * 2; gy += cell) {
+              marks.push({
+                x: gx + rand() * cell,
+                y: gy + rand() * cell,
+                len: (6 + rand() * 10) * dpr,
+                diag: rand() < 0.3,
+                base: 0.05 + rand() * 0.08,
+                depth: 0.15 + rand() * 0.55,
+                spin: rand() < 0.5 ? 1 : -1,
+              });
+            }
           }
-          size();
-          addEventListener("resize", size);
+        }
+
+        function size() {
+          W = cv.width = innerWidth * dpr;
+          H = cv.height = innerHeight * dpr;
+          cv.style.width = innerWidth + "px";
+          cv.style.height = innerHeight + "px";
+          build();
+          paint();
+        }
+
+        function paint() {
+          cx.clearRect(0, 0, W, H);
+          var reach = 200 * dpr;
+          var th = Math.max(1, Math.round(dpr));
+          var span = H + CELL * 3 * dpr;
+          for (var i = 0; i < marks.length; i++) {
+            var m = marks[i];
+            var y = m.y - ((drift * m.depth) % span);
+            if (y < -CELL * dpr) y += span;
+            var dx = m.x - mx,
+              dy = y - my;
+            var near = Math.max(0, 1 - Math.sqrt(dx * dx + dy * dy) / reach);
+            var a = m.base + near * 0.5 + energy * 0.14;
+            var len = m.len + near * 6 * dpr + energy * 9 * dpr;
+            cx.fillStyle =
+              near > 0.25 ? "rgba(255,61,154," + a + ")" : "rgba(225,225,225," + a + ")";
+            cx.save();
+            cx.translate(m.x, y);
+            cx.rotate((m.diag ? Math.PI / 4 : 0) + energy * m.spin * 0.5);
+            cx.fillRect(-len / 2, -th / 2, len, th);
+            cx.fillRect(-th / 2, -len / 2, th, len);
+            cx.restore();
+          }
+        }
+
+        size();
+        addEventListener("resize", size);
+
+        if (!reduce) {
           if (fine) {
             addEventListener(
               "pointermove",
               function (e) {
                 mx = e.clientX * dpr;
                 my = e.clientY * dpr;
+                wake();
               },
               { passive: true },
             );
           }
 
-          function draw() {
-            cx.clearRect(0, 0, W, H);
-            var s = S * dpr;
-            var reach = 190 * dpr;
-            var th = Math.max(1, Math.round(dpr));
-            for (var x = 0; x < W + s; x += s) {
-              for (var y = 0; y < H + s; y += s) {
-                var dx = x - mx,
-                  dy = y - my;
-                var near = Math.max(0, 1 - Math.sqrt(dx * dx + dy * dy) / reach);
-                var wave = 0.5 + 0.5 * Math.sin((x + y) / (150 * dpr) + t);
-                var a = 0.045 + wave * 0.045 + near * 0.45;
-                cx.fillStyle =
-                  near > 0.25 ? "rgba(255,61,154," + a + ")" : "rgba(225,225,225," + a + ")";
-                var len = (3 + near * 5) * dpr;
-                cx.fillRect(x - len / 2, y - th / 2, len, th);
-                cx.fillRect(x - th / 2, y - len / 2, th, len);
-              }
+          addEventListener(
+            "scroll",
+            function () {
+              var y = window.scrollY || 0;
+              var delta = y - lastY;
+              lastY = y;
+              drift += delta * dpr * 0.35;
+              energy = Math.min(1, energy + Math.abs(delta) * 0.012);
+              wake();
+            },
+            { passive: true },
+          );
+
+          // Runs only while there is something to settle, then parks itself.
+          function frame() {
+            energy *= 0.9;
+            paint();
+            if (energy > 0.002 && !document.hidden) {
+              raf = requestAnimationFrame(frame);
+            } else {
+              energy = 0;
+              live = false;
+              paint();
             }
-            t += 0.012;
-            raf = requestAnimationFrame(draw);
           }
-          function start() {
-            if (!live) {
+
+          function wake() {
+            if (!live && !document.hidden) {
               live = true;
-              raf = requestAnimationFrame(draw);
+              raf = requestAnimationFrame(frame);
             }
-          }
-          function stop() {
-            live = false;
-            cancelAnimationFrame(raf);
           }
 
           document.addEventListener("visibilitychange", function () {
-            if (document.hidden) stop();
-            else start();
+            if (document.hidden) {
+              cancelAnimationFrame(raf);
+              live = false;
+            }
           });
-          new IntersectionObserver(
-            function (es) {
-              if (es[0].isIntersecting) start();
-              else stop();
-            },
-            { threshold: 0 },
-          ).observe(document.querySelector("header.hero"));
         }
       })();
     </script>
