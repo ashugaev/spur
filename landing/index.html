@@ -885,8 +885,9 @@
       }
       .fo-you {
         fill: none;
-        stroke: var(--t3);
-        stroke-width: 1.5;
+        stroke: var(--t1);
+        stroke-width: 1.75;
+        stroke-linecap: round;
       }
       .fo-cap {
         fill: var(--t4);
@@ -931,13 +932,6 @@
         font-size: 9.5px;
         letter-spacing: 0.1em;
       }
-      .fo-note {
-        fill: var(--t4);
-        font-family: var(--mono);
-        font-size: 10px;
-        letter-spacing: 0.12em;
-        text-anchor: middle;
-      }
       .fo-dot {
         animation: fodot 3.2s linear infinite;
         animation-delay: var(--d);
@@ -957,7 +951,7 @@
         offset-rotate: 0deg;
       }
       .fo-in {
-        offset-path: path("M26 160 H116");
+        offset-path: path("M38 160 H116");
       }
       .fo-o1 {
         offset-path: path("M174 160 C 245 160 255 28 318 28");
@@ -989,7 +983,7 @@
         fill: var(--error);
       }
       .fo-back {
-        offset-path: path("M26 160 H116");
+        offset-path: path("M38 160 H116");
         fill: var(--attention);
       }
       .fo-in,
@@ -1746,7 +1740,7 @@
 
           <div class="fanout" aria-hidden="true">
             <svg viewBox="0 0 420 338">
-              <path class="fo-wire" d="M26 160 H116" />
+              <path class="fo-wire" d="M38 160 H116" />
               <path class="fo-wire" d="M174 160 C 245 160 255 28 318 28" />
               <path class="fo-wire" d="M174 160 C 245 160 255 72 318 72" />
               <path class="fo-wire" d="M174 160 C 245 160 255 116 318 116" />
@@ -1755,8 +1749,11 @@
               <path class="fo-wire" d="M174 160 C 245 160 255 248 318 248" />
               <path class="fo-wire" d="M174 160 C 245 160 255 292 318 292" />
 
-              <rect class="fo-you" x="14" y="154" width="12" height="12" />
-              <text class="fo-cap" x="20" y="186">you</text>
+              <g class="fo-you">
+                <circle cx="20" cy="150" r="6" />
+                <path d="M8 172 a12 11 0 0 1 24 0" />
+              </g>
+              <text class="fo-cap" x="20" y="190">you</text>
 
               <rect class="fo-frame" x="116" y="131" width="58" height="58" />
               <g transform="translate(127 142) scale(1.5)">
@@ -1811,8 +1808,6 @@
                 <rect class="fo-dot d-working" x="318" y="288" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="296">codex</text>
               </g>
-
-              <text class="fo-note" x="210" y="330">only what needs you gets through</text>
             </svg>
           </div>
         </header>
