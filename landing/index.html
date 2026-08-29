@@ -544,42 +544,40 @@
         background: var(--brand);
       }
 
-      .cmd {
+      .install {
         margin-top: clamp(40px, 6vh, 68px);
-        display: grid;
-        gap: 22px;
-        border: 1px solid var(--b-strong);
-        border-left: 4px solid var(--brand);
-        background: var(--term);
-        padding: clamp(24px, 3vw, 34px);
       }
-      @media (min-width: 900px) {
-        .cmd {
-          grid-template-columns: 220px minmax(0, 1fr);
-          gap: 40px;
-          align-items: start;
-        }
+      .install-head {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap;
+        padding-bottom: 16px;
+        border-bottom: 1px solid var(--b-sub);
       }
-      .cmd-tag {
-        display: block;
-        font-size: 10.5px;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        line-height: 1.9;
+      .install-head .mono-label {
         color: var(--brand);
-        margin-bottom: 18px;
+      }
+      .install-sub {
+        color: var(--t3);
+        font-size: var(--step-0);
+      }
+      .install-head .copy {
+        margin-left: auto;
+      }
+      .cmd {
+        margin-top: 20px;
+        border-left: 2px solid var(--b-strong);
+        padding: 4px 0 4px clamp(18px, 2vw, 26px);
       }
       .cmd code {
         display: block;
         background: none;
         padding: 0;
-        color: var(--t0);
-        font-size: clamp(14px, 1.2vw, 15.5px);
-        line-height: 1.85;
-        overflow-wrap: break-word;
-      }
-      .cmd code .u {
-        color: var(--brand);
+        color: var(--t2);
+        font-size: clamp(13.5px, 1.1vw, 15px);
+        line-height: 1.95;
+        max-width: 92ch;
         overflow-wrap: anywhere;
       }
       .copy {
@@ -1475,9 +1473,10 @@
             </div>
           </div>
 
-          <div class="cmd">
-            <div>
-              <span class="cmd-tag">Install prompt<br />paste into your agent</span>
+          <div class="install">
+            <div class="install-head">
+              <span class="mono-label">Auto-install</span>
+              <span class="install-sub">Hand it to claude, codex or cursor. It does the rest.</span>
               <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
                 <svg
                   viewBox="0 0 24 24"
@@ -1493,14 +1492,13 @@
                 <span class="copy-t">Copy prompt</span>
               </button>
             </div>
-            <code id="installcmd"
-              >Read
-              <span class="u"
-                >https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md</span
+            <div class="cmd">
+              <code id="installcmd"
+                >Read https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md
+                and install and run Spur on this machine end to end, following the guide. Do the
+                steps yourself; don't ask me to run what you can run.</code
               >
-              and install and run Spur on this machine end to end, following the guide. Do the steps
-              yourself; don't ask me to run what you can run.</code
-            >
+            </div>
           </div>
         </header>
 
