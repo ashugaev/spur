@@ -931,139 +931,44 @@
         font-family: var(--mono);
         font-size: 9.5px;
         letter-spacing: 0.1em;
+        opacity: 0;
+        transition: opacity 0.3s;
       }
       .fo-dot {
-        animation: fodot 3.2s linear infinite;
-        animation-delay: var(--d);
+        transition: fill 0.35s;
       }
-      @keyframes fodot {
-        0%,
-        86% {
-          opacity: 0.45;
-        }
-        88%,
-        96% {
-          opacity: 1;
-        }
+      .d-idle {
+        fill: var(--t4);
       }
       .fo-pkt {
         fill: var(--brand);
         offset-rotate: 0deg;
+        offset-distance: 0%;
+        opacity: 0;
       }
-      .fo-in {
+      .fo-p0 {
         offset-path: path("M38 160 H116");
       }
-      .fo-o1 {
+      .fo-p1 {
         offset-path: path("M174 160 C 245 160 255 28 318 28");
       }
-      .fo-o2 {
+      .fo-p2 {
         offset-path: path("M174 160 C 245 160 255 72 318 72");
       }
-      .fo-o3 {
+      .fo-p3 {
         offset-path: path("M174 160 C 245 160 255 116 318 116");
       }
-      .fo-o4 {
+      .fo-p4 {
         offset-path: path("M174 160 H318");
       }
-      .fo-o5 {
+      .fo-p5 {
         offset-path: path("M174 160 C 245 160 255 204 318 204");
       }
-      .fo-o6 {
+      .fo-p6 {
         offset-path: path("M174 160 C 245 160 255 248 318 248");
       }
-      .fo-o7 {
+      .fo-p7 {
         offset-path: path("M174 160 C 245 160 255 292 318 292");
-      }
-      .fo-r4 {
-        offset-path: path("M174 160 H318");
-        fill: var(--attention);
-      }
-      .fo-r6 {
-        offset-path: path("M174 160 C 245 160 255 248 318 248");
-        fill: var(--error);
-      }
-      .fo-back {
-        offset-path: path("M38 160 H116");
-        fill: var(--attention);
-      }
-      .fo-in,
-      .fo-o1,
-      .fo-o2,
-      .fo-o3,
-      .fo-o4,
-      .fo-o5,
-      .fo-o6,
-      .fo-o7 {
-        animation: fomove 6s linear infinite;
-      }
-      .fo-r4,
-      .fo-r6,
-      .fo-back {
-        animation: fomoveback 6s linear infinite;
-      }
-      .fo-o1 {
-        animation-delay: 0.8s;
-      }
-      .fo-o2 {
-        animation-delay: 0.95s;
-      }
-      .fo-o3 {
-        animation-delay: 1.1s;
-      }
-      .fo-o4 {
-        animation-delay: 1.25s;
-      }
-      .fo-o5 {
-        animation-delay: 1.4s;
-      }
-      .fo-o6 {
-        animation-delay: 1.55s;
-      }
-      .fo-o7 {
-        animation-delay: 1.7s;
-      }
-      .fo-r4 {
-        animation-delay: 3s;
-      }
-      .fo-r6 {
-        animation-delay: 3.3s;
-      }
-      .fo-back {
-        animation-delay: 4.4s;
-      }
-      @keyframes fomove {
-        0% {
-          offset-distance: 0%;
-          opacity: 0;
-        }
-        3% {
-          opacity: 1;
-        }
-        12% {
-          opacity: 1;
-        }
-        15%,
-        100% {
-          offset-distance: 100%;
-          opacity: 0;
-        }
-      }
-      @keyframes fomoveback {
-        0% {
-          offset-distance: 100%;
-          opacity: 0;
-        }
-        3% {
-          opacity: 1;
-        }
-        12% {
-          opacity: 1;
-        }
-        15%,
-        100% {
-          offset-distance: 0%;
-          opacity: 0;
-        }
       }
 
       /* ── architecture diagram ──────────────────────────────────────── */
@@ -1765,48 +1670,50 @@
               </g>
 
               <g class="fo-pkt-wrap">
-                <rect class="fo-pkt fo-in" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-o1" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-o2" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-o3" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-o4" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-o5" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-o6" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-o7" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-r4" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-r6" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-back" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p0" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p1" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p2" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p3" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p4" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p5" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p6" x="0" y="0" width="7" height="7" />
+                <rect class="fo-pkt fo-p7" x="0" y="0" width="7" height="7" />
               </g>
 
-              <g class="fo-node" style="--d: 0s">
-                <rect class="fo-dot d-working" x="318" y="24" width="8" height="8" />
+              <g class="fo-node">
+                <rect class="fo-dot d-idle" x="318" y="24" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="32">claude</text>
+                <text class="fo-sig" x="340" y="46"></text>
               </g>
-              <g class="fo-node" style="--d: 0.4s">
-                <rect class="fo-dot d-working" x="318" y="68" width="8" height="8" />
+              <g class="fo-node">
+                <rect class="fo-dot d-idle" x="318" y="68" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="76">codex</text>
+                <text class="fo-sig" x="340" y="90"></text>
               </g>
-              <g class="fo-node" style="--d: 0.8s">
-                <rect class="fo-dot d-ready" x="318" y="112" width="8" height="8" />
+              <g class="fo-node">
+                <rect class="fo-dot d-idle" x="318" y="112" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="120">cursor</text>
+                <text class="fo-sig" x="340" y="134"></text>
               </g>
-              <g class="fo-node" style="--d: 1.2s">
-                <rect class="fo-dot d-attention" x="318" y="156" width="8" height="8" />
-                <text class="fo-lbl fo-lbl-hot" x="340" y="164">opencode</text>
-                <text class="fo-sig" x="340" y="178">needs input</text>
+              <g class="fo-node">
+                <rect class="fo-dot d-idle" x="318" y="156" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="164">opencode</text>
+                <text class="fo-sig" x="340" y="178"></text>
               </g>
-              <g class="fo-node" style="--d: 1.6s">
-                <rect class="fo-dot d-working" x="318" y="200" width="8" height="8" />
+              <g class="fo-node">
+                <rect class="fo-dot d-idle" x="318" y="200" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="208">claude</text>
+                <text class="fo-sig" x="340" y="222"></text>
               </g>
-              <g class="fo-node" style="--d: 2s">
-                <rect class="fo-dot d-error" x="318" y="244" width="8" height="8" />
-                <text class="fo-lbl fo-lbl-hot" x="340" y="252">cursor</text>
-                <text class="fo-sig" x="340" y="266">error</text>
+              <g class="fo-node">
+                <rect class="fo-dot d-idle" x="318" y="244" width="8" height="8" />
+                <text class="fo-lbl" x="340" y="252">cursor</text>
+                <text class="fo-sig" x="340" y="266"></text>
               </g>
-              <g class="fo-node" style="--d: 2.4s">
-                <rect class="fo-dot d-working" x="318" y="288" width="8" height="8" />
+              <g class="fo-node">
+                <rect class="fo-dot d-idle" x="318" y="288" width="8" height="8" />
                 <text class="fo-lbl" x="340" y="296">codex</text>
+                <text class="fo-sig" x="340" y="310"></text>
               </g>
             </svg>
           </div>
@@ -2655,6 +2562,143 @@
           );
           tio.observe(term);
         }
+
+        /* hero fan-out: one scripted round of fleet work */
+        (function () {
+          var fanout = document.querySelector(".fanout");
+          if (!fanout) return;
+          var dots = fanout.querySelectorAll(".fo-dot");
+          var sigs = fanout.querySelectorAll(".fo-sig");
+          var pkts = fanout.querySelectorAll(".fo-pkt");
+          var link = pkts[0];
+          var STATES = ["d-idle", "d-working", "d-attention", "d-error", "d-ready"];
+
+          function setState(i, state, sig) {
+            var dot = dots[i];
+            STATES.forEach(function (c) {
+              dot.classList.remove(c);
+            });
+            dot.classList.add("d-" + state);
+            sigs[i].textContent = sig || "";
+            sigs[i].style.opacity = sig ? "1" : "0";
+          }
+
+          if (reduce) {
+            ["working", "working", "ready", "attention", "working", "ready", "working"].forEach(
+              function (s, i) {
+                setState(i, s, s === "attention" ? "needs input" : "");
+              },
+            );
+            return;
+          }
+
+          var alive = false;
+          var token = 0;
+
+          function wait(ms) {
+            return new Promise(function (r) {
+              setTimeout(r, ms);
+            });
+          }
+
+          function flight(pkt, back, colour, dur) {
+            pkt.style.fill = colour;
+            var from = back ? "100%" : "0%";
+            var to = back ? "0%" : "100%";
+            var mid1 = back ? "90%" : "10%";
+            var mid2 = back ? "10%" : "90%";
+            var anim = pkt.animate(
+              [
+                { offsetDistance: from, opacity: 0 },
+                { offsetDistance: mid1, opacity: 1 },
+                { offsetDistance: mid2, opacity: 1 },
+                { offsetDistance: to, opacity: 0 },
+              ],
+              { duration: dur, easing: "linear" },
+            );
+            return anim.finished.catch(function () {});
+          }
+
+          async function round(mine) {
+            var stale = function () {
+              return mine !== token;
+            };
+
+            for (var i = 0; i < dots.length; i++) setState(i, "idle");
+            await wait(500);
+            if (stale()) return;
+
+            // you dispatch work, every agent spawns and starts working
+            await flight(link, false, "var(--t1)", 520);
+            for (var s = 0; s < dots.length; s++) {
+              (function (idx) {
+                flight(pkts[idx + 1], false, "var(--brand)", 620).then(function () {
+                  if (!stale()) setState(idx, "working");
+                });
+              })(s);
+              await wait(170);
+              if (stale()) return;
+            }
+            await wait(1100);
+            if (stale()) return;
+
+            // one agent blocks, asks, gets an answer, resumes
+            var conversation = [
+              { at: 3, state: "attention", sig: "needs input", colour: "var(--attention)" },
+              { at: 5, state: "error", sig: "error", colour: "var(--error)" },
+            ];
+            for (var c = 0; c < conversation.length; c++) {
+              var turn = conversation[c];
+              setState(turn.at, turn.state, turn.sig);
+              await wait(600);
+              if (stale()) return;
+              await flight(pkts[turn.at + 1], true, turn.colour, 620);
+              await flight(link, true, turn.colour, 520);
+              if (stale()) return;
+              await wait(1000);
+              await flight(link, false, "var(--t1)", 520);
+              await flight(pkts[turn.at + 1], false, "var(--t1)", 620);
+              if (stale()) return;
+              setState(turn.at, "working");
+              await wait(800);
+              if (stale()) return;
+            }
+
+            // work lands, each agent reports done
+            for (var d = 0; d < dots.length; d++) {
+              setState(d, "ready");
+              flight(pkts[d + 1], true, "var(--ready)", 620);
+              await wait(240);
+              if (stale()) return;
+            }
+            await flight(link, true, "var(--ready)", 520);
+            await wait(2400);
+          }
+
+          async function loop() {
+            var mine = ++token;
+            alive = true;
+            while (alive && mine === token) await round(mine);
+          }
+
+          function stop() {
+            alive = false;
+            token++;
+          }
+
+          document.addEventListener("visibilitychange", function () {
+            if (document.hidden) stop();
+            else if (!alive) loop();
+          });
+          new IntersectionObserver(
+            function (es) {
+              if (es[0].isIntersecting) {
+                if (!alive) loop();
+              } else stop();
+            },
+            { threshold: 0 },
+          ).observe(fanout);
+        })();
 
         /* canvas grid — paused when off-screen or the tab is hidden */
         var cv = document.getElementById("grid");
