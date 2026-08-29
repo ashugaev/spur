@@ -389,7 +389,11 @@ describe("DirectTerminal scroll integration", () => {
     normalBuffer.rows = [{ text: "https://resized.example https://newest.example" }];
     act(() => terminalResizeCallback?.());
     fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    // Resize is a keep-mode rescan: it shows what is on screen right away,
+    // even before these two urls are folded into discovered.
     expect(screen.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+      "https://newest.example",
+      "https://resized.example",
       "https://parsed.example",
     ]);
 
@@ -567,10 +571,9 @@ describe("DirectTerminal scroll integration", () => {
     await act(async () => {
       result.rerender(<DirectTerminal sessionId="session-b" />);
     });
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
     });
-    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
   });
 
   it("resets discovery ownership when the session identity changes", async () => {

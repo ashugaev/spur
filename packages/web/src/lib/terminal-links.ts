@@ -247,17 +247,24 @@ export function mergeTerminalLinkDiscoveries(
   return merged;
 }
 
-// Composes the displayed list: the current scan's URLs in scan order (newest
-// first), followed by earlier discoveries (in discovery order) whose rows
-// have left the buffer. Unknown-to-the-scan discoveries are appended, never
-// dropped — this is what keeps a link listed after its row scrolls out.
+// Composes the displayed list: every URL the current scan found, in scan
+// order, followed by earlier discoveries (in discovery order) that the scan
+// did not find. The scan half is never filtered against `discovered` — a
+// keep-mode scan (the resize rescan) deliberately does not merge into
+// `discovered`, so a URL that only becomes visible after a reflow would be
+// on screen but missing from `discovered` yet; filtering it out here would
+// hide something the pty is actually showing, with nothing left to surface
+// it once the pty goes idle. Showing it for one frame is correct: it IS on
+// screen, and because keep-mode never records it, it drops back out on the
+// next scan on its own. In merge mode this changes nothing, since a merge
+// adds every scanned URL into `discovered` before eviction, and eviction
+// never touches a URL still present in `scanned` — so `scanned` is always a
+// subset of `discovered` there.
 export function composeTerminalLinkDisplay(
   scanned: TerminalLink[],
   discovered: TerminalLink[],
 ): TerminalLink[] {
-  const discoveredUrls = new Set(discovered.map((link) => link.url));
-  const visible = scanned.filter((link) => discoveredUrls.has(link.url));
-  const visibleUrls = new Set(visible.map((link) => link.url));
-  const leftovers = discovered.filter((link) => !visibleUrls.has(link.url));
-  return [...visible, ...leftovers];
+  const scannedUrls = new Set(scanned.map((link) => link.url));
+  const leftovers = discovered.filter((link) => !scannedUrls.has(link.url));
+  return [...scanned, ...leftovers];
 }

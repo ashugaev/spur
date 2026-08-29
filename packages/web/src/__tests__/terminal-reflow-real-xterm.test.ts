@@ -60,6 +60,12 @@ describe("terminal link discovery over real xterm", () => {
 
     expect(links.map((link) => link.url)).toContain("https://alt.example.com/path/x");
 
+    terminal.resize(40, 41);
+    await writeBytes(terminal, loadFixture("tui-cup-118-stage2-redraw-40x41.raw"));
+    const rescanned = scanRows(terminal);
+
+    expect(rescanned.map((link) => link.url)).toContain("https://alt.example.com/path/x");
+
     terminal.dispose();
   });
 

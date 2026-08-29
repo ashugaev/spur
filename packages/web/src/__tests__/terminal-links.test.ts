@@ -392,13 +392,28 @@ describe("composeTerminalLinkDisplay", () => {
     expect(composed.map((entry) => entry.url)).toEqual(["https://b.example", "https://a.example"]);
   });
 
-  it("filters out scanned urls unknown to discovered", () => {
+  it("keeps a scanned url that is not yet in discovered", () => {
     const discovered = [link("https://a.example")];
     const scanned = [link("https://a.example"), link("https://unknown.example")];
 
     const composed = composeTerminalLinkDisplay(scanned, discovered);
 
-    expect(composed.map((entry) => entry.url)).toEqual(["https://a.example"]);
+    expect(composed.map((entry) => entry.url)).toEqual([
+      "https://a.example",
+      "https://unknown.example",
+    ]);
+  });
+
+  it("shows a url that only became visible on a keep-mode resize rescan, even though the rescan never records it into discovered", () => {
+    // Keep-mode (the resize rescan) passes its scan straight to display
+    // without merging into `discovered` first, so a url the reflow newly
+    // exposed can be in `scanned` without ever being in `discovered`.
+    const discovered: TerminalLink[] = [];
+    const scanned = [link("https://reflowed.example")];
+
+    const composed = composeTerminalLinkDisplay(scanned, discovered);
+
+    expect(composed.map((entry) => entry.url)).toEqual(["https://reflowed.example"]);
   });
 });
 
