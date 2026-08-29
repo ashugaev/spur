@@ -90,7 +90,7 @@
             "@id": "https://spur.dev/#app",
             "name": "Spur",
             "applicationCategory": "DeveloperApplication",
-            "operatingSystem": "Linux, macOS",
+            "operatingSystem": "Ubuntu Linux",
             "description": "Local daemon and CLI that runs AI coding agents (claude, codex, cursor, opencode) as tmux sessions with a git worktree each, routes GitHub, CI, Sentry, cron and Telegram events into them, and shows the fleet on a mobile web dashboard.",
             "license": "https://www.apache.org/licenses/LICENSE-2.0",
             "codeRepository": "https://github.com/ashugaev/spur",
@@ -120,10 +120,10 @@
               },
               {
                 "@type": "Question",
-                "name": "What do I need on the host?",
+                "name": "Which operating systems work?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "A Linux box you control, Node 20+, tmux, git, and the agent CLIs installed and logged in. Daemon and web UI install as systemd user services. Verified on Ubuntu 24.04, 2 GB RAM."
+                  "text": "Ubuntu is the tested target, bare metal or a VM; verified on 24.04 with 2 GB RAM. macOS and Windows are partial — expect to sort out host differences yourself."
                 }
               },
               {
@@ -191,7 +191,7 @@
         --t2: #a1a1a1;
         --t3: #8b8b90;
         --t4: #555558;
-        --brand: #ff5c33;
+        --brand: #ff3d9a;
         --working: #58a6ff;
         --ready: #3fb950;
         --attention: #ffd700;
@@ -401,7 +401,7 @@
           width: 100%;
         }
       }
-      @media (min-width: 1000px) {
+      @media (min-width: 1080px) {
         .nav-links {
           display: flex;
         }
@@ -556,22 +556,41 @@
         background: var(--brand);
       }
 
-      .install {
-        margin-top: clamp(64px, 10vh, 118px);
-        padding-top: clamp(36px, 5vh, 60px);
-        border-top: 1px solid var(--b-sub);
+      .install-grid {
+        margin-top: 28px;
+        display: grid;
+        gap: 1px;
+        background: var(--b-sub);
+        border: 1px solid var(--b-sub);
       }
-      .install-head .mono-label {
+      @media (min-width: 820px) {
+        .install-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      .install-grid .keeps {
+        border: 0;
+        min-width: 0;
+      }
+      .install-grid .reach li {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .install-note {
+        margin-top: 24px;
+        color: var(--t3);
+        font-size: var(--step-0);
+      }
+      .install-note a {
+        color: var(--t1);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        text-decoration-color: var(--brand);
+      }
+      .install-note a:hover {
         color: var(--brand);
       }
-      .install-sub {
-        margin-top: 12px;
-        color: var(--t2);
-        font-size: var(--step-0);
-        max-width: 62ch;
-      }
       .install-body {
-        margin-top: 26px;
         display: grid;
         gap: 24px;
         align-items: start;
@@ -621,8 +640,8 @@
         flex: none;
       }
       .copy:hover {
-        background: #ff7a55;
-        border-color: #ff7a55;
+        background: #ff66b0;
+        border-color: #ff66b0;
       }
       .copy.done {
         background: var(--ready);
@@ -918,7 +937,7 @@
         letter-spacing: 0.16em;
       }
       .a-box > rect.a-daemon {
-        fill: rgba(255, 92, 51, 0.12);
+        fill: rgba(255, 61, 154, 0.12);
         stroke: var(--brand);
         stroke-width: 1.5;
       }
@@ -1442,6 +1461,7 @@
             <a href="#pipeline">Automation</a>
             <a href="#features">Features</a>
             <a href="#cli">CLI</a>
+            <a href="#install">Install</a>
             <a href="#faq">FAQ</a>
           </div>
           <a class="btn nav-cta" href="https://github.com/ashugaev/spur" rel="noopener">GitHub</a>
@@ -1471,12 +1491,7 @@
               </p>
 
               <div class="hero-cta">
-                <a
-                  class="btn primary"
-                  href="https://github.com/ashugaev/spur#install"
-                  rel="noopener"
-                  >Get Spur &rarr;</a
-                >
+                <a class="btn primary" href="#install">Get Spur &rarr;</a>
                 <a class="btn" href="#dashboard">See it running</a>
               </div>
             </div>
@@ -1489,40 +1504,6 @@
                 <li><i class="c-ready"></i>Plain tmux and git worktrees</li>
                 <li><i class="c-attention"></i>One repo at a time. Rest of the box untouched</li>
               </ul>
-            </div>
-          </div>
-
-          <div class="install">
-            <div class="install-head">
-              <span class="mono-label">Auto-install</span>
-              <p class="install-sub">
-                No commands to run. Paste this into claude, codex or cursor and it installs Spur end
-                to end.
-              </p>
-            </div>
-            <div class="install-body">
-              <div class="cmd">
-                <code id="installcmd"
-                  >Read
-                  https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md and
-                  install and run Spur on this machine end to end, following the guide. Do the steps
-                  yourself; don't ask me to run what you can run.</code
-                >
-              </div>
-              <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  aria-hidden="true"
-                  focusable="false"
-                >
-                  <rect x="9" y="9" width="12" height="12" />
-                  <path d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
-                </svg>
-                <span class="copy-t">Copy prompt</span>
-              </button>
             </div>
           </div>
         </header>
@@ -2003,8 +1984,90 @@
           </div>
         </section>
 
-        <section id="faq" class="shell" aria-labelledby="faq-h">
+        <section id="install" class="shell" aria-labelledby="install-h">
           <div class="sec-head rv" data-n="06">
+            <span class="mono-label">Install</span>
+            <h2 id="install-h">You don't install it. Your agent does.</h2>
+            <p>
+              No package manager to reason about, no unit files to write. Paste one prompt into a
+              coding agent you already have and let it read the guide.
+            </p>
+          </div>
+
+          <div class="install rv">
+            <div class="install-body">
+              <div class="cmd">
+                <code id="installcmd"
+                  >Read
+                  https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md and
+                  install and run Spur on this machine end to end, following the guide. Do the steps
+                  yourself; don't ask me to run what you can run.</code
+                >
+              </div>
+              <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <rect x="9" y="9" width="12" height="12" />
+                  <path d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
+                </svg>
+                <span class="copy-t">Copy prompt</span>
+              </button>
+            </div>
+
+            <div class="install-grid">
+              <div class="keeps">
+                <span class="mono-label">What it will do</span>
+                <ul class="reach">
+                  <li>
+                    <i class="c-brand"></i>Install <code>@shugaev/spur</code> under
+                    <code>~/.local</code>
+                  </li>
+                  <li>
+                    <i class="c-working"></i>Run <code>spur init</code> — daemon on 4310, web UI on
+                    5555
+                  </li>
+                  <li><i class="c-ready"></i>Register both as systemd user services</li>
+                  <li>
+                    <i class="c-attention"></i>Put the UI on your tailnet, not a public interface
+                  </li>
+                </ul>
+              </div>
+
+              <div class="keeps">
+                <span class="mono-label">Before you start</span>
+                <ul class="reach">
+                  <li>
+                    <i class="c-ready"></i>Ubuntu, bare metal or a VM. This is the tested target
+                  </li>
+                  <li>
+                    <i class="c-attention"></i>macOS and Windows: partial, expect to sort out host
+                    differences
+                  </li>
+                  <li><i class="c-working"></i>Node 20+, tmux and git on the box</li>
+                  <li><i class="c-brand"></i>Your agent CLIs installed and already logged in</li>
+                </ul>
+              </div>
+            </div>
+
+            <p class="install-note">
+              Rather do it by hand?
+              <a
+                href="https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md"
+                rel="noopener"
+                >Read the same guide yourself</a
+              >.
+            </p>
+          </div>
+        </section>
+
+        <section id="faq" class="shell" aria-labelledby="faq-h">
+          <div class="sec-head rv" data-n="07">
             <span class="mono-label">FAQ</span>
             <h2 id="faq-h">Before you install.</h2>
           </div>
@@ -2024,11 +2087,10 @@
               </div>
             </details>
             <details>
-              <summary>What do I need on the host?<span class="pm">+</span></summary>
+              <summary>Which operating systems work?<span class="pm">+</span></summary>
               <div class="ans">
-                A Linux box you control, Node 20+, tmux, git, and the agent CLIs installed and
-                logged in. Daemon and web UI install as systemd user services. Verified on Ubuntu
-                24.04, 2 GB RAM.
+                Ubuntu is the tested target, bare metal or a VM; verified on 24.04 with 2 GB RAM.
+                macOS and Windows are partial — expect to sort out host differences yourself.
               </div>
             </details>
             <details>
@@ -2066,14 +2128,9 @@
         <section class="shell" aria-label="Get started">
           <div class="endcta rv">
             <h2>Stop babysitting one terminal.</h2>
-            <p>
-              Hand the prompt to a coding agent. Tested on Ubuntu; elsewhere expect host
-              differences.
-            </p>
+            <p>Hand the prompt to a coding agent and go do something else.</p>
             <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap">
-              <a class="btn primary" href="https://github.com/ashugaev/spur#install" rel="noopener"
-                >Install guide &rarr;</a
-              >
+              <a class="btn primary" href="#install">Install Spur &rarr;</a>
               <a class="btn" href="https://github.com/ashugaev/spur/stargazers" rel="noopener"
                 >Star on GitHub</a
               >
