@@ -895,18 +895,21 @@
         text-transform: uppercase;
         text-anchor: middle;
       }
-      .fo-hub {
+      .fo-logo path {
         fill: none;
         stroke: var(--brand);
         stroke-width: 1.5;
+        stroke-linecap: round;
       }
-      .fo-hub-t {
-        fill: var(--brand);
-        font-family: var(--mono);
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 0.18em;
-        text-anchor: middle;
+      .fo-logo {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: fospin 9s linear infinite;
+      }
+      @keyframes fospin {
+        to {
+          transform: rotate(360deg);
+        }
       }
       .fo-lbl {
         fill: var(--t3);
@@ -1687,8 +1690,13 @@
               <rect class="fo-you" x="14" y="154" width="12" height="12" />
               <text class="fo-cap" x="20" y="186">you</text>
 
-              <rect class="fo-hub" x="110" y="144" width="70" height="32" />
-              <text class="fo-hub-t" x="145" y="165">SPUR</text>
+              <g transform="translate(121 136) scale(2)">
+                <g class="fo-logo">
+                  <path
+                    d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4"
+                  />
+                </g>
+              </g>
 
               <g class="fo-pkt-wrap">
                 <rect class="fo-pkt fo-in" x="0" y="0" width="7" height="7" />
