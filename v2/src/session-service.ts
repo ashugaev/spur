@@ -14870,6 +14870,22 @@ export class SessionService {
           // bounds how long it can survive with no fresh confirming scan.
           // The real fix is upstream, in captureTmuxPane's return contract.
           this.claudeRateLimitReconfirmOverrides.delete(session.id);
+        } else if (
+          this.claudeRateLimitReconfirmOverrides.has(session.id) &&
+          rateLimit?.resetAtMs !== undefined &&
+          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+        ) {
+          // Not clearing the override on an empty capture (above) only
+          // protects the NEXT scanPane:false read — this tick's own
+          // paneReconfirmedLimit is otherwise recomputed fresh from menuHit
+          // (null here), so it would still flip the reported state to
+          // "no menu found" off nothing and momentarily reopen the
+          // delivery-suppression window this override exists to hold shut.
+          // An empty capture is not an observation in either direction:
+          // reuse the stored override the same way the scanPane:false path
+          // below does, under the same ceiling gate, so the reported state
+          // doesn't move until a real capture or the ceiling decides it.
+          paneReconfirmedLimit = true;
         }
         // Compaction never reaches Claude's persisted status file (it stays
         // "idle" throughout, which jsonl/hook maps to waiting) and the

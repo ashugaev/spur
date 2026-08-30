@@ -9284,14 +9284,16 @@ describe("SessionService", () => {
     expect(live.state).toBe("rate_limited");
 
     // captureTmuxPane collapses a failed capture-pane fork into "" (its own
-    // comment notes the distinction is discarded at the return). A live
-    // scan hitting that empty result reports "waiting" for THIS tick (no
-    // fresh evidence either way) — the override itself must still survive
-    // for the next scanPane:false consumer, checked below.
+    // comment notes the distinction is discarded at the return). An empty
+    // capture is not an observation in either direction: this live tick must
+    // reuse the stored override rather than recomputing paneReconfirmedLimit
+    // fresh off a null menuHit, which would otherwise flip this exact tick
+    // to "waiting" — reopening the delivery-suppression window stateHistory
+    // feeds isLiveStateRateLimited, even if only for one tick.
     captureTmuxPaneMock.mockResolvedValue("");
     await vi.advanceTimersByTimeAsync(4_001);
     const afterFailedCapture = await service.get("api-1");
-    expect(afterFailedCapture.state).toBe("waiting");
+    expect(afterFailedCapture.state).toBe("rate_limited");
 
     // The scanPane:false dashboard tick never captures its own pane, so it
     // only sees "rate_limited" here if the override survived the empty
@@ -9315,6 +9317,70 @@ describe("SessionService", () => {
     expect(captureTmuxPaneMock).not.toHaveBeenCalled();
     const dashboardAfterRealClear = await service.list({ view: "dashboard" });
     expect(dashboardAfterRealClear[0]).toMatchObject({ id: "api-1", state: "waiting" });
+
+    service.dispose();
+  });
+
+  it("stops holding rate_limited on an empty-capture live tick once the ceiling is crossed", async () => {
+    const sessions = createSessionStore();
+    // Same edge as the sibling dashboard-tick ceiling test: 23h59m59s before
+    // the live scan's clock, still inside CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+    // (24h) when the override is set.
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-17T10:05:01.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-17T10:05:01.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+
+    // Switch to an empty capture and freeze both background loops so only
+    // this explicit clock advance and the explicit get() below drive the
+    // next tick — no periodic re-affirmation to mask the transition.
+    captureTmuxPaneMock.mockClear();
+    captureTmuxPaneMock.mockResolvedValue("");
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    // 5s: crosses the 24h ceiling (relative to resetAtMs) by a few seconds,
+    // and clears STATE_HOLD_MS (4s). The override is still in the Set (an
+    // empty capture never deletes it), but the ceiling gate on the reuse
+    // branch must refuse to apply it past this point — an empty capture
+    // must not out-live the same ceiling a real menu re-confirmation is
+    // bound by.
+    await vi.advanceTimersByTimeAsync(5_000);
+    const afterCeiling = await service.get("api-1");
+    expect(afterCeiling.state).toBe("waiting");
 
     service.dispose();
   });
