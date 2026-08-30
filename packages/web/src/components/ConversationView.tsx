@@ -1,15 +1,31 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { Spinner } from "@/components/icons/Spinner";
 import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 import type { ConversationMessage, TranscriptEntry } from "@/lib/types";
 
+// Scroll fetch/resume thresholds, in pixels from the edge of the dialog's
+// scroll container.
+const SCROLL_EDGE_THRESHOLD_PX = 64;
+
 export interface ConversationViewProps {
   entries: TranscriptEntry[];
   messages: ConversationMessage[];
   durationMs: number;
+  /** Absolute index of `entries[0]` within the full transcript. Defaults to 0. */
+  startIndex?: number;
+  /** True when there are older entries before `startIndex`. */
+  hasMore?: boolean;
+  /** True while an older page fetch triggered by scroll-to-top is in flight. */
+  isLoadingOlder?: boolean;
+  /** True once the user has scrolled back to an older page (parent's fromIndex is set). */
+  hasOlderLoaded?: boolean;
+  /** Fetches the next older page. Called on scroll-to-top when `hasMore`. */
+  onLoadOlder?: () => void;
+  /** Resumes following the live tail. Called on scroll-to-bottom when `hasOlderLoaded`. */
+  onResumeTail?: () => void;
   /** True when the agent is actively producing a response right now. */
   isWorking: boolean;
   /** Agent runtime for this session; only "claude" supports interactive answering. */
@@ -245,6 +261,12 @@ export function ConversationView({
   entries,
   messages,
   durationMs,
+  startIndex = 0,
+  hasMore,
+  isLoadingOlder = false,
+  hasOlderLoaded = false,
+  onLoadOlder = () => {},
+  onResumeTail = () => {},
   isWorking,
   agent,
   onAnswer,
@@ -252,6 +274,9 @@ export function ConversationView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastTailRef = useRef<string | null>(null);
   const [answerStates, setAnswerStates] = useState<Record<string, QuestionAnswerState>>({});
+  // Captured just before an older page is prepended so the post-render layout
+  // effect can restore the user's read position instead of letting it jump.
+  const pendingScrollAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
 
   const items = entries.length > 0 ? entries : messagesAsEntries(messages);
 
@@ -272,7 +297,33 @@ export function ConversationView({
     })();
   };
 
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollTop < SCROLL_EDGE_THRESHOLD_PX && hasMore === true && !isLoadingOlder) {
+      pendingScrollAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+      onLoadOlder();
+      return;
+    }
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < SCROLL_EDGE_THRESHOLD_PX && hasOlderLoaded) {
+      onResumeTail();
+    }
+  };
+
+  // Scroll anchoring for a load-older prepend: restore the user's read
+  // position relative to the content that was already on screen, rather than
+  // letting the new (longer) list push it down.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const anchor = pendingScrollAnchorRef.current;
+    if (!el || anchor === null) return;
+    pendingScrollAnchorRef.current = null;
+    el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
+  }, [startIndex]);
+
   useEffect(() => {
+    if (hasOlderLoaded) return;
     const last = items[items.length - 1];
     const tailKey = isWorking
       ? `pending:${last ? entryTailKey(last) : "none"}`
@@ -290,7 +341,7 @@ export function ConversationView({
       return;
     }
     el.scrollTop = el.scrollHeight;
-  }, [items, isWorking]);
+  }, [items, isWorking, hasOlderLoaded]);
 
   if (items.length === 0 && !isWorking) {
     return null;
@@ -309,11 +360,21 @@ export function ConversationView({
       </h2>
       <div
         ref={scrollRef}
+        onScroll={handleScroll}
+        data-testid="conversation-scroll"
         className="flex max-h-80 flex-col gap-2 overflow-y-auto overflow-x-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
       >
+        {isLoadingOlder ? (
+          <div
+            aria-label="Loading older messages"
+            className="mx-auto flex items-center gap-1.5 py-1 text-[var(--color-text-tertiary)]"
+          >
+            <Spinner className="h-3 w-3" strokeWidth={1.5} />
+          </div>
+        ) : null}
         {items.map((entry, index) => (
           <ConversationEntryRow
-            key={`${entry.kind}-${index}`}
+            key={`${startIndex + index}-${entry.kind}`}
             entry={entry}
             agent={agent}
             getQuestionAnswerState={(questionEntry) =>

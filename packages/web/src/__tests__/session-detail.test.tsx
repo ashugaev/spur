@@ -157,15 +157,22 @@ function conversationFixture(
     messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }>;
     durationMs: number;
     state: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+    startIndex: number;
+    totalEntries: number;
+    hasMore: boolean;
   }>,
 ) {
+  const messages = overrides?.messages ?? [
+    { role: "user" as const, text: "Original prompt", timestampMs: 1 },
+    { role: "assistant" as const, text: "First reply", timestampMs: 2 },
+  ];
   return {
-    messages: [
-      { role: "user" as const, text: "Original prompt", timestampMs: 1 },
-      { role: "assistant" as const, text: "First reply", timestampMs: 2 },
-    ],
+    messages,
+    entries: messages.map((message) => ({ kind: "message" as const, ...message })),
     durationMs: 60_000,
     state: "waiting" as const,
+    startIndex: 0,
+    totalEntries: messages.length,
     ...overrides,
   };
 }
@@ -2212,6 +2219,209 @@ describe("SessionDetail voice input", () => {
     expect(screen.queryByText("waiting")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Assistant is responding")).toHaveTextContent("...");
     expect(screen.getAllByText("working")).toHaveLength(1);
+  });
+
+  it("renders the tail delivered by a large-transcript response with no count hint", async () => {
+    const messages = Array.from({ length: 300 }, (_, index) => ({
+      role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      text: `message-${index + 200}`,
+      timestampMs: index + 1,
+    }));
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              messages,
+              startIndex: 200,
+              totalEntries: 500,
+              hasMore: true,
+              state: "waiting",
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("message-499")).toBeInTheDocument();
+    });
+
+    // Tail present, older-than-tail message absent (server dropped it).
+    expect(screen.getByText("message-200")).toBeInTheDocument();
+    expect(screen.queryByText("message-199")).not.toBeInTheDocument();
+
+    // No "showing last N of M" hint is ever rendered.
+    expect(screen.queryByText(/showing last/i)).not.toBeInTheDocument();
+  });
+
+  it("omits any count hint when the full transcript fits", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              startIndex: 0,
+              totalEntries: 2,
+              hasMore: false,
+              state: "waiting",
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /dialog/i })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(/showing last/i)).not.toBeInTheDocument();
+  });
+
+  it("fetches an older page with ?from= on scroll-to-top and shows the loading row until it resolves", async () => {
+    const fetchedUrls: string[] = [];
+    let resolveOlderPage: ((value: Response) => void) | undefined;
+    const olderPagePromise = new Promise<Response>((resolve) => {
+      resolveOlderPage = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      fetchedUrls.push(url);
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation?from=100") {
+        return olderPagePromise;
+      }
+      if (url.startsWith("/api/sessions/api-a1/conversation")) {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    // Wait for the conversation fetch (hasMore: true) to land, not just the
+    // static heading — the scroll handler's guard needs hasMore already set.
+    await waitFor(() => {
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    });
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scrollEl);
+
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
+        true,
+      );
+    });
+
+    // The loading row must still be visible while the older-page fetch is
+    // in flight — it must not be cleared before the fetch resolves.
+    expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+    resolveOlderPage?.(
+      new Response(
+        JSON.stringify(conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true })),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    });
+  });
+
+  it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
+    const fetchedUrls: string[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      fetchedUrls.push(url);
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-b2") {
+        return new Response(JSON.stringify(sessionFixture({ id: "api-b2" })), { status: 200 });
+      }
+      if (url.startsWith("/api/sessions/api-a1/conversation")) {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/sessions/api-b2/conversation")) {
+        return new Response(
+          JSON.stringify(conversationFixture({ startIndex: 0, totalEntries: 2, hasMore: false })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    });
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scrollEl);
+
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
+        true,
+      );
+    });
+
+    rerender(<SessionDetail sessionId="api-b2" />);
+
+    // The switched-to session's fromIndex settles back to null (no `from`)
+    // even though the prior session had an older page loaded.
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-b2/conversation")).toBe(true);
+    });
   });
 
   it("hard-wraps long dialog and queued message tokens without widening the layout", async () => {

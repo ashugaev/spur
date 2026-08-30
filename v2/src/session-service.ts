@@ -107,8 +107,10 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
-  readClaudeConversation,
+  CONVERSATION_PAGE_ENTRIES,
+  readClaudeConversationTail,
   readClaudeJsonlState,
+  type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
@@ -954,6 +956,51 @@ function statusFallbackState(
   if (isStaleParked(session)) return "stale";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
+}
+
+/** Derives `messages` from `entries` so the two can never disagree. */
+function buildConversationResponse(
+  entries: TranscriptEntry[],
+  totalEntries: number,
+  startIndex: number,
+  state: SessionState,
+  durationMs: number,
+): ConversationResponse {
+  const messages: ConversationMessage[] = entries
+    .filter(
+      (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+    )
+    .map((entry) => ({
+      role: entry.role,
+      text: entry.text,
+      timestampMs: entry.timestampMs ?? 0,
+    }));
+  return {
+    messages,
+    entries,
+    durationMs,
+    state,
+    startIndex,
+    totalEntries,
+    hasMore: startIndex > 0,
+  };
+}
+
+/**
+ * Clamps a requested conversation page start so the response is never an
+ * empty slice while entries exist. `from` (or `floor`, the retained-window
+ * lower bound) landing at or past `totalEntries` means the pin is stale —
+ * the transcript shrank under it via rotation, truncation, or respawn — so
+ * fall back to the tail page instead of an out-of-range start that would
+ * return zero entries with no scrollable element left to trigger a
+ * recovery re-fetch.
+ */
+function clampPageStart(from: number, floor: number, totalEntries: number): number {
+  const boundedFloor = Math.max(floor, 0);
+  if (totalEntries <= 0) return boundedFloor;
+  const candidate = Math.max(from, boundedFloor);
+  if (candidate < totalEntries && boundedFloor <= totalEntries) return candidate;
+  return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -2413,6 +2460,11 @@ export class SessionService {
   private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
+  private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
+  // Serializes conversation tail reads per session. getConversation is polled
+  // every 4s and a slow read can overlap the next poll; chaining keeps the one
+  // shared reader's offset monotonic instead of racing read-modify-write.
+  private readonly conversationReadChain = new Map<string, Promise<void>>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -7203,43 +7255,112 @@ export class SessionService {
     return artifact;
   }
 
-  async getConversation(sessionId: string): Promise<ConversationResponse> {
+  async getConversation(
+    sessionId: string,
+    options?: { from?: number },
+  ): Promise<ConversationResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
-    const fallback: ConversationResponse = {
-      messages: [],
-      entries: [],
-      durationMs,
-      state: statusFallbackState(session),
-    };
+    const from = options?.from;
 
-    const entries =
-      (await readAgentConversation(session.agent, {
+    const readFullEntries = (): Promise<TranscriptEntry[]> =>
+      readAgentConversation(session.agent, {
         worktreePath: session.worktreePath,
         ...(session.agent === "codex"
           ? { codexSessionsDir: this.codexSessionsDir(session.id) }
           : {}),
         ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-      })) ?? [];
+      }).then((result) => result ?? []);
 
     if (session.agent === "claude") {
-      const result = await readClaudeConversation(session.worktreePath);
-      return result
-        ? { messages: result.messages, entries, durationMs, state: result.state }
-        : { ...fallback, entries };
+      // Classification always comes from the tail reader, on every request
+      // regardless of `from` — a live session's status must never fall back
+      // to statusFallbackState while a transcript exists.
+      const tail = await this.readConversationSerialized(session);
+      if (!tail) {
+        const entries = await readFullEntries();
+        const startIndex = from === undefined ? 0 : clampPageStart(from, 0, entries.length);
+        return buildConversationResponse(
+          entries.slice(startIndex),
+          entries.length,
+          startIndex,
+          statusFallbackState(session),
+          durationMs,
+        );
+      }
+
+      const { entries: tailEntries, state, totalEntries, startIndex: tailStartIndex } = tail;
+
+      if (from === undefined || from >= tailStartIndex) {
+        // Within the retained window: slice the cached tail, no full read.
+        const sliceStart =
+          from === undefined
+            ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
+            : clampPageStart(from, tailStartIndex, totalEntries);
+        const entries = tailEntries.slice(sliceStart - tailStartIndex);
+        return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
+      }
+
+      // Deep scroll-back below the retained window: fall back to a full read.
+      const fullEntries = await readFullEntries();
+      const startIndex = clampPageStart(from, 0, fullEntries.length);
+      return buildConversationResponse(
+        fullEntries.slice(startIndex),
+        fullEntries.length,
+        startIndex,
+        state,
+        durationMs,
+      );
     }
 
-    const messages: ConversationMessage[] = entries
-      .filter(
-        (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
-      )
-      .map((entry) => ({
-        role: entry.role,
-        text: entry.text,
-        timestampMs: entry.timestampMs ?? 0,
-      }));
-    return { messages, entries, durationMs, state: statusFallbackState(session) };
+    const entries = await readFullEntries();
+    const startIndex =
+      from === undefined
+        ? Math.max(0, entries.length - CONVERSATION_PAGE_ENTRIES)
+        : clampPageStart(from, 0, entries.length);
+    return buildConversationResponse(
+      entries.slice(startIndex),
+      entries.length,
+      startIndex,
+      statusFallbackState(session),
+      durationMs,
+    );
+  }
+
+  /**
+   * Run one conversation tail read per session at a time. Overlapping polls
+   * would otherwise both snapshot the same cached reader and the later write
+   * would clobber the earlier, regressing the offset and double-counting.
+   * Chaining on the prior read serializes them so the offset advances
+   * monotonically.
+   */
+  private readConversationSerialized(session: SessionRecord): Promise<{
+    entries: TranscriptEntry[];
+    state: SessionState;
+    totalEntries: number;
+    startIndex: number;
+  } | null> {
+    const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
+    const run = prior.then(async () => {
+      const result = await readClaudeConversationTail(
+        session.worktreePath,
+        this.conversationReaders.get(session.id),
+        session.agentSessionId,
+      );
+      if (!result) return null;
+      const { reader, hasMore: _hasMore, ...conversation } = result;
+      this.conversationReaders.set(session.id, reader);
+      return conversation;
+    });
+    this.conversationReadChain.set(
+      session.id,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
   }
 
   async getProjectSuggestions(
@@ -10970,6 +11091,12 @@ export class SessionService {
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     deleteSessionUserActions(this.config.dataDir, sessionId);
+    // Evict per-session in-memory reader caches so they do not grow unbounded
+    // for the life of the daemon as sessions are created and discarded.
+    this.conversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+    this.claudeJsonlReaders.delete(sessionId);
+    this.cursorJsonlReaders.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
