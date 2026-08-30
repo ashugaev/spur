@@ -4559,6 +4559,12 @@ describe("SessionDetail artifacts", () => {
       }
       return realSetItem.call(this, key, value);
     });
+    const uncaughtErrors: unknown[] = [];
+    const onWindowError = (event: ErrorEvent) => {
+      uncaughtErrors.push(event.error);
+      event.preventDefault();
+    };
+    window.addEventListener("error", onWindowError);
     mockThreeArtifacts();
 
     render(<SessionDetail sessionId="api-a1" />);
@@ -4573,6 +4579,11 @@ describe("SessionDetail artifacts", () => {
       expect(screen.getByRole("table")).toBeInTheDocument();
     });
 
+    // The write-side try/catch must swallow the localStorage throw: no
+    // uncaught error should escape the click handler.
+    expect(uncaughtErrors).toEqual([]);
+
+    window.removeEventListener("error", onWindowError);
     setItemSpy.mockRestore();
   });
 

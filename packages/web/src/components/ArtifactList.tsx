@@ -69,9 +69,8 @@ function sortIndicator(direction: ArtifactSortDirection): string {
   return direction === "asc" ? "↑" : "↓";
 }
 
-function isHtmlArtifact(artifact: SpurSessionArtifact): boolean {
-  return isHtmlMimeType(artifact.mimeType);
-}
+const ROW_ACTION_BUTTON_CLASS =
+  "inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] outline-none hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)]";
 
 interface ArtifactListProps {
   artifacts: readonly SpurSessionArtifact[];
@@ -145,16 +144,16 @@ export function ArtifactList({
               <div className="flex items-center gap-2">
                 <button
                   aria-label={`Preview ${artifact.name}`}
-                  className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] outline-none hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)]"
+                  className={ROW_ACTION_BUTTON_CLASS}
                   onClick={() => onPreview(artifact.id)}
                   type="button"
                 >
                   <ArtifactPreviewIcon className="h-3 w-3" />
                 </button>
-                {isHtmlArtifact(artifact) ? (
+                {isHtmlMimeType(artifact.mimeType) ? (
                   <a
                     aria-label={`Open ${artifact.name} in a new tab`}
-                    className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] outline-none hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)]"
+                    className={ROW_ACTION_BUTTON_CLASS}
                     href={hrefFor(artifact.id)}
                     rel="noreferrer"
                     target="_blank"
@@ -164,7 +163,7 @@ export function ArtifactList({
                 ) : null}
                 <a
                   aria-label={`Download ${artifact.name}`}
-                  className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] outline-none hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)]"
+                  className={ROW_ACTION_BUTTON_CLASS}
                   download={artifact.name}
                   href={hrefFor(artifact.id)}
                 >
