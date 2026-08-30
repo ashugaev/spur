@@ -139,8 +139,6 @@ Ports reserve/probe on the host at start, inject into the sidecar env only — p
 
 Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubuntu, nvm needs `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A remapped `$HOME` still resolves via `$SPUR_REAL_HOME` (from `/etc/passwd`).
 
-This repo configures three: `isolated-daemon` (`4320-4399`, `SPUR_RESERVED_PORT_DAEMON`), `isolated-ui` (`5600-5699`, `SPUR_RESERVED_PORT_UI`), and `landing` (`5700-5749`, `SPUR_RESERVED_PORT_LANDING`, serves `landing/` with live reload on loopback). Contributor workflow for each: [CONTRIBUTING.md](../CONTRIBUTING.md).
-
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
 
 ### Built-in MCP sidecars
