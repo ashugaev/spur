@@ -32,12 +32,7 @@ import {
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { hasRecentSessionUserAction } from "../user-action-log.js";
-import {
-  collectGitHubSignalsBatch,
-  hasTerminalSignal,
-  resolvePrSummary,
-  resolveTrackedBranch,
-} from "../review-providers/github.js";
+import { collectGitHubSignalsBatch, hasTerminalSignal } from "../review-providers/github.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -182,9 +177,6 @@ function parseResetDeadlineMs(text: string, nowMs: number): number | null {
   return null;
 }
 
-// How often to cheaply re-resolve a terminal session's branch to a new PR.
-const TERMINAL_RECHECK_INTERVAL_MS = 600_000;
-
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
   data: Omit<ReviewEventData, "signals">,
@@ -292,7 +284,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // defeating adaptivePoll source-wide. Past the tolerance, that session's failures
   // stop counting toward the hysteresis flag (still logged, just excluded from it).
   const consecutiveSessionPollErrors = new Map<string, number>();
-  const terminalRecheckAt = new Map<string, number>();
   let nextEligiblePollAtMs = 0;
   let lastCycleCiActive = false;
   let stopped = false;
@@ -402,25 +393,11 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         // must never mute it. Unbound sessions are always polled (the only local
         // authority for "the current PR" is `session.pr`; see decision 2).
         // The snapshot persists to disk and reloads at startup, so the skip is
-        // sticky across restarts.
-        //
-        // A long-lived session can open a NEW PR on the same branch after the
-        // bound one merged/closed, so the skip cannot be permanent: roughly every
-        // TERMINAL_RECHECK_INTERVAL_MS do ONE cheap branch->PR resolution, and when
-        // the branch now resolves to a different PR, poll that PR instead.
+        // sticky across restarts: a CLOSED PR later reopened won't be re-detected
+        // while the session stays bound to that PR number (no `reopened` lifecycle
+        // kind exists). MERGED is unconditionally terminal.
         const existing = snapshots.get(session.id);
         if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
-          const now = Date.now();
-          const last = terminalRecheckAt.get(session.id) ?? 0;
-          if (now - last < TERMINAL_RECHECK_INTERVAL_MS) continue;
-          terminalRecheckAt.set(session.id, now);
-          const branch = await resolveTrackedBranch(session.worktreePath, session.branch);
-          const currentPr = await resolvePrSummary(session.worktreePath, branch);
-          if (!currentPr || currentPr.number === session.pr.number) continue;
-          pollableSessions.push({
-            ...session,
-            pr: { number: currentPr.number, repo: currentPr.repo, url: currentPr.url },
-          });
           continue;
         }
         pollableSessions.push(session);
@@ -586,10 +563,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const sessionId of [...consecutiveSessionPollErrors.keys()]) {
         if (!currentSessionIds.has(sessionId)) consecutiveSessionPollErrors.delete(sessionId);
-      }
-
-      for (const sessionId of [...terminalRecheckAt.keys()]) {
-        if (!currentSessionIds.has(sessionId)) terminalRecheckAt.delete(sessionId);
       }
     } finally {
       polling = false;

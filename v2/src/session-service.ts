@@ -191,6 +191,7 @@ import {
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
+  readReviewSourceSnapshot,
   readTelegramBindings,
   readServiceInstance,
   readSession,
@@ -307,6 +308,7 @@ import {
   resolveSessionPrBinding,
   viewSessionPrState,
 } from "./session-pr.js";
+import { hasTerminalSignal } from "./review-providers/github.js";
 import {
   type PrLookupOutcome,
   cancelPendingPrLookups,
@@ -691,13 +693,28 @@ interface StoredImageAttachment {
   name: string;
 }
 
+/** Last git-resolved discovery target, so the cache can be read spawn-free. */
+interface PrLookupDiscoveryMemo {
+  branch: string;
+  slug: PrRepoSlug | null;
+  resolvedAt: number;
+}
+
 interface PrCheckTracker {
   waitingChecks: number;
   lastState: SessionState | null;
   lastCheckAt: number;
   found: boolean;
-  /** Last git-resolved discovery target, so the cache can be read spawn-free. */
-  discovery?: { branch: string; slug: PrRepoSlug | null; resolvedAt: number };
+  discovery?: PrLookupDiscoveryMemo;
+}
+
+// Not merged into PrCheckTracker: the rebind path never tracks a waiting
+// backoff or a state-changed reset (there is no "state" to wait on, and once
+// rebound the session is done), so waitingChecks/lastState/found would sit
+// unused on every rebind tracker.
+interface PrRebindTracker {
+  lastCheckAt: number;
+  discovery?: PrLookupDiscoveryMemo;
 }
 
 export class SessionResourceNotFoundError extends Error {
@@ -2420,6 +2437,7 @@ export class SessionService {
   private stateSubscriptionIndexReady = false;
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
+  private readonly prRebindTrackers = new Map<string, PrRebindTracker>();
   private readonly prCheckRuns = new Set<Promise<void>>();
   /** Git wall clock spent by the current sweep resolving PR discovery targets. */
   private prCheckGitSpentMs = 0;
@@ -4780,7 +4798,13 @@ export class SessionService {
             allSessions,
             sidecarProcSnapshot,
           );
-          await this.checkPrForSession(session, view.state);
+          // Read once and shared: PR binding is workspace-owned, and the two
+          // checks below are mutually exclusive on it (one runs only absent a
+          // binding, the other only present), so one read per sweep tick
+          // covers both instead of resolving the same workspace state twice.
+          const workspace = resolveWorkspaceState(this.config.dataDir, session);
+          await this.checkPrForSession(session, view.state, workspace);
+          await this.checkRebindForSession(session, workspace);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
@@ -4925,6 +4949,11 @@ export class SessionService {
     for (const sessionId of this.prCheckTrackers.keys()) {
       if (!liveIds.has(sessionId)) {
         this.prCheckTrackers.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.prRebindTrackers.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.prRebindTrackers.delete(sessionId);
       }
     }
     for (const sessionId of this.usageMenuConfirmedAt.keys()) {
@@ -5400,17 +5429,122 @@ export class SessionService {
     }
   }
 
+  /** Gets a session-keyed tracker, creating and registering a default on first use. */
+  private getOrCreateTracker<T>(map: Map<string, T>, sessionId: string, makeDefault: () => T): T {
+    const existing = map.get(sessionId);
+    if (existing) {
+      return existing;
+    }
+    const created = makeDefault();
+    map.set(sessionId, created);
+    return created;
+  }
+
+  /**
+   * First half of the shared PR-lookup cadence: the per-status throttle plus
+   * the persisted-cache memo fast-path. Shared verbatim between
+   * `checkPrForSession` and `checkRebindForSession` — both gate the same
+   * git-costing work behind the same cadence, and a branch whose lookup is
+   * not due must cost nothing at all, before either caller's own extra
+   * checks run. Returns false when the caller should return immediately.
+   */
+  private isPrRecheckDue(
+    tracker: { lastCheckAt: number; discovery?: PrLookupDiscoveryMemo },
+    live: boolean,
+    capMs: number,
+  ): boolean {
+    if (
+      Date.now() - tracker.lastCheckAt <
+      (live ? PR_CHECK_THROTTLE_MS : PR_CHECK_IDLE_THROTTLE_MS)
+    ) {
+      return false;
+    }
+    const memo = tracker.discovery;
+    if (
+      memo &&
+      Date.now() - memo.resolvedAt < PR_DISCOVERY_MEMO_TTL_MS &&
+      memo.slug &&
+      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, memo.slug, memo.branch), capMs)
+    ) {
+      tracker.lastCheckAt = Date.now();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Second half of the shared PR-lookup cadence: the per-sweep git budget
+   * gate, the git resolution of the discovery branch/repo slug (memoized on
+   * the tracker), and the persisted due-check against that target. Shared
+   * verbatim between `checkPrForSession` and `checkRebindForSession`, which
+   * both draw from the same `prCheckGitSpentMs` budget for one sweep.
+   * Returns null when the caller should return without dispatching a lookup.
+   */
+  private async resolveDueLookupTarget(
+    session: SessionRecord,
+    worktreePath: string,
+    tracker: { lastCheckAt: number; discovery?: PrLookupDiscoveryMemo },
+    capMs: number,
+  ): Promise<{ discoveryBranch: string; slug: PrRepoSlug | null } | null> {
+    if (this.prCheckGitSpentMs >= PR_CHECK_GIT_BUDGET_MS) {
+      return null;
+    }
+    const gitStartedAt = Date.now();
+    const discoveryBranch = await resolvePrDiscoveryBranch(worktreePath, session.branch);
+    // git only, no GitHub budget, and memoized per worktree.
+    const slug = await resolvePrLookupRepo(worktreePath);
+    this.prCheckGitSpentMs += Date.now() - gitStartedAt;
+    tracker.discovery = { branch: discoveryBranch, slug, resolvedAt: Date.now() };
+    tracker.lastCheckAt = Date.now();
+
+    if (
+      slug &&
+      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, slug, discoveryBranch), capMs)
+    ) {
+      return null;
+    }
+    return { discoveryBranch, slug };
+  }
+
+  /**
+   * Registers a fire-and-forget PR lookup run so teardown can drain it — an
+   * unawaited `gh` call outliving its caller lands on whatever runs next.
+   * Shared between `checkPrForSession` and `checkRebindForSession`; only the
+   * failure message text differs between the two callers.
+   */
+  private dispatchPrLookupRun(
+    run: Promise<void>,
+    session: SessionRecord,
+    describeFailure: (message: string) => string,
+  ): void {
+    const tracked = run.catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.pr_auto_detect.failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: describeFailure(message),
+      });
+    });
+    this.prCheckRuns.add(tracked);
+    void tracked.finally(() => this.prCheckRuns.delete(tracked));
+  }
+
   /**
    * Resolves once this session's lookup is registered with the batch queue (or
    * ruled out), not once it has an answer. The caller awaits this per session
    * and then flushes the queue, so the whole sweep leaves as one query per
    * repo. The answer itself lands through the fire-and-forget run.
    */
-  private async checkPrForSession(session: SessionRecord, state: SessionState): Promise<void> {
+  private async checkPrForSession(
+    session: SessionRecord,
+    state: SessionState,
+    workspace: WorkspaceState,
+  ): Promise<void> {
     // PR binding is workspace-owned: skip once any desk member already has
     // one. resolveWorkspaceState is the dual-read (workspace file, else the
     // legacy owning-record fallback) that replaces a plain anchor-record read.
-    if (resolveWorkspaceState(this.config.dataDir, session).pr) {
+    if (workspace.pr) {
       return;
     }
     // Skip terminal states
@@ -5428,15 +5562,12 @@ export class SessionService {
       return;
     }
 
-    const tracker = this.prCheckTrackers.get(session.id) ?? {
+    const tracker = this.getOrCreateTracker(this.prCheckTrackers, session.id, () => ({
       waitingChecks: 0,
       lastState: null,
       lastCheckAt: 0,
       found: false,
-    };
-    if (!this.prCheckTrackers.has(session.id)) {
-      this.prCheckTrackers.set(session.id, tracker);
-    }
+    }));
 
     // Already found
     if (tracker.found) {
@@ -5459,66 +5590,155 @@ export class SessionService {
     // other status drops to the idle cadence, which is what the bulk of the
     // eligible set is.
     const live = session.status === "running";
-    if (
-      Date.now() - tracker.lastCheckAt <
-      (live ? PR_CHECK_THROTTLE_MS : PR_CHECK_IDLE_THROTTLE_MS)
-    ) {
-      return;
-    }
     const capMs = live ? PR_LOOKUP_LIVE_CAP_MS : PR_LOOKUP_IDLE_CAP_MS;
-
-    // Persisted cache before any subprocess: a branch whose lookup is not due
-    // must cost nothing at all, or the graphql burst is traded for a git one.
-    const memo = tracker.discovery;
-    if (
-      memo &&
-      Date.now() - memo.resolvedAt < PR_DISCOVERY_MEMO_TTL_MS &&
-      memo.slug &&
-      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, memo.slug, memo.branch), capMs)
-    ) {
-      tracker.lastCheckAt = Date.now();
+    if (!this.isPrRecheckDue(tracker, live, capMs)) {
       return;
     }
 
     // Past here the sweep pays for git. Out of budget means "next sweep", with
     // the throttle deliberately left untouched.
-    if (this.prCheckGitSpentMs >= PR_CHECK_GIT_BUDGET_MS) {
+    const target = await this.resolveDueLookupTarget(session, session.worktreePath, tracker, capMs);
+    if (!target) {
       return;
     }
-    const gitStartedAt = Date.now();
-    const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
-    // git only, no GitHub budget, and memoized per worktree.
-    const slug = await resolvePrLookupRepo(session.worktreePath);
-    this.prCheckGitSpentMs += Date.now() - gitStartedAt;
-    tracker.discovery = { branch: discoveryBranch, slug, resolvedAt: Date.now() };
-
-    tracker.lastCheckAt = Date.now();
-    if (
-      slug &&
-      !isPrLookupDue(readPrLookupEntry(this.config.dataDir, slug, discoveryBranch), capMs)
-    ) {
-      return;
-    }
+    const { discoveryBranch, slug } = target;
     // Counted here, not above: the waiting limit exists to stop repeated
     // lookups, so an attempt that performed none must not burn a slot.
     if (state === "waiting") {
       tracker.waitingChecks += 1;
     }
 
-    // Fire and forget, but tracked so teardown can drain it — an unawaited
-    // `gh` call outliving its caller lands on whatever runs next. The queue
-    // registration inside is synchronous, so the caller's flush sees it.
-    const run = this.runPrCheck(session, discoveryBranch, slug, capMs).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.pr_auto_detect.failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `PR auto-detect failed for ${session.id}: ${message}`,
-      });
+    this.dispatchPrLookupRun(
+      this.runPrCheck(session, discoveryBranch, slug, capMs),
+      session,
+      (message) => `PR auto-detect failed for ${session.id}: ${message}`,
+    );
+  }
+
+  /**
+   * A terminal-bound session (its bound PR merged/closed) is skipped forever by
+   * the GitHub review source's `hasTerminalSignal` filter — including a NEW PR
+   * later opened on the same branch. This is the counterpart to
+   * `checkPrForSession`: it runs only once a workspace already has a PR
+   * binding (`checkPrForSession` runs only when it does not — the two are
+   * mutually exclusive), and rebinds the workspace to the new PR once the
+   * bound one is confirmed terminal and the branch now resolves elsewhere.
+   */
+  private async checkRebindForSession(
+    session: SessionRecord,
+    workspace: WorkspaceState,
+  ): Promise<void> {
+    // PR binding is workspace-owned; see checkPrForSession's own comment.
+    const boundPr = workspace.pr;
+    if (!boundPr) {
+      return;
+    }
+    if (!session.worktree || !session.worktreePath || !existsSync(session.worktreePath)) {
+      return;
+    }
+
+    const tracker = this.getOrCreateTracker(this.prRebindTrackers, session.id, () => ({
+      lastCheckAt: 0,
+    }));
+
+    const live = session.status === "running";
+    const capMs = live ? PR_LOOKUP_LIVE_CAP_MS : PR_LOOKUP_IDLE_CAP_MS;
+    if (!this.isPrRecheckDue(tracker, live, capMs)) {
+      return;
+    }
+
+    // Only bother once the bound PR is confirmed terminal by the review
+    // source's own snapshot — this is what makes the rebind additive rather
+    // than a relaxation of the discovery guard. This check sits between the
+    // memo fast-path and the git budget gate deliberately: it is cheap (no
+    // subprocess) and must run before the sweep pays for git.
+    let boundIsTerminal = false;
+    for (const sourceId of githubReplaySourceIds(this.config, session.project)) {
+      const snapshot = readReviewSourceSnapshot(
+        this.config.dataDir,
+        "github",
+        session.project,
+        sourceId,
+        session.id,
+      );
+      if (snapshot && hasTerminalSignal(snapshot.signals, boundPr.number)) {
+        boundIsTerminal = true;
+        break;
+      }
+    }
+    if (!boundIsTerminal) {
+      tracker.lastCheckAt = Date.now();
+      return;
+    }
+
+    // Past here the sweep pays for git, against the same per-sweep budget
+    // checkPrForSession draws from.
+    const target = await this.resolveDueLookupTarget(session, session.worktreePath, tracker, capMs);
+    // Unlike checkPrForSession, a rebind has no non-GitHub fallback provider
+    // path: without a resolved repo slug there is nothing to rebind to.
+    if (!target?.slug) {
+      return;
+    }
+    const { discoveryBranch, slug } = target;
+
+    this.dispatchPrLookupRun(
+      this.runRebindCheck(session, discoveryBranch, slug, capMs, boundPr.number),
+      session,
+      (message) => `PR rebind check failed for ${session.id}: ${message}`,
+    );
+  }
+
+  /**
+   * Settles the queued lookup for a rebind candidate and, only on a genuinely
+   * different open PR, rewrites the workspace's binding. Goes through the same
+   * `resolveQueuedPrLookup` claim boundary `checkPrForSession` uses, so the
+   * cross-poller dedupe and the negative-cache write stay owned by
+   * `claimPollPrLookup` — this method never mutates the pr-lookup cache
+   * itself.
+   */
+  private async runRebindCheck(
+    session: SessionRecord,
+    discoveryBranch: string,
+    slug: PrRepoSlug,
+    capMs: number,
+    boundPrNumber: number,
+  ): Promise<void> {
+    const outcome = await this.resolveQueuedPrLookup(
+      slug,
+      discoveryBranch,
+      session.worktreePath,
+      capMs,
+    );
+    if (outcome.status !== "found" || outcome.pr.number === boundPrNumber) {
+      return;
+    }
+    const binding = prLookupBindingOf(outcome.pr);
+    if (!binding) {
+      return;
+    }
+    const anchorId = workspaceIdOf(session);
+    const current = readSession(this.config.dataDir, anchorId);
+    if (!current?.worktreePath) {
+      return;
+    }
+    // Re-read right before writing: bail if the bound PR changed underneath
+    // this check (another rebind, or the session's own discovery, already
+    // landed a different binding).
+    const resolved = resolveWorkspaceState(this.config.dataDir, current);
+    if (resolved.pr?.number !== boundPrNumber) {
+      return;
+    }
+    const nextState: WorkspaceState = {
+      ...(resolved.slots ? { slots: resolved.slots } : {}),
+      pr: binding,
+    };
+    this.writeWorkspaceStateWithLegacyMirror(current, nextState);
+    this.logEvent("session.pr_auto_detect.rebound", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Rebound ${session.id} from terminal PR #${boundPrNumber} to ${binding.url}`,
     });
-    this.prCheckRuns.add(run);
-    void run.finally(() => this.prCheckRuns.delete(run));
   }
 
   /**
