@@ -4537,6 +4537,69 @@ describe("SessionDetail load state", () => {
     expect(screen.queryByRole("heading", { name: "Stale first session" })).not.toBeInTheDocument();
   });
 
+  it("ignores a stale core response after navigation", async () => {
+    let resolveFirstCore: ((response: Response) => void) | null = null;
+    const firstCoreResponse = new Promise<Response>((resolve) => {
+      resolveFirstCore = resolve;
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/core") {
+        return firstCoreResponse;
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return Promise.resolve(
+          new Response(JSON.stringify(sessionFixture({ id: "api-a1", prompt: "First session" })), {
+            status: 200,
+          }),
+        );
+      }
+
+      if (url === "/api/sessions/api-b2" || url === "/api/sessions/api-b2/core") {
+        return Promise.resolve(
+          new Response(JSON.stringify(sessionFixture({ id: "api-b2", prompt: "Second session" })), {
+            status: 200,
+          }),
+        );
+      }
+
+      if (
+        url === "/api/sessions/api-a1/conversation" ||
+        url === "/api/sessions/api-b2/conversation"
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify(conversationFixture()), { status: 200 }),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+    rerender(<SessionDetail sessionId="api-b2" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      if (!resolveFirstCore) throw new Error("Missing api-a1 core resolver");
+      resolveFirstCore(
+        new Response(
+          JSON.stringify(sessionFixture({ id: "api-a1", prompt: "Stale core session" })),
+          { status: 200 },
+        ),
+      );
+      await firstCoreResponse;
+    });
+
+    expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Stale core session" })).not.toBeInTheDocument();
+  });
+
   it("dismisses a load-error toast after a successful reload", async () => {
     let sessionRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -4607,7 +4670,9 @@ describe("SessionDetail load state", () => {
 
       if (url === "/api/sessions/api-a1/conversation") {
         conversationRequests += 1;
-        return Promise.resolve(new Response(JSON.stringify(conversationFixture()), { status: 200 }));
+        return Promise.resolve(
+          new Response(JSON.stringify(conversationFixture()), { status: 200 }),
+        );
       }
 
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));

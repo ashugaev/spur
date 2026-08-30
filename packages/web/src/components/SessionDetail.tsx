@@ -1591,6 +1591,19 @@ async function readSidecarPortConflict(
   }
 }
 
+// A response is stale once a newer request for the same loader has started,
+// or once navigation has moved on to a different session entirely.
+function isStaleRequest(
+  requestId: number,
+  latestRequestIdRef: { current: number },
+  currentSessionIdRef: { current: string },
+  requestedSessionId: string,
+): boolean {
+  return (
+    requestId !== latestRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId
+  );
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
@@ -1742,20 +1755,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
+      if (isStaleRequest(requestId, loadRequestIdRef, currentSessionIdRef, requestedSessionId)) {
         return;
       }
       if (!response.ok) {
         throw new Error(await readApiErrorMessage(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
+      if (isStaleRequest(requestId, loadRequestIdRef, currentSessionIdRef, requestedSessionId)) {
         return;
       }
       const nextSession = toDashboardSession(payload);
@@ -1763,10 +1770,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setError(null);
       dismissLoadErrorToast();
     } catch (loadError) {
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
+      if (isStaleRequest(requestId, loadRequestIdRef, currentSessionIdRef, requestedSessionId)) {
         return;
       }
       const message = errorMessage(loadError, "Failed to load session");
@@ -1792,8 +1796,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         cache: "no-store",
       });
       if (
-        requestId !== coreLoadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId ||
+        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId) ||
         sessionRef.current?.id === requestedSessionId
       ) {
         return;
@@ -1801,8 +1804,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (!response.ok) return;
       const core = (await response.json()) as SpurSessionView;
       if (
-        requestId !== coreLoadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId ||
+        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId) ||
         sessionRef.current?.id === requestedSessionId
       ) {
         return;
