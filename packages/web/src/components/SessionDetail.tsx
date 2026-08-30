@@ -1796,20 +1796,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         cache: "no-store",
       });
       if (
-        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId) ||
-        sessionRef.current?.id === requestedSessionId
+        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId)
       ) {
         return;
       }
       if (!response.ok) return;
       const core = (await response.json()) as SpurSessionView;
       if (
-        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId) ||
-        sessionRef.current?.id === requestedSessionId
+        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId)
       ) {
         return;
       }
-      setSession(toDashboardSession(core));
+      // Functional update, not a sessionRef read-then-setSession: sessionRef
+      // is written by a passive effect and can lag a setSession that already
+      // committed the full enriched session for this id. Reading current
+      // state here instead of the ref closes that one-render clobber window.
+      setSession((current) =>
+        current?.id === requestedSessionId ? current : toDashboardSession(core),
+      );
     } catch {
       return;
     }
