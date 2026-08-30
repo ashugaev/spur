@@ -18,6 +18,8 @@ Run from source without a global install: `node v2/dist/cli.js <cmd>` after `pnp
 
 For a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`, use `scripts/spur-isolated-daemon.sh`. `isolated-daemon` and `isolated-ui` project sidecars start an isolated Spur daemon and the web UI against it; new isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks, and `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs.
 
+The `landing` sidecar (`scripts/spur-landing.sh`) serves `landing/` with live reload for marketing-page work: static files plus an SSE watch that reloads the browser on change, injected at serve time so the committed HTML stays clean. It reserves one port from `5700-5749` as `SPUR_RESERVED_PORT_LANDING` and binds loopback; set `LANDING_HOST` to widen that. The daemon resolves sidecars from the instance's own `spur.yaml`, so a session whose daemon predates this entry cannot start it by name — run `node scripts/landing-dev-server.mjs landing` directly in that case. Point the published origin at a real domain with `node scripts/landing-set-origin.mjs https://<host>`, which rewrites canonical, Open Graph, JSON-LD, `robots.txt` and `sitemap.xml` together.
+
 ## PR Checks
 
 Before opening or updating a PR:

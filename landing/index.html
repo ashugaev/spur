@@ -123,7 +123,7 @@
                 "name": "Which operating systems work?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Ubuntu is the tested target, bare metal or a VM; verified on 24.04 with 2 GB RAM. macOS and Windows are partial — expect to sort out host differences yourself."
+                  "text": "Ubuntu is the tested target, bare metal or a VM; verified on 24.04 down to a ~1 GB box, 2 GB recommended. macOS and Windows are partial — expect to sort out host differences yourself."
                 }
               },
               {
@@ -147,7 +147,7 @@
                 "name": "What can trigger an agent automatically?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Seven pollers: cron, GitHub, GitHub CI, GitLab, Sentry, systemd service logs, Telegram. A trigger spawns a session or sends a message into a live one."
+                  "text": "Six pollers: cron, GitHub, GitHub CI, GitLab, Sentry, Telegram. A trigger spawns a session or sends a message into a live one."
                 }
               },
               {
@@ -605,6 +605,10 @@
       }
       .install-grid .reach li {
         min-width: 0;
+      }
+      /* Confined to the code chips: on the row it inherits and breaks plain
+         words mid-letter at 375px. */
+      .install-grid .reach code {
         overflow-wrap: anywhere;
       }
       .install-note {
@@ -1909,7 +1913,7 @@
           <div class="mock rv">
             <div class="mock-bar">
               <span>spur &mdash; dashboard</span>
-              <span style="margin-left: auto" id="clock">2 running &middot; 1 needs input</span>
+              <span style="margin-left: auto" id="clock">1 running &middot; 1 needs input</span>
             </div>
             <div class="mock-body">
               <div class="rows" id="rows">
@@ -1934,7 +1938,19 @@
                   ><span class="ag">claude</span><span class="br">feature/landing-page</span>
                 </div>
               </div>
-              <div class="term" id="term" aria-hidden="true"></div>
+              <div class="term" id="term" aria-hidden="true">
+                <span class="v">$</span> spur spawn backend-api "Fix flaky auth test" --worktree<br />
+                <span class="g">✓</span> worktree&nbsp; feature/flaky-auth-test<br />
+                <span class="g">✓</span> tmux&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ses_a41f<br />
+                <span class="b">→</span> claude&nbsp;&nbsp;&nbsp; working<br /><br />
+                <span class="v">$</span> spur list<br />
+                &nbsp; ses_a41f&nbsp; <span class="b">working</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                claude&nbsp; feature/flaky-auth-test<br />
+                &nbsp; ses_9c02&nbsp; <span class="y">needs input</span>&nbsp; codex&nbsp;&nbsp;
+                feature/todo-ledger<br /><br />
+                <span class="v">$</span> spur send ses_9c02 "use the queue, not a retry"<br />
+                <span class="g">✓</span> delivered
+              </div>
             </div>
           </div>
         </section>
@@ -1971,13 +1987,12 @@
           <div class="pipe rv">
             <article class="pipe-col">
               <div class="step">01 &mdash; Source</div>
-              <h3>Seven pollers</h3>
+              <h3>Six pollers</h3>
               <p>Turn the outside world into events.</p>
               <div class="chips">
                 <span class="chip">cron</span><span class="chip">github</span
                 ><span class="chip">github-ci</span><span class="chip">gitlab</span>
-                <span class="chip">sentry</span><span class="chip">service logs</span
-                ><span class="chip">telegram</span>
+                <span class="chip">sentry</span><span class="chip">telegram</span>
               </div>
               <span class="flow"></span>
             </article>
@@ -2205,8 +2220,8 @@
               </svg>
               <h3>Wake &amp; subscribe</h3>
               <p>
-                <code>wake --in 30m</code>, or every morning at 09:00. <code>subscribe</code> pings
-                you the moment another session hits <code>needs_input</code>.
+                <code>wake --in 30m</code>, or every morning at 09:00. <code>subscribe</code> makes
+                one session wake another the moment it hits <code>needs_input</code>.
               </p>
             </article>
             <article class="cell">
@@ -2224,8 +2239,8 @@
               </svg>
               <h3>Rate-limit failover</h3>
               <p>
-                Store several Claude logins. A rate-limited session swaps credentials in place. No
-                kill, no relaunch.
+                Store several Claude logins and switch a session between them in place, no kill and
+                no relaunch. Opt in to automatic swaps on rate limit.
               </p>
             </article>
             <article class="cell">
@@ -2268,8 +2283,8 @@
 <span class="c"># queue a message for later, or on a schedule</span>
 <span class="p">$</span> spur wake ses_123 <span class="f">--in</span> 30m "check CI"
 
-<span class="c"># get pinged when another session stalls</span>
-<span class="p">$</span> spur subscribe ses_123 <span class="f">--state</span> needs_input <span class="f">--message</span> "target needs a decision"
+<span class="c"># have one session wake another when it stalls</span>
+<span class="p">$</span> spur subscribe ses_123 <span class="f">--session</span> ses_456 <span class="f">--state</span> needs_input <span class="f">--message</span> "target needs a decision"
 
 <span class="c"># check the host</span>
 <span class="p">$</span> spur doctor</pre>
@@ -2341,7 +2356,10 @@
                     <i class="c-attention"></i>macOS and Windows: partial, expect to sort out host
                     differences
                   </li>
-                  <li><i class="c-working"></i>Node 20+, tmux and git on the box</li>
+                  <li>
+                    <i class="c-working"></i>Node 20.19+, 22.13+ or 24+, plus tmux and git on the
+                    box
+                  </li>
                   <li><i class="c-brand"></i>Your agent CLIs installed and already logged in</li>
                 </ul>
               </div>
@@ -2381,8 +2399,9 @@
             <details>
               <summary>Which operating systems work?<span class="pm">+</span></summary>
               <div class="ans">
-                Ubuntu is the tested target, bare metal or a VM; verified on 24.04 with 2 GB RAM.
-                macOS and Windows are partial — expect to sort out host differences yourself.
+                Ubuntu is the tested target, bare metal or a VM; verified on 24.04 down to a ~1 GB
+                box, 2 GB recommended. macOS and Windows are partial — expect to sort out host
+                differences yourself.
               </div>
             </details>
             <details>
@@ -2402,8 +2421,8 @@
             <details>
               <summary>What can trigger an agent automatically?<span class="pm">+</span></summary>
               <div class="ans">
-                Seven pollers: cron, GitHub, GitHub CI, GitLab, Sentry, systemd service logs,
-                Telegram. A trigger spawns a session or sends a message into a live one.
+                Six pollers: cron, GitHub, GitHub CI, GitLab, Sentry, Telegram. A trigger spawns a
+                session or sends a message into a live one.
               </div>
             </details>
             <details>
@@ -2467,25 +2486,71 @@
           { passive: true },
         );
 
-        /* reveal */
-        var io = new IntersectionObserver(
-          function (es) {
-            es.forEach(function (e) {
-              if (e.isIntersecting) {
-                e.target.classList.add("in");
-                io.unobserve(e.target);
-              }
-            });
-          },
-          { threshold: 0.12, rootMargin: "0px 0px -8% 0px" },
-        );
-        document.querySelectorAll(".rv").forEach(function (el, i) {
-          el.style.transitionDelay = (i % 3) * 60 + "ms";
-          io.observe(el);
-        });
+        /* reveal — without IntersectionObserver everything stays revealed
+           rather than stuck at opacity 0 behind a thrown script */
+        var hasIO = typeof IntersectionObserver === "function";
+        if (hasIO) {
+          var io = new IntersectionObserver(
+            function (es) {
+              es.forEach(function (e) {
+                if (e.isIntersecting) {
+                  e.target.classList.add("in");
+                  io.unobserve(e.target);
+                }
+              });
+            },
+            { threshold: 0.12, rootMargin: "0px 0px -8% 0px" },
+          );
+          document.querySelectorAll(".rv").forEach(function (el, i) {
+            el.style.transitionDelay = (i % 3) * 60 + "ms";
+            io.observe(el);
+          });
+        } else {
+          document.querySelectorAll(".rv").forEach(function (el) {
+            el.classList.add("in");
+          });
+        }
 
         /* copy */
         document.querySelectorAll(".copy").forEach(function (btn) {
+          var label = btn.querySelector(".copy-t") || btn;
+          // Captured once: reading it per click pins the button at "Copied"
+          // when clicks overlap the restore timer.
+          var idle = label.textContent;
+          var restore = 0;
+
+          function say(word) {
+            label.textContent = word;
+          }
+          function settle() {
+            clearTimeout(restore);
+            restore = setTimeout(function () {
+              say(idle);
+              btn.classList.remove("done");
+            }, 1600);
+          }
+          function ok() {
+            say("Copied");
+            btn.classList.add("done");
+            btn.setAttribute("aria-live", "polite");
+            settle();
+          }
+          function selectSource(target) {
+            // Last resort: put the text under the user's cursor so "select it"
+            // is true rather than an instruction with nothing selected.
+            try {
+              var sel = getSelection();
+              var range = document.createRange();
+              range.selectNodeContents(target);
+              sel.removeAllRanges();
+              sel.addRange(range);
+            } catch (e) {
+              /* selection unavailable; the label still tells the user */
+            }
+            say("Select it");
+            settle();
+          }
+
           btn.addEventListener("click", function () {
             var target = document.querySelector(btn.dataset.copy);
             if (!target) return;
@@ -2497,45 +2562,38 @@
                   })
                   .join("\n")
               : target.textContent.replace(/\s+/g, " ").trim();
-            var label = btn.querySelector(".copy-t") || btn;
-            var idle = label.textContent;
-            function say(word) {
-              label.textContent = word;
+
+            function legacyCopy() {
+              var ta = document.createElement("textarea");
+              ta.value = text;
+              ta.setAttribute("readonly", "");
+              ta.style.cssText = "position:fixed;top:-9999px";
+              document.body.appendChild(ta);
+              ta.select();
+              var copied = false;
+              try {
+                copied = document.execCommand("copy");
+              } catch (e) {
+                copied = false;
+              }
+              document.body.removeChild(ta);
+              if (copied) ok();
+              else selectSource(target);
             }
-            function ok() {
-              say("Copied");
-              btn.classList.add("done");
-              btn.setAttribute("aria-live", "polite");
-              setTimeout(function () {
-                say(idle);
-                btn.classList.remove("done");
-              }, 1600);
-            }
-            function fail() {
-              say("Select it");
-            }
+
             if (navigator.clipboard && isSecureContext) {
-              navigator.clipboard.writeText(text).then(ok, fail);
+              navigator.clipboard.writeText(text).then(ok, legacyCopy);
               return;
             }
-            var ta = document.createElement("textarea");
-            ta.value = text;
-            ta.setAttribute("readonly", "");
-            ta.style.cssText = "position:fixed;top:-9999px";
-            document.body.appendChild(ta);
-            ta.select();
-            try {
-              document.execCommand("copy");
-              ok();
-            } catch (e) {
-              fail();
-            }
-            document.body.removeChild(ta);
+            legacyCopy();
           });
         });
 
         /* terminal drives the session rows */
         var term = document.getElementById("term");
+        // Ships with a static transcript so the panel is not a blank 252px box
+        // without JS; the scripted version replaces it.
+        term.innerHTML = "";
         var dots = document.querySelectorAll("#rows .sd");
         var clock = document.getElementById("clock");
         var STATES = ["working", "ready", "attention", "idle"];
@@ -2599,9 +2657,14 @@
 
           var probe = document.createElement("div");
           var li = 0,
-            ci = 0;
+            ci = 0,
+            typing = false;
 
           function tick() {
+            if (!termAwake()) {
+              typing = false;
+              return;
+            }
             if (li >= steps.length) {
               setTimeout(reset, 4200);
               return;
@@ -2629,19 +2692,34 @@
             ci = 0;
             setRow(0, "idle");
             setRow(1, "attention");
-            tick();
+            if (termAwake()) tick();
+            else typing = false;
           }
 
-          var tio = new IntersectionObserver(
-            function (es) {
-              if (es[0].isIntersecting) {
-                tio.disconnect();
-                tick();
-              }
-            },
-            { threshold: 0.3 },
-          );
-          tio.observe(term);
+          // Typing keeps running only while the panel is on screen and the tab
+          // is visible; without this the setTimeout chain re-types forever.
+          var termVisible = !hasIO;
+          function termAwake() {
+            return termVisible && !document.hidden;
+          }
+          function termWake() {
+            if (termAwake() && !typing) {
+              typing = true;
+              tick();
+            }
+          }
+          document.addEventListener("visibilitychange", termWake);
+          if (hasIO) {
+            new IntersectionObserver(
+              function (es) {
+                termVisible = es[0].isIntersecting;
+                termWake();
+              },
+              { threshold: 0.3 },
+            ).observe(term);
+          } else {
+            termWake();
+          }
         }
 
         /* hero fan-out: one scripted round of fleet work */
@@ -2789,18 +2867,29 @@
             token++;
           }
 
-          document.addEventListener("visibilitychange", function () {
-            if (document.hidden) stop();
-            else if (!alive) loop();
-          });
-          new IntersectionObserver(
-            function (es) {
-              if (es[0].isIntersecting) {
-                if (!alive) loop();
-              } else stop();
-            },
-            { threshold: 0 },
-          ).observe(fanout);
+          // Resuming needs both conditions. Keying only off visibility
+          // restarted the round while the diagram was scrolled away, and no
+          // intersection event was left to stop it again.
+          var onScreen = !hasIO;
+          function maybeRun() {
+            if (onScreen && !document.hidden) {
+              if (!alive) loop();
+            } else {
+              stop();
+            }
+          }
+          document.addEventListener("visibilitychange", maybeRun);
+          if (hasIO) {
+            new IntersectionObserver(
+              function (es) {
+                onScreen = es[0].isIntersecting;
+                maybeRun();
+              },
+              { threshold: 0 },
+            ).observe(fanout);
+          } else {
+            maybeRun();
+          }
         })();
 
         /* background: a scattered crosshair field that reacts to scroll */
@@ -2850,6 +2939,9 @@
         }
 
         function size() {
+          // Resample: a zoom change or a move to another monitor changes dpr,
+          // and the backing store has to follow it.
+          dpr = Math.min(devicePixelRatio || 1, 2);
           W = cv.width = innerWidth * dpr;
           H = cv.height = innerHeight * dpr;
           cv.style.width = innerWidth + "px";
@@ -2884,7 +2976,13 @@
         }
 
         size();
-        addEventListener("resize", size);
+        // Debounced: reallocating a ~33MB backing store on every resize event
+        // is what makes a window drag crawl.
+        var resizeTimer = 0;
+        addEventListener("resize", function () {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(size, 120);
+        });
 
         if (!reduce) {
           if (fine) {
@@ -2893,6 +2991,16 @@
               function (e) {
                 mx = e.clientX * dpr;
                 my = e.clientY * dpr;
+                wake();
+              },
+              { passive: true },
+            );
+          } else {
+            // Touch has no pointermove to wake on; a tap still nudges the field.
+            addEventListener(
+              "touchstart",
+              function () {
+                energy = Math.min(1, energy + 0.25);
                 wake();
               },
               { passive: true },
@@ -2934,8 +3042,15 @@
 
           document.addEventListener("visibilitychange", function () {
             if (document.hidden) {
+              // Settle to rest before parking, otherwise the field freezes at
+              // whatever brightness the last frame had and stays there.
               cancelAnimationFrame(raf);
               live = false;
+              energy = 0;
+              paint();
+            } else {
+              lastY = window.scrollY || 0;
+              wake();
             }
           });
         }

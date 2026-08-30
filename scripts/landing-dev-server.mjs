@@ -9,7 +9,7 @@ import { clearTimeout, setTimeout } from "node:timers";
 
 const root = resolve(process.argv[2] ?? "landing");
 const port = Number(process.env.SPUR_RESERVED_PORT_LANDING ?? process.argv[3] ?? 5700);
-const host = process.env.LANDING_HOST ?? "0.0.0.0";
+const host = process.env.LANDING_HOST ?? "127.0.0.1";
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -46,10 +46,17 @@ watch(root, { recursive: true }, () => {
 });
 
 function resolveWithinRoot(urlPath) {
-  const decoded = decodeURIComponent(urlPath.split("?")[0]);
+  let decoded;
+  try {
+    // A malformed escape (GET /%) throws URIError; without this the rejection
+    // is unhandled inside the async handler and the process exits.
+    decoded = decodeURIComponent(urlPath.split("?")[0]);
+  } catch {
+    return { bad: true };
+  }
   const target = resolve(join(root, decoded === "/" ? "index.html" : decoded));
   if (target !== root && !target.startsWith(root + sep)) return null;
-  return target;
+  return { path: target };
 }
 
 const server = createServer(async (req, res) => {
@@ -65,13 +72,17 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  const target = resolveWithinRoot(req.url ?? "/");
-  if (!target) {
+  const resolved = resolveWithinRoot(req.url ?? "/");
+  if (resolved?.bad) {
+    res.writeHead(400).end("Bad request");
+    return;
+  }
+  if (!resolved) {
     res.writeHead(403).end("Forbidden");
     return;
   }
 
-  let file = target;
+  let file = resolved.path;
   try {
     if ((await stat(file)).isDirectory()) file = join(file, "index.html");
   } catch {
