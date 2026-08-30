@@ -59,8 +59,13 @@ export function playwrightMcpUrl(port: number): string {
   return `http://${PLAYWRIGHT_CLIENT_HOST}:${port}${PLAYWRIGHT_ENDPOINT_PATH}`;
 }
 
+// `exec` so the pane's `sh -lc` wrapper is replaced by node itself instead of
+// lingering above it. Without it the pane tree is `sh -lc` -> node, and a leaked
+// node's parent is that surviving shell (not pid 1) while the shell still
+// carries the unexpanded `--port $SPUR_RESERVED_PORT_PLAYWRIGHT` — so
+// isLeakedManagedPlaywright matches neither and the whole tree leaks forever.
 function buildPlaywrightCommand(bin: string): string {
-  return `node ${shellEscape(bin)} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`;
+  return `exec node ${shellEscape(bin)} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`;
 }
 
 /**
@@ -77,7 +82,8 @@ export function resolvePlaywrightSidecarCommand(): string {
 /**
  * Built-in implicit sidecar def for one Spur-owned playwright MCP server bound
  * to loopback. A static template (no per-session state): the port env is
- * expanded at runtime inside the sidecar pane (`sh -lc <command>`, no `exec`).
+ * expanded at runtime inside the sidecar pane (`sh -lc <command>`), and the
+ * command `exec`s so the pane pid is the node server itself.
  * Off by default; a project opts in via `sidecars.playwright.autoStart: true`,
  * and `agents` scopes it to claude/codex — cursor never gets it.
  *

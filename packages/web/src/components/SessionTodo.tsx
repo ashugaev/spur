@@ -146,7 +146,11 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
                       {item.id.slice(0, 8)}
                     </span>
                     <span className="min-w-0">
-                      <span className="block min-w-0 text-[var(--color-text-primary)] [overflow-wrap:anywhere]">
+                      <span
+                        className={`block text-[var(--color-text-primary)] ${
+                          isExpanded ? HARD_WRAP_TEXT_CLASS : "min-w-0 truncate"
+                        }`}
+                      >
                         {item.text}
                       </span>
                       <span className="block truncate text-[var(--color-text-secondary)]">

@@ -2591,8 +2591,7 @@ projects:
       source: "pr-watch",
       event: "github:work_item.new",
       spawn: {
-        blocks: [{ prompt: "Review only." }],
-        restrictWrites: true,
+        blocks: [{ prompt: "Review only.", restrictWrites: true }],
       },
     });
   });
@@ -2617,6 +2616,100 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.triggers.review.spawn.restrictWrites must be a boolean",
+    );
+  });
+
+  it("parses per-block restrictWrites overrides in blocks form", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          restrictWrites: true
+          blocks:
+            - agent: claude
+              prompt: "review it"
+              restrictWrites: false
+            - agent: cursor
+              prompt: "test it"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
+      spawn: {
+        restrictWrites: true,
+        blocks: [
+          { agent: "claude", prompt: "review it", restrictWrites: false },
+          { agent: "cursor", prompt: "test it" },
+        ],
+      },
+    });
+  });
+
+  it("parses per-block restrictWrites overrides in array form", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          - agent: claude
+            prompt: "review it"
+            restrictWrites: true
+          - agent: cursor
+            prompt: "test it"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toEqual({
+      source: "prs",
+      event: "github:work_item.new",
+      spawn: {
+        blocks: [
+          { agent: "claude", prompt: "review it", restrictWrites: true },
+          { agent: "cursor", prompt: "test it" },
+        ],
+      },
+    });
+  });
+
+  it("rejects non-boolean blocks[].restrictWrites", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          blocks:
+            - agent: claude
+              prompt: "review it"
+              restrictWrites: yes
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.blocks[0].restrictWrites must be a boolean",
     );
   });
 
@@ -3675,6 +3768,72 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(
       "projects.api.sidecars.constructor.command must be a non-empty string",
     );
+  });
+
+  it("parses projects.<id>.mcp.exclude", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp:
+      exclude: [playwright, digitalocean]
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.mcp).toEqual({ exclude: ["playwright", "digitalocean"] });
+  });
+
+  it("leaves mcp unset when the project does not declare it", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.mcp).toBeUndefined();
+  });
+
+  it("defaults mcp.exclude to an empty list when mcp is present but empty", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.mcp).toEqual({ exclude: [] });
+  });
+
+  it("rejects unknown keys under projects.<id>.mcp", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp:
+      inherit: false
+      exclude: [playwright]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.api.mcp only supports "exclude" (got: inherit)',
+    );
+  });
+
+  it("rejects a non-array mcp.exclude", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    mcp:
+      exclude: playwright
+`);
+
+    expect(() => loadConfig(configPath)).toThrow("projects.api.mcp.exclude");
   });
 
   it("rejects non-string project preflight prompts", async () => {

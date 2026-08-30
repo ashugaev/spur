@@ -1778,6 +1778,12 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoOpenWorkError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           sessions: error.sessions,
@@ -1786,6 +1792,12 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoEmptyLedgerError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           ...(error.sessionIds.length === 1
@@ -1796,10 +1808,22 @@ export async function startServer(
         return;
       }
       if (error instanceof InvalidTodoRequestError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, { code: error.code, error: error.message });
         return;
       }
       if (error instanceof TodoTransitionConflictError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           sessionId: error.sessionId,
@@ -1809,6 +1833,12 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoLedgerCorruptError) {
+        logEvent("http.request.failed", {
+          level: "error",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           sessionId: error.sessionId,

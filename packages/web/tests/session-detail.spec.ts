@@ -671,6 +671,86 @@ test.describe("Spur ToDo audit", () => {
     ).toBeVisible();
     await page.screenshot({ path: join(screenshotDir, "todo-resolved.png"), fullPage: true });
   });
+
+  test("collapsed ToDo item text clips to one line and expands without horizontal overflow", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const session = makeCompletedSession({ id: "detail-todo-overflow" });
+    await mockSessionDetail(page, session);
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    await page.route(`**/api/sessions/${session.id}/todo`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          revision: "event-1",
+          status: "active",
+          counts: { total: 1, open: 1, held: 0, completed: 0, cancelled: 0 },
+          items: [
+            {
+              id: "item-overflow1",
+              text: longToken,
+              status: "open",
+              added: {
+                reason: "Session objective requires it",
+                actor: { kind: "agent", agent: "codex", sessionId: session.id },
+                at: "2026-08-20T10:00:00.000Z",
+              },
+              history: [
+                {
+                  eventId: "event-1",
+                  type: "item_added",
+                  reason: "Session objective requires it",
+                  actor: { kind: "agent", agent: "codex", sessionId: session.id },
+                  at: "2026-08-20T10:00:00.000Z",
+                },
+              ],
+            },
+          ],
+          finishOverrides: [],
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    const toggle = page.getByRole("button", { name: new RegExp(longToken.slice(0, 30)) });
+    await expect(toggle).toBeVisible();
+    const textSpan = toggle.getByText(longToken, { exact: true });
+    await expect(textSpan).toHaveCount(1);
+
+    const collapsed = await textSpan.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      height: element.getBoundingClientRect().height,
+    }));
+    expect(collapsed.scrollWidth).toBeGreaterThan(collapsed.clientWidth);
+
+    const collapsedButtonOverflow = await toggle.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    expect(collapsedButtonOverflow.scrollWidth).toBe(collapsedButtonOverflow.clientWidth);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    const expanded = await textSpan.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      height: element.getBoundingClientRect().height,
+    }));
+    // Expanded text must no longer clip horizontally, and must grow tall
+    // enough to hold more than a single line of the collapsed height.
+    expect(expanded.scrollWidth).toBeLessThanOrEqual(expanded.clientWidth + 1);
+    expect(expanded.height).toBeGreaterThan(collapsed.height * 1.5);
+
+    const expandedButtonOverflow = await toggle.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    expect(expandedButtonOverflow.scrollWidth).toBe(expandedButtonOverflow.clientWidth);
+  });
 });
 
 // S2: Actions bar
@@ -2598,6 +2678,45 @@ test.describe("S4b: Artifacts section", () => {
     await expect(downloadLink).toHaveAttribute("download", "design-spec.md");
   });
 
+  test("artifact list view does not scroll the page horizontally on a narrow viewport", async ({
+    page,
+  }) => {
+    // Reproduces the reviewer's PR #789 measurement (scrollWidth 402 vs
+    // innerWidth 390 at 390px) with the current HEAD's Updated column always
+    // visible, which grows the row further. Name must shrink and any
+    // remaining overflow must stay inside the table, never the page.
+    const session = makeWorkingSession({
+      id: "detail-s4b-narrow-list",
+      artifacts: [
+        {
+          id: "report.html",
+          name: "a-fairly-long-generated-report-name-for-this-session.html",
+          size: 123_456,
+          mimeType: "text/html",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page
+      .getByRole("tablist", { name: "Artifact view" })
+      .getByRole("button", { name: "List" })
+      .click();
+    await expect(page.getByRole("columnheader", { name: /Updated/ })).toBeVisible();
+
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    const innerWidth = await page.evaluate(() => window.innerWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+
   test("renders artifact names with a leading neutral character in original visual order", async ({
     page,
   }) => {
@@ -3218,6 +3337,178 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByText("agent-second.txt")).toBeVisible();
     await expect(page.getByText("agent-history-first.jsonl")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /system \(/i })).toHaveCount(0);
+  });
+
+  test("switches the artifacts panel between grid and list and persists the mode", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-mode",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "trace.log",
+          name: "trace.log",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T09:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByAltText("shot.png")).toBeVisible();
+    await expect(page.getByRole("table")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "List" }).click();
+    await expect(page.getByRole("table")).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Name" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Size" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Type" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Updated" })).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByRole("table")).toBeVisible();
+  });
+
+  test("sorts the artifact list by every column", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("spur:artifact-view-mode", "list");
+    });
+    const session = makeWorkingSession({
+      id: "detail-s4b-sort",
+      artifacts: [
+        {
+          id: "beta.txt",
+          name: "beta.txt",
+          size: 300,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T09:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+        {
+          id: "alpha.txt",
+          name: "alpha.txt",
+          size: 100,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T11:00:00.000Z",
+          updatedAt: "2026-04-02T11:00:00.000Z",
+        },
+        {
+          id: "gamma.png",
+          name: "gamma.png",
+          size: 200,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByRole("table")).toBeVisible();
+
+    const rowName = (index: number) =>
+      page
+        .locator("tbody tr td")
+        .nth(index * 5)
+        .innerText();
+
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Name" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "beta.txt", "gamma.png"]);
+
+    await page.getByRole("button", { name: "Name" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["gamma.png", "beta.txt", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Size" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Size" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Type" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Type" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Updated" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Updated" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.reload();
+    await expect(page.getByRole("table")).toBeVisible();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+  });
+
+  test("opens the same artifact viewer from a list row", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("spur:artifact-view-mode", "list");
+    });
+    const session = makeWorkingSession({
+      id: "detail-s4b-list-view",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByRole("table")).toBeVisible();
+
+    await page.getByRole("button", { name: "Preview shot.png" }).click();
+    await expect(page.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeVisible();
   });
 });
 

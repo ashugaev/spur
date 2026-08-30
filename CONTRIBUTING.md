@@ -14,7 +14,7 @@ bash scripts/setup.sh
 
 Bootstrap details live in [SETUP.md](SETUP.md).
 
-Run from source without a global install: `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`. `pnpm --dir v2 build` also restarts a running daemon when Spur config is discoverable — a normal CLI command auto-connects its discovered project config into the daemon; registration and pruning rules live in [config registry](docs/configuration.md#config-registry).
+Run from source without a global install: `node v2/dist/cli.js <cmd>` after `pnpm --dir v2 build`. `pnpm --dir v2 build` never touches a daemon by default. Set `SPUR_BUILD_RESTART=1` to opt a build into restarting the daemon at the resolved instance config — it still refuses and exits 0 when that config is the host default path (a maintainer reloads that daemon with `spur daemon restart` instead).
 
 For a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`, use `scripts/spur-isolated-daemon.sh`. `isolated-daemon` and `isolated-ui` project sidecars start an isolated Spur daemon and the web UI against it; new isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks, and `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs.
 
