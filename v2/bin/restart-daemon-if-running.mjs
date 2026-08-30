@@ -3,18 +3,11 @@
 import { spawnSync } from "node:child_process";
 import { env, execPath, exit, stderr } from "node:process";
 
-// Skip daemon restart when running inside a Spur session (worktree build).
-// Restarting the daemon kills pipeline loops for all active sessions.
-if (env.SPUR_SESSION) {
-  exit(0);
-}
-
-// Skip when the deploy sets SPUR_DISABLE_AUTOSTART for the build. The deploy's
-// systemd restart is the authoritative daemon restart; this in-build restart is
-// redundant and was racing/aborting the deploy (it ran `daemon restart` and
-// exited nonzero under prod cron, tripping `set -e` before the deploy's own
-// restart+verify could run). A genuinely broken `tsc` still fails the build.
-if (env.SPUR_DISABLE_AUTOSTART) {
+// Positive opt-in only: a build never restarts a daemon unless the caller
+// explicitly asks. Restarting the daemon kills pipeline loops for all active
+// sessions, and any caller outside a Spur session (a bare `pnpm build`, CI, a
+// fast-test recipe) has no business touching one by default.
+if (env.SPUR_BUILD_RESTART !== "1") {
   exit(0);
 }
 
@@ -34,8 +27,7 @@ const configPath = resolveInstanceConfigPath();
 // systemd — observed on a prod host where the systemd unit then sat at
 // EADDRINUSE for 13h while a worktree build served :4310.
 //
-// No caller needs this: an in-session build is already skipped above, and the
-// source deploy sets SPUR_DISABLE_AUTOSTART and does its own systemd restart.
+// An explicit SPUR_BUILD_RESTART=1 still cannot hijack the host-global slot.
 // A maintainer wanting their host daemon reloaded runs `spur daemon restart`.
 if (isDefaultInstanceConfigPath(configPath)) {
   stderr.write(
@@ -47,7 +39,7 @@ if (isDefaultInstanceConfigPath(configPath)) {
 
 const result = spawnSync(execPath, ["dist/cli.js", "daemon", "restart", "--json"], {
   env: { ...env, SPUR_CONFIG: configPath },
-  stdio: "ignore",
+  stdio: "inherit",
 });
 
 if (result.error) {

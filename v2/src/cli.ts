@@ -69,6 +69,7 @@ import {
   renderInteractiveSessionList,
   renderWaitingInputAlert,
   withSpinner,
+  queuedMessageCount,
 } from "./cli-view.js";
 import { installHostSkillsForDaemonStart, renderHostSkillWarnings } from "./host-skills.js";
 import { writeStderr, writeStdout } from "./io.js";
@@ -2757,7 +2758,12 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "sending message",
         action: () =>
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
-        success: (session) => `Sent message to ${session.id}.`,
+        success: (session) => {
+          const pending = queuedMessageCount(session);
+          return pending > 0
+            ? `Queued message for ${session.id} (${pending} pending).`
+            : `Delivered message to ${session.id}.`;
+        },
         render: renderSessionCard,
       });
     });

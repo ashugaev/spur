@@ -1341,7 +1341,14 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
-        sendJson(response, 200, await service.getConversation(conversationSessionId));
+        const fromValue = url.searchParams.get("from");
+        const from =
+          fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        sendJson(
+          response,
+          200,
+          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+        );
         return;
       }
 
@@ -1764,6 +1771,12 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoOpenWorkError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           sessions: error.sessions,
@@ -1772,6 +1785,12 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoEmptyLedgerError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           ...(error.sessionIds.length === 1
@@ -1782,10 +1801,22 @@ export async function startServer(
         return;
       }
       if (error instanceof InvalidTodoRequestError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, { code: error.code, error: error.message });
         return;
       }
       if (error instanceof TodoTransitionConflictError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           sessionId: error.sessionId,
@@ -1795,6 +1826,12 @@ export async function startServer(
         return;
       }
       if (error instanceof TodoLedgerCorruptError) {
+        logEvent("http.request.failed", {
+          level: "error",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
         sendJson(response, error.statusCode, {
           code: error.code,
           sessionId: error.sessionId,

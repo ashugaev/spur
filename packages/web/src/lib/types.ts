@@ -208,6 +208,46 @@ export function isGithubPrCheckUnavailablePayload(
   );
 }
 
+export interface TodoOpenWorkPayload {
+  code: "todo_open_work";
+  sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>;
+}
+
+export function isTodoOpenWorkPayload(value: unknown): value is TodoOpenWorkPayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (record["code"] !== "todo_open_work" || !Array.isArray(record["sessions"])) {
+    return false;
+  }
+  return record["sessions"].every((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return false;
+    }
+    const entryRecord = entry as Record<string, unknown>;
+    return (
+      typeof entryRecord["sessionId"] === "string" &&
+      Array.isArray(entryRecord["openItemIds"]) &&
+      entryRecord["openItemIds"].every((id) => typeof id === "string") &&
+      Array.isArray(entryRecord["heldItemIds"]) &&
+      entryRecord["heldItemIds"].every((id) => typeof id === "string")
+    );
+  });
+}
+
+export interface TodoLedgerEmptyPayload {
+  code: "todo_ledger_empty";
+}
+
+export function isTodoLedgerEmptyPayload(value: unknown): value is TodoLedgerEmptyPayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return record["code"] === "todo_ledger_empty";
+}
+
 export interface SessionNotRestorablePayload {
   code: "session_not_restorable";
   sessionId: string;
@@ -849,6 +889,12 @@ export interface ConversationResponse {
   entries: TranscriptEntry[];
   durationMs: number;
   state: SpurSessionState;
+  /** Absolute index of `entries[0]` within the full transcript. */
+  startIndex: number;
+  /** Total number of entries in the full transcript. */
+  totalEntries: number;
+  /** True when there are older entries before `startIndex` (startIndex > 0). */
+  hasMore?: boolean;
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {

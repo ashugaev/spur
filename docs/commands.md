@@ -77,7 +77,7 @@ Fires only while status is restorable (`running`, `stopped`, `paused`); dropped 
 
 ## list
 
-TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit, `Ctrl+G` back. Non-TTY prints a one-shot summary, hides `completed`/`killed` by default. A resolvable-age sidecar shows `sidecar <name> <age>` (oldest, `+N more`); `!` marks one past [`sidecarGc.maxAgeWarnMinutes`](configuration.md#sidecar-reaping).
+TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit, `Ctrl+G` back. The selected session's details pane shows a `queued <N>` field when it holds real queued messages, never a per-row column. Non-TTY prints a one-shot summary, hides `completed`/`killed` by default, and adds a `queued <N>` fact beside the sidecar-age fact for a session holding real queued messages. Neither surface counts a pipeline's own auto-steps. A resolvable-age sidecar shows `sidecar <name> <age>` (oldest, `+N more`); `!` marks one past [`sidecarGc.maxAgeWarnMinutes`](configuration.md#sidecar-reaping).
 
 `pause` keeps the worktree; `complete`/`kill` tear down the pane, remove an owned worktree (`kill` needs `--force` on dirty/unpushed). Both check for an open PR first: `--pr-action leave_open|close` answers it, `--skip-pr-check` skips it; a failed check fails with retry hint. Shared-workspace sessions keep the project path on `kill`.
 
@@ -95,7 +95,7 @@ Each session's ToDo ledger starts empty — no code path seeds an item; the agen
 
 ## send, queue
 
-`spur send <sessionId> <message>`. While an agent is busy, `send` queues per session, flushes on return to prompt, ahead of the next auto-step. A `stopped`/`paused` session with an existing workspace: `send` tries native resume first, then a fresh launch.
+`spur send <sessionId> <message>`. While an agent is busy, `send` queues per session, flushes on return to prompt, ahead of the next auto-step. Prints `Delivered message to <id>.` when the response carries no real queued messages, `Queued message for <id> (<N> pending).` otherwise; N counts real queued messages, never a pipeline's own auto-steps. A `stopped`/`paused` session with an existing workspace: `send` tries native resume first, then a fresh launch.
 
 `spur queue <sessionId> list|remove|flush [index]`. `list` numbers real queued messages from `1`; a pipeline's own future steps print unnumbered, never a target. `remove`/`flush` resolve that number to exact text just before acting; `remove` drops it unsent, `flush` sends it immediately, ahead of the queue. `flush` fails `409` while any pane write for that session is in flight. `remove` fails `409` only when the target is the queue head and its delivery is in flight; any other position always succeeds. Wire: [daemon-api.md](daemon-api.md#session-routes).
 
@@ -137,7 +137,7 @@ Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, stop `"$SPUR_SESSIO
 
 Ports reserve/probe on the host at start, inject into the sidecar env only — pane env freezes first, no session variable carries it. Read with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (`--name <name>`, `--json`): `<sidecar> <portId> <env> <port> alive|dead` per line. A non-MCP sidecar is desk-shared: one tmux pane/port per [desk group](configuration.md#desk-groups).
 
-Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubuntu, nvm needs `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A remapped `$HOME` still resolves via `$SPUR_REAL_HOME` (from `/etc/passwd`).
+Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubuntu, nvm needs `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A remapped `$HOME` still resolves via `$SPUR_REAL_HOME` (from `/etc/passwd`). A long-lived server should start its own command with `exec` — otherwise the pane pid is a shell above the real process, hiding it from pid/args-based reaping and leaving the shell holding unexpanded `$PORT` env.
 
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
 
@@ -145,4 +145,34 @@ Stop/restart reap the sidecar's whole tmux pane process tree, not just the direc
 
 A sidecar entry can carry MCP wiring, injecting its port into the launching agent's MCP config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright` is the one built-in: an HTTP playwright MCP sidecar for claude/codex, never cursor, off by default: `sidecars: { playwright: { autoStart: true } }`. YAML only overrides `autoStart`, rejects any other key incl. `dependsOn` (MCP sidecars start before the agent, ahead of the dependency-aware autostart pass). Re-resolved every spawn/restore/recover, no per-session toggle.
 
-Enabling for claude changes MCP resolution for the whole session: in a fresh worktree, local-scope servers approved against the main repo path drop. A host `mcpServers.playwright` entry from any source gets replaced.
+Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
+with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated
+config survive — the merge reads `~/.claude.json` user-scope servers, `<worktree>/.mcp.json`, and
+`~/.claude.json` `projects["<worktree path>"]` (later wins). A fresh worktree has no
+`projects["<worktree path>"]` entry yet, so local-scope servers approved against the main repo path
+are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
+is silently replaced by Spur's own. `~/.claude/settings.json` is not a source: claude ignores an
+`mcpServers` block there, so merging it would start servers the session would otherwise not have.
+
+### Suppressing a host MCP server
+
+A globally-configured MCP server is spawned per session by the agent, whether or not the session
+uses it. `projects.<id>.mcp.exclude` drops named servers from what Spur hands the agent, so a
+project pays no RAM for tooling it does not need:
+
+```yaml
+projects:
+  api:
+    mcp:
+      exclude: [playwright, digitalocean]
+```
+
+Applies to claude (dropped from the generated `mcp-config.json`, which is then launched with
+`--strict-mcp-config`) and codex (the inherited `[mcp_servers.<name>]` table is stripped from the
+session `config.toml`). Cursor has no suppression path. Excluding a name that a sidecar also binds
+is safe: the sidecar wins, so `exclude: [playwright]` plus `sidecars.playwright.autoStart: true`
+gives the session Spur's managed server and not the host's.
+
+For claude, any non-empty `exclude` makes the generated config authoritative for the session, the
+same as enabling an MCP sidecar — the caveats above apply. With no `exclude` and no MCP sidecar,
+Spur passes no MCP flags and claude resolves servers itself.

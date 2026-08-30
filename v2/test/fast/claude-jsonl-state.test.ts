@@ -6,14 +6,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyClaudeJsonlState,
   hasTrailingClaudeServerError,
-  parseConversationLines,
+  MAX_RETAINED_CONVERSATION_ENTRIES,
+  parseConversationBatch,
   parseJsonlRecord,
+  readClaudeConversationTail,
   readClaudeJsonlState,
   readClaudeTranscriptEntries,
   type ParsedRecord,
 } from "../../src/claude-jsonl-state.js";
 import type { TranscriptEntry } from "../../src/types.js";
 
+// Path resolution is mocked so the tail reader tests can point at temp files.
+// The readClaudeJsonlState tests below pass a concrete `reader.filePath`, so
+// they bypass resolution entirely and are unaffected by these mocks.
 const { findLatestSessionFileMock, sessionFileForIdMock } = vi.hoisted(() => ({
   findLatestSessionFileMock: vi.fn(),
   sessionFileForIdMock: vi.fn(),
@@ -406,9 +411,15 @@ describe("hasTrailingClaudeServerError", () => {
   });
 });
 
-// ── parseConversationLines ──────────────────────────────────────────
+// ── parseConversationBatch ──────────────────────────────────────────
 
-describe("parseConversationLines", () => {
+function messagesOf(entries: TranscriptEntry[]) {
+  return entries.filter(
+    (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+  );
+}
+
+describe("parseConversationBatch", () => {
   function jsonl(...records: Record<string, unknown>[]): string[] {
     return records.map((r) => JSON.stringify(r));
   }
@@ -425,7 +436,7 @@ describe("parseConversationLines", () => {
         },
       },
     );
-    const { messages } = parseConversationLines(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: "user", text: "hello" });
     expect(messages[1]).toMatchObject({ role: "assistant", text: "hi" });
@@ -439,7 +450,7 @@ describe("parseConversationLines", () => {
         content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }],
       },
     });
-    const { messages } = parseConversationLines(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(0);
   });
 
@@ -451,7 +462,7 @@ describe("parseConversationLines", () => {
         content: [{ type: "tool_use", id: "x", name: "Read", input: {} }],
       },
     });
-    const { messages } = parseConversationLines(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(0);
   });
 
@@ -466,7 +477,7 @@ describe("parseConversationLines", () => {
         ],
       },
     });
-    const { messages } = parseConversationLines(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(1);
     const firstMessage = messages[0];
     if (!firstMessage) {
@@ -477,15 +488,27 @@ describe("parseConversationLines", () => {
 
   it("handles string content (user prompt via spur send)", () => {
     const lines = jsonl({ type: "user", message: { role: "user", content: "fix the bug" } });
-    const { messages } = parseConversationLines(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ role: "user", text: "fix the bug" });
   });
 
   it("returns empty for file with no conversation records", () => {
     const lines = jsonl({ type: "progress" }, { type: "system" });
-    const { messages } = parseConversationLines(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(0);
+  });
+
+  it("never truncates message text, however long", () => {
+    const longText = "x".repeat(5000);
+    const lines = jsonl({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: longText }] },
+    });
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.text).toBe(longText);
+    expect(messages[0]?.text).toHaveLength(5000);
   });
 
   it("classifies state alongside conversation extraction", () => {
@@ -497,8 +520,8 @@ describe("parseConversationLines", () => {
         stop_reason: "end_turn",
       },
     });
-    const { state } = parseConversationLines(lines, NOW);
-    expect(state).toBe("waiting");
+    const { records } = parseConversationBatch(lines, NOW);
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("waiting");
   });
 
   it("keeps the same spur-0190 tail fixture working inside the activity window", async () => {
@@ -823,5 +846,278 @@ describe("readClaudeJsonlState live model derivation", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── readClaudeConversationTail ───────────────────────────────────────
+
+describe("readClaudeConversationTail", () => {
+  const TS = "2026-04-11T16:44:38.000Z";
+
+  function assistantLine(text: string): string {
+    return JSON.stringify({
+      type: "assistant",
+      timestamp: TS,
+      message: { role: "assistant", content: [{ type: "text", text }], stop_reason: "end_turn" },
+    });
+  }
+
+  function userLine(text: string): string {
+    return JSON.stringify({
+      type: "user",
+      timestamp: TS,
+      message: { role: "user", content: [{ type: "text", text }] },
+    });
+  }
+
+  async function withTempFile(
+    fn: (tempDir: string, filePath: string) => Promise<void>,
+  ): Promise<void> {
+    const tempDir = await mkdtemp(join(tmpdir(), "spur-convo-tail-"));
+    const filePath = join(tempDir, "transcript.jsonl");
+    try {
+      await fn(tempDir, filePath);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  afterEach(() => {
+    findLatestSessionFileMock.mockReset();
+    sessionFileForIdMock.mockReset();
+  });
+
+  it("reads a whole transcript one-shot: entries, totalEntries, and state", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      await writeFile(filePath, [userLine("hello"), assistantLine("hi")].join("\n") + "\n", "utf8");
+
+      const result = await readClaudeConversationTail(tempDir);
+      expect(result).not.toBeNull();
+      if (!result) throw new Error("expected result");
+      expect(messagesOf(result.entries).map((m) => m.text)).toEqual(["hello", "hi"]);
+      expect(result.totalEntries).toBe(2);
+      expect(result.startIndex).toBe(0);
+      expect(result.hasMore).toBe(false);
+      expect(result.state).toBe("waiting");
+    });
+  });
+
+  it("yields identical entries/state/totalEntries whether read one-shot or in chunks", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const lines = [userLine("q1"), assistantLine("a1"), userLine("q2"), assistantLine("a2")];
+
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
+      const oneShot = await readClaudeConversationTail(tempDir);
+
+      // Chunked: first half, then append the rest with a bumped mtime.
+      await writeFile(filePath, lines.slice(0, 2).join("\n") + "\n", "utf8");
+      const first = await readClaudeConversationTail(tempDir);
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
+      const later = new Date(Date.now() + 5000);
+      await utimes(filePath, later, later);
+      const second = await readClaudeConversationTail(tempDir, first?.reader);
+
+      expect(second?.entries).toEqual(oneShot?.entries);
+      expect(second?.totalEntries).toBe(oneShot?.totalEntries);
+      expect(second?.state).toBe(oneShot?.state);
+    });
+  });
+
+  it("caps the retained tail at MAX_RETAINED_CONVERSATION_ENTRIES and reports hasMore", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const total = MAX_RETAINED_CONVERSATION_ENTRIES + 5;
+      const lines = Array.from({ length: total }, (_, i) => assistantLine(`m${i}`));
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
+
+      const result = await readClaudeConversationTail(tempDir);
+      if (!result) throw new Error("expected result");
+      const messages = messagesOf(result.entries);
+      expect(messages).toHaveLength(MAX_RETAINED_CONVERSATION_ENTRIES);
+      expect(result.totalEntries).toBe(total);
+      expect(result.startIndex).toBe(total - MAX_RETAINED_CONVERSATION_ENTRIES);
+      expect(result.hasMore).toBe(true);
+      // The kept window is the newest MAX_RETAINED_CONVERSATION_ENTRIES entries.
+      expect(messages[0]?.text).toBe("m5");
+      expect(messages.at(-1)?.text).toBe(`m${total - 1}`);
+    });
+  });
+
+  it("sets hasMore false at exactly the cap and true one past it", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+
+      const atCap = Array.from({ length: MAX_RETAINED_CONVERSATION_ENTRIES }, (_, i) =>
+        assistantLine(`m${i}`),
+      );
+      await writeFile(filePath, atCap.join("\n") + "\n", "utf8");
+      const exact = await readClaudeConversationTail(tempDir);
+      expect(exact?.totalEntries).toBe(MAX_RETAINED_CONVERSATION_ENTRIES);
+      expect(exact?.hasMore).toBe(false);
+
+      await writeFile(filePath, [...atCap, assistantLine("extra")].join("\n") + "\n", "utf8");
+      const over = await readClaudeConversationTail(tempDir);
+      expect(over?.totalEntries).toBe(MAX_RETAINED_CONVERSATION_ENTRIES + 1);
+      expect(over?.hasMore).toBe(true);
+    });
+  });
+
+  it("does not emit an unterminated trailing line until it is newline-terminated", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const complete = userLine("hello");
+      const trailing = assistantLine("world");
+      // First chunk: a complete line + newline, then a partial line with no
+      // trailing newline (a transcript event mid-write).
+      const partial = trailing.slice(0, trailing.length - 10);
+      await writeFile(filePath, `${complete}\n${partial}`, "utf8");
+
+      const first = await readClaudeConversationTail(tempDir);
+      if (!first) throw new Error("expected result");
+      expect(messagesOf(first.entries).map((m) => m.text)).toEqual(["hello"]);
+      expect(first.totalEntries).toBe(1);
+
+      // Append the completing bytes with a trailing newline; bump mtime.
+      await writeFile(filePath, `${complete}\n${trailing}\n`, "utf8");
+      const later = new Date(Date.now() + 5000);
+      await utimes(filePath, later, later);
+      const second = await readClaudeConversationTail(tempDir, first.reader);
+      if (!second) throw new Error("expected result");
+      expect(messagesOf(second.entries).map((m) => m.text)).toEqual(["hello", "world"]);
+      expect(second.totalEntries).toBe(2);
+    });
+  });
+
+  it("emits a complete final line that lacks a trailing newline (killed mid-flush)", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      // Session killed after the final record was fully written but before its
+      // terminating newline flushed. The record is valid JSON, so it must be
+      // surfaced rather than held back forever (the file never grows again).
+      await writeFile(filePath, `${userLine("hello")}\n${assistantLine("world")}`, "utf8");
+
+      const result = await readClaudeConversationTail(tempDir);
+      if (!result) throw new Error("expected result");
+      expect(messagesOf(result.entries).map((m) => m.text)).toEqual(["hello", "world"]);
+      expect(result.totalEntries).toBe(2);
+    });
+  });
+
+  it("rebuilds from offset 0 when the transcript mtime moves backwards", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      await writeFile(filePath, [userLine("one"), assistantLine("two")].join("\n") + "\n", "utf8");
+      const first = await readClaudeConversationTail(tempDir);
+
+      // Same path replaced with different content at a size >= the old offset
+      // but an older mtime (restore/rotate-in of an older file). Reusing the
+      // stale offset would read misaligned bytes; we must rebuild instead.
+      await writeFile(
+        filePath,
+        [userLine("fresh-a"), assistantLine("fresh-b"), userLine("fresh-c")].join("\n") + "\n",
+        "utf8",
+      );
+      const earlier = new Date(Date.now() - 60_000);
+      await utimes(filePath, earlier, earlier);
+      const second = await readClaudeConversationTail(tempDir, first?.reader);
+      expect(messagesOf(second?.entries ?? []).map((m) => m.text)).toEqual([
+        "fresh-a",
+        "fresh-b",
+        "fresh-c",
+      ]);
+      expect(second?.totalEntries).toBe(3);
+    });
+  });
+
+  it("rebuilds from offset 0 when the file shrinks below the last offset", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      await writeFile(
+        filePath,
+        [userLine("one"), assistantLine("two"), userLine("three")].join("\n") + "\n",
+        "utf8",
+      );
+      const first = await readClaudeConversationTail(tempDir);
+
+      await writeFile(filePath, userLine("fresh") + "\n", "utf8");
+      const second = await readClaudeConversationTail(tempDir, first?.reader);
+      expect(messagesOf(second?.entries ?? []).map((m) => m.text)).toEqual(["fresh"]);
+      expect(second?.totalEntries).toBe(1);
+    });
+  });
+
+  it("rebuilds when the resolved transcript path changes", async () => {
+    await withTempFile(async (tempDir, fileA) => {
+      const fileB = join(tempDir, "other.jsonl");
+      await writeFile(fileA, [userLine("a1"), assistantLine("a2")].join("\n") + "\n", "utf8");
+      await writeFile(fileB, [userLine("b1")].join("\n") + "\n", "utf8");
+
+      findLatestSessionFileMock.mockResolvedValueOnce(fileA);
+      const first = await readClaudeConversationTail(tempDir);
+      expect(first?.totalEntries).toBe(2);
+
+      findLatestSessionFileMock.mockResolvedValueOnce(fileB);
+      const second = await readClaudeConversationTail(tempDir, first?.reader);
+      expect(messagesOf(second?.entries ?? []).map((m) => m.text)).toEqual(["b1"]);
+      expect(second?.totalEntries).toBe(1);
+    });
+  });
+
+  it("resolves by agentSessionId when pinned and by findLatest when absent", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      await writeFile(filePath, userLine("x") + "\n", "utf8");
+
+      sessionFileForIdMock.mockResolvedValue(filePath);
+      await readClaudeConversationTail(tempDir, undefined, "sess-1");
+      expect(sessionFileForIdMock).toHaveBeenCalledWith(tempDir, "sess-1");
+      expect(findLatestSessionFileMock).not.toHaveBeenCalled();
+
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      await readClaudeConversationTail(tempDir);
+      expect(findLatestSessionFileMock).toHaveBeenCalledWith(tempDir);
+    });
+  });
+
+  it("never truncates message text, however long", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const long = "z".repeat(5000);
+      await writeFile(filePath, [userLine(long), assistantLine("short")].join("\n") + "\n", "utf8");
+
+      const result = await readClaudeConversationTail(tempDir);
+      const messages = messagesOf(result?.entries ?? []);
+      expect(messages[0]?.text).toBe(long);
+      expect(messages[0]?.text).toHaveLength(5000);
+      expect(messages[1]?.text).toBe("short");
+    });
+  });
+
+  it("produces the same entries as readClaudeTranscriptEntries for one fixture", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const lines = [userLine("one"), assistantLine("two"), userLine("three")];
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
+
+      const tail = await readClaudeConversationTail(tempDir);
+      const full = await readClaudeTranscriptEntries(tempDir);
+      expect(tail?.entries).toEqual(full);
+    });
+  });
+
+  it("classifies identically to the uncapped pure parser despite the entry cap", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const lines = Array.from({ length: MAX_RETAINED_CONVERSATION_ENTRIES + 10 }, (_, i) =>
+        assistantLine(`m${i}`),
+      );
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
+
+      const tail = await readClaudeConversationTail(tempDir);
+      const now = Date.now();
+      const { records } = parseConversationBatch(lines, now);
+      expect(tail?.state).toBe(classifyClaudeJsonlState(records, now));
+    });
   });
 });

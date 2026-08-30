@@ -1,7 +1,9 @@
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_RESUME_READY_MARKER } from "../../src/agents/cursor.js";
+import { createTempDir } from "../helpers/common.js";
 
 type ExecFileAsync = (
   file: string,
@@ -395,6 +397,40 @@ describe("runtime-tmux", () => {
     const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
     expect(pasteIndex).toBeGreaterThan(-1);
     expect(enterIndex).toBeGreaterThan(pasteIndex);
+  });
+
+  it("pastes a long message when TMPDIR points at a deleted directory", async () => {
+    const { readFileSync } = await import("node:fs");
+
+    const originalTmpdir = process.env["TMPDIR"];
+    const parent = await createTempDir("spur-tmux-test-");
+    process.env["TMPDIR"] = join(parent, "gone");
+
+    let capturedBufferFile: string | undefined;
+    let capturedContent: string | undefined;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "load-buffer") {
+        capturedBufferFile = args[args.length - 1];
+        capturedContent = readFileSync(capturedBufferFile ?? "", "utf-8");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    try {
+      const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+      const longMessage = "x".repeat(250);
+
+      await expect(sendMessageToTmux("api-1", longMessage)).resolves.toBeUndefined();
+
+      expect(capturedBufferFile).toBeDefined();
+      expect(capturedContent).toBe(longMessage);
+    } finally {
+      if (originalTmpdir === undefined) {
+        delete process.env["TMPDIR"];
+      } else {
+        process.env["TMPDIR"] = originalTmpdir;
+      }
+    }
   });
 
   it("wraps sidecar launch commands without `exec` and sets remain-on-exit before launch", async () => {

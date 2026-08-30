@@ -428,6 +428,8 @@ export interface TriggerSpawnBlockConfig {
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
+  /** Overrides the spawn-level restrictWrites default for this block. */
+  restrictWrites?: boolean;
 }
 
 export interface TriggerSpawnConfig {
@@ -560,6 +562,16 @@ export interface SessionModeConfig {
   default?: boolean;
 }
 
+/**
+ * Host/global MCP servers suppressed for this project's sessions. Spur's launch
+ * plan is authoritative: an excluded server is dropped from the generated agent
+ * MCP config, so a project pays no RAM for a globally-configured server it does
+ * not use.
+ */
+export interface ProjectMcpConfig {
+  exclude: string[];
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -578,6 +590,7 @@ export interface ProjectConfig {
   workspaceAccess?: WorkspaceAccessConfig;
   modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
+  mcp?: ProjectMcpConfig;
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
@@ -1404,4 +1417,10 @@ export interface ConversationResponse {
   entries: TranscriptEntry[];
   durationMs: number;
   state: SessionState;
+  /** Absolute index of `entries[0]` within the full transcript. */
+  startIndex: number;
+  /** Total number of entries in the full transcript. */
+  totalEntries: number;
+  /** True when there are older entries before `startIndex` (startIndex > 0). */
+  hasMore?: boolean;
 }
