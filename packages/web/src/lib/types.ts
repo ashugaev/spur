@@ -889,9 +889,11 @@ export interface ConversationResponse {
   entries: TranscriptEntry[];
   durationMs: number;
   state: SpurSessionState;
-  /** Total count of text-bearing messages across the whole transcript. */
-  totalMessages?: number;
-  /** True when the transcript holds more messages than the returned tail. */
+  /** Absolute index of `entries[0]` within the full transcript. */
+  startIndex: number;
+  /** Total number of entries in the full transcript. */
+  totalEntries: number;
+  /** True when there are older entries before `startIndex` (startIndex > 0). */
   hasMore?: boolean;
 }
 

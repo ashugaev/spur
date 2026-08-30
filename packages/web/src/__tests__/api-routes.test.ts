@@ -1697,13 +1697,46 @@ describe("Spur web API routes", () => {
     } as unknown as Response);
 
     const response = await getSessionConversation(
-      new Request("http://localhost:3000/api/sessions/api-a1/conversation"),
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/conversation"),
       { params: Promise.resolve({ id: "api-a1" }) },
     );
     const payload = await response.json();
 
     expect(response.status).toBe(200);
     expect(payload).toEqual(conversation);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/conversation");
+  });
+
+  it("GET /api/sessions/:id/conversation forwards the from query param", async () => {
+    const conversation = { messages: [], entries: [], startIndex: 120, totalEntries: 500 };
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => conversation,
+      text: async () => JSON.stringify(conversation),
+    } as unknown as Response);
+
+    await getSessionConversation(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/conversation?from=120"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/conversation?from=120");
+  });
+
+  it("GET /api/sessions/:id/conversation omits the from param when absent", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "{}",
+    } as unknown as Response);
+
+    await getSessionConversation(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/conversation"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
     expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/conversation");
   });
 
@@ -1715,7 +1748,7 @@ describe("Spur web API routes", () => {
     } as unknown as Response);
 
     const response = await getSessionConversation(
-      new Request("http://localhost:3000/api/sessions/missing/conversation"),
+      new NextRequest("http://localhost:3000/api/sessions/missing/conversation"),
       { params: Promise.resolve({ id: "missing" }) },
     );
 
@@ -1726,7 +1759,7 @@ describe("Spur web API routes", () => {
     mockedSpurRequest.mockRejectedValue(new Error("daemon down"));
 
     const response = await getSessionConversation(
-      new Request("http://localhost:3000/api/sessions/api-a1/conversation"),
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/conversation"),
       { params: Promise.resolve({ id: "api-a1" }) },
     );
     const payload = (await response.json()) as { error: string };

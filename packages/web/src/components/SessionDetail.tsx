@@ -415,6 +415,9 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
+// Page size for a scroll-back fetch. Must match the daemon's
+// CONVERSATION_PAGE_ENTRIES (v2/src/claude-jsonl-state.ts).
+const CONVERSATION_SCROLL_PAGE_ENTRIES = 100;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
@@ -1699,6 +1702,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setHandoffNotes((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  // Absolute transcript index of the oldest page currently requested. null
+  // means "follow the live tail" (the default, no `from` query param).
+  const [fromIndex, setFromIndex] = useState<number | null>(null);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
@@ -1731,6 +1738,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
     setError(null);
     setConversation(null);
+    setFromIndex(null);
     dismissLoadErrorToast();
   }, [dismissLoadErrorToast, sessionId]);
 
@@ -1845,10 +1853,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setConversation(null);
       return;
     }
+    const query = fromIndex !== null ? `?from=${fromIndex}` : "";
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`, {
-        cache: "no-store",
-      });
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
+        { cache: "no-store" },
+      );
       if (res.ok) {
         setConversation((await res.json()) as ConversationResponse);
       } else {
@@ -1857,13 +1867,29 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     } catch {
       setConversation(null);
     }
-  }, [session?.agent, sessionId]);
+  }, [session?.agent, sessionId, fromIndex]);
 
   useEffect(() => {
     void loadConversation();
     const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadConversation]);
+
+  const handleLoadOlder = useCallback(() => {
+    const startIndex = conversation?.startIndex ?? 0;
+    if (startIndex <= 0) return;
+    setIsLoadingOlder(true);
+    setFromIndex(Math.max(0, startIndex - CONVERSATION_SCROLL_PAGE_ENTRIES));
+  }, [conversation?.startIndex]);
+
+  const handleResumeTail = useCallback(() => {
+    setFromIndex(null);
+  }, []);
+
+  useEffect(() => {
+    if (!isLoadingOlder) return;
+    setIsLoadingOlder(false);
+  }, [conversation, isLoadingOlder]);
 
   const handleAnswer = useCallback(
     async (optionIndex: number) => {
@@ -2992,8 +3018,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 entries={conversation?.entries ?? []}
                 messages={conversation?.messages ?? []}
                 durationMs={conversation?.durationMs ?? 0}
-                totalMessages={conversation?.totalMessages}
+                startIndex={conversation?.startIndex ?? 0}
                 hasMore={conversation?.hasMore}
+                isLoadingOlder={isLoadingOlder}
+                hasOlderLoaded={fromIndex !== null}
+                onLoadOlder={handleLoadOlder}
+                onResumeTail={handleResumeTail}
                 isWorking={displayState === "working"}
                 agent={session.agent}
                 onAnswer={handleAnswer}
