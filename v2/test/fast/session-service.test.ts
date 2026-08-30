@@ -370,6 +370,7 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
 });
 
 vi.mock("../../src/claude-jsonl-state.js", () => ({
+  CONVERSATION_PAGE_ENTRIES: 100,
   readClaudeJsonlState: readClaudeJsonlStateMock,
   readClaudeConversationTail: readClaudeConversationTailMock,
 }));
@@ -27453,9 +27454,10 @@ describe("SessionService", () => {
     it("preserves JSONL-derived state and forwards transcript totals on success", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
       readClaudeConversationTailMock.mockResolvedValue({
-        messages: [{ role: "assistant", text: "hi", timestampMs: 1 }],
+        entries: [{ kind: "message", role: "assistant", text: "hi", timestampMs: 1 }],
         state: "waiting",
-        totalMessages: 42,
+        totalEntries: 42,
+        startIndex: 41,
         hasMore: true,
         reader: { filePath: "/x.jsonl" },
       });
@@ -27467,8 +27469,110 @@ describe("SessionService", () => {
 
       expect(result.state).toBe("waiting");
       expect(result.messages).toHaveLength(1);
-      expect(result.totalMessages).toBe(42);
+      expect(result.totalEntries).toBe(42);
       expect(result.hasMore).toBe(true);
+    });
+
+    it("does not call readAgentConversation for a claude default (from-absent) request", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "hi", timestampMs: 1 }],
+        state: "waiting",
+        totalEntries: 1,
+        startIndex: 0,
+        hasMore: false,
+        reader: { filePath: "/x.jsonl" },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("does not call readAgentConversation for a claude from within the retained window", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [
+          { kind: "message", role: "user", text: "a", timestampMs: 1 },
+          { kind: "message", role: "assistant", text: "b", timestampMs: 2 },
+        ],
+        state: "waiting",
+        totalEntries: 10,
+        startIndex: 8,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1", { from: 9 });
+
+      expect(readAgentConversationMock).not.toHaveBeenCalled();
+      expect(result.startIndex).toBe(9);
+      expect(result.entries).toHaveLength(1);
+    });
+
+    it("calls readAgentConversation exactly once for a claude from below the retained window", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "tail", timestampMs: 5 }],
+        state: "waiting",
+        totalEntries: 10,
+        startIndex: 9,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      readAgentConversationMock.mockResolvedValue(
+        Array.from({ length: 10 }, (_, i) => ({
+          kind: "message",
+          role: "assistant",
+          text: `m${i}`,
+          timestampMs: i,
+        })),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1", { from: 2 });
+
+      expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+      expect(result.startIndex).toBe(2);
+      expect(result.totalEntries).toBe(10);
+      expect(result.entries).toHaveLength(8);
+    });
+
+    it("uses the tail classifier's state on a deep from-read even when it diverges from statusFallbackState", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "stopped" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "tail", timestampMs: 5 }],
+        state: "working",
+        totalEntries: 10,
+        startIndex: 9,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      readAgentConversationMock.mockResolvedValue(
+        Array.from({ length: 10 }, (_, i) => ({
+          kind: "message",
+          role: "assistant",
+          text: `m${i}`,
+          timestampMs: i,
+        })),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1", { from: 0 });
+
+      // statusFallbackState for a plain "stopped" session (no error) is "stopped",
+      // which must never win over the classifier's "working".
+      expect(result.state).toBe("working");
     });
 
     it("resolves the transcript by pinned agentSessionId", async () => {
@@ -27476,9 +27580,10 @@ describe("SessionService", () => {
         baseSession({ agent: "claude", status: "running", agentSessionId: "sess-abc" }),
       );
       readClaudeConversationTailMock.mockResolvedValue({
-        messages: [],
+        entries: [],
         state: "working",
-        totalMessages: 0,
+        totalEntries: 0,
+        startIndex: 0,
         hasMore: false,
         reader: { filePath: "/x.jsonl" },
       });
@@ -27499,9 +27604,10 @@ describe("SessionService", () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
       const readerA = { filePath: "/x.jsonl", lastOffset: 10 };
       readClaudeConversationTailMock.mockResolvedValue({
-        messages: [],
+        entries: [],
         state: "working",
-        totalMessages: 0,
+        totalEntries: 0,
+        startIndex: 0,
         hasMore: false,
         reader: readerA,
       });
@@ -27522,22 +27628,23 @@ describe("SessionService", () => {
     it("serializes overlapping reads so the shared reader is not clobbered", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
 
-      // Each read builds on the reader it was handed: consume 5 more messages
+      // Each read builds on the reader it was handed: consume 5 more entries
       // and advance the offset. Two overlapping polls that both snapshot the
       // same stale reader would double-count and regress the offset; serialized
       // reads must chain so the second sees the first's advanced reader.
       readClaudeConversationTailMock.mockImplementation(
-        async (_worktree: string, reader?: { lastOffset?: number; totalMessages?: number }) => {
+        async (_worktree: string, reader?: { lastOffset?: number; totalEntries?: number }) => {
           const prevOffset = reader?.lastOffset ?? 0;
-          const prevTotal = reader?.totalMessages ?? 0;
+          const prevTotal = reader?.totalEntries ?? 0;
           await Promise.resolve();
-          const totalMessages = prevTotal + 5;
+          const totalEntries = prevTotal + 5;
           return {
-            messages: [],
+            entries: [],
             state: "working",
-            totalMessages,
+            totalEntries,
+            startIndex: 0,
             hasMore: false,
-            reader: { filePath: "/x.jsonl", lastOffset: prevOffset + 100, totalMessages },
+            reader: { filePath: "/x.jsonl", lastOffset: prevOffset + 100, totalEntries },
           };
         },
       );
@@ -27551,13 +27658,55 @@ describe("SessionService", () => {
       ]);
 
       // Sequential accumulation: one read saw offset 0, the other saw offset 100.
-      const totals = [a.totalMessages, b.totalMessages].sort((x, y) => (x ?? 0) - (y ?? 0));
+      const totals = [a.totalEntries, b.totalEntries].sort((x, y) => (x ?? 0) - (y ?? 0));
       expect(totals).toEqual([5, 10]);
       expect(readClaudeConversationTailMock).toHaveBeenLastCalledWith(
         "/tmp/spur-worktrees/api/api-1",
-        expect.objectContaining({ lastOffset: 100, totalMessages: 5 }),
+        expect.objectContaining({ lastOffset: 100, totalEntries: 5 }),
         undefined,
       );
+    });
+
+    it("derives messages as entries.filter(kind === message) across from-absent, deep-from, and from=0", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [
+          { kind: "message", role: "user", text: "a", timestampMs: 1 },
+          { kind: "tool", name: "Read", timestampMs: 2 },
+        ],
+        state: "waiting",
+        totalEntries: 20,
+        startIndex: 18,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      const fullEntries = [
+        { kind: "message", role: "user", text: "full-a", timestampMs: 1 },
+        { kind: "tool", name: "Read", timestampMs: 2 },
+        { kind: "message", role: "assistant", text: "full-b", timestampMs: 3 },
+      ];
+      readAgentConversationMock.mockResolvedValue(fullEntries);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      for (const from of [undefined, 0] as const) {
+        const result = await service.getConversation(
+          "api-1",
+          from === undefined ? undefined : { from },
+        );
+        const expectedMessages = result.entries
+          .filter(
+            (entry): entry is Extract<typeof entry, { kind: "message" }> =>
+              entry.kind === "message",
+          )
+          .map((entry) => ({
+            role: entry.role,
+            text: entry.text,
+            timestampMs: entry.timestampMs ?? 0,
+          }));
+        expect(result.messages).toEqual(expectedMessages);
+      }
     });
 
     it("derives messages and entries from the codex transcript reader", async () => {

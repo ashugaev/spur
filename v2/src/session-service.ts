@@ -107,6 +107,7 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
+  CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
   readClaudeJsonlState,
   type ClaudeConversationReaderState,
@@ -955,6 +956,34 @@ function statusFallbackState(
   if (isStaleParked(session)) return "stale";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
+}
+
+/** Derives `messages` from `entries` so the two can never disagree. */
+function buildConversationResponse(
+  entries: TranscriptEntry[],
+  totalEntries: number,
+  startIndex: number,
+  state: SessionState,
+  durationMs: number,
+): ConversationResponse {
+  const messages: ConversationMessage[] = entries
+    .filter(
+      (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+    )
+    .map((entry) => ({
+      role: entry.role,
+      text: entry.text,
+      timestampMs: entry.timestampMs ?? 0,
+    }));
+  return {
+    messages,
+    entries,
+    durationMs,
+    state,
+    startIndex,
+    totalEntries,
+    hasMore: startIndex > 0,
+  };
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -7209,41 +7238,77 @@ export class SessionService {
     return artifact;
   }
 
-  async getConversation(sessionId: string): Promise<ConversationResponse> {
+  async getConversation(
+    sessionId: string,
+    options?: { from?: number },
+  ): Promise<ConversationResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
-    const fallback: ConversationResponse = {
-      messages: [],
-      entries: [],
-      durationMs,
-      state: statusFallbackState(session),
-    };
+    const from = options?.from;
 
-    const entries =
-      (await readAgentConversation(session.agent, {
+    const readFullEntries = (): Promise<TranscriptEntry[]> =>
+      readAgentConversation(session.agent, {
         worktreePath: session.worktreePath,
         ...(session.agent === "codex"
           ? { codexSessionsDir: this.codexSessionsDir(session.id) }
           : {}),
         ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-      })) ?? [];
+      }).then((result) => result ?? []);
 
     if (session.agent === "claude") {
-      const conversation = await this.readConversationSerialized(session);
-      return conversation ? { ...conversation, entries, durationMs } : { ...fallback, entries };
+      // Classification always comes from the tail reader, on every request
+      // regardless of `from` — a live session's status must never fall back
+      // to statusFallbackState while a transcript exists.
+      const tail = await this.readConversationSerialized(session);
+      if (!tail) {
+        const entries = await readFullEntries();
+        const startIndex = from === undefined ? 0 : Math.max(0, Math.min(from, entries.length));
+        return buildConversationResponse(
+          entries.slice(startIndex),
+          entries.length,
+          startIndex,
+          statusFallbackState(session),
+          durationMs,
+        );
+      }
+
+      const { entries: tailEntries, state, totalEntries, startIndex: tailStartIndex } = tail;
+
+      if (from === undefined || from >= tailStartIndex) {
+        // Within the retained window: slice the cached tail, no full read.
+        const sliceStart =
+          from === undefined
+            ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
+            : Math.max(from, tailStartIndex);
+        const entries = tailEntries.slice(sliceStart - tailStartIndex);
+        return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
+      }
+
+      // Deep scroll-back below the retained window: fall back to a full read.
+      const fullEntries = await readFullEntries();
+      const startIndex = Math.max(0, Math.min(from, fullEntries.length));
+      return buildConversationResponse(
+        fullEntries.slice(startIndex),
+        fullEntries.length,
+        startIndex,
+        state,
+        durationMs,
+      );
     }
 
-    const messages: ConversationMessage[] = entries
-      .filter(
-        (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
-      )
-      .map((entry) => ({
-        role: entry.role,
-        text: entry.text,
-        timestampMs: entry.timestampMs ?? 0,
-      }));
-    return { messages, entries, durationMs, state: statusFallbackState(session) };
+    const entries = await readFullEntries();
+    const startIndex =
+      from === undefined
+        ? Math.max(0, entries.length - CONVERSATION_PAGE_ENTRIES)
+        : Math.max(0, Math.min(from, entries.length));
+    return buildConversationResponse(
+      entries.slice(startIndex),
+      entries.length,
+      startIndex,
+      statusFallbackState(session),
+      durationMs,
+    );
   }
 
   /**
@@ -7253,9 +7318,12 @@ export class SessionService {
    * Chaining on the prior read serializes them so the offset advances
    * monotonically.
    */
-  private readConversationSerialized(
-    session: SessionRecord,
-  ): Promise<Omit<ConversationResponse, "durationMs" | "entries"> | null> {
+  private readConversationSerialized(session: SessionRecord): Promise<{
+    entries: TranscriptEntry[];
+    state: SessionState;
+    totalEntries: number;
+    startIndex: number;
+  } | null> {
     const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
     const run = prior.then(async () => {
       const result = await readClaudeConversationTail(
@@ -7264,7 +7332,7 @@ export class SessionService {
         session.agentSessionId,
       );
       if (!result) return null;
-      const { reader, ...conversation } = result;
+      const { reader, hasMore: _hasMore, ...conversation } = result;
       this.conversationReaders.set(session.id, reader);
       return conversation;
     });

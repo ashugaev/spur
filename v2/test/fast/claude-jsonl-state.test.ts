@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyClaudeJsonlState,
   hasTrailingClaudeServerError,
-  MAX_CONVERSATION_MESSAGES,
+  MAX_RETAINED_CONVERSATION_ENTRIES,
   parseConversationBatch,
   parseJsonlRecord,
   readClaudeConversationTail,
@@ -337,6 +337,12 @@ describe("hasTrailingClaudeServerError", () => {
 
 // ── parseConversationBatch ──────────────────────────────────────────
 
+function messagesOf(entries: TranscriptEntry[]) {
+  return entries.filter(
+    (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+  );
+}
+
 describe("parseConversationBatch", () => {
   function jsonl(...records: Record<string, unknown>[]): string[] {
     return records.map((r) => JSON.stringify(r));
@@ -354,7 +360,7 @@ describe("parseConversationBatch", () => {
         },
       },
     );
-    const { messages } = parseConversationBatch(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: "user", text: "hello" });
     expect(messages[1]).toMatchObject({ role: "assistant", text: "hi" });
@@ -368,7 +374,7 @@ describe("parseConversationBatch", () => {
         content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }],
       },
     });
-    const { messages } = parseConversationBatch(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(0);
   });
 
@@ -380,7 +386,7 @@ describe("parseConversationBatch", () => {
         content: [{ type: "tool_use", id: "x", name: "Read", input: {} }],
       },
     });
-    const { messages } = parseConversationBatch(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(0);
   });
 
@@ -395,7 +401,7 @@ describe("parseConversationBatch", () => {
         ],
       },
     });
-    const { messages } = parseConversationBatch(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(1);
     const firstMessage = messages[0];
     if (!firstMessage) {
@@ -406,31 +412,27 @@ describe("parseConversationBatch", () => {
 
   it("handles string content (user prompt via spur send)", () => {
     const lines = jsonl({ type: "user", message: { role: "user", content: "fix the bug" } });
-    const { messages } = parseConversationBatch(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ role: "user", text: "fix the bug" });
   });
 
   it("returns empty for file with no conversation records", () => {
     const lines = jsonl({ type: "progress" }, { type: "system" });
-    const { messages } = parseConversationBatch(lines, NOW);
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
     expect(messages).toHaveLength(0);
   });
 
-  it("truncates message text longer than the cap and leaves shorter text unchanged", () => {
-    const longText = "x".repeat(3000);
-    const shortText = "y".repeat(2000);
-    const lines = jsonl(
-      { type: "user", message: { role: "user", content: [{ type: "text", text: longText }] } },
-      {
-        type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text: shortText }] },
-      },
-    );
-    const { messages } = parseConversationBatch(lines, NOW);
-    expect(messages).toHaveLength(2);
-    expect(messages[0]?.text).toHaveLength(2000);
-    expect(messages[1]?.text).toBe(shortText);
+  it("never truncates message text, however long", () => {
+    const longText = "x".repeat(5000);
+    const lines = jsonl({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: longText }] },
+    });
+    const messages = messagesOf(parseConversationBatch(lines, NOW).entries);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.text).toBe(longText);
+    expect(messages[0]?.text).toHaveLength(5000);
   });
 
   it("classifies state alongside conversation extraction", () => {
@@ -805,7 +807,7 @@ describe("readClaudeConversationTail", () => {
     sessionFileForIdMock.mockReset();
   });
 
-  it("reads a whole transcript one-shot: messages, totalMessages, and state", async () => {
+  it("reads a whole transcript one-shot: entries, totalEntries, and state", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
       await writeFile(filePath, [userLine("hello"), assistantLine("hi")].join("\n") + "\n", "utf8");
@@ -813,14 +815,15 @@ describe("readClaudeConversationTail", () => {
       const result = await readClaudeConversationTail(tempDir);
       expect(result).not.toBeNull();
       if (!result) throw new Error("expected result");
-      expect(result.messages.map((m) => m.text)).toEqual(["hello", "hi"]);
-      expect(result.totalMessages).toBe(2);
+      expect(messagesOf(result.entries).map((m) => m.text)).toEqual(["hello", "hi"]);
+      expect(result.totalEntries).toBe(2);
+      expect(result.startIndex).toBe(0);
       expect(result.hasMore).toBe(false);
       expect(result.state).toBe("waiting");
     });
   });
 
-  it("yields identical messages/state/totalMessages whether read one-shot or in chunks", async () => {
+  it("yields identical entries/state/totalEntries whether read one-shot or in chunks", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
       const lines = [userLine("q1"), assistantLine("a1"), userLine("q2"), assistantLine("a2")];
@@ -836,27 +839,29 @@ describe("readClaudeConversationTail", () => {
       await utimes(filePath, later, later);
       const second = await readClaudeConversationTail(tempDir, first?.reader);
 
-      expect(second?.messages).toEqual(oneShot?.messages);
-      expect(second?.totalMessages).toBe(oneShot?.totalMessages);
+      expect(second?.entries).toEqual(oneShot?.entries);
+      expect(second?.totalEntries).toBe(oneShot?.totalEntries);
       expect(second?.state).toBe(oneShot?.state);
     });
   });
 
-  it("caps the returned tail at MAX_CONVERSATION_MESSAGES and reports hasMore", async () => {
+  it("caps the retained tail at MAX_RETAINED_CONVERSATION_ENTRIES and reports hasMore", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
-      const total = MAX_CONVERSATION_MESSAGES + 5;
+      const total = MAX_RETAINED_CONVERSATION_ENTRIES + 5;
       const lines = Array.from({ length: total }, (_, i) => assistantLine(`m${i}`));
       await writeFile(filePath, lines.join("\n") + "\n", "utf8");
 
       const result = await readClaudeConversationTail(tempDir);
       if (!result) throw new Error("expected result");
-      expect(result.messages).toHaveLength(MAX_CONVERSATION_MESSAGES);
-      expect(result.totalMessages).toBe(total);
+      const messages = messagesOf(result.entries);
+      expect(messages).toHaveLength(MAX_RETAINED_CONVERSATION_ENTRIES);
+      expect(result.totalEntries).toBe(total);
+      expect(result.startIndex).toBe(total - MAX_RETAINED_CONVERSATION_ENTRIES);
       expect(result.hasMore).toBe(true);
-      // The kept window is the newest MAX_CONVERSATION_MESSAGES messages.
-      expect(result.messages[0]?.text).toBe("m5");
-      expect(result.messages.at(-1)?.text).toBe(`m${total - 1}`);
+      // The kept window is the newest MAX_RETAINED_CONVERSATION_ENTRIES entries.
+      expect(messages[0]?.text).toBe("m5");
+      expect(messages.at(-1)?.text).toBe(`m${total - 1}`);
     });
   });
 
@@ -864,17 +869,17 @@ describe("readClaudeConversationTail", () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
 
-      const atCap = Array.from({ length: MAX_CONVERSATION_MESSAGES }, (_, i) =>
+      const atCap = Array.from({ length: MAX_RETAINED_CONVERSATION_ENTRIES }, (_, i) =>
         assistantLine(`m${i}`),
       );
       await writeFile(filePath, atCap.join("\n") + "\n", "utf8");
       const exact = await readClaudeConversationTail(tempDir);
-      expect(exact?.totalMessages).toBe(MAX_CONVERSATION_MESSAGES);
+      expect(exact?.totalEntries).toBe(MAX_RETAINED_CONVERSATION_ENTRIES);
       expect(exact?.hasMore).toBe(false);
 
       await writeFile(filePath, [...atCap, assistantLine("extra")].join("\n") + "\n", "utf8");
       const over = await readClaudeConversationTail(tempDir);
-      expect(over?.totalMessages).toBe(MAX_CONVERSATION_MESSAGES + 1);
+      expect(over?.totalEntries).toBe(MAX_RETAINED_CONVERSATION_ENTRIES + 1);
       expect(over?.hasMore).toBe(true);
     });
   });
@@ -891,8 +896,8 @@ describe("readClaudeConversationTail", () => {
 
       const first = await readClaudeConversationTail(tempDir);
       if (!first) throw new Error("expected result");
-      expect(first.messages.map((m) => m.text)).toEqual(["hello"]);
-      expect(first.totalMessages).toBe(1);
+      expect(messagesOf(first.entries).map((m) => m.text)).toEqual(["hello"]);
+      expect(first.totalEntries).toBe(1);
 
       // Append the completing bytes with a trailing newline; bump mtime.
       await writeFile(filePath, `${complete}\n${trailing}\n`, "utf8");
@@ -900,8 +905,8 @@ describe("readClaudeConversationTail", () => {
       await utimes(filePath, later, later);
       const second = await readClaudeConversationTail(tempDir, first.reader);
       if (!second) throw new Error("expected result");
-      expect(second.messages.map((m) => m.text)).toEqual(["hello", "world"]);
-      expect(second.totalMessages).toBe(2);
+      expect(messagesOf(second.entries).map((m) => m.text)).toEqual(["hello", "world"]);
+      expect(second.totalEntries).toBe(2);
     });
   });
 
@@ -915,8 +920,8 @@ describe("readClaudeConversationTail", () => {
 
       const result = await readClaudeConversationTail(tempDir);
       if (!result) throw new Error("expected result");
-      expect(result.messages.map((m) => m.text)).toEqual(["hello", "world"]);
-      expect(result.totalMessages).toBe(2);
+      expect(messagesOf(result.entries).map((m) => m.text)).toEqual(["hello", "world"]);
+      expect(result.totalEntries).toBe(2);
     });
   });
 
@@ -937,8 +942,12 @@ describe("readClaudeConversationTail", () => {
       const earlier = new Date(Date.now() - 60_000);
       await utimes(filePath, earlier, earlier);
       const second = await readClaudeConversationTail(tempDir, first?.reader);
-      expect(second?.messages.map((m) => m.text)).toEqual(["fresh-a", "fresh-b", "fresh-c"]);
-      expect(second?.totalMessages).toBe(3);
+      expect(messagesOf(second?.entries ?? []).map((m) => m.text)).toEqual([
+        "fresh-a",
+        "fresh-b",
+        "fresh-c",
+      ]);
+      expect(second?.totalEntries).toBe(3);
     });
   });
 
@@ -954,8 +963,8 @@ describe("readClaudeConversationTail", () => {
 
       await writeFile(filePath, userLine("fresh") + "\n", "utf8");
       const second = await readClaudeConversationTail(tempDir, first?.reader);
-      expect(second?.messages.map((m) => m.text)).toEqual(["fresh"]);
-      expect(second?.totalMessages).toBe(1);
+      expect(messagesOf(second?.entries ?? []).map((m) => m.text)).toEqual(["fresh"]);
+      expect(second?.totalEntries).toBe(1);
     });
   });
 
@@ -967,12 +976,12 @@ describe("readClaudeConversationTail", () => {
 
       findLatestSessionFileMock.mockResolvedValueOnce(fileA);
       const first = await readClaudeConversationTail(tempDir);
-      expect(first?.totalMessages).toBe(2);
+      expect(first?.totalEntries).toBe(2);
 
       findLatestSessionFileMock.mockResolvedValueOnce(fileB);
       const second = await readClaudeConversationTail(tempDir, first?.reader);
-      expect(second?.messages.map((m) => m.text)).toEqual(["b1"]);
-      expect(second?.totalMessages).toBe(1);
+      expect(messagesOf(second?.entries ?? []).map((m) => m.text)).toEqual(["b1"]);
+      expect(second?.totalEntries).toBe(1);
     });
   });
 
@@ -991,22 +1000,36 @@ describe("readClaudeConversationTail", () => {
     });
   });
 
-  it("truncates message text over the cap while leaving shorter text intact", async () => {
+  it("never truncates message text, however long", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
       const long = "z".repeat(5000);
       await writeFile(filePath, [userLine(long), assistantLine("short")].join("\n") + "\n", "utf8");
 
       const result = await readClaudeConversationTail(tempDir);
-      expect(result?.messages[0]?.text).toHaveLength(2000);
-      expect(result?.messages[1]?.text).toBe("short");
+      const messages = messagesOf(result?.entries ?? []);
+      expect(messages[0]?.text).toBe(long);
+      expect(messages[0]?.text).toHaveLength(5000);
+      expect(messages[1]?.text).toBe("short");
     });
   });
 
-  it("classifies identically to the uncapped pure parser despite the message cap", async () => {
+  it("produces the same entries as readClaudeTranscriptEntries for one fixture", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
-      const lines = Array.from({ length: MAX_CONVERSATION_MESSAGES + 10 }, (_, i) =>
+      const lines = [userLine("one"), assistantLine("two"), userLine("three")];
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
+
+      const tail = await readClaudeConversationTail(tempDir);
+      const full = await readClaudeTranscriptEntries(tempDir);
+      expect(tail?.entries).toEqual(full);
+    });
+  });
+
+  it("classifies identically to the uncapped pure parser despite the entry cap", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const lines = Array.from({ length: MAX_RETAINED_CONVERSATION_ENTRIES + 10 }, (_, i) =>
         assistantLine(`m${i}`),
       );
       await writeFile(filePath, lines.join("\n") + "\n", "utf8");

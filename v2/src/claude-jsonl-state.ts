@@ -1,5 +1,5 @@
 import { open, readFile, stat } from "node:fs/promises";
-import type { ConversationMessage, SessionState, TranscriptEntry } from "./types.js";
+import type { SessionState, TranscriptEntry } from "./types.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
   CLAUDE_BOOKKEEPING_RECORD_TYPES,
@@ -33,29 +33,31 @@ export interface ClaudeJsonlReaderState {
 
 /**
  * Incremental reader state for the conversation tail. `tailRecords` feeds state
- * classification; `tailMessages` feeds the dialog display. The two are capped
+ * classification; `tailEntries` feeds the dialog display. The two are capped
  * independently so a large transcript stays cheap to re-poll and to send.
  */
 export interface ClaudeConversationReaderState {
   filePath: string;
   lastOffset: number;
   lastMtimeMs: number;
-  tailMessages: ConversationMessage[];
+  tailEntries: TranscriptEntry[];
   tailRecords: ParsedRecord[];
-  totalMessages: number;
+  totalEntries: number;
 }
 
 const TAIL_RECORD_LIMIT = 50;
 // Claude stamps locally-generated placeholder assistant records (API errors,
 // stop-sequence stubs) with this instead of a model id.
 const SYNTHETIC_MODEL = "<synthetic>";
-// Cap on the number of text-bearing messages returned/kept for display.
-export const MAX_CONVERSATION_MESSAGES = 300;
+// Page size for GET /sessions/:id/conversation. The default (no `from`) page
+// and the scroll-back page-fetch step both use this.
+export const CONVERSATION_PAGE_ENTRIES = 100;
+// Cap on the number of transcript entries retained in the incremental reader's
+// tail. Must stay >= 2 * CONVERSATION_PAGE_ENTRIES so the retained window
+// always covers at least one scroll-back page beyond the default page.
+export const MAX_RETAINED_CONVERSATION_ENTRIES = 300;
 // Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
-// Per-message text cap. Kept comfortably above the 500-char display truncation
-// so the wire payload stays bounded without altering anything the UI shows.
-export const MAX_MESSAGE_TEXT_CHARS = 2000;
 
 /** Scan backward for the model reported by the most recent assistant record. */
 export function deriveClaudeLiveModel(records: ParsedRecord[]): string | undefined {
@@ -433,145 +435,6 @@ export async function readClaudeJsonlState(
   };
 }
 
-// ── Conversation parser (pure, no I/O) ───────────────────────────────
-
-/**
- * Parse a batch of JSONL lines into both classification records and display
- * messages. Message text is truncated to the per-message cap. Shared by the
- * pure line parser and the incremental tail reader so extraction stays single-path.
- */
-export function parseConversationBatch(
-  lines: string[],
-  nowMs: number,
-): { records: ParsedRecord[]; messages: ConversationMessage[] } {
-  const records: ParsedRecord[] = [];
-  const messages: ConversationMessage[] = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    const record = parseJsonlRecord(trimmed, nowMs);
-    if (record) records.push(record);
-
-    const parsed = tryParseJson(trimmed);
-    if (!parsed) continue;
-
-    const message = unwrapMessage(parsed);
-    const role = extractRole(parsed, message);
-    if (role !== "user" && role !== "assistant") continue;
-
-    const combinedText = extractTextContent(message);
-    if (!combinedText) continue;
-
-    const ts = extractTimestampMs(parsed, message, nowMs);
-    messages.push({ role, text: combinedText.slice(0, MAX_MESSAGE_TEXT_CHARS), timestampMs: ts });
-  }
-
-  return { records, messages };
-}
-
-// ── Incremental conversation tail reader ──────────────────────────────
-
-export async function readClaudeConversationTail(
-  worktreePath: string,
-  reader?: ClaudeConversationReaderState,
-  agentSessionId?: string,
-): Promise<{
-  messages: ConversationMessage[];
-  state: SessionState;
-  totalMessages: number;
-  hasMore: boolean;
-  reader: ClaudeConversationReaderState;
-} | null> {
-  // Re-resolve each poll: a pinned id binds to its own transcript, else fall
-  // back to the newest-mtime scan (legacy sessions with no pinned id).
-  const filePath = agentSessionId
-    ? await sessionFileForId(worktreePath, agentSessionId)
-    : await findLatestSessionFile(worktreePath);
-  if (!filePath) return null;
-
-  let fileStat: { size: number; mtimeMs: number };
-  try {
-    fileStat = await stat(filePath);
-  } catch {
-    return null;
-  }
-
-  // Rebuild from scratch when there is no reader, the transcript file changed,
-  // the file shrank below our last offset (truncation/rotation), or its mtime
-  // moved backwards (the same path was replaced with an older file). Reading
-  // from a stale offset into rewritten bytes would emit misaligned/garbled
-  // lines. Residual gap: an in-place compaction that rewrites the same path to
-  // a size >= the old offset with a newer mtime is not detectable here and
-  // would still misalign until the next path change or shrink.
-  const reuse =
-    reader !== undefined &&
-    reader.filePath === filePath &&
-    fileStat.size >= reader.lastOffset &&
-    fileStat.mtimeMs >= reader.lastMtimeMs;
-  const base: ClaudeConversationReaderState = reuse
-    ? reader
-    : {
-        filePath,
-        lastOffset: 0,
-        lastMtimeMs: 0,
-        tailMessages: [],
-        tailRecords: [],
-        totalMessages: 0,
-      };
-
-  // Nothing appended (same mtime and size) and we already have content → skip
-  // re-read. Comparing size as well as mtime guards against coarse-granularity
-  // filesystem timestamps where a second write lands within the same mtime tick.
-  if (
-    reuse &&
-    fileStat.mtimeMs === base.lastMtimeMs &&
-    fileStat.size === base.lastOffset &&
-    base.tailRecords.length > 0
-  ) {
-    return {
-      messages: base.tailMessages,
-      state: classifyClaudeJsonlState(base.tailRecords, Date.now(), fileStat.mtimeMs),
-      totalMessages: base.totalMessages,
-      hasMore: base.totalMessages > base.tailMessages.length,
-      reader: base,
-    };
-  }
-
-  const readOffset = base.lastOffset;
-  const nowMs = Date.now();
-
-  const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
-  if (!chunk) return null;
-
-  const { records: newRecords, messages: newMessages } = parseConversationBatch(
-    chunk.consumedText.split("\n"),
-    nowMs,
-  );
-
-  const totalMessages = base.totalMessages + newMessages.length;
-  const tailMessages = [...base.tailMessages, ...newMessages].slice(-MAX_CONVERSATION_MESSAGES);
-  const tailRecords = [...base.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
-
-  const nextReader: ClaudeConversationReaderState = {
-    filePath,
-    lastOffset: readOffset + chunk.consumedBytes,
-    lastMtimeMs: fileStat.mtimeMs,
-    tailMessages,
-    tailRecords,
-    totalMessages,
-  };
-
-  return {
-    messages: tailMessages,
-    state: classifyClaudeJsonlState(tailRecords, nowMs, fileStat.mtimeMs),
-    totalMessages,
-    hasMore: totalMessages > tailMessages.length,
-    reader: nextReader,
-  };
-}
-
 // ── Transcript entries (unified message/tool/question timeline) ──────
 
 interface ClaudeQuestionOption {
@@ -620,29 +483,27 @@ function extractAskUserQuestions(input: unknown): ClaudeQuestion[] {
   return questions;
 }
 
-/** Full transcript in file-line order: messages, tool_use calls, and AskUserQuestion prompts. */
-export async function readClaudeTranscriptEntries(
-  worktreePath: string,
-  agentSessionId?: string,
-): Promise<TranscriptEntry[] | null> {
-  const filePath = agentSessionId
-    ? await sessionFileForId(worktreePath, agentSessionId)
-    : await findLatestSessionFile(worktreePath);
-  if (!filePath) return null;
+// ── Conversation parser (pure, no I/O) ───────────────────────────────
 
-  let fileText: string;
-  try {
-    fileText = await readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
-
-  const nowMs = Date.now();
+/**
+ * Parse a batch of JSONL lines into classification records and full-fidelity
+ * transcript entries (messages, tool_use calls, AskUserQuestion prompts).
+ * Message text is never truncated. Shared by the incremental tail reader and
+ * the full-file reader so extraction stays single-path.
+ */
+export function parseConversationBatch(
+  lines: string[],
+  nowMs: number,
+): { records: ParsedRecord[]; entries: TranscriptEntry[] } {
+  const records: ParsedRecord[] = [];
   const entries: TranscriptEntry[] = [];
 
-  for (const line of fileText.split("\n")) {
+  for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
+
+    const record = parseJsonlRecord(trimmed, nowMs);
+    if (record) records.push(record);
 
     const parsed = tryParseJson(trimmed);
     if (!parsed) continue;
@@ -684,5 +545,132 @@ export async function readClaudeTranscriptEntries(
     }
   }
 
+  return { records, entries };
+}
+
+/** Full transcript in file-line order: messages, tool_use calls, and AskUserQuestion prompts. */
+export async function readClaudeTranscriptEntries(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<TranscriptEntry[] | null> {
+  const filePath = agentSessionId
+    ? await sessionFileForId(worktreePath, agentSessionId)
+    : await findLatestSessionFile(worktreePath);
+  if (!filePath) return null;
+
+  let fileText: string;
+  try {
+    fileText = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const { entries } = parseConversationBatch(fileText.split("\n"), Date.now());
   return entries;
+}
+
+// ── Incremental conversation tail reader ──────────────────────────────
+
+export async function readClaudeConversationTail(
+  worktreePath: string,
+  reader?: ClaudeConversationReaderState,
+  agentSessionId?: string,
+): Promise<{
+  entries: TranscriptEntry[];
+  state: SessionState;
+  totalEntries: number;
+  startIndex: number;
+  hasMore: boolean;
+  reader: ClaudeConversationReaderState;
+} | null> {
+  // Re-resolve each poll: a pinned id binds to its own transcript, else fall
+  // back to the newest-mtime scan (legacy sessions with no pinned id).
+  const filePath = agentSessionId
+    ? await sessionFileForId(worktreePath, agentSessionId)
+    : await findLatestSessionFile(worktreePath);
+  if (!filePath) return null;
+
+  let fileStat: { size: number; mtimeMs: number };
+  try {
+    fileStat = await stat(filePath);
+  } catch {
+    return null;
+  }
+
+  // Rebuild from scratch when there is no reader, the transcript file changed,
+  // the file shrank below our last offset (truncation/rotation), or its mtime
+  // moved backwards (the same path was replaced with an older file). Reading
+  // from a stale offset into rewritten bytes would emit misaligned/garbled
+  // lines. Residual gap: an in-place compaction that rewrites the same path to
+  // a size >= the old offset with a newer mtime is not detectable here and
+  // would still misalign until the next path change or shrink.
+  const reuse =
+    reader !== undefined &&
+    reader.filePath === filePath &&
+    fileStat.size >= reader.lastOffset &&
+    fileStat.mtimeMs >= reader.lastMtimeMs;
+  const base: ClaudeConversationReaderState = reuse
+    ? reader
+    : {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailEntries: [],
+        tailRecords: [],
+        totalEntries: 0,
+      };
+
+  // Nothing appended (same mtime and size) and we already have content → skip
+  // re-read. Comparing size as well as mtime guards against coarse-granularity
+  // filesystem timestamps where a second write lands within the same mtime tick.
+  if (
+    reuse &&
+    fileStat.mtimeMs === base.lastMtimeMs &&
+    fileStat.size === base.lastOffset &&
+    base.tailRecords.length > 0
+  ) {
+    return {
+      entries: base.tailEntries,
+      state: classifyClaudeJsonlState(base.tailRecords, Date.now(), fileStat.mtimeMs),
+      totalEntries: base.totalEntries,
+      startIndex: Math.max(0, base.totalEntries - base.tailEntries.length),
+      hasMore: base.totalEntries > base.tailEntries.length,
+      reader: base,
+    };
+  }
+
+  const readOffset = base.lastOffset;
+  const nowMs = Date.now();
+
+  const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
+  if (!chunk) return null;
+
+  const { records: newRecords, entries: newEntries } = parseConversationBatch(
+    chunk.consumedText.split("\n"),
+    nowMs,
+  );
+
+  const totalEntries = base.totalEntries + newEntries.length;
+  const tailEntries = [...base.tailEntries, ...newEntries].slice(
+    -MAX_RETAINED_CONVERSATION_ENTRIES,
+  );
+  const tailRecords = [...base.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
+
+  const nextReader: ClaudeConversationReaderState = {
+    filePath,
+    lastOffset: readOffset + chunk.consumedBytes,
+    lastMtimeMs: fileStat.mtimeMs,
+    tailEntries,
+    tailRecords,
+    totalEntries,
+  };
+
+  return {
+    entries: tailEntries,
+    state: classifyClaudeJsonlState(tailRecords, nowMs, fileStat.mtimeMs),
+    totalEntries,
+    startIndex: Math.max(0, totalEntries - tailEntries.length),
+    hasMore: totalEntries > tailEntries.length,
+    reader: nextReader,
+  };
 }
