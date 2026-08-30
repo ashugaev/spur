@@ -9077,6 +9077,7 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("waiting");
+    expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
     service.dispose();
   });
 

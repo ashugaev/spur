@@ -14709,7 +14709,8 @@ export class SessionService {
           rateLimit?.limited &&
           !rateLimitActive(rateLimit, nowMs) &&
           menuHit?.limited &&
-          nowMs - (rateLimit.resetAtMs as number) <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+          rateLimit.resetAtMs !== undefined &&
+          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
         ) {
           paneReconfirmedLimit = true;
           this.claudeRateLimitReconfirmOverrides.set(
@@ -14806,10 +14807,18 @@ export class SessionService {
           rateLimit = tmuxHit;
         }
       }
+      // Defined only when the detection is flagged and its parsed reset has
+      // passed (rateLimit?.limited && resetAtMs === undefined would make
+      // rateLimitActive true, so that case never reaches this ternary's
+      // false branch through the else-if below — it's consumed by the
+      // rate_limited arm instead). Narrows the expired-arm condition to
+      // `number` with no cast.
+      const rateLimitExpiredResetAtMs =
+        rateLimit?.limited && !rateLimitActive(rateLimit, nowMs) ? rateLimit.resetAtMs : undefined;
       if (rateLimitActive(rateLimit, nowMs) || paneReconfirmedLimit) {
         state = "rate_limited";
         classifiedDetail = `State: rate_limited (${rateLimit?.reason}${paneReconfirmedLimit && !rateLimitActive(rateLimit, nowMs) ? ", pane menu re-confirmed after expiry" : ""})`;
-      } else if (rateLimit?.limited) {
+      } else if (rateLimitExpiredResetAtMs !== undefined) {
         // The parsed reset instant has passed and no live menu re-confirmed
         // it: leave `state` as the source above computed it (never force it
         // back to rate_limited), but record the expiry so
@@ -14817,13 +14826,10 @@ export class SessionService {
         // into rateLimitExpiredAtMs for resolveParkActivityAt's park-clock
         // anchor. Guarded on !compactingApplied: a compaction override
         // already set classifiedDetail above and must not be clobbered here
-        // (THREAD 7). resetAtMs is always defined here: reaching this arm
-        // requires !rateLimitActive with rateLimit.limited true, which per
-        // rateLimitExpired only holds when resetAtMs is set and past.
-        const resetAtMs = rateLimit.resetAtMs as number;
-        rateLimitExpiredAtMs = resetAtMs;
+        // (THREAD 7).
+        rateLimitExpiredAtMs = rateLimitExpiredResetAtMs;
         if (!compactingApplied) {
-          classifiedDetail = `State: ${state} (rate limit expired at ${new Date(resetAtMs).toISOString()})`;
+          classifiedDetail = `State: ${state} (rate limit expired at ${new Date(rateLimitExpiredResetAtMs).toISOString()})`;
         }
       } else if (hasServerErrorRecord) {
         state = "error";
