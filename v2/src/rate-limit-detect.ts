@@ -128,18 +128,37 @@ export interface ClaudeRateLimitRecord {
 // unparseable, since guessing a timezone would risk a wrong expiry.
 const RATE_LIMIT_RESET_RE = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(\s*utc\s*\)/i;
 
-// Parses a claude rate-limit banner's trailing "resets HH[:MM](am|pm) (UTC)"
+// The only banner scope this parser trusts a reset instant from. RATE_LIMIT_MARKERS
+// / TMUX_BANNER_MARKERS also match "hit your weekly limit" and "hit your opus limit",
+// which can carry the same "resets HH (UTC)" clause for a reset days away — parsing
+// that would still land inside this function's forward-only (anchor, anchor+24h]
+// range and report a multi-day limit as expired within a day.
+const SESSION_LIMIT_BANNER = "hit your session limit";
+
+// The truncation window a minute-precision banner clock can hide: the true reset can
+// land up to 60s after the rendered minute.
+const BANNER_CLOCK_TRUNCATION_MS = 60_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Parses a claude session-limit banner's trailing "resets HH[:MM](am|pm) (UTC)"
 // clause into an absolute epoch-ms instant, anchored to the record's own
 // timestamp (never the caller's clock — see claude-jsonl-state.ts's
-// extractRecordTimestampMs). Forward-only: the returned instant is always
-// strictly after `anchorMs`, rolling over to the next day when the banner's
-// clock time has already passed on the anchor's own UTC calendar date. A
-// backward-inclusive match would land the reset in the past at parse time on
-// the reporter's own case (a banner printed just after its own reset hour),
-// which is worse than never expiring at all. Returns `undefined` for any
-// unparseable, out-of-range, or non-UTC form — never a guessed timezone or a
-// fallback expiry.
+// extractRecordTimestampMs). Scope-gated to the session limit: a weekly, opus,
+// or otherwise unrecognized banner returns `undefined` and keeps today's
+// time-blind, stuck-but-safe behavior — see SESSION_LIMIT_BANNER. Forward-only:
+// the returned instant is always strictly after `anchorMs`. The banner's clock
+// is minute-truncated, so the true reset can land up to 60s after the rendered
+// minute; when the anchor is still within that truncation window of the
+// rendered minute, the candidate is clamped forward to the end of that minute
+// (candidate + 60s) rather than accepted as-is, so the returned instant is
+// never earlier than the true reset. Once the anchor is 60s or more past the
+// rendered minute, the candidate rolls a full day forward instead. Returns
+// `undefined` for any unparseable, out-of-range, or non-UTC form — never a
+// guessed timezone or a fallback expiry.
 export function parseRateLimitResetAtMs(text: string, anchorMs: number): number | undefined {
+  if (!text.toLowerCase().includes(SESSION_LIMIT_BANNER)) {
+    return undefined;
+  }
   const match = RATE_LIMIT_RESET_RE.exec(text);
   if (!match) {
     return undefined;
@@ -168,7 +187,7 @@ export function parseRateLimitResetAtMs(text: string, anchorMs: number): number 
     0,
   );
   if (candidate <= anchorMs) {
-    candidate += 24 * 60 * 60 * 1000;
+    candidate += anchorMs - candidate < BANNER_CLOCK_TRUNCATION_MS ? BANNER_CLOCK_TRUNCATION_MS : DAY_MS;
   }
   return candidate;
 }
@@ -242,8 +261,21 @@ const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for lim
 const CLAUDE_USAGE_MENU_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*ask your admin for more usage$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
+// captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
+// banner search, not this check — without a tail bound, an already-dismissed menu
+// could still match here until ~200 lines of subsequent output scroll it out.
+// Bounded the same way as detectCodexMcpPermissionDialog's CODEX_MCP_DIALOG_TAIL_LINES:
+// only a menu inside the pane's last 20 non-blank lines matches. Unlike the codex
+// dialog, confirming this menu (Enter) produces no further pane output — the
+// session just goes idle — so "at the tail" narrows the false-positive window but
+// does not prove the menu is still live.
+const CLAUDE_USAGE_MENU_TAIL_LINES = 20;
+
 export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
-  const lines = paneText.split("\n").map((line) => line.trim());
+  const allLines = paneText.split("\n").map((line) => line.trim());
+  let end = allLines.length;
+  while (end > 0 && allLines[end - 1] === "") end--;
+  const lines = allLines.slice(Math.max(0, end - CLAUDE_USAGE_MENU_TAIL_LINES), end);
   const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
   const hasOptionTwo = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_TWO.test(line));
   const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));

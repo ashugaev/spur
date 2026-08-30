@@ -366,6 +366,27 @@ describe("detectClaudeUsageLimitMenu", () => {
     const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();
   });
+
+  it("ignores a usage-limit menu that has scrolled out of the live tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    const paneText = `${MENU_TEXT}\n${subsequentOutput}`;
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("still matches a menu at the pane tail", () => {
+    const precedingOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: earlier unrelated output`,
+    ).join("\n");
+    const paneText = `${precedingOutput}\n${MENU_TEXT}`;
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
 });
 
 describe("claudeUsageMenuOptionOneSelected", () => {
@@ -567,9 +588,9 @@ describe("readCodexRolloutState rate limits", () => {
 describe("parseRateLimitResetAtMs", () => {
   it("parses the field-reported sample anchored same-day", () => {
     const anchorMs = Date.parse("2026-07-01T11:07:00.000Z");
-    expect(parseRateLimitResetAtMs("resets 11:20am (UTC)", anchorMs)).toBe(
-      Date.parse("2026-07-01T11:20:00.000Z"),
-    );
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 11:20am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-01T11:20:00.000Z"));
   });
 
   it("parses the captured fixture sample anchored same-day", () => {
@@ -581,46 +602,81 @@ describe("parseRateLimitResetAtMs", () => {
 
   it("rolls over to the next day when the anchor's clock time is already past the reset hour", () => {
     const anchorMs = Date.parse("2026-07-01T23:50:00.000Z");
-    expect(parseRateLimitResetAtMs("resets 12:10am (UTC)", anchorMs)).toBe(
-      Date.parse("2026-07-02T00:10:00.000Z"),
-    );
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 12:10am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-02T00:10:00.000Z"));
   });
 
-  it("rolls over forward-only when the reset clock time equals the anchor's own minute (no backward grace)", () => {
+  it("clamps to the end of the truncated banner minute instead of rolling a full day", () => {
     const anchorMs = Date.parse("2026-07-01T11:20:30.000Z");
-    const resetAtMs = parseRateLimitResetAtMs("resets 11:20am (UTC)", anchorMs);
-    expect(resetAtMs).toBe(Date.parse("2026-07-02T11:20:00.000Z"));
+    const resetAtMs = parseRateLimitResetAtMs(
+      "You've hit your session limit · resets 11:20am (UTC)",
+      anchorMs,
+    );
+    expect(resetAtMs).toBe(Date.parse("2026-07-01T11:21:00.000Z"));
     expect(resetAtMs).toBeGreaterThan(anchorMs);
+  });
+
+  it("rolls a full day once the anchor is past the truncation window", () => {
+    const anchorMs = Date.parse("2026-07-01T11:21:00.000Z");
+    expect(
+      parseRateLimitResetAtMs(
+        "You've hit your session limit · resets 11:20am (UTC)",
+        anchorMs,
+      ),
+    ).toBe(Date.parse("2026-07-02T11:20:00.000Z"));
   });
 
   it("maps 12pm to noon and 12am to midnight", () => {
     const anchorMs = Date.parse("2026-07-01T00:00:00.000Z");
-    expect(parseRateLimitResetAtMs("resets 12pm (UTC)", anchorMs)).toBe(
-      Date.parse("2026-07-01T12:00:00.000Z"),
-    );
-    expect(parseRateLimitResetAtMs("resets 12am (UTC)", anchorMs)).toBe(
-      Date.parse("2026-07-02T00:00:00.000Z"),
-    );
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 12pm (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-01T12:00:00.000Z"));
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 12am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-01T00:01:00.000Z"));
   });
 
   it("returns undefined for an hour of 0", () => {
-    expect(parseRateLimitResetAtMs("resets 0am (UTC)", 0)).toBeUndefined();
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 0am (UTC)", 0),
+    ).toBeUndefined();
   });
 
   it("returns undefined for minutes above 59", () => {
-    expect(parseRateLimitResetAtMs("resets 11:99am (UTC)", 0)).toBeUndefined();
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 11:99am (UTC)", 0),
+    ).toBeUndefined();
   });
 
   it("returns undefined with no resets phrase", () => {
-    expect(parseRateLimitResetAtMs("You've hit your usage limit.", 0)).toBeUndefined();
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · You've hit your usage limit.", 0),
+    ).toBeUndefined();
   });
 
   it("returns undefined with no UTC parenthetical", () => {
-    expect(parseRateLimitResetAtMs("resets 3pm", 0)).toBeUndefined();
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 3pm", 0),
+    ).toBeUndefined();
   });
 
   it("returns undefined for a non-UTC parenthetical", () => {
-    expect(parseRateLimitResetAtMs("resets 3pm (PDT)", 0)).toBeUndefined();
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 3pm (PDT)", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for a weekly-limit banner carrying a resets clause", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets 7pm (UTC)", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for an opus-limit banner carrying a resets clause", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your opus limit · resets 7pm (UTC)", 0),
+    ).toBeUndefined();
   });
 });
 

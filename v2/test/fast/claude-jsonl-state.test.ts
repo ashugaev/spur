@@ -345,6 +345,25 @@ describe("parseJsonlRecord rate_limit reset detection", () => {
     expect(record?.rateLimited).toBeUndefined();
     expect(record?.rateLimitResetAtMs).toBeUndefined();
   });
+
+  it("leaves rateLimitResetAtMs undefined for a weekly-limit banner", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      isApiErrorMessage: true,
+      apiErrorStatus: 429,
+      error: "rate_limit",
+      timestamp: "2026-07-12T18:18:45.588Z",
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        stop_reason: "stop_sequence",
+        content: [{ type: "text", text: "You've hit your weekly limit · resets 7pm (UTC)" }],
+      },
+    });
+    const record = parseJsonlRecord(line, 0);
+    expect(record?.rateLimited).toBe(true);
+    expect(record?.rateLimitResetAtMs).toBeUndefined();
+  });
 });
 
 // ── hasTrailingClaudeServerError ──────────────────────────────────────
