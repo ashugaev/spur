@@ -98,82 +98,98 @@ export function ArtifactList({
   };
 
   return (
-    <table className="w-full border-collapse">
-      <thead>
-        <tr className="border-b border-[var(--color-border-default)]">
-          {COLUMN_HEADERS.map(({ column, label, className }) => {
-            const active = sort.column === column;
-            return (
-              <th
-                aria-sort={
-                  active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"
-                }
-                className={`font-bold text-[var(--color-text-tertiary)] ${className ?? ""}`}
-                key={column}
-                scope="col"
-              >
-                <button
-                  className="flex w-full items-center gap-1 px-2.5 py-2 text-left uppercase tracking-[0.1em] outline-none hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
-                  onClick={() => toggleColumn(column)}
-                  type="button"
+    // Contains any residual overflow to the table itself, never the page:
+    // matches the `[&_table]:overflow-x-auto` pattern MarkdownMessage.tsx
+    // uses for user-generated tables. `table-fixed` + the colgroup below
+    // also let the Name column shrink instead of forcing overflow, so this
+    // wrapper is normally just a safety net rather than an active scroller.
+    <div className="overflow-x-auto">
+      <table className="w-full table-fixed border-collapse">
+        <colgroup>
+          <col />
+          <col className="w-16" />
+          <col className="hidden w-16 sm:table-column" />
+          <col className="w-20" />
+          <col className="w-24" />
+        </colgroup>
+        <thead>
+          <tr className="border-b border-[var(--color-border-default)]">
+            {COLUMN_HEADERS.map(({ column, label, className }) => {
+              const active = sort.column === column;
+              return (
+                <th
+                  aria-sort={
+                    active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"
+                  }
+                  className={`font-bold text-[var(--color-text-tertiary)] ${className ?? ""}`}
+                  key={column}
+                  scope="col"
                 >
-                  {label}
-                  {active ? <span aria-hidden="true">{sortIndicator(sort.direction)}</span> : null}
-                </button>
-              </th>
-            );
-          })}
-          <th
-            className="px-2.5 py-2 text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]"
-            scope="col"
-          >
-            Actions
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {sortedArtifacts.map((artifact) => (
-          <tr className="border-b border-[var(--color-border-subtle)]" key={artifact.id}>
-            <td className="max-w-[16rem] truncate px-2.5 py-2 font-mono" title={artifact.name}>
-              {artifact.name}
-            </td>
-            <td className="px-2.5 py-2">{formatBytes(artifact.size)}</td>
-            <td className="hidden px-2.5 py-2 sm:table-cell">{artifact.kind}</td>
-            <td className="px-2.5 py-2">{formatRelativeTime(artifact.updatedAt)}</td>
-            <td className="px-2.5 py-2">
-              <div className="flex items-center gap-2">
-                <button
-                  aria-label={`Preview ${artifact.name}`}
-                  className={ROW_ACTION_BUTTON_CLASS}
-                  onClick={() => onPreview(artifact.id)}
-                  type="button"
-                >
-                  <ArtifactPreviewIcon className="h-3 w-3" />
-                </button>
-                {isHtmlMimeType(artifact.mimeType) ? (
-                  <a
-                    aria-label={`Open ${artifact.name} in a new tab`}
-                    className={ROW_ACTION_BUTTON_CLASS}
-                    href={hrefFor(artifact.id)}
-                    rel="noreferrer"
-                    target="_blank"
+                  <button
+                    className="flex w-full items-center gap-1 px-2.5 py-2 text-left uppercase tracking-[0.1em] outline-none hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+                    onClick={() => toggleColumn(column)}
+                    type="button"
                   >
-                    <ArtifactOpenExternalIcon className="h-3 w-3" />
-                  </a>
-                ) : null}
-                <a
-                  aria-label={`Download ${artifact.name}`}
-                  className={ROW_ACTION_BUTTON_CLASS}
-                  download={artifact.name}
-                  href={hrefFor(artifact.id)}
-                >
-                  <ArtifactDownloadIcon className="h-3 w-3" />
-                </a>
-              </div>
-            </td>
+                    {label}
+                    {active ? (
+                      <span aria-hidden="true">{sortIndicator(sort.direction)}</span>
+                    ) : null}
+                  </button>
+                </th>
+              );
+            })}
+            <th
+              className="px-2.5 py-2 text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]"
+              scope="col"
+            >
+              Actions
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {sortedArtifacts.map((artifact) => (
+            <tr className="border-b border-[var(--color-border-subtle)]" key={artifact.id}>
+              <td className="min-w-0 truncate px-2.5 py-2 font-mono" title={artifact.name}>
+                {artifact.name}
+              </td>
+              <td className="px-2.5 py-2">{formatBytes(artifact.size)}</td>
+              <td className="hidden px-2.5 py-2 sm:table-cell">{artifact.kind}</td>
+              <td className="px-2.5 py-2">{formatRelativeTime(artifact.updatedAt)}</td>
+              <td className="px-2.5 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    aria-label={`Preview ${artifact.name}`}
+                    className={ROW_ACTION_BUTTON_CLASS}
+                    onClick={() => onPreview(artifact.id)}
+                    type="button"
+                  >
+                    <ArtifactPreviewIcon className="h-3 w-3" />
+                  </button>
+                  {isHtmlMimeType(artifact.mimeType) ? (
+                    <a
+                      aria-label={`Open ${artifact.name} in a new tab`}
+                      className={ROW_ACTION_BUTTON_CLASS}
+                      href={hrefFor(artifact.id)}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <ArtifactOpenExternalIcon className="h-3 w-3" />
+                    </a>
+                  ) : null}
+                  <a
+                    aria-label={`Download ${artifact.name}`}
+                    className={ROW_ACTION_BUTTON_CLASS}
+                    download={artifact.name}
+                    href={hrefFor(artifact.id)}
+                  >
+                    <ArtifactDownloadIcon className="h-3 w-3" />
+                  </a>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

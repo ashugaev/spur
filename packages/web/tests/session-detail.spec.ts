@@ -2530,6 +2530,45 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
+  test("artifact list view does not scroll the page horizontally on a narrow viewport", async ({
+    page,
+  }) => {
+    // Reproduces the reviewer's PR #789 measurement (scrollWidth 402 vs
+    // innerWidth 390 at 390px) with the current HEAD's Updated column always
+    // visible, which grows the row further. Name must shrink and any
+    // remaining overflow must stay inside the table, never the page.
+    const session = makeWorkingSession({
+      id: "detail-s4b-narrow-list",
+      artifacts: [
+        {
+          id: "report.html",
+          name: "a-fairly-long-generated-report-name-for-this-session.html",
+          size: 123_456,
+          mimeType: "text/html",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page
+      .getByRole("tablist", { name: "Artifact view" })
+      .getByRole("button", { name: "List" })
+      .click();
+    await expect(page.getByRole("columnheader", { name: /Updated/ })).toBeVisible();
+
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    const innerWidth = await page.evaluate(() => window.innerWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+
   test("image lightbox zoom buttons scale and reset the preview", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4b-zoom",
