@@ -919,15 +919,16 @@ interface SessionStateResult {
   // (see the expired arm below) — level-triggered, not edge-triggered. Safe
   // because the value is a fixed instant: resolveParkActivityAt's max()
   // against agentActivityAt makes repeated writes of the same anchor inert.
-  // The park-clock anchor: a session shielded by rate_limited must get a
-  // fresh idle window measured from the moment it became workable again, not
-  // from the rate-limit record's own (much older) transcript timestamp.
-  // Exception, deliberate: once CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS trips
-  // (see its own comment), this is still the raw resetAtMs — now 24h+ stale.
-  // resolveParkActivityAt's max() then anchors the park clock 24h+ in the
-  // past, so the session is immediately stale-park-sweep eligible. Not a
-  // regression of the fresh-window case above: an uncorroborated limit for a
-  // full reset cycle is exactly what the sweep is for.
+  // The anchor is always resetAtMs, the instant the limit lapsed — never
+  // nowMs, the instant Spur recognized the lapse. A nowMs anchor would
+  // advance on every classify call, so resolveParkActivityAt's max() would
+  // never let the idle window accumulate and the session would never park.
+  // Once CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS trips (see its own comment),
+  // recognition lands 24h+ after the lapse, so the same rule yields an
+  // already-stale anchor: the session parks promptly, by design, not by
+  // accident. Not a regression of the fresh-window case above: an
+  // uncorroborated limit for a full reset cycle is exactly what the sweep
+  // is for.
   rateLimitExpiredAtMs?: number;
 }
 
