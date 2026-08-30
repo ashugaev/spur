@@ -31,7 +31,7 @@ export const TODO_TOOL_NAME = "spur-todo";
 export const MANUAL_TITLE_LOCK_MESSAGE =
   "title editing unavailable because title was set manually; do not attempt title edits again.";
 
-interface NormalizedSlotsUpdate {
+export interface NormalizedSlotsUpdate {
   title?: string;
   clearTitle: boolean;
   setTitleIfAbsent?: boolean;
@@ -192,17 +192,15 @@ function hasPersistentSlotState(slots: SessionSlots): boolean {
   return (
     Boolean(slots.title) ||
     slots.links.length > 0 ||
-    slots.titleLocked === true ||
     slots.titleSource !== undefined ||
     (slots.tags?.length ?? 0) > 0
   );
 }
 
-export function applySlotsUpdateWithResult(
+export function applyNormalizedSlotsUpdate(
   current: SessionSlots | undefined,
-  request: UpdateSessionSlotsRequest,
+  update: NormalizedSlotsUpdate,
 ): AppliedSlotsUpdate {
-  const update = normalizeSlotsUpdate(request);
   const links = new Map((current?.links ?? []).map((link) => [link.label, link] as const));
   for (const label of update.unlinkLabels) {
     links.delete(label);
@@ -213,31 +211,24 @@ export function applySlotsUpdateWithResult(
 
   let title = current?.title;
   let titleSource = current?.titleSource;
-  let titleLocked = current?.titleLocked === true;
   let titleResult: SessionSlotsUpdateResult["titleResult"] = "unchanged";
   let message: string | undefined;
   const titleEditRequested = update.clearTitle || update.title !== undefined;
-  const blockedTitleEdit = current?.titleLocked === true && update.source !== "manual";
+  const blockedTitleEdit = current?.titleSource === "manual" && update.source !== "manual";
 
   if (blockedTitleEdit && titleEditRequested) {
     titleResult = "blocked";
     message = MANUAL_TITLE_LOCK_MESSAGE;
   } else if (update.clearTitle) {
     title = undefined;
-    if (update.source === "manual") {
-      titleSource = "manual";
-      titleLocked = true;
-    } else {
-      titleSource = undefined;
-      titleLocked = false;
-    }
+    titleSource = update.source;
     titleResult = "cleared";
   } else if (update.title !== undefined) {
-    const hasExistingTitle = (current?.title?.trim().length ?? 0) > 0;
+    const hasExistingTitle =
+      (current?.title?.trim().length ?? 0) > 0 || current?.titleSource !== undefined;
     if (!update.setTitleIfAbsent || !hasExistingTitle) {
       title = update.title;
       titleSource = update.source;
-      titleLocked = update.source === "manual";
       titleResult = "updated";
     }
   }
@@ -256,7 +247,6 @@ export function applySlotsUpdateWithResult(
   const slots: SessionSlots = {
     ...(title ? { title } : {}),
     ...(titleSource ? { titleSource } : {}),
-    ...(titleLocked ? { titleLocked: true } : {}),
     links: nextLinks,
     ...(nextTags.length > 0 ? { tags: nextTags } : {}),
   };
@@ -273,6 +263,13 @@ export function applySlotsUpdateWithResult(
     slots,
     result,
   };
+}
+
+export function applySlotsUpdateWithResult(
+  current: SessionSlots | undefined,
+  request: UpdateSessionSlotsRequest,
+): AppliedSlotsUpdate {
+  return applyNormalizedSlotsUpdate(current, normalizeSlotsUpdate(request));
 }
 
 export function applySlotsUpdate(

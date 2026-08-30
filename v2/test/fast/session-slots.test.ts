@@ -9,6 +9,7 @@ import {
   AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
   applySlotsUpdateWithResult,
+  applyNormalizedSlotsUpdate,
   MANUAL_TITLE_LOCK_MESSAGE,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
@@ -63,7 +64,7 @@ describe("session slots", () => {
     });
   });
 
-  it("removes title and links when explicitly cleared", () => {
+  it("removes title and links when explicitly cleared, recording the clearing source", () => {
     const updated = applySlotsUpdate(
       {
         title: "Current task",
@@ -75,7 +76,7 @@ describe("session slots", () => {
       },
     );
 
-    expect(updated).toBeUndefined();
+    expect(updated).toEqual({ titleSource: "agent", links: [] });
   });
 
   it("rejects invalid link labels and empty updates", () => {
@@ -111,7 +112,6 @@ describe("session slots", () => {
     expect(first).toEqual({
       title: "Manual title",
       titleSource: "manual",
-      titleLocked: true,
       links: [],
     });
 
@@ -119,7 +119,6 @@ describe("session slots", () => {
     expect(second).toEqual({
       title: "Manual title revised",
       titleSource: "manual",
-      titleLocked: true,
       links: [],
     });
   });
@@ -129,7 +128,6 @@ describe("session slots", () => {
       {
         title: "Manual title",
         titleSource: "manual",
-        titleLocked: true,
         links: [],
       },
       { clearTitle: true, source: "manual" },
@@ -137,7 +135,22 @@ describe("session slots", () => {
 
     expect(updated).toEqual({
       titleSource: "manual",
-      titleLocked: true,
+      links: [],
+    });
+  });
+
+  it("agent clear keeps titleSource agent", () => {
+    const updated = applySlotsUpdate(
+      {
+        title: "Agent title",
+        titleSource: "agent",
+        links: [],
+      },
+      { clearTitle: true },
+    );
+
+    expect(updated).toEqual({
+      titleSource: "agent",
       links: [],
     });
   });
@@ -147,7 +160,6 @@ describe("session slots", () => {
       {
         title: "Manual title",
         titleSource: "manual",
-        titleLocked: true,
         links: [{ label: "tracker", url: "https://tracker.example.com/TASK-1" }],
       },
       {
@@ -163,7 +175,6 @@ describe("session slots", () => {
     expect(applied.slots).toEqual({
       title: "Manual title",
       titleSource: "manual",
-      titleLocked: true,
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-1" },
         { label: "pr", url: "https://github.com/org/repo/pull/10" },
@@ -175,7 +186,6 @@ describe("session slots", () => {
     const current = {
       title: "Manual title",
       titleSource: "manual" as const,
-      titleLocked: true,
       links: [],
     };
 
@@ -203,6 +213,29 @@ describe("session slots", () => {
     expect(() => normalizeSlotsUpdate({ setTitleIfAbsent: true })).toThrow(
       "setTitleIfAbsent requires a title",
     );
+  });
+
+  it("setTitleIfAbsent is a once-only initializer, even after a clear leaves no title", () => {
+    const cleared = { titleSource: "agent" as const, links: [] };
+    const updated = applySlotsUpdate(cleared, { title: "Second", setTitleIfAbsent: true });
+    expect(updated).toEqual({ titleSource: "agent", links: [] });
+  });
+
+  it("applyNormalizedSlotsUpdate does not re-validate", () => {
+    const applied = applyNormalizedSlotsUpdate(undefined, {
+      title: "Not a valid raw label but pre-normalized already",
+      clearTitle: false,
+      source: "manual",
+      links: [{ label: "not valid raw", url: "https://example.com" }],
+      unlinkLabels: [],
+      tags: [],
+      untags: [],
+    });
+    expect(applied.slots).toEqual({
+      title: "Not a valid raw label but pre-normalized already",
+      titleSource: "manual",
+      links: [{ label: "not valid raw", url: "https://example.com" }],
+    });
   });
 
   it("injects helper instructions only once", () => {
