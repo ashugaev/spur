@@ -1,20 +1,22 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { formatBytes, formatRelativeTime } from "@/lib/format";
+import { isHtmlMimeType } from "@/lib/artifact-html";
 import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
+import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import type { SpurSessionArtifact } from "@/lib/types";
 
-type ArtifactSortColumn = "name" | "size" | "type" | "updatedAt";
-type ArtifactSortDirection = "asc" | "desc";
+export type ArtifactSortColumn = "name" | "size" | "type" | "updatedAt";
+export type ArtifactSortDirection = "asc" | "desc";
 
-interface ArtifactSortState {
+export interface ArtifactSortState {
   column: ArtifactSortColumn;
   direction: ArtifactSortDirection;
 }
 
-const DEFAULT_SORT: ArtifactSortState = { column: "updatedAt", direction: "desc" };
+export const DEFAULT_ARTIFACT_SORT: ArtifactSortState = { column: "updatedAt", direction: "desc" };
 
 const COLUMN_DEFAULT_DIRECTION: Record<ArtifactSortColumn, ArtifactSortDirection> = {
   name: "asc",
@@ -31,7 +33,7 @@ const COLUMN_HEADERS: ReadonlyArray<{
   { column: "name", label: "Name" },
   { column: "size", label: "Size" },
   { column: "type", label: "Type", className: "hidden sm:table-cell" },
-  { column: "updatedAt", label: "Updated", className: "hidden md:table-cell" },
+  { column: "updatedAt", label: "Updated" },
 ];
 
 function compareArtifacts(
@@ -41,41 +43,59 @@ function compareArtifacts(
 ): number {
   switch (column) {
     case "name":
-      return left.name.localeCompare(right.name);
+      return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" });
     case "size":
       return left.size - right.size;
     case "type":
-      return left.kind.localeCompare(right.kind);
+      return left.kind.localeCompare(right.kind, undefined, { numeric: true, sensitivity: "base" });
     case "updatedAt":
+      // Matches the server comparator (v2/src/session-artifacts.ts) exactly:
+      // a bare ISO-string compare, not locale/numeric aware.
       return left.updatedAt.localeCompare(right.updatedAt);
   }
+}
+
+// Shared by the list's own render and by the artifact viewer's prev/next
+// navigation, so both walk the exact same order.
+export function sortArtifacts(
+  artifacts: readonly SpurSessionArtifact[],
+  sort: ArtifactSortState,
+): SpurSessionArtifact[] {
+  const sign = sort.direction === "asc" ? 1 : -1;
+  return [...artifacts].sort((left, right) => sign * compareArtifacts(left, right, sort.column));
 }
 
 function sortIndicator(direction: ArtifactSortDirection): string {
   return direction === "asc" ? "↑" : "↓";
 }
 
+function isHtmlArtifact(artifact: SpurSessionArtifact): boolean {
+  return isHtmlMimeType(artifact.mimeType);
+}
+
 interface ArtifactListProps {
   artifacts: readonly SpurSessionArtifact[];
   hrefFor: (artifactId: string) => string;
   onPreview: (artifactId: string) => void;
+  sort: ArtifactSortState;
+  onSortChange: (sort: ArtifactSortState) => void;
 }
 
-export function ArtifactList({ artifacts, hrefFor, onPreview }: ArtifactListProps) {
-  const [sort, setSort] = useState<ArtifactSortState>(DEFAULT_SORT);
-
-  const sortedArtifacts = useMemo(() => {
-    const sign = sort.direction === "asc" ? 1 : -1;
-    return [...artifacts].sort((left, right) => sign * compareArtifacts(left, right, sort.column));
-  }, [artifacts, sort]);
+export function ArtifactList({
+  artifacts,
+  hrefFor,
+  onPreview,
+  sort,
+  onSortChange,
+}: ArtifactListProps) {
+  const sortedArtifacts = useMemo(() => sortArtifacts(artifacts, sort), [artifacts, sort]);
 
   const toggleColumn = (column: ArtifactSortColumn) => {
-    setSort((current) => {
-      if (current.column === column) {
-        return { column, direction: current.direction === "asc" ? "desc" : "asc" };
-      }
-      return { column, direction: COLUMN_DEFAULT_DIRECTION[column] };
-    });
+    if (sort.column === column) {
+      onSortChange({ column, direction: sort.direction === "asc" ? "desc" : "asc" });
+      return;
+    }
+    onSortChange({ column, direction: COLUMN_DEFAULT_DIRECTION[column] });
   };
 
   return (
@@ -120,9 +140,7 @@ export function ArtifactList({ artifacts, hrefFor, onPreview }: ArtifactListProp
             </td>
             <td className="px-2.5 py-2">{formatBytes(artifact.size)}</td>
             <td className="hidden px-2.5 py-2 sm:table-cell">{artifact.kind}</td>
-            <td className="hidden px-2.5 py-2 md:table-cell">
-              {formatRelativeTime(artifact.updatedAt)}
-            </td>
+            <td className="px-2.5 py-2">{formatRelativeTime(artifact.updatedAt)}</td>
             <td className="px-2.5 py-2">
               <div className="flex items-center gap-2">
                 <button
@@ -133,6 +151,17 @@ export function ArtifactList({ artifacts, hrefFor, onPreview }: ArtifactListProp
                 >
                   <ArtifactPreviewIcon className="h-3 w-3" />
                 </button>
+                {isHtmlArtifact(artifact) ? (
+                  <a
+                    aria-label={`Open ${artifact.name} in a new tab`}
+                    className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] outline-none hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)]"
+                    href={hrefFor(artifact.id)}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    <ArtifactOpenExternalIcon className="h-3 w-3" />
+                  </a>
+                ) : null}
                 <a
                   aria-label={`Download ${artifact.name}`}
                   className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] outline-none hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-text-primary)]"

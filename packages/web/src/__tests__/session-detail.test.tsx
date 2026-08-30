@@ -4524,6 +4524,58 @@ describe("SessionDetail artifacts", () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
+  it("renders the tile grid when reading the stored view mode throws (F2)", async () => {
+    const realGetItem = Storage.prototype.getItem;
+    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (key === "spur:artifact-view-mode") {
+        throw new DOMException("blocked", "SecurityError");
+      }
+      return realGetItem.call(this, key);
+    });
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    getItemSpy.mockRestore();
+  });
+
+  it("still switches to list view when persisting the view mode throws (F2)", async () => {
+    const realSetItem = Storage.prototype.setItem;
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (key === "spur:artifact-view-mode") {
+        throw new DOMException("blocked", "SecurityError");
+      }
+      return realSetItem.call(this, key, value);
+    });
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    setItemSpy.mockRestore();
+  });
+
   it("opens the same artifact viewer dialog from a list row as the tile click", async () => {
     window.localStorage.setItem("spur:artifact-view-mode", "list");
     mockThreeArtifacts();
@@ -4539,6 +4591,38 @@ describe("SessionDetail artifacts", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
     });
+  });
+
+  it("viewer next/prev follows the list's active sort, not payload order (F1)", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    // Payload order is shot.png, run.webm, trace.log. Sorting by Name asc
+    // reorders it to run.webm, shot.png, trace.log.
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    expect(screen.getAllByTitle(/\.(png|webm|log)$/).map((el) => el.textContent ?? "")).toEqual([
+      "run.webm",
+      "shot.png",
+      "trace.log",
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview run.webm" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview run.webm" }),
+    ).toBeInTheDocument();
+
+    // Payload-order neighbour of run.webm is trace.log; the name-sorted
+    // (rendered) neighbour is shot.png.
+    fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+    ).toBeInTheDocument();
   });
 
   it("resets list sort to updatedAt desc after switching category away and back", async () => {

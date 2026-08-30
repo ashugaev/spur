@@ -35,8 +35,14 @@ import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
-import { ArtifactList } from "@/components/ArtifactList";
+import {
+  ArtifactList,
+  DEFAULT_ARTIFACT_SORT,
+  sortArtifacts,
+  type ArtifactSortState,
+} from "@/components/ArtifactList";
 import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
+import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
 import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -257,25 +263,6 @@ function PromptSectionCopyButton({
   );
 }
 
-function ArtifactOpenExternalIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.7"
-      viewBox="0 0 24 24"
-    >
-      <path d="M14 4h6v6" />
-      <path d="m20 4-8 8" />
-      <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
-    </svg>
-  );
-}
-
 function ArtifactImagePreviewIcon() {
   return (
     <svg
@@ -450,7 +437,14 @@ type ArtifactViewMode = "grid" | "list";
 
 function readArtifactViewMode(): ArtifactViewMode {
   if (typeof window === "undefined") return "grid";
-  return window.localStorage.getItem(ARTIFACT_VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid";
+  // `localStorage` access can throw `SecurityError` (e.g. site data blocked);
+  // this runs as a `useState` initializer, so an uncaught throw would unwind
+  // the whole SessionDetail tree rather than just the artifacts panel.
+  try {
+    return window.localStorage.getItem(ARTIFACT_VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid";
+  } catch {
+    return "grid";
+  }
 }
 
 function artifactTabClass(active: boolean): string {
@@ -1691,9 +1685,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const [artifactViewMode, setArtifactViewMode] = useState<ArtifactViewMode>(readArtifactViewMode);
+  // Not persisted to localStorage: the list's sort resets to the default on
+  // reload, same as before it was lifted out of ArtifactList's local state.
+  const [artifactListSort, setArtifactListSort] =
+    useState<ArtifactSortState>(DEFAULT_ARTIFACT_SORT);
   const setArtifactViewModeAndPersist = (mode: ArtifactViewMode) => {
     setArtifactViewMode(mode);
-    window.localStorage.setItem(ARTIFACT_VIEW_MODE_STORAGE_KEY, mode);
+    try {
+      window.localStorage.setItem(ARTIFACT_VIEW_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore: the view mode still applies below, just isn't persisted.
+    }
   };
   const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
   const [showAllDeskMembers, setShowAllDeskMembers] = useState(false);
@@ -2448,31 +2450,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session],
   );
   const allArtifacts = session?.artifacts ?? [];
-  const selectedArtifactIndex = selectedArtifactId
-    ? allArtifacts.findIndex((artifact) => artifact.id === selectedArtifactId)
-    : -1;
-  const selectedArtifact =
-    selectedArtifactIndex >= 0 ? (allArtifacts[selectedArtifactIndex] ?? null) : null;
-  const selectedArtifactHref =
-    session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
-  const canSelectPreviousArtifact = selectedArtifactIndex > 0;
-  const canSelectNextArtifact =
-    selectedArtifactIndex >= 0 && selectedArtifactIndex < allArtifacts.length - 1;
-  const selectArtifactOffset = useCallback(
-    (offset: -1 | 1) => {
-      setSelectedArtifactId((currentId) => {
-        const currentIndex = allArtifacts.findIndex((artifact) => artifact.id === currentId);
-        if (currentIndex < 0) return currentId;
-        return allArtifacts[currentIndex + offset]?.id ?? currentId;
-      });
-    },
-    [allArtifacts],
-  );
-  const selectPreviousArtifact = useCallback(
-    () => selectArtifactOffset(-1),
-    [selectArtifactOffset],
-  );
-  const selectNextArtifact = useCallback(() => selectArtifactOffset(1), [selectArtifactOffset]);
   const agentArtifacts = useMemo(
     () =>
       session?.artifacts.filter(
@@ -2504,6 +2481,43 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
     [visibleArtifacts],
   );
+  // List mode's viewer navigation must step over the same sort the list
+  // renders, not the raw payload order. It still walks every category
+  // (matching `allArtifacts` below, same as grid mode) — jumping across
+  // categories on next/prev is a pre-existing, separate gap, out of scope
+  // here.
+  const listSortedArtifacts = useMemo(
+    () => sortArtifacts(allArtifacts, artifactListSort),
+    [allArtifacts, artifactListSort],
+  );
+  const artifactNavigationOrder = artifactViewMode === "list" ? listSortedArtifacts : allArtifacts;
+  const selectedArtifactIndex = selectedArtifactId
+    ? artifactNavigationOrder.findIndex((artifact) => artifact.id === selectedArtifactId)
+    : -1;
+  const selectedArtifact =
+    selectedArtifactIndex >= 0 ? (artifactNavigationOrder[selectedArtifactIndex] ?? null) : null;
+  const selectedArtifactHref =
+    session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
+  const canSelectPreviousArtifact = selectedArtifactIndex > 0;
+  const canSelectNextArtifact =
+    selectedArtifactIndex >= 0 && selectedArtifactIndex < artifactNavigationOrder.length - 1;
+  const selectArtifactOffset = useCallback(
+    (offset: -1 | 1) => {
+      setSelectedArtifactId((currentId) => {
+        const currentIndex = artifactNavigationOrder.findIndex(
+          (artifact) => artifact.id === currentId,
+        );
+        if (currentIndex < 0) return currentId;
+        return artifactNavigationOrder[currentIndex + offset]?.id ?? currentId;
+      });
+    },
+    [artifactNavigationOrder],
+  );
+  const selectPreviousArtifact = useCallback(
+    () => selectArtifactOffset(-1),
+    [selectArtifactOffset],
+  );
+  const selectNextArtifact = useCallback(() => selectArtifactOffset(1), [selectArtifactOffset]);
   const startupArtifacts = useMemo(() => {
     const startupAttachmentIds = session?.startupAttachmentIds ?? [];
     return (
@@ -2555,6 +2569,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setArtifactCategory("agent");
     }
   }, [artifactCategory, agentArtifacts.length, attachedArtifacts.length, systemArtifacts.length]);
+
+  // The list's sort used to reset via `key={artifactCategory}` remounting
+  // ArtifactList's own local state. Lifting that state up here means the
+  // remount no longer resets it, so reset it explicitly on category change.
+  useEffect(() => {
+    setArtifactListSort(DEFAULT_ARTIFACT_SORT);
+  }, [artifactCategory]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -3303,13 +3324,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                   {visibleArtifacts.length > 0 ? (
                     artifactViewMode === "list" ? (
-                      // key={artifactCategory} deliberately remounts ArtifactList on category
-                      // switch so its local sort state resets to the updatedAt-desc default.
                       <ArtifactList
-                        key={artifactCategory}
                         artifacts={visibleArtifacts}
                         hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
                         onPreview={setSelectedArtifactId}
+                        onSortChange={setArtifactListSort}
+                        sort={artifactListSort}
                       />
                     ) : (
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
