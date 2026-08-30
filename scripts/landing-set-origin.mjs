@@ -4,7 +4,7 @@
 // and sitemap.xml. Also restamps the sitemap's lastmod.
 //
 //   node scripts/landing-set-origin.mjs https://spur.example
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
@@ -27,21 +27,28 @@ try {
   process.exit(1);
 }
 
-const ORIGIN_RE =
-  /https?:\/\/(?!raw\.githubusercontent\.com|github\.com|fonts\.|www\.|schema\.org|www\.apache\.org|www\.sitemaps\.org)[a-z0-9.-]+(?::\d+)?/gi;
-const files = ["index.html", "og.html", "robots.txt", "sitemap.xml"];
+// The origin in use is whatever canonical points at. Replacing that one
+// literal keeps every other absolute URL on the page untouched; a pattern for
+// "some host" would rewrite the next external link someone adds.
+const indexPath = join(landing, "index.html");
+const index = await readFile(indexPath, "utf8");
+const canonical = index.match(/<link\s+rel="canonical"\s+href="(https?:\/\/[^/"]+)/i);
+if (!canonical) {
+  console.error("landing-set-origin: no <link rel=canonical> in landing/index.html");
+  process.exit(1);
+}
+const current = canonical[1];
+
 const today = new Date().toISOString().slice(0, 10);
+const escaped = current.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const currentRe = new RegExp(escaped, "g");
 
 let touched = 0;
-for (const name of files) {
+for (const name of await readdir(landing)) {
+  if (!/\.(html|txt|xml)$/i.test(name)) continue;
   const path = join(landing, name);
-  let text;
-  try {
-    text = await readFile(path, "utf8");
-  } catch {
-    continue;
-  }
-  let out = text.replace(ORIGIN_RE, origin);
+  const text = await readFile(path, "utf8");
+  let out = text.replace(currentRe, origin);
   if (name === "sitemap.xml") {
     out = out.replace(/<lastmod>[^<]*<\/lastmod>/g, `<lastmod>${today}</lastmod>`);
   }
@@ -52,4 +59,4 @@ for (const name of files) {
   }
 }
 
-console.log(touched ? `origin set to ${origin}` : `already ${origin}`);
+console.log(touched ? `origin ${current} -> ${origin}` : `already ${origin}`);
