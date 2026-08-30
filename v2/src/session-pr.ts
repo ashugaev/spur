@@ -28,23 +28,16 @@ function normalizeLegacyPrLink(link: SessionLink): SessionLink {
 }
 
 function buildSessionSlots(
-  slots: Pick<SessionSlots, "title" | "titleSource" | "titleLocked" | "tags"> | undefined,
+  slots: Pick<SessionSlots, "title" | "titleSource" | "tags"> | undefined,
   links: SessionLink[],
 ): SessionSlots | undefined {
   const tags = slots?.tags ?? [];
-  if (
-    !slots?.title &&
-    links.length === 0 &&
-    tags.length === 0 &&
-    slots?.titleLocked !== true &&
-    !slots?.titleSource
-  ) {
+  if (!slots?.title && links.length === 0 && tags.length === 0 && !slots?.titleSource) {
     return undefined;
   }
   return {
     ...(slots?.title ? { title: slots.title } : {}),
     ...(slots?.titleSource ? { titleSource: slots.titleSource } : {}),
-    ...(slots?.titleLocked === true ? { titleLocked: true } : {}),
     links,
     ...(tags.length > 0 ? { tags } : {}),
   };
