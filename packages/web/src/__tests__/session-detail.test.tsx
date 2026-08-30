@@ -3368,6 +3368,39 @@ describe("SessionDetail artifacts", () => {
     expect(screen.getByText(/truncated/i)).toBeInTheDocument();
   });
 
+  it("shows the truncation line when every artifact row was truncated away", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [],
+              artifactsTruncated: true,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/truncated/i)).toBeInTheDocument();
+    expect(screen.getByText("None.")).toBeInTheDocument();
+  });
+
   it("shows no truncation line without the flag", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

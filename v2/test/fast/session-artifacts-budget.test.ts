@@ -3,13 +3,23 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// Counts the three fs calls the nested walk makes below depth 1 (readdirSync per descended
-// directory, realpathSync and statSync per entry). vi.spyOn cannot wrap these bindings:
-// session-artifacts.ts imports them as named ESM bindings, and vitest throws
-// "Cannot spy on export ... Module namespace is not configurable in ESM." Wrapping node:fs
-// itself with vi.mock's importOriginal delegates to the real filesystem so the fixture tree
-// still gets built and walked for real; only the call counts are observed.
-const counts = vi.hoisted(() => ({ readdirSync: 0, realpathSync: 0, statSync: 0 }));
+// Counts the fs calls the walk makes (readdirSync at the root, realpathSync and statSync
+// per symlink entry, opendirSync per below-root directory opened, and readSync pulls on the
+// Dir handle opendirSync returns). vi.spyOn cannot wrap these bindings: session-artifacts.ts
+// imports them as named ESM bindings, and vitest throws "Cannot spy on export ... Module
+// namespace is not configurable in ESM." Wrapping node:fs itself with vi.mock's
+// importOriginal delegates to the real filesystem so the fixture tree still gets built and
+// walked for real; only the call counts are observed. opendirSync's own count
+// (counts.opendirSync) bounds directories opened (D2); wrapping readSync on the returned Dir
+// (counts.dirReadSync) bounds entries pulled from a single directory (D3) — the two counters
+// the plain call-count mock above them cannot tell apart.
+const counts = vi.hoisted(() => ({
+  readdirSync: 0,
+  realpathSync: 0,
+  statSync: 0,
+  opendirSync: 0,
+  dirReadSync: 0,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
@@ -27,6 +37,16 @@ vi.mock("node:fs", async (importOriginal) => {
       counts.statSync++;
       return (actual.statSync as (...fnArgs: unknown[]) => unknown)(...args);
     }) as unknown as typeof actual.statSync,
+    opendirSync: ((...args: unknown[]) => {
+      counts.opendirSync++;
+      const realDir = (actual.opendirSync as (...fnArgs: unknown[]) => NodeFs.Dir)(...args);
+      const realReadSync = realDir.readSync.bind(realDir);
+      realDir.readSync = (() => {
+        counts.dirReadSync++;
+        return realReadSync();
+      }) as typeof realDir.readSync;
+      return realDir;
+    }) as unknown as typeof actual.opendirSync,
   };
 });
 
@@ -47,6 +67,8 @@ afterEach(() => {
   counts.readdirSync = 0;
   counts.realpathSync = 0;
   counts.statSync = 0;
+  counts.opendirSync = 0;
+  counts.dirReadSync = 0;
 });
 
 describe("session artifact walk budget", () => {
@@ -70,6 +92,8 @@ describe("session artifact walk budget", () => {
     counts.readdirSync = 0;
     counts.realpathSync = 0;
     counts.statSync = 0;
+    counts.opendirSync = 0;
+    counts.dirReadSync = 0;
 
     const { artifacts, truncated } = listSessionArtifacts(dataDir, sessionId);
 
@@ -81,9 +105,13 @@ describe("session artifact walk budget", () => {
     expect(artifacts.length).toBeLessThan(MAX_NESTED_ARTIFACT_ROWS);
 
     // The walk must have stopped at (or just past) the entry budget, not walked all 3,000
-    // subdirectories.
-    expect(counts.realpathSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 10);
-    expect(counts.statSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 10);
+    // subdirectories. All 3,000 are plain (non-symlink) directories, so D1 means the walk
+    // never pays realpathSync/statSync for them at all — only D3's opendirSync/readSync
+    // pulls are the operative bound here.
+    expect(counts.realpathSync).toBeLessThanOrEqual(5);
+    expect(counts.statSync).toBeLessThanOrEqual(5);
+    expect(counts.opendirSync).toBeLessThanOrEqual(5);
+    expect(counts.dirReadSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 64);
   });
 
   it("examines at most MAX_NESTED_ARTIFACT_WALK_ENTRIES entries below the root", async () => {
@@ -112,25 +140,83 @@ describe("session artifact walk budget", () => {
     counts.readdirSync = 0;
     counts.realpathSync = 0;
     counts.statSync = 0;
+    counts.opendirSync = 0;
+    counts.dirReadSync = 0;
 
     const { truncated } = listSessionArtifacts(dataDir, sessionId);
     expect(truncated).toBe(true);
 
-    // One readdirSync per directory descended below the root, one realpathSync and one
-    // statSync per entry examined below the root: each bounded by the walk-entry budget.
-    // The root level is unbudgeted by design (D8) and still costs its own small, fixed
-    // overhead: one readdirSync, one realpathSync (resolving the root itself), and one
-    // statSync per depth-1 plain file (no realpathSync needed there — see the "root-level
-    // syscall note"). That overhead is linear in depth1Count, not in the 6,000-file nested
-    // tree, so a generous fixed allowance still proves the nested walk itself is bounded.
+    // After D1 a plain (non-symlink) dirent never pays realpathSync/statSync; only a
+    // statSync per depth-1 root FILE (no symlinks in this fixture, so realpathSync stays at
+    // the single root-resolving call). The root level is unbudgeted by design and still
+    // costs its own small, fixed overhead linear in depth1Count, not in the 6,000-file
+    // nested tree.
     const rootOverhead = depth1Count + 10;
-    expect(counts.realpathSync).toBeLessThanOrEqual(
-      MAX_NESTED_ARTIFACT_WALK_ENTRIES + rootOverhead,
-    );
+    expect(counts.realpathSync).toBeLessThanOrEqual(5);
     expect(counts.statSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + rootOverhead);
-    expect(counts.readdirSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + rootOverhead);
+    // After D3 the nested loop no longer calls readdirSync at all (it pulls incrementally
+    // via opendirSync/readSync); the root's own single readdirSync is the only call left.
+    expect(counts.readdirSync).toBe(1);
+    expect(counts.opendirSync).toBeLessThanOrEqual(20 + 5);
+    expect(counts.dirReadSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 64);
     // And it must be nowhere near the unbounded case: 6,000 nested files plus 20
     // directories would cost ~6,020 stat/realpath calls if the walk were unbounded.
     expect(counts.statSync).toBeLessThan(6000);
+  });
+
+  it("bounds entries pulled from a single oversized directory", async () => {
+    const dataDir = await createTempDir("spur-artifacts-budget-");
+    tempDirs.push(dataDir);
+    const sessionId = "api-budget-oversized-dir";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    mkdirSync(dir, { recursive: true });
+
+    // One depth-1 directory holding 20,000 files: the F3 hole this fixture closes let a
+    // single oversized directory's full readdirSync materialize before any budget check ran.
+    const oversizedDir = join(dir, "oversized");
+    mkdirSync(oversizedDir, { recursive: true });
+    const fileCount = 20_000;
+    for (let index = 0; index < fileCount; index++) {
+      writeFileSync(join(oversizedDir, `f-${String(index).padStart(6, "0")}.txt`), "x", "utf8");
+    }
+    counts.readdirSync = 0;
+    counts.realpathSync = 0;
+    counts.statSync = 0;
+    counts.opendirSync = 0;
+    counts.dirReadSync = 0;
+
+    const { truncated } = listSessionArtifacts(dataDir, sessionId);
+
+    expect(truncated).toBe(true);
+    expect(counts.dirReadSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 64);
+    expect(counts.opendirSync).toBeLessThanOrEqual(5);
+  });
+
+  it("truncates on directory expansion alone and skips the per-directory stat", async () => {
+    const dataDir = await createTempDir("spur-artifacts-budget-");
+    tempDirs.push(dataDir);
+    const sessionId = "api-budget-empty-dirs";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    mkdirSync(dir, { recursive: true });
+
+    // 3,000 EMPTY depth-1 directories directly under the root: no files exist anywhere, so
+    // only directory expansion (D2's per-open tick) can ever set truncated here.
+    const dirCount = 3000;
+    for (let index = 0; index < dirCount; index++) {
+      mkdirSync(join(dir, `sub-${index}`), { recursive: true });
+    }
+    counts.readdirSync = 0;
+    counts.realpathSync = 0;
+    counts.statSync = 0;
+    counts.opendirSync = 0;
+    counts.dirReadSync = 0;
+
+    const { artifacts, truncated } = listSessionArtifacts(dataDir, sessionId);
+
+    expect(truncated).toBe(true);
+    expect(artifacts.length).toBe(0);
+    expect(counts.statSync).toBeLessThanOrEqual(50);
+    expect(counts.realpathSync).toBeLessThanOrEqual(5);
+    expect(counts.opendirSync).toBeLessThanOrEqual(MAX_NESTED_ARTIFACT_WALK_ENTRIES + 5);
   });
 });

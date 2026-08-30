@@ -214,6 +214,39 @@ describe("nested artifact listing", () => {
     expect(artifacts.map((artifact) => artifact.id)).toEqual(["x.md"]);
   });
 
+  it("lists a directory reachable by two paths under both paths", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-sibling-alias";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    await mkdir(join(dir, "reports", "2026-08"), { recursive: true });
+    await writeFile(join(dir, "reports", "2026-08", "summary.md"), "hi", "utf8");
+    await symlink(join(dir, "reports", "2026-08"), join(dir, "latest"), "dir");
+
+    const { artifacts, truncated } = listSessionArtifacts(dataDir, sessionId);
+    expect(truncated).toBe(false);
+    expect(artifacts.map((artifact) => artifact.id).sort()).toEqual([
+      "latest/summary.md",
+      "reports/2026-08/summary.md",
+    ]);
+  });
+
+  it("terminates on a two-way symlink alias without duplicating a row", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-cross-symlink";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    await mkdir(join(dir, "a"), { recursive: true });
+    await mkdir(join(dir, "b"), { recursive: true });
+    await writeFile(join(dir, "a", "a-file.txt"), "a", "utf8");
+    await writeFile(join(dir, "b", "b-file.txt"), "b", "utf8");
+    await symlink(join(dir, "b"), join(dir, "a", "link-to-b"), "dir");
+    await symlink(join(dir, "a"), join(dir, "b", "link-to-a"), "dir");
+
+    const { artifacts, truncated } = listSessionArtifacts(dataDir, sessionId);
+    expect(truncated).toBe(false);
+    const ids = artifacts.map((artifact) => artifact.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it("lists every depth-1 file when the nested walk truncates", async () => {
     const dataDir = await newDataDir();
     const sessionId = "api-depth1-uncapped";
