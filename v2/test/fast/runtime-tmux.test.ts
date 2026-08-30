@@ -805,14 +805,30 @@ describe("runtime-tmux", () => {
     });
 
     const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+    const { agentProcessMatchers } = await import("../../src/agents/index.js");
 
     // Today's bug: only the wrapper's own basename as a matcher, and `exec`
     // erased it from ps.
     expect(await isProcessRunningInTmux("intelas-c007", ["codex-spur-wrapper.sh"])).toBe(false);
-    // The fix: the canonical name is also a matcher.
-    expect(await isProcessRunningInTmux("intelas-c007", ["codex-spur-wrapper.sh", "codex"])).toBe(
-      true,
-    );
+
+    // The fix, exercised end to end: agentProcessMatchers (not a hand-written
+    // array) derives the wrapper basename plus the canonical "codex" name from
+    // the issue's real launchCommand shape, and that real output is what makes
+    // isProcessRunningInTmux see the wrapper as alive. Deleting the canonical
+    // name from defaultProcessMatchers must turn this assertion false.
+    const wrapperLaunchCommand =
+      "CODEX_HOME='/home/vershinin/.spur/session-tools/intelas-c007/codex-home' " +
+      "/home/vershinin/.local/bin/codex-spur-wrapper.sh --enable hooks --model gpt-5.6-sol";
+    expect(agentProcessMatchers("codex", wrapperLaunchCommand)).toEqual([
+      "codex-spur-wrapper.sh",
+      "codex",
+    ]);
+    expect(
+      await isProcessRunningInTmux(
+        "intelas-c007",
+        agentProcessMatchers("codex", wrapperLaunchCommand),
+      ),
+    ).toBe(true);
   });
 
   it("does not let codex-code-mode-host alone satisfy the canonical codex matcher", async () => {
