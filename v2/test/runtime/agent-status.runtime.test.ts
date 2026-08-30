@@ -359,6 +359,12 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const { context, configPath, port } = await setup("cursor-cpl");
     const session = await spawnSession(context, configPath, "cursor");
 
+    // The complete gate is unconditional on session state: it refuses while the
+    // fixture's seeded ToDo item is still open. Wait for "waiting", which lands
+    // strictly after the fixture's own resolve_initial_todo, or this races that
+    // resolution — same guard the Claude and Codex complete cases already use.
+    await waitForState(port, session.id, "waiting", 45_000);
+
     await context.execCli(["--config", configPath, "complete", session.id, "--json"]);
     const view = await waitForState(port, session.id, "stopped");
     expect(view.state).toBe("stopped");
