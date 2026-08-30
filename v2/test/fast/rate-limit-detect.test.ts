@@ -620,10 +620,7 @@ describe("parseRateLimitResetAtMs", () => {
   it("rolls a full day once the anchor is past the truncation window", () => {
     const anchorMs = Date.parse("2026-07-01T11:21:00.000Z");
     expect(
-      parseRateLimitResetAtMs(
-        "You've hit your session limit · resets 11:20am (UTC)",
-        anchorMs,
-      ),
+      parseRateLimitResetAtMs("You've hit your session limit · resets 11:20am (UTC)", anchorMs),
     ).toBe(Date.parse("2026-07-02T11:20:00.000Z"));
   });
 

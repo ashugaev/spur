@@ -8970,7 +8970,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("does not revive rate_limited from the pane after the parsed reset passed", async () => {
+  it("keeps waiting when only a stale pane banner remains after the parsed reset", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
     mockClaudeSessionStatus("waiting", "idle");
@@ -8983,8 +8983,10 @@ describe("SessionService", () => {
         resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
       },
     });
-    // The pane still renders the banner: a naive revival would re-flag
-    // rate_limited from this text alone (DECISION 3's raw `:14610` gate).
+    // The pane still renders the banner: it survives in scrollback
+    // indefinitely with no dismissal, so admitting it as re-confirmation
+    // would restore the permanent-rate_limited bug this expiry check exists
+    // to fix. Only a live usage-limit menu re-confirms (see the sibling test).
     captureTmuxPaneMock.mockResolvedValue("■ Usage limit reached ∙ resets 3pm");
 
     const { SessionService } = await loadSessionServiceModule();
@@ -8994,6 +8996,87 @@ describe("SessionService", () => {
 
     expect(result.state).toBe("waiting");
     expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+    service.dispose();
+  });
+
+  it("keeps rate_limited when the live usage-limit menu re-confirms after the parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    // Cursor on option 2 so confirmClaudeUsageLimitMenu's option-one-selected
+    // gate does not fire — this test pins re-confirmation, not the Enter send.
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    // The background dashboard/attention ticks that fire on construction may
+    // already have logged an earlier (pre-live-scan) classification for this
+    // session, so take the LAST classified call, not the first.
+    const classifiedCalls = logSpurEventMock.mock.calls.filter(
+      ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+    );
+    expect(classifiedCalls.at(-1)?.[1].message).toBe(
+      "State: rate_limited (claude rate_limit, pane menu re-confirmed after expiry)",
+    );
+    service.dispose();
+  });
+
+  it("ignores stale menu scrollback after the parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    const menuText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "> 2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    captureTmuxPaneMock.mockResolvedValue(`${menuText}\n${subsequentOutput}`);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
     service.dispose();
   });
 
@@ -9028,34 +9111,83 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("does not fall through to error when the parsed reset passed with a server-error record", async () => {
+  it("keeps the compaction detail when the parsed reset has passed", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
     mockClaudeSessionStatus("waiting", "idle");
     readClaudeJsonlStateMock.mockResolvedValue({
-      state: "error",
+      state: "waiting",
       reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
       rateLimit: {
         limited: true,
         reason: "claude rate_limit",
         resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
       },
-      serverError: true,
     });
+    captureTmuxPaneMock.mockResolvedValue("✳ Compacting conversation… (18s)");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const result = await service.get("api-1");
+    await service.get("api-1");
+    await vi.advanceTimersByTimeAsync(4_001);
+    await service.get("api-1");
 
-    // Exact match, not just "not error": a raw (unfixed) `rateLimit?.limited`
-    // gate would force this back to rate_limited instead of falling through
-    // to error, which also satisfies a bare not.toBe("error") — this pins
-    // DECISION 4's fall-through block specifically, leaving `state` as the
-    // claude_status source computed it ("waiting").
-    expect(result.state).toBe("waiting");
-    expect(result.state).not.toBe("error");
-    expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
+    // The compaction override must own classifiedDetail; the expired-rate-
+    // limit arm must not clobber it with "rate limit expired ..." (THREAD 7).
+    // Take the LAST classified call: the background dashboard/attention ticks
+    // and the first service.get() above may have already logged an earlier
+    // "waiting" classification for this session.
+    const classifiedCalls = logSpurEventMock.mock.calls.filter(
+      ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+    );
+    expect(classifiedCalls.at(-1)?.[1].message).toBe("State: working (claude compacting)");
+    expect(classifiedCalls.at(-1)?.[1].message).not.toContain("rate limit expired");
+    service.dispose();
+  });
+
+  it("keeps rate_limited on the dashboard tick after a live menu re-confirmed an expired limit", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // A live (scanPane:true) classify sees the menu and re-confirms.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+    const rateLimitedAtAfterLive = sessions.get("api-1")?.rateLimitedAt;
+    captureTmuxPaneMock.mockClear();
+
+    // The next scanPane:false dashboard tick must reuse the re-confirmation
+    // override instead of flapping to waiting, and must not re-stamp
+    // rateLimitedAt (no new episode minted for a still-limited session).
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
+    expect(sessions.get("api-1")?.rateLimitedAt).toBe(rateLimitedAtAfterLive);
     service.dispose();
   });
 
@@ -33173,6 +33305,40 @@ describe("SessionService", () => {
         const view = { status: "running" as const, state: "waiting" as const, lastActivityAt };
         expect(shouldParkForStale(view, staleAfterMs, exactlyAt)).toBe(true);
         expect(shouldParkForStale(view, staleAfterMs, justUnder)).toBe(false);
+      });
+    });
+
+    describe("resolveParkActivityAt", () => {
+      it("returns null when agentActivityAt is null (fail-safe: never park)", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        expect(
+          resolveParkActivityAt({ agentActivityAt: null, rateLimitExpiredAtMs: 1_000 }),
+        ).toBeNull();
+        expect(resolveParkActivityAt({ agentActivityAt: null })).toBeNull();
+      });
+
+      it("returns rateLimitExpiredAtMs when it is later than agentActivityAt", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        const agentActivityAt = new Date("2026-03-18T09:00:00.000Z");
+        const rateLimitExpiredAtMs = Date.parse("2026-03-18T09:05:00.000Z");
+        expect(resolveParkActivityAt({ agentActivityAt, rateLimitExpiredAtMs })).toEqual(
+          new Date(rateLimitExpiredAtMs),
+        );
+      });
+
+      it("returns agentActivityAt when it is later than rateLimitExpiredAtMs", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        const agentActivityAt = new Date("2026-03-18T09:10:00.000Z");
+        const rateLimitExpiredAtMs = Date.parse("2026-03-18T09:00:00.000Z");
+        expect(resolveParkActivityAt({ agentActivityAt, rateLimitExpiredAtMs })).toBe(
+          agentActivityAt,
+        );
+      });
+
+      it("returns agentActivityAt unchanged when rateLimitExpiredAtMs is absent", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        const agentActivityAt = new Date("2026-03-18T09:00:00.000Z");
+        expect(resolveParkActivityAt({ agentActivityAt })).toBe(agentActivityAt);
       });
     });
 

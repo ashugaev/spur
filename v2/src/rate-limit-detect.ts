@@ -187,7 +187,8 @@ export function parseRateLimitResetAtMs(text: string, anchorMs: number): number 
     0,
   );
   if (candidate <= anchorMs) {
-    candidate += anchorMs - candidate < BANNER_CLOCK_TRUNCATION_MS ? BANNER_CLOCK_TRUNCATION_MS : DAY_MS;
+    candidate +=
+      anchorMs - candidate < BANNER_CLOCK_TRUNCATION_MS ? BANNER_CLOCK_TRUNCATION_MS : DAY_MS;
   }
   return candidate;
 }

@@ -576,6 +576,9 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
+// Same outlast-the-sweep-gap reasoning again, for a live usage-limit menu that
+// re-confirms an expired claude rate-limit detection back to rate_limited.
+const CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS = 15_000;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // Fixed tick cadence for the session GC sweep; the actual sweep frequency is
 // gated inside the tick by sessionGc.intervalMinutes (re-read from
@@ -900,6 +903,12 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
+  // Epoch ms of the parsed claude rate-limit reset instant, set only when the
+  // detection just expired this classify call (see the expired arm below).
+  // The park-clock anchor: a session shielded by rate_limited must get a
+  // fresh idle window measured from the moment it became workable again, not
+  // from the rate-limit record's own (much older) transcript timestamp.
+  rateLimitExpiredAtMs?: number;
 }
 
 const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
@@ -1820,10 +1829,26 @@ function buildLastActivityAt(
 // unparkable forever and measure a never-attached one against a timestamp
 // that means nothing. Returns null when there is no transcript signal at
 // all; callers must treat null as "never park" (fail safe), not "park now".
-function resolveParkActivityAt(
-  classified: Pick<SessionStateResult, "agentActivityAt">,
+// A session shielded by rate_limited must get a fresh idle window measured
+// from the moment its parsed reset instant passed, not from the rate-limit
+// record's own (much older) transcript timestamp — otherwise a session
+// limited longer ago than staleAfterMinutes parks on the very first tick
+// past expiry. rateLimitExpiredAtMs is only ever later than or equal to
+// agentActivityAt (the reset instant is always after the record that carried
+// it), but the max is taken explicitly rather than assumed.
+export function resolveParkActivityAt(
+  classified: Pick<SessionStateResult, "agentActivityAt" | "rateLimitExpiredAtMs">,
 ): Date | null {
-  return classified.agentActivityAt ?? null;
+  if (classified.agentActivityAt === null) {
+    return null;
+  }
+  if (classified.rateLimitExpiredAtMs === undefined) {
+    return classified.agentActivityAt;
+  }
+  const rateLimitExpiredAt = new Date(classified.rateLimitExpiredAtMs);
+  return rateLimitExpiredAt > classified.agentActivityAt
+    ? rateLimitExpiredAt
+    : classified.agentActivityAt;
 }
 
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
@@ -2327,6 +2352,12 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  // Same TTL-override pattern for a live usage-limit menu that re-confirmed
+  // an expired claude rate-limit detection: keyed by session id, value =
+  // expiry epoch ms. Lets the scanPane:false dashboard tick agree with the
+  // live pane scan for CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS instead of flapping
+  // rate_limited -> waiting every cycle between live scans.
+  private readonly claudeRateLimitReconfirmOverrides = new Map<string, number>();
   // Dedupes session.state.classified: emit once per classify call only when
   // the raw classified state actually changed since the last classify call
   // for that session (not the message, so a detail-only churn like
@@ -4900,6 +4931,11 @@ export class SessionService {
     for (const sessionId of this.claudeCompactingOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.claudeRateLimitReconfirmOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeRateLimitReconfirmOverrides.delete(sessionId);
       }
     }
     for (const sessionId of this.lastClassifiedLogStates.keys()) {
@@ -14493,6 +14529,17 @@ export class SessionService {
     // today for non-running/dead-pane sessions). A later branch's assignment
     // overrides an earlier one exactly as it overrides `state`.
     let classifiedDetail: string | undefined;
+    const nowMs = Date.now();
+    // Set true only in the compaction override branches, so the expired-rate-
+    // limit arm below knows not to clobber a classifiedDetail the compaction
+    // override already claimed (THREAD 7).
+    let compactingApplied = false;
+    // Set true when a live usage-limit menu re-confirms an expired claude
+    // rate-limit detection (D2' Part B). Carried across ticks via
+    // claudeRateLimitReconfirmOverrides so the scanPane:false dashboard tick
+    // agrees with the live scan instead of flapping every cycle.
+    let paneReconfirmedLimit = false;
+    let rateLimitExpiredAtMs: number | undefined;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
@@ -14625,8 +14672,13 @@ export class SessionService {
       if (scanPane && strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const menuHit = detectClaudeUsageLimitMenu(paneText);
-        if (!rateLimit?.limited) {
-          const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+        // A flagged-but-expired detection never admits a fresh generic banner
+        // scan: an idle limited session's banner survives in pane scrollback
+        // indefinitely with no dismissal, so admitting it here would restore
+        // the permanent-rate_limited bug this expiry check exists to fix.
+        // Only a live usage-limit menu re-confirms in that case (below).
+        if (!rateLimitActive(rateLimit, nowMs)) {
+          const tmuxHit = rateLimit?.limited ? null : (scanTmuxRateLimit(paneText) ?? menuHit);
           if (tmuxHit?.limited) {
             rateLimit = tmuxHit;
           }
@@ -14634,38 +14686,60 @@ export class SessionService {
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
         }
+        // Re-confirmation: the detection is flagged but its parsed reset has
+        // passed, and a live menu is on the pane. Carried via a TTL override
+        // rather than by overwriting `rateLimit` itself, so resetAtMs stays
+        // observable and the scanPane:false dashboard tick agrees with this
+        // sweep for CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS instead of flapping
+        // rate_limited -> waiting every cycle between live scans.
+        if (rateLimit?.limited && !rateLimitActive(rateLimit, nowMs) && menuHit?.limited) {
+          paneReconfirmedLimit = true;
+          this.claudeRateLimitReconfirmOverrides.set(
+            session.id,
+            nowMs + CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS,
+          );
+        } else {
+          this.claudeRateLimitReconfirmOverrides.delete(session.id);
+        }
         // Compaction never reaches Claude's persisted status file (it stays
         // "idle" throughout, which jsonl/hook maps to waiting) and the
         // transcript only gets a compact record after completion — so the
         // live pane spinner is the only signal while it's in progress. The
-        // rate-limit override below still wins if a banner is also present —
-        // skip recording the override in that case so the scanPane:false
-        // dashboard tick doesn't strand a stale "working" once the rate
-        // limit expires (mirrors codexMcpDialogOverrides' hard-limit delete
-        // above). Recorded into claudeCompactingOverrides (TTL) so the
-        // scanPane:false dashboard tick's own idle re-read doesn't keep
-        // refreshing stabilizeState's hold window against this working
-        // transition.
-        if (detectClaudeCompacting(paneText) && !rateLimitActive(rateLimit, Date.now())) {
+        // rate-limit override below still wins if a banner or a re-confirmed
+        // menu is also present — skip recording the override in that case so
+        // the scanPane:false dashboard tick doesn't strand a stale "working"
+        // once the rate limit expires (mirrors codexMcpDialogOverrides'
+        // hard-limit delete above). Recorded into claudeCompactingOverrides
+        // (TTL) so the scanPane:false dashboard tick's own idle re-read
+        // doesn't keep refreshing stabilizeState's hold window against this
+        // working transition.
+        if (
+          detectClaudeCompacting(paneText) &&
+          !rateLimitActive(rateLimit, nowMs) &&
+          !paneReconfirmedLimit
+        ) {
           state = "working";
-          this.claudeCompactingOverrides.set(
-            session.id,
-            Date.now() + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
-          );
+          compactingApplied = true;
+          this.claudeCompactingOverrides.set(session.id, nowMs + CLAUDE_COMPACTING_OVERRIDE_TTL_MS);
           classifiedDetail = "State: working (claude compacting)";
         } else {
           this.claudeCompactingOverrides.delete(session.id);
         }
       } else if (!scanPane && strategy === "claude_jsonl") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
-        // fork, but it can still reuse the last live pane-scan's compaction
-        // confirmation while it's fresh, so the dashboard doesn't keep
-        // showing waiting for a session the 5s attention monitor (or
-        // on-demand enrich of the viewed session) already knows is
-        // mid-compaction.
+        // fork, but it can still reuse the last live pane-scan's re-confirm
+        // and compaction confirmation while they're fresh, so the dashboard
+        // doesn't flap or keep showing waiting/working for a session the 5s
+        // attention monitor (or on-demand enrich of the viewed session)
+        // already knows is re-confirmed rate_limited or mid-compaction.
+        const reconfirmExpiresAt = this.claudeRateLimitReconfirmOverrides.get(session.id);
+        if (reconfirmExpiresAt !== undefined && reconfirmExpiresAt > nowMs) {
+          paneReconfirmedLimit = true;
+        }
         const expiresAt = this.claudeCompactingOverrides.get(session.id);
-        if (expiresAt !== undefined && expiresAt > Date.now()) {
+        if (expiresAt !== undefined && expiresAt > nowMs) {
           state = "working";
+          compactingApplied = true;
           classifiedDetail = "State: working (claude compacting)";
         }
       } else if (scanPane && strategy === "hook") {
@@ -14714,19 +14788,23 @@ export class SessionService {
           rateLimit = tmuxHit;
         }
       }
-      if (rateLimitActive(rateLimit, Date.now())) {
+      if (rateLimitActive(rateLimit, nowMs) || paneReconfirmedLimit) {
         state = "rate_limited";
-        classifiedDetail = `State: rate_limited (${rateLimit?.reason})`;
+        classifiedDetail = `State: rate_limited (${rateLimit?.reason}${paneReconfirmedLimit && !rateLimitActive(rateLimit, nowMs) ? ", pane menu re-confirmed after expiry" : ""})`;
       } else if (rateLimit?.limited) {
-        // The parsed reset instant has passed: leave `state` as the source
-        // above computed it (never force it back to rate_limited), but
-        // record the expiry so session.state.classified reflects it. This
-        // also implicitly blocks the hasServerErrorRecord arm below — a
-        // stale server-error record must not get promoted to an urgent
-        // `error` state just because the transcript tail's rate-limit
-        // record won the tail-walk over it.
+        // The parsed reset instant has passed and no live menu re-confirmed
+        // it: leave `state` as the source above computed it (never force it
+        // back to rate_limited), but record the expiry so
+        // session.state.classified reflects it, and carry the expiry instant
+        // into rateLimitExpiredAtMs for resolveParkActivityAt's park-clock
+        // anchor. Guarded on !compactingApplied: a compaction override
+        // already set classifiedDetail above and must not be clobbered here
+        // (THREAD 7).
         const resetAtMs = rateLimit.resetAtMs;
-        classifiedDetail = `State: ${state} (rate limit expired${resetAtMs !== undefined ? ` at ${new Date(resetAtMs).toISOString()}` : ""})`;
+        rateLimitExpiredAtMs = resetAtMs;
+        if (!compactingApplied) {
+          classifiedDetail = `State: ${state} (rate limit expired${resetAtMs !== undefined ? ` at ${new Date(resetAtMs).toISOString()}` : ""})`;
+        }
       } else if (hasServerErrorRecord) {
         state = "error";
         stateSource = "jsonl";
@@ -14755,15 +14833,14 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
-      // Only true when the hasServerErrorRecord arm above actually applied: a
-      // live (non-expired) rate_limit record wins state outright, and an
-      // expired one still blocks this arm without winning state itself — in
-      // both cases this reports false and updateStateHistory's clear branch
-      // drops any stale serverErrorAt instead of arming it, so the two
-      // markers stay independently owned.
+      // Only true when the hasServerErrorRecord arm above actually applied. A
+      // live rate_limit record wins state outright, so this reports false and
+      // updateStateHistory's clear branch drops any stale serverErrorAt
+      // instead of arming it.
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
       agentActivityAt,
+      ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
       ...(liveModel ? { liveModel } : {}),
     };
   }
