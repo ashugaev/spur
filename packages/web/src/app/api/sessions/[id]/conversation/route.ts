@@ -1,14 +1,16 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { spurRequest } from "@/lib/spur-daemon";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
-export async function GET(_: Request, context: RouteContext) {
+export async function GET(request: NextRequest, context: RouteContext) {
   const { id } = await context.params;
+  const from = request.nextUrl.searchParams.get("from")?.trim();
+  const query = from ? `?from=${encodeURIComponent(from)}` : "";
   try {
-    const res = await spurRequest(`/sessions/${encodeURIComponent(id)}/conversation`);
+    const res = await spurRequest(`/sessions/${encodeURIComponent(id)}/conversation${query}`);
     if (!res.ok) {
       return new NextResponse(await res.text(), { status: res.status });
     }

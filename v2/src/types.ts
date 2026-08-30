@@ -1419,4 +1419,10 @@ export interface ConversationResponse {
   entries: TranscriptEntry[];
   durationMs: number;
   state: SessionState;
+  /** Absolute index of `entries[0]` within the full transcript. */
+  startIndex: number;
+  /** Total number of entries in the full transcript. */
+  totalEntries: number;
+  /** True when there are older entries before `startIndex` (startIndex > 0). */
+  hasMore?: boolean;
 }

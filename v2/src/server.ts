@@ -1342,7 +1342,14 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
-        sendJson(response, 200, await service.getConversation(conversationSessionId));
+        const fromValue = url.searchParams.get("from");
+        const from =
+          fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        sendJson(
+          response,
+          200,
+          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+        );
         return;
       }
 
