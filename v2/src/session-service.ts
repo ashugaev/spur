@@ -922,6 +922,12 @@ interface SessionStateResult {
   // The park-clock anchor: a session shielded by rate_limited must get a
   // fresh idle window measured from the moment it became workable again, not
   // from the rate-limit record's own (much older) transcript timestamp.
+  // Exception, deliberate: once CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS trips
+  // (see its own comment), this is still the raw resetAtMs — now 24h+ stale.
+  // resolveParkActivityAt's max() then anchors the park clock 24h+ in the
+  // past, so the session is immediately stale-park-sweep eligible. Not a
+  // regression of the fresh-window case above: an uncorroborated limit for a
+  // full reset cycle is exactly what the sweep is for.
   rateLimitExpiredAtMs?: number;
 }
 
@@ -14826,7 +14832,8 @@ export class SessionService {
         // into rateLimitExpiredAtMs for resolveParkActivityAt's park-clock
         // anchor. Guarded on !compactingApplied: a compaction override
         // already set classifiedDetail above and must not be clobbered here
-        // (THREAD 7).
+        // (THREAD 7). Past the reconfirm ceiling this is a 24h+-stale
+        // resetAtMs, not a fresh one — see rateLimitExpiredAtMs's field doc.
         rateLimitExpiredAtMs = rateLimitExpiredResetAtMs;
         if (!compactingApplied) {
           classifiedDetail = `State: ${state} (rate limit expired at ${new Date(rateLimitExpiredResetAtMs).toISOString()})`;
