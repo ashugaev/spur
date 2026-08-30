@@ -1279,6 +1279,21 @@ function parseSlotLink(value: string): SessionLink {
   };
 }
 
+// Guards against an older daemon replying with a plain SessionView (no
+// slotUpdate) despite the compile-time UpdateSessionSlotsResponse type —
+// this narrows the actual runtime value instead of trusting the cast.
+function slotUpdateMessage(session: unknown): string | undefined {
+  if (!session || typeof session !== "object" || !("slotUpdate" in session)) {
+    return undefined;
+  }
+  const slotUpdate = (session as { slotUpdate?: unknown }).slotUpdate;
+  if (!slotUpdate || typeof slotUpdate !== "object" || !("message" in slotUpdate)) {
+    return undefined;
+  }
+  const message = (slotUpdate as { message?: unknown }).message;
+  return typeof message === "string" ? message : undefined;
+}
+
 function currentSessionId(): string {
   const sessionId = runningSessionId();
   if (!sessionId) {
@@ -3539,7 +3554,6 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--title <text>", "Set task title")
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
-    .option("--source <source>", "Slot update source: agent or manual", "agent")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
     .option(
       "--unlink <label>",
@@ -3590,10 +3604,6 @@ export function createProgram(cliEntrypoint: string): Command {
       if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
         throw new Error("--title-if-absent cannot be combined with --title or --clear-title");
       }
-      const source = options.source as string;
-      if (source !== "agent" && source !== "manual") {
-        throw new Error("--source must be agent or manual");
-      }
       const titleFields: Pick<UpdateSessionSlotsRequest, "title" | "setTitleIfAbsent"> = {};
       if (titleIfAbsent !== undefined) {
         titleFields.title = titleIfAbsent;
@@ -3603,7 +3613,6 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       const payload: UpdateSessionSlotsRequest = {
         ...titleFields,
-        source,
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }
@@ -3624,7 +3633,7 @@ export function createProgram(cliEntrypoint: string): Command {
             payload,
             configPath,
           ),
-        success: (session) => session.slotUpdate.message ?? `Updated slots for ${session.id}.`,
+        success: (session) => slotUpdateMessage(session) ?? `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
     });

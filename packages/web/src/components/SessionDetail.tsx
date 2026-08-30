@@ -109,6 +109,7 @@ import {
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
   type SpurSessionView,
+  type SpurUpdateSessionSlotsResponse,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
@@ -2385,9 +2386,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
   const openTitleEditor = useCallback(() => {
     if (!session) return;
-    setTitleDraft(session.title ?? title);
+    setTitleDraft(session.title ?? "");
     setTitleEditing(true);
-  }, [session, title]);
+  }, [session]);
   const updateManualTitle = useCallback(
     async (nextTitle: string | null) => {
       if (!session || titleSaving) return;
@@ -2401,7 +2402,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         if (!response.ok) {
           throw new Error(await readApiErrorMessage(response, "Failed to update title"));
         }
-        const payload = (await response.json()) as SpurSessionView;
+        const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
         setSession(toDashboardSession(payload));
         setTitleEditing(false);
         setTitleDraft("");
@@ -2701,6 +2702,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
+            {session.titleSource === "manual" ? (
+              <p className="mt-1 text-xs uppercase text-[var(--color-text-secondary)]">
+                Set manually — agents cannot change it.
+              </p>
+            ) : null}
             {titleEditing ? (
               <form
                 className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row"

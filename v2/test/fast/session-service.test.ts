@@ -222,6 +222,7 @@ const probeWorkspaceMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const normalizeSlotLinksMock = vi.fn();
 const applySlotsUpdateWithResultMock = vi.fn();
+const applyNormalizedSlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
@@ -679,6 +680,7 @@ vi.mock("../../src/session-slots.js", () => ({
   TODO_TOOL_NAME: "spur-todo",
   applySlotsUpdate: applySlotsUpdateMock,
   applySlotsUpdateWithResult: applySlotsUpdateWithResultMock,
+  applyNormalizedSlotsUpdate: applyNormalizedSlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
   normalizeSlotsUpdate: vi.fn(
     (request: {
@@ -1533,7 +1535,14 @@ describe("SessionService", () => {
         : request.setTitleIfAbsent && current?.title?.trim()
           ? current.title
           : (request.title ?? current?.title);
-      return title || links.length > 0 ? { ...(title ? { title } : {}), links } : undefined;
+      const titleSource = request.clearTitle
+        ? (request.source ?? "agent")
+        : request.title !== undefined && title === request.title
+          ? (request.source ?? "agent")
+          : current?.titleSource;
+      return title || links.length > 0 || titleSource !== undefined
+        ? { ...(title ? { title } : {}), ...(titleSource ? { titleSource } : {}), links }
+        : undefined;
     });
     applySlotsUpdateWithResultMock.mockReset().mockImplementation((current, request) => ({
       slots: applySlotsUpdateMock(current, request),
@@ -1541,6 +1550,49 @@ describe("SessionService", () => {
         titleResult: request.clearTitle ? "cleared" : request.title ? "updated" : "unchanged",
       },
     }));
+    applyNormalizedSlotsUpdateMock.mockReset().mockImplementation((current, update) => {
+      const links = [...(current?.links ?? [])];
+      for (const label of update.unlinkLabels ?? []) {
+        const index = links.findIndex((link) => link.label === label);
+        if (index !== -1) {
+          links.splice(index, 1);
+        }
+      }
+      for (const link of update.links ?? []) {
+        const index = links.findIndex((entry) => entry.label === link.label);
+        if (index === -1) {
+          links.push(link);
+        } else {
+          links[index] = link;
+        }
+      }
+      const title = update.clearTitle
+        ? undefined
+        : update.setTitleIfAbsent && current?.title?.trim()
+          ? current.title
+          : (update.title ?? current?.title);
+      const titleSource = update.clearTitle
+        ? update.source
+        : update.title !== undefined && title === update.title
+          ? update.source
+          : current?.titleSource;
+      const nextTags = update.tags?.length ? update.tags : (current?.tags ?? []);
+      const slots =
+        title || links.length > 0 || titleSource !== undefined || nextTags.length > 0
+          ? {
+              ...(title ? { title } : {}),
+              ...(titleSource ? { titleSource } : {}),
+              links,
+              ...(nextTags.length > 0 ? { tags: nextTags } : {}),
+            }
+          : undefined;
+      return {
+        ...(slots ? { slots } : {}),
+        result: {
+          titleResult: update.clearTitle ? "cleared" : update.title ? "updated" : "unchanged",
+        },
+      };
+    });
   });
 
   afterEach(async () => {
@@ -21282,11 +21334,20 @@ describe("SessionService", () => {
     });
 
     expect(result.slots?.title).toBe("First");
-    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(undefined, {
       title: "First",
       setTitleIfAbsent: true,
+      clearTitle: false,
+      source: "agent",
+      links: [],
+      unlinkLabels: [],
+      tags: [],
+      untags: [],
     });
-    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBeUndefined();
+    // The conditional write succeeded and left a title source behind: the
+    // observable outcome (title set) is unchanged from before the fold, the
+    // recorded mechanism is not.
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
     service.dispose();
   });
 
@@ -21329,7 +21390,7 @@ describe("SessionService", () => {
       { label: "tracker", url: "https://tracker.example.com/1" },
     ]);
     expect(cleared.slots?.title).toBeUndefined();
-    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
     service.dispose();
   });
 
@@ -21360,7 +21421,7 @@ describe("SessionService", () => {
       links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
     });
 
-    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
     service.dispose();
   });
 
@@ -21474,7 +21535,7 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
       slots: { links: [] },
     });
-    applySlotsUpdateWithResultMock.mockReturnValueOnce({
+    applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
       slots: { title: "Agent title", titleSource: "agent", links: [] },
       result: { titleResult: "updated" },
     });
@@ -21487,12 +21548,17 @@ describe("SessionService", () => {
       setTitleIfAbsent: true,
     });
 
-    expect(applySlotsUpdateWithResultMock).toHaveBeenCalledWith(
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(
       { links: [] },
       {
         title: "Agent title",
         setTitleIfAbsent: true,
+        clearTitle: false,
         source: "agent",
+        links: [],
+        unlinkLabels: [],
+        tags: [],
+        untags: [],
       },
     );
     expect(result.slotUpdate).toEqual({ titleResult: "updated" });
@@ -21508,7 +21574,6 @@ describe("SessionService", () => {
     const lockedSlots = {
       title: "Manual title",
       titleSource: "manual" as const,
-      titleLocked: true,
       links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
     };
     readSessionMock.mockReturnValue({
@@ -21526,7 +21591,7 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
       slots: lockedSlots,
     });
-    applySlotsUpdateWithResultMock.mockReturnValueOnce({
+    applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
       slots: {
         ...lockedSlots,
         links: [...lockedSlots.links, { label: "docs", url: "https://docs.example.com/" }],
@@ -21563,6 +21628,52 @@ describe("SessionService", () => {
         },
       }),
     );
+  });
+
+  it("gates a conditional title write out of the update sent to session-slots once titleSource is set", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: { titleSource: "agent", links: [] },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", {
+      title: "Second attempt",
+      setTitleIfAbsent: true,
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    });
+
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(
+      { titleSource: "agent", links: [] },
+      expect.not.objectContaining({ title: expect.anything() }),
+    );
+  });
+
+  it("rejects updateSlots on an unknown session with SessionResourceNotFoundError", async () => {
+    readSessionMock.mockReturnValue(undefined);
+
+    const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const promise = service.updateSlots("missing", { title: "Anything" });
+    await expect(promise).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+    await expect(promise).rejects.toMatchObject({
+      statusCode: 404,
+      message: "Session not found: missing",
+    });
   });
 
   it("keeps non-GitHub pr links as generic slots", async () => {
@@ -27350,9 +27461,11 @@ describe("SessionService", () => {
         const links = [...(current?.links ?? [])];
         const title = request.title ?? current?.title;
         const tags = request.tags ?? current?.tags;
+        const titleSource = request.title !== undefined ? (request.source ?? "agent") : current?.titleSource;
         return {
           ...(title ? { title } : {}),
           links,
+          ...(titleSource ? { titleSource } : {}),
           ...(tags?.length ? { tags } : {}),
         };
       });
@@ -27370,7 +27483,7 @@ describe("SessionService", () => {
         title: "Handoff task",
         tags: ["feature"],
       });
-      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
       expect(result.id).toBe("api-2");
     });
 
