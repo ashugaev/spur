@@ -33457,6 +33457,52 @@ describe("SessionService", () => {
         service.dispose();
       });
 
+      it("keeps a just-expired rate-limited session out of the stale park sweep", async () => {
+        // staleParkableSession is 65 minutes idle by transcript mtime alone
+        // (STALE_PARK_ACTIVITY_MS == its own updatedAt), comfortably past the
+        // 60-minute staleAfterMinutes threshold below. But its parsed
+        // rate-limit reset (10:04) is only 1 minute before "now" (10:05):
+        // resolveParkActivityAt must anchor the idle clock to that later
+        // instant, so the session gets a fresh idle window from the reset
+        // and must NOT be parked on the very next tick past expiry.
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          staleAfterMinutes: 60,
+        });
+        readClaudeJsonlStateMock.mockResolvedValue({
+          state: "waiting",
+          reader: {
+            filePath: "test.jsonl",
+            lastOffset: 0,
+            lastMtimeMs: STALE_PARK_ACTIVITY_MS,
+            tailRecords: [],
+          },
+          rateLimit: {
+            limited: true,
+            reason: "claude rate_limit",
+            resetAtMs: Date.parse("2026-03-18T10:04:00.000Z"),
+          },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(0);
+        expect(sessions.get("api-1")?.status).toBe("running");
+        service.dispose();
+      });
+
       it("a per-project staleAfterMinutes override takes effect at runtime, not just at config parse", async () => {
         // resolveStaleAfterMs reads project.staleAfterMinutes ?? instance
         // staleAfterMinutes. staleParkableSession is 65 minutes idle: the

@@ -624,7 +624,7 @@ describe("parseRateLimitResetAtMs", () => {
     ).toBe(Date.parse("2026-07-02T11:20:00.000Z"));
   });
 
-  it("maps 12pm to noon and 12am to midnight", () => {
+  it("maps 12pm to noon, and 12am to midnight clamped to the end of its truncated minute", () => {
     const anchorMs = Date.parse("2026-07-01T00:00:00.000Z");
     expect(
       parseRateLimitResetAtMs("You've hit your session limit · resets 12pm (UTC)", anchorMs),

@@ -148,10 +148,12 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // time-blind, stuck-but-safe behavior — see SESSION_LIMIT_BANNER. Forward-only:
 // the returned instant is always strictly after `anchorMs`. The banner's clock
 // is minute-truncated, so the true reset can land up to 60s after the rendered
-// minute; when the anchor is still within that truncation window of the
-// rendered minute, the candidate is clamped forward to the end of that minute
-// (candidate + 60s) rather than accepted as-is, so the returned instant is
-// never earlier than the true reset. Once the anchor is 60s or more past the
+// minute; the common case (the rendered minute is still ahead of the anchor)
+// returns that truncated minute as-is, which can be up to 60s earlier than the
+// true reset. Only when the anchor has already reached the rendered minute is
+// the candidate clamped forward to the end of that minute (candidate + 60s)
+// rather than rolled a full day, so it is never earlier than the true reset in
+// that same-minute case specifically. Once the anchor is 60s or more past the
 // rendered minute, the candidate rolls a full day forward instead. Returns
 // `undefined` for any unparseable, out-of-range, or non-UTC form — never a
 // guessed timezone or a fallback expiry.
