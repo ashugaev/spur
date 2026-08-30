@@ -185,11 +185,19 @@ describe("ArtifactList", () => {
   });
 
   it("keeps the Updated column visible and hides only Type below sm (F4)", () => {
-    render(<ControlledArtifactList artifacts={artifacts} />);
+    const { container } = render(<ControlledArtifactList artifacts={artifacts} />);
     const updatedHeader = screen.getByRole("columnheader", { name: /Updated/ });
     const typeHeader = screen.getByRole("columnheader", { name: /Type/ });
     expect(updatedHeader.className).not.toMatch(/hidden/);
     expect(typeHeader.className).toMatch(/hidden sm:table-cell/);
+
+    // The `th`/`td` classes must stay in lockstep, or the header and its
+    // column's cells go responsive at different breakpoints.
+    const typeCell = container.querySelector("tbody tr td:nth-child(3)");
+    const updatedCell = container.querySelector("tbody tr td:nth-child(4)");
+    expect(typeCell?.className).toMatch(/\bhidden\b/);
+    expect(typeCell?.className).toMatch(/\bsm:table-cell\b/);
+    expect(updatedCell?.className).not.toMatch(/hidden/);
   });
 
   it("renders an open-in-new-tab action for HTML artifacts only (F5)", () => {
