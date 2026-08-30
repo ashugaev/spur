@@ -9233,6 +9233,92 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("survives a failed pane capture but clears on a genuine empty pane", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks, then freeze
+    // both background loops so the rest of this test is driven only by the
+    // explicit calls below — the periodic dashboard tick's own exempt
+    // rate_limited re-affirmations would otherwise keep refreshing
+    // stabilizeState's hold window against a real clock advance and mask
+    // the very transitions this test checks.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+      runDashboardCacheTick: () => Promise<void>;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    // A live (scanPane:true) classify sees the menu and re-confirms.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+
+    // captureTmuxPane collapses a failed capture-pane fork into "" (its own
+    // comment notes the distinction is discarded at the return). A live
+    // scan hitting that empty result reports "waiting" for THIS tick (no
+    // fresh evidence either way) — the override itself must still survive
+    // for the next scanPane:false consumer, checked below.
+    captureTmuxPaneMock.mockResolvedValue("");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterFailedCapture = await service.get("api-1");
+    expect(afterFailedCapture.state).toBe("waiting");
+
+    // The scanPane:false dashboard tick never captures its own pane, so it
+    // only sees "rate_limited" here if the override survived the empty
+    // capture above.
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+    expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
+
+    // A genuine (non-empty) pane with no menu is a real observation: it must
+    // still clear the override so the dashboard doesn't strand rate_limited
+    // forever once the menu is actually gone.
+    captureTmuxPaneMock.mockResolvedValue("line 1: doing unrelated follow-up work");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterRealClear = await service.get("api-1");
+    expect(afterRealClear.state).toBe("waiting");
+
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterRealClear = await service.list({ view: "dashboard" });
+    expect(dashboardAfterRealClear[0]).toMatchObject({ id: "api-1", state: "waiting" });
+
+    service.dispose();
+  });
+
   it("keeps rate_limited on the dashboard tick across a live-scan gap longer than the old fixed TTL", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));

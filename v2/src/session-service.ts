@@ -14859,7 +14859,16 @@ export class SessionService {
         ) {
           paneReconfirmedLimit = true;
           this.claudeRateLimitReconfirmOverrides.add(session.id);
-        } else {
+        } else if (paneText !== "") {
+          // A menu-not-found result only clears the override when it comes
+          // from an actual capture. captureTmuxPane collapses a failed
+          // capture-pane fork into "" (see its own comment), so an empty
+          // paneText here is indistinguishable from a real empty pane at
+          // this call site — clearing on it would treat a failed observation
+          // as evidence the menu is gone. Leave the override in place on an
+          // empty capture; CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS above still
+          // bounds how long it can survive with no fresh confirming scan.
+          // The real fix is upstream, in captureTmuxPane's return contract.
           this.claudeRateLimitReconfirmOverrides.delete(session.id);
         }
         // Compaction never reaches Claude's persisted status file (it stays
