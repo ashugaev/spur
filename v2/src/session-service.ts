@@ -272,8 +272,8 @@ import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  applyNormalizedSlotsUpdate,
   applySlotsUpdate,
-  applySlotsUpdateWithResult,
   ensureSessionSlotTool,
   normalizeSlotLinks,
   normalizeSlotsUpdate,
@@ -310,7 +310,6 @@ import {
 import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
-  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -10503,13 +10502,7 @@ export class SessionService {
     options?: { touchUpdatedAt?: boolean },
   ): SessionRecord | null {
     const workspaceId = workspaceIdOf(member);
-    const stored = readWorkspaceState(this.config.dataDir, workspaceId);
-    const nextState: WorkspaceState = {
-      ...state,
-      ...(state.manualTitleOverride || stored?.manualTitleOverride
-        ? { manualTitleOverride: true }
-        : {}),
-    };
+    const nextState: WorkspaceState = { ...state };
     writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
     const owner =
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
@@ -12735,7 +12728,7 @@ export class SessionService {
   ): Promise<UpdateSessionSlotsResponse> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     // Slots (title/links/tags/pr) are workspace-owned: mutations always land
     // on the workspace's own state, so every member sees the same slots.
@@ -12759,7 +12752,7 @@ export class SessionService {
     );
     const genericUnlinks = normalized.unlinkLabels;
     const conditionalTitleBlocked =
-      normalized.setTitleIfAbsent === true && current.manualTitleOverride === true;
+      normalized.setTitleIfAbsent === true && current.slots?.titleSource !== undefined;
     const hasGenericChanges =
       (normalized.title !== undefined && !conditionalTitleBlocked) ||
       normalized.clearTitle ||
@@ -12768,19 +12761,19 @@ export class SessionService {
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
     const applied: AppliedSlotsUpdate = hasGenericChanges
-      ? applySlotsUpdateWithResult(current.slots, {
+      ? applyNormalizedSlotsUpdate(current.slots, {
           ...(normalized.title !== undefined && !conditionalTitleBlocked
             ? {
                 title: normalized.title,
                 ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
               }
             : {}),
-          ...(normalized.clearTitle ? { clearTitle: true } : {}),
+          clearTitle: normalized.clearTitle,
           source: normalized.source,
-          ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
-          ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
-          ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
-          ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
+          links: genericLinks,
+          unlinkLabels: genericUnlinks,
+          tags: normalized.tags,
+          untags: normalized.untags,
         })
       : {
           ...(current.slots ? { slots: current.slots } : {}),
@@ -12791,11 +12784,6 @@ export class SessionService {
     const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
-      ...(current.manualTitleOverride ||
-      normalized.clearTitle ||
-      (normalized.title !== undefined && !normalized.setTitleIfAbsent)
-        ? { manualTitleOverride: true }
-        : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
     const displaySlots = deriveSessionSlots(nextState);

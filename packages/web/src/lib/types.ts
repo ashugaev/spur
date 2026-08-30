@@ -349,7 +349,6 @@ export interface SpurSessionView {
   slots?: {
     title?: string;
     titleSource?: SpurSessionTitleSource;
-    titleLocked?: boolean;
     links: SpurSessionLink[];
     tags?: string[];
   };
@@ -374,6 +373,15 @@ export interface SpurSessionView {
  * plus the real stop outcome (`sidecarStop`), never claiming a clean reap
  * when survivors were left behind. */
 export type SpurSidecarStopResponse = SpurSessionView & { sidecarStop: SpurSidecarStopReport };
+
+// Mirrors v2/src/types.ts UpdateSessionSlotsResponse — the daemon's reply to
+// POST /sessions/:id/slots.
+export interface SpurUpdateSessionSlotsResponse extends SpurSessionView {
+  slotUpdate: {
+    titleResult: "updated" | "cleared" | "unchanged" | "blocked";
+    message?: string;
+  };
+}
 
 export type SpurTodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
@@ -679,7 +687,6 @@ export interface DashboardSession {
   model?: string;
   title: string | null;
   titleSource: SpurSessionTitleSource | null;
-  titleLocked: boolean;
   prompt: string;
   originalTaskPrompt: string | null;
   startupAttachmentIds: string[];
@@ -767,7 +774,6 @@ export function toDashboardSession(
     ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     titleSource: session.slots?.titleSource ?? null,
-    titleLocked: session.slots?.titleLocked === true,
     prompt: session.prompt,
     originalTaskPrompt: session.originalTaskPrompt?.trim() || null,
     startupAttachmentIds: session.startupAttachmentIds ?? [],

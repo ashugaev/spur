@@ -129,7 +129,6 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 export interface SessionSlots {
   title?: string;
   titleSource?: SessionSlotTitleSource;
-  titleLocked?: boolean;
   links: SessionLink[];
   tags?: string[];
 }
