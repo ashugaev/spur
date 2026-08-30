@@ -1178,7 +1178,7 @@ export async function startServer(
 
       const coreSessionId = path.match(/^\/sessions\/([^/]+)\/core$/)?.[1];
       if (method === "GET" && coreSessionId) {
-        sendJson(response, 200, await service.getCore(coreSessionId));
+        sendJson(response, 200, await service.getCore(decodeURIComponent(coreSessionId)));
         return;
       }
 
