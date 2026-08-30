@@ -370,6 +370,7 @@ export function ConversationView({
             className="mx-auto flex items-center gap-1.5 py-1 text-[var(--color-text-tertiary)]"
           >
             <Spinner className="h-3 w-3" strokeWidth={1.5} />
+            <span className="text-[10px] uppercase tracking-[0.08em]">Loading older</span>
           </div>
         ) : null}
         {items.map((entry, index) => (
