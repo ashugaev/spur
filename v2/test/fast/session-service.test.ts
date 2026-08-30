@@ -27532,13 +27532,47 @@ describe("SessionService", () => {
 
       // Browser held an offset from before rotation (from=400) that is now
       // far beyond the post-rotation totalEntries (30). startIndex must never
-      // exceed totalEntries: an out-of-range startIndex would return an empty
-      // page forever with no scroll event to trigger a recovery re-fetch.
+      // exceed totalEntries, and the response must still carry the tail page
+      // instead of an empty page: an out-of-range or empty page would leave
+      // no scroll event to trigger a recovery re-fetch.
       const result = await service.getConversation("api-1", { from: 400 });
 
-      expect(result.startIndex).toBe(30);
+      expect(result.startIndex).toBeLessThan(result.totalEntries);
       expect(result.startIndex + result.entries.length).toBeLessThanOrEqual(result.totalEntries);
-      expect(result.entries).toHaveLength(0);
+      expect(result.entries.length).toBeGreaterThan(0);
+    });
+
+    it("returns a non-empty tail page when the transcript shrinks far below a deep-scroll-back from", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "tail", timestampMs: 5 }],
+        state: "waiting",
+        // Retained window starts well above the stale `from` (100), so this
+        // falls into the deep-scroll-back full-read branch.
+        totalEntries: 9,
+        startIndex: 9,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      readAgentConversationMock.mockResolvedValue(
+        Array.from({ length: 9 }, (_, i) => ({
+          kind: "message",
+          role: "assistant",
+          text: `m${i}`,
+          timestampMs: i,
+        })),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Browser pinned from=100 against a 500-entry transcript that has since
+      // shrunk (rotation/truncation/respawn) to 9 entries.
+      const result = await service.getConversation("api-1", { from: 100 });
+
+      expect(result.entries.length).toBeGreaterThan(0);
+      expect(result.startIndex + result.entries.length).toBeLessThanOrEqual(result.totalEntries);
+      expect(result.totalEntries).toBe(9);
     });
 
     it("calls readAgentConversation exactly once for a claude from below the retained window", async () => {

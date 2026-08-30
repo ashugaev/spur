@@ -986,6 +986,23 @@ function buildConversationResponse(
   };
 }
 
+/**
+ * Clamps a requested conversation page start so the response is never an
+ * empty slice while entries exist. `from` (or `floor`, the retained-window
+ * lower bound) landing at or past `totalEntries` means the pin is stale —
+ * the transcript shrank under it via rotation, truncation, or respawn — so
+ * fall back to the tail page instead of an out-of-range start that would
+ * return zero entries with no scrollable element left to trigger a
+ * recovery re-fetch.
+ */
+function clampPageStart(from: number, floor: number, totalEntries: number): number {
+  const boundedFloor = Math.max(floor, 0);
+  if (totalEntries <= 0) return boundedFloor;
+  const candidate = Math.max(from, boundedFloor);
+  if (candidate < totalEntries && boundedFloor <= totalEntries) return candidate;
+  return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
+}
+
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
@@ -7263,7 +7280,7 @@ export class SessionService {
       const tail = await this.readConversationSerialized(session);
       if (!tail) {
         const entries = await readFullEntries();
-        const startIndex = from === undefined ? 0 : Math.max(0, Math.min(from, entries.length));
+        const startIndex = from === undefined ? 0 : clampPageStart(from, 0, entries.length);
         return buildConversationResponse(
           entries.slice(startIndex),
           entries.length,
@@ -7280,14 +7297,14 @@ export class SessionService {
         const sliceStart =
           from === undefined
             ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
-            : Math.min(Math.max(from, tailStartIndex), totalEntries);
+            : clampPageStart(from, tailStartIndex, totalEntries);
         const entries = tailEntries.slice(sliceStart - tailStartIndex);
         return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
       }
 
       // Deep scroll-back below the retained window: fall back to a full read.
       const fullEntries = await readFullEntries();
-      const startIndex = Math.max(0, Math.min(from, fullEntries.length));
+      const startIndex = clampPageStart(from, 0, fullEntries.length);
       return buildConversationResponse(
         fullEntries.slice(startIndex),
         fullEntries.length,
@@ -7301,7 +7318,7 @@ export class SessionService {
     const startIndex =
       from === undefined
         ? Math.max(0, entries.length - CONVERSATION_PAGE_ENTRIES)
-        : Math.max(0, Math.min(from, entries.length));
+        : clampPageStart(from, 0, entries.length);
     return buildConversationResponse(
       entries.slice(startIndex),
       entries.length,
