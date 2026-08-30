@@ -292,9 +292,22 @@ wait "$first_pid" "$second_pid"
 # record here, so the :64-78 wait loop spins its full ~2s before the lock is
 # even attempted — acceptable, noted in the spec's test plan. Held long enough
 # (5s) to outlast that 2s wait plus the 1s lock-wait timeout below.
-flock "$LOCK_FILE" -c "sleep 5" &
+flock "$LOCK_FILE" -c "sleep 12" &
 holder_pid=$!
-sleep 0.2
+# Barrier, not a sleep: wait until the holder actually owns the lock. A fixed
+# delay is a guess about how long a backgrounded flock takes to acquire, and
+# under load it can still be starting — the helper then wins the lock and the
+# case asserts nothing, failing with rc=0. Probe non-blockingly instead: while
+# the probe can take the lock, the holder does not have it yet.
+lock_held=""
+for _ in $(seq 1 200); do
+  if ! flock -n "$LOCK_FILE" -c true 2>/dev/null; then
+    lock_held="yes"
+    break
+  fi
+  sleep 0.05
+done
+[ -n "$lock_held" ] || fail "lock holder never acquired the lock"
 STATUS_FILE14="$PREFIX_DIR/lock-give-up-status.json"
 LEDGER_FILE14="$PREFIX_DIR/lock-give-up-ledger.jsonl"
 rm -f "$STATUS_FILE14" "$LEDGER_FILE14"
@@ -311,7 +324,10 @@ grep -q '"failureKind":"install_failed"' "$STATUS_FILE14" || fail "a lock give-u
 if [ -e "$LEDGER_FILE14" ]; then
   fail "a lock give-up must never write a ledger line: $(cat "$LEDGER_FILE14")"
 fi
-wait "$holder_pid"
+# The hold outlasts the helper's wait by a wide margin so a slow runner cannot
+# release it early; release it now rather than sitting out the remainder.
+kill "$holder_pid" 2>/dev/null || true
+wait "$holder_pid" 2>/dev/null || true
 
 # Case 15: detached deploy runs replace the durable running record with terminal status.
 STATUS_FILE="$PREFIX_DIR/deploy-switch.json"
