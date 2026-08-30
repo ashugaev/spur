@@ -578,9 +578,6 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
-// Same outlast-the-sweep-gap reasoning again, for a live usage-limit menu that
-// re-confirms an expired claude rate-limit detection back to rate_limited.
-const CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS = 15_000;
 // Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
 // still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
 // only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
@@ -2422,12 +2419,17 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
-  // Same TTL-override pattern for a live usage-limit menu that re-confirmed
-  // an expired claude rate-limit detection: keyed by session id, value =
-  // expiry epoch ms. Lets the scanPane:false dashboard tick agree with the
-  // live pane scan for CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS instead of flapping
-  // rate_limited -> waiting every cycle between live scans.
-  private readonly claudeRateLimitReconfirmOverrides = new Map<string, number>();
+  // Evidence-gated override (not TTL-gated) for a live usage-limit menu that
+  // re-confirmed an expired claude rate-limit detection: keyed by session id.
+  // A sweep can take longer than any fixed TTL to reach a given session (its
+  // duration is O(live sessions) of capture-pane forks), so this persists
+  // until either a live pane scan actually observes the menu gone (the
+  // scanPane:true branch's own `else { delete }`) or the session leaves
+  // liveIds (pruneSessionScopedState). The scanPane:false dashboard tick
+  // additionally re-checks CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against
+  // rateLimit.resetAtMs on every read, so a stalled sweep can't leave this
+  // pinned forever with neither evidence nor a clock to end it.
+  private readonly claudeRateLimitReconfirmOverrides = new Set<string>();
   // Dedupes session.state.classified: emit once per classify call only when
   // the raw classified state actually changed since the last classify call
   // for that session (not the message, so a detail-only churn like
@@ -14838,15 +14840,16 @@ export class SessionService {
           await this.confirmClaudeUsageLimitMenu(session);
         }
         // Re-confirmation: the detection is flagged but its parsed reset has
-        // passed, and a live menu is on the pane. Carried via a TTL override
-        // rather than by overwriting `rateLimit` itself, so resetAtMs stays
-        // observable and the scanPane:false dashboard tick agrees with this
-        // sweep for CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS instead of flapping
-        // rate_limited -> waiting every cycle between live scans. Gated on
-        // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never clears
-        // (no fresh output, per confirmClaudeUsageLimitMenu's own caveat)
-        // can't pin the session rate_limited forever — reaching this branch
-        // guarantees resetAtMs is set (rateLimitExpired requires it).
+        // passed, and a live menu is on the pane. Carried via an evidence-
+        // gated override rather than by overwriting `rateLimit` itself, so
+        // resetAtMs stays observable and the scanPane:false dashboard tick
+        // agrees with this sweep until a live scan actually clears it,
+        // instead of flapping rate_limited -> waiting every time a sweep
+        // takes longer than a fixed TTL to reach this session again. Gated
+        // here on CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never
+        // clears (no fresh output, per confirmClaudeUsageLimitMenu's own
+        // caveat) can't pin the session rate_limited forever — reaching this
+        // branch guarantees resetAtMs is set (rateLimitExpired requires it).
         if (
           rateLimit?.limited &&
           !rateLimitActive(rateLimit, nowMs) &&
@@ -14855,10 +14858,7 @@ export class SessionService {
           nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
         ) {
           paneReconfirmedLimit = true;
-          this.claudeRateLimitReconfirmOverrides.set(
-            session.id,
-            nowMs + CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS,
-          );
+          this.claudeRateLimitReconfirmOverrides.add(session.id);
         } else {
           this.claudeRateLimitReconfirmOverrides.delete(session.id);
         }
@@ -14889,12 +14889,24 @@ export class SessionService {
       } else if (!scanPane && strategy === "claude_jsonl") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
         // fork, but it can still reuse the last live pane-scan's re-confirm
-        // and compaction confirmation while they're fresh, so the dashboard
-        // doesn't flap or keep showing waiting/working for a session the 5s
-        // attention monitor (or on-demand enrich of the viewed session)
-        // already knows is re-confirmed rate_limited or mid-compaction.
-        const reconfirmExpiresAt = this.claudeRateLimitReconfirmOverrides.get(session.id);
-        if (reconfirmExpiresAt !== undefined && reconfirmExpiresAt > nowMs) {
+        // and compaction confirmation, so the dashboard doesn't flap or keep
+        // showing waiting/working for a session the 5s attention monitor (or
+        // on-demand enrich of the viewed session) already knows is
+        // re-confirmed rate_limited or mid-compaction. The re-confirm below
+        // is bounded by CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against the
+        // current resetAtMs, re-checked on every call; the compaction
+        // override further down is still bounded by its own fixed TTL.
+        // Narrowing: if this tick's jsonl read transiently returns null,
+        // rateLimit is null here and the reconfirm is dropped for that tick
+        // (the old fixed TTL would have held it) — two consecutive read
+        // failures 2s apart surface this, since stabilizeState's 4s hold
+        // absorbs a single one. Intended: trust current structured evidence,
+        // mirrors the write path's own resetAtMs requirement.
+        if (
+          this.claudeRateLimitReconfirmOverrides.has(session.id) &&
+          rateLimit?.resetAtMs !== undefined &&
+          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+        ) {
           paneReconfirmedLimit = true;
         }
         const expiresAt = this.claudeCompactingOverrides.get(session.id);
