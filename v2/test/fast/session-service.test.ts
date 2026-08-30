@@ -9232,6 +9232,140 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("keeps rate_limited on the dashboard tick across a live-scan gap longer than the old fixed TTL", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks first so
+    // neither races the deliberate live classify below nor resets the
+    // guard we force busy afterward.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    // A live (scanPane:true) classify sees the menu and re-confirms.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+    captureTmuxPaneMock.mockClear();
+
+    // Force the attention-monitor re-entrancy guard busy for the rest of
+    // this test, simulating a sweep stalled on other sessions in a larger
+    // fleet: the interval still fires every ATTENTION_POLL_INTERVAL_MS (5s)
+    // but pollAttentionStates's own guard makes every one of those a no-op,
+    // so no fresh live scan reaches this session again.
+    internals.attentionMonitorRunning = true;
+
+    // 20s: past the old CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS (15s) plus
+    // STATE_HOLD_MS (4s) — the periodic scanPane:false dashboard-cache tick
+    // re-confirms "rate_limited" against the override every
+    // DASHBOARD_CACHE_INTERVAL_MS (2s) while it's still valid, which keeps
+    // refreshing stabilizeState's own hold window, so the flap this test
+    // guards against only becomes externally visible once the gap clears
+    // both windows. Well under CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS (24h).
+    // A TTL-gated override would have lapsed long before this point and the
+    // scanPane:false dashboard tick would flap to "waiting" even though
+    // nothing has actually cleared the live menu.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
+    service.dispose();
+  });
+
+  it("stops replaying the re-confirmation override on the dashboard tick once a stalled sweep crosses the ceiling", async () => {
+    const sessions = createSessionStore();
+    // The suite's global beforeEach pins the fake clock to
+    // 2026-03-18T10:05:00.000Z (not the SessionService constructor's
+    // `startedAt` label, which is metadata only). 23h59m59s before that
+    // clock is still inside CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS (24h)
+    // when the live scan below runs, so the override is set.
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-17T10:05:01.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-17T10:05:01.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks first so
+    // neither races the deliberate live classify below nor resets the
+    // guard we force busy afterward.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+    captureTmuxPaneMock.mockClear();
+
+    // Force the attention-monitor guard busy so no fresh live scan ever
+    // reaches this session again — a sweep stalled indefinitely, the shape
+    // this ceiling exists to bound.
+    internals.attentionMonitorRunning = true;
+
+    // 5s: crosses the 24h ceiling (relative to resetAtMs) by a few seconds,
+    // and clears STATE_HOLD_MS (4s) so the non-exempt rate_limited->waiting
+    // transition is observable on this tick rather than held from the prior
+    // classification.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "waiting" });
+    service.dispose();
+  });
+
   it("propagates a codex MCP dialog override into the dashboard tick after a live scan confirms it", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
