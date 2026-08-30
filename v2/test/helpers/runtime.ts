@@ -682,18 +682,40 @@ record_fixture_todo() {
   # fixture item is a one-time "the agent touched ToDo" marker, not a per-launch
   # step. Re-adding on every relaunch races a caller polling for a clean ledger
   # right after a resume (see cli-lifecycle.runtime.test.ts pause/resume/complete).
-  local already
-  already="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys
+  #
+  # Skipping on the text alone leaks an open item: a launch torn down between the
+  # add and the complete below (pause, kill, teardown) leaves "Fixture step" open,
+  # and every relaunch then returns early without resolving it, so every later
+  # complete on that session refuses with todo_open_work. Resolve a leftover
+  # instead of skipping it; only an already-resolved marker means there is
+  # nothing to do.
+  local existing
+  existing="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys
 try:
     data = json.load(sys.stdin)
 except Exception:
     print("")
 else:
-    found = any(item.get("text") == "Fixture step" for item in data.get("items", []))
-    print("yes" if found else "")' 2>/dev/null || true)"
-  if [[ -n "$already" ]]; then
-    return
-  fi
+    items = [i for i in data.get("items", []) if i.get("text") == "Fixture step"]
+    pending = next((i for i in items if i.get("status") not in ("completed", "cancelled")), None)
+    if pending is not None:
+        print("pending:" + str(pending.get("id", "")))
+    elif items:
+        print("resolved")
+    else:
+        print("")' 2>/dev/null || true)"
+  case "$existing" in
+    resolved)
+      return
+      ;;
+    pending:*)
+      local leftover="\${existing#pending:}"
+      if [[ -n "$leftover" ]]; then
+        SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$leftover" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
+      fi
+      return
+      ;;
+  esac
   local todo_id
   todo_id="$("$SPUR_TODO_COMMAND" add --text "Fixture step" --reason "Runtime agent fixture step" --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
   if [[ -n "$todo_id" ]]; then

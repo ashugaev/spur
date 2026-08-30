@@ -2454,6 +2454,14 @@ projects:
       accept: (value) => value.includes("resume after pause"),
     });
 
+    // Pane text echoes before the fixture has finished resolving its ToDo item
+    // for that turn, so it is not a ledger barrier. Wait for "waiting", which
+    // lands strictly after resolve_initial_todo, or complete can take the 409.
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
+
     const completed = JSON.parse(
       (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
     ) as SessionView;

@@ -359,6 +359,11 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const { context, configPath, port } = await setup("cursor-cpl");
     const session = await spawnSession(context, configPath, "cursor");
 
+    // "waiting" lands strictly after the fixture's own resolve_initial_todo, so
+    // it is the barrier that guarantees a clean ledger — the same guard the
+    // Claude and Codex complete cases use.
+    await waitForState(port, session.id, "waiting");
+
     await context.execCli(["--config", configPath, "complete", session.id, "--json"]);
     const view = await waitForState(port, session.id, "stopped");
     expect(view.state).toBe("stopped");
