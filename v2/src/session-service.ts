@@ -6925,16 +6925,49 @@ export class SessionService {
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
-    const runtimeAlive =
+    if (
       (session.status === "running" || session.status === "spawning") &&
       this.isInRestoreWarmup(session.id)
-        ? true
-        : isTerminalSessionStatus(session.status)
-          ? false
-          : await tmuxSessionExists(session.tmuxSession);
+    ) {
+      return {
+        ...session,
+        state: "working",
+        runtimeAlive: true,
+        workspaceExists: probeWorkspace(session.worktreePath).exists,
+        lastActivityAt: session.updatedAt,
+      };
+    }
+    if (isTerminalSessionStatus(session.status)) {
+      return {
+        ...session,
+        state: statusFallbackState(session),
+        runtimeAlive: false,
+        workspaceExists: probeWorkspace(session.worktreePath).exists,
+        lastActivityAt: session.updatedAt,
+      };
+    }
+    const gate =
+      session.status === "running" ||
+      (session.status === "spawning" && !this.spawnsInFlight.has(session.id));
+    let state: SessionState;
+    let runtimeAlive: boolean;
+    if (!gate) {
+      runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+      state = statusFallbackState(session);
+    } else {
+      const runtime = await this.readRuntimeSnapshot(session);
+      // Read-only aliveness gate mirroring classifySessionRecord's
+      // paneUsable/processAlive check. Not "error": that outcome only comes
+      // from reconcileUnexpectedStop actually writing the record; getCore
+      // never writes, so it reports the plain gate result instead of
+      // replicating that write-path split.
+      state =
+        !runtime.paneUsable || !runtime.processAlive ? "stopped" : statusFallbackState(session);
+      runtimeAlive = runtime.runtimeAlive;
+    }
     return {
       ...session,
-      state: statusFallbackState(session),
+      state,
       runtimeAlive,
       workspaceExists: probeWorkspace(session.worktreePath).exists,
       lastActivityAt: session.updatedAt,
