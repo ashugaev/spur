@@ -14672,13 +14672,8 @@ export class SessionService {
       if (scanPane && strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const menuHit = detectClaudeUsageLimitMenu(paneText);
-        // A flagged-but-expired detection never admits a fresh generic banner
-        // scan: an idle limited session's banner survives in pane scrollback
-        // indefinitely with no dismissal, so admitting it here would restore
-        // the permanent-rate_limited bug this expiry check exists to fix.
-        // Only a live usage-limit menu re-confirms in that case (below).
-        if (!rateLimitActive(rateLimit, nowMs)) {
-          const tmuxHit = rateLimit?.limited ? null : (scanTmuxRateLimit(paneText) ?? menuHit);
+        if (!rateLimit?.limited) {
+          const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
           if (tmuxHit?.limited) {
             rateLimit = tmuxHit;
           }
