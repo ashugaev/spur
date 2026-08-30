@@ -9181,8 +9181,12 @@ describe("SessionService", () => {
 
     // The next scanPane:false dashboard tick must reuse the re-confirmation
     // override instead of flapping to waiting, and must not re-stamp
-    // rateLimitedAt (no new episode minted for a still-limited session).
-    await vi.advanceTimersByTimeAsync(2_000);
+    // rateLimitedAt (no new episode minted for a still-limited session). Past
+    // STATE_HOLD_MS (4s), not just one 2s tick: within the hold window a
+    // "waiting" reclassify would be masked by stabilizeState's cache anyway
+    // (rate_limited isn't the exempt direction), so this assertion would pass
+    // even without the reconfirm override actually being reused.
+    await vi.advanceTimersByTimeAsync(4_001);
     expect(captureTmuxPaneMock).not.toHaveBeenCalled();
 
     const dashboardListed = await service.list({ view: "dashboard" });
