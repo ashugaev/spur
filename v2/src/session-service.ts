@@ -14754,10 +14754,19 @@ export class SessionService {
       } else if (!scanPane && strategy === "claude_jsonl") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
         // fork, but it can still reuse the last live pane-scan's re-confirm
-        // and compaction confirmation while they're fresh, so the dashboard
-        // doesn't flap or keep showing waiting/working for a session the 5s
-        // attention monitor (or on-demand enrich of the viewed session)
-        // already knows is re-confirmed rate_limited or mid-compaction.
+        // and compaction confirmation, so the dashboard doesn't flap or keep
+        // showing waiting/working for a session the 5s attention monitor (or
+        // on-demand enrich of the viewed session) already knows is
+        // re-confirmed rate_limited or mid-compaction. The re-confirm below
+        // is bounded by CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against the
+        // current resetAtMs, re-checked on every call; the compaction
+        // override further down is still bounded by its own fixed TTL.
+        // Narrowing: if this tick's jsonl read transiently returns null,
+        // rateLimit is null here and the reconfirm is dropped for that tick
+        // (the old fixed TTL would have held it) — two consecutive read
+        // failures 2s apart surface this, since stabilizeState's 4s hold
+        // absorbs a single one. Intended: trust current structured evidence,
+        // mirrors the write path's own resetAtMs requirement.
         if (
           this.claudeRateLimitReconfirmOverrides.has(session.id) &&
           rateLimit?.resetAtMs !== undefined &&
