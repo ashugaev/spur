@@ -9044,6 +9044,42 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("stops re-confirming a live usage-limit menu once nowMs is a full day past the parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-17T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-17T09:00:00.000Z"),
+      },
+    });
+    // Same live menu as the sibling test above, cursor on option 2 so
+    // confirmClaudeUsageLimitMenu's option-one-selected gate does not fire.
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    // 25h after resetAtMs: past CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS (24h).
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    service.dispose();
+  });
+
   it("ignores stale menu scrollback after the parsed reset", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));

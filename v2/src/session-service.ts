@@ -579,6 +579,17 @@ const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning again, for a live usage-limit menu that
 // re-confirms an expired claude rate-limit detection back to rate_limited.
 const CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS = 15_000;
+// Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
+// still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
+// only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
+// when the parsed clock already looks past — so any genuine session-limit
+// reset is always within one day of the record that reported it. Once nowMs
+// is a full day past resetAtMs with no fresh rate-limit record to refresh it,
+// an entire reset cycle has elapsed uncorroborated: a menu still sitting on
+// the pane is a stuck render, not a live limit, so re-confirmation stops and
+// the session is left free to fall through to whatever state the structured
+// source (jsonl/status) actually reports.
+const CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS = 24 * 60 * 60 * 1000;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // Fixed tick cadence for the session GC sweep; the actual sweep frequency is
 // gated inside the tick by sessionGc.intervalMinutes (re-read from
@@ -903,8 +914,11 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
-  // Epoch ms of the parsed claude rate-limit reset instant, set only when the
-  // detection just expired this classify call (see the expired arm below).
+  // Epoch ms of the parsed claude rate-limit reset instant, set on every
+  // classify call for as long as the expired detection stays in the tail
+  // (see the expired arm below) — level-triggered, not edge-triggered. Safe
+  // because the value is a fixed instant: resolveParkActivityAt's max()
+  // against agentActivityAt makes repeated writes of the same anchor inert.
   // The park-clock anchor: a session shielded by rate_limited must get a
   // fresh idle window measured from the moment it became workable again, not
   // from the rate-limit record's own (much older) transcript timestamp.
@@ -14686,8 +14700,17 @@ export class SessionService {
         // rather than by overwriting `rateLimit` itself, so resetAtMs stays
         // observable and the scanPane:false dashboard tick agrees with this
         // sweep for CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS instead of flapping
-        // rate_limited -> waiting every cycle between live scans.
-        if (rateLimit?.limited && !rateLimitActive(rateLimit, nowMs) && menuHit?.limited) {
+        // rate_limited -> waiting every cycle between live scans. Gated on
+        // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never clears
+        // (no fresh output, per confirmClaudeUsageLimitMenu's own caveat)
+        // can't pin the session rate_limited forever — reaching this branch
+        // guarantees resetAtMs is set (rateLimitExpired requires it).
+        if (
+          rateLimit?.limited &&
+          !rateLimitActive(rateLimit, nowMs) &&
+          menuHit?.limited &&
+          nowMs - (rateLimit.resetAtMs as number) <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+        ) {
           paneReconfirmedLimit = true;
           this.claudeRateLimitReconfirmOverrides.set(
             session.id,
@@ -14794,11 +14817,13 @@ export class SessionService {
         // into rateLimitExpiredAtMs for resolveParkActivityAt's park-clock
         // anchor. Guarded on !compactingApplied: a compaction override
         // already set classifiedDetail above and must not be clobbered here
-        // (THREAD 7).
-        const resetAtMs = rateLimit.resetAtMs;
+        // (THREAD 7). resetAtMs is always defined here: reaching this arm
+        // requires !rateLimitActive with rateLimit.limited true, which per
+        // rateLimitExpired only holds when resetAtMs is set and past.
+        const resetAtMs = rateLimit.resetAtMs as number;
         rateLimitExpiredAtMs = resetAtMs;
         if (!compactingApplied) {
-          classifiedDetail = `State: ${state} (rate limit expired${resetAtMs !== undefined ? ` at ${new Date(resetAtMs).toISOString()}` : ""})`;
+          classifiedDetail = `State: ${state} (rate limit expired at ${new Date(resetAtMs).toISOString()})`;
         }
       } else if (hasServerErrorRecord) {
         state = "error";
