@@ -9233,7 +9233,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("survives a failed pane capture but clears on a genuine empty pane", async () => {
+  it("survives a failed pane capture but clears on a genuine non-empty pane with no menu", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
     mockClaudeSessionStatus("waiting", "idle");

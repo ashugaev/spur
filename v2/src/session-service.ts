@@ -2422,13 +2422,20 @@ export class SessionService {
   // Evidence-gated override (not TTL-gated) for a live usage-limit menu that
   // re-confirmed an expired claude rate-limit detection: keyed by session id.
   // A sweep can take longer than any fixed TTL to reach a given session (its
-  // duration is O(live sessions) of capture-pane forks), so this persists
-  // until either a live pane scan actually observes the menu gone (the
-  // scanPane:true branch's own `else { delete }`) or the session leaves
-  // liveIds (pruneSessionScopedState). The scanPane:false dashboard tick
-  // additionally re-checks CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against
-  // rateLimit.resetAtMs on every read, so a stalled sweep can't leave this
-  // pinned forever with neither evidence nor a clock to end it.
+  // duration is O(live sessions) of capture-pane forks), so an entry only
+  // ends via: a live scanPane:true capture that is non-empty and finds no
+  // menu (deletes it — an empty capture is a failed fork, not evidence, and
+  // leaves the entry alone); or the session leaving liveIds
+  // (pruneSessionScopedState). Both tick kinds — scanPane:true on an empty
+  // capture, and scanPane:false on every read — re-check
+  // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against rateLimit.resetAtMs before
+  // applying the entry, so a stalled sweep can't report rate_limited off it
+  // forever with neither evidence nor a clock to end it. Residual: under
+  // sustained capture failure the entry itself is never deleted while the
+  // session stays live — it only goes inert past the ceiling — so a later
+  // genuine rate limit with a fresh resetAtMs re-arms it for up to another
+  // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS with no new menu evidence; same
+  // bound the scanPane:false reuse already accepts.
   private readonly claudeRateLimitReconfirmOverrides = new Set<string>();
   // Dedupes session.state.classified: emit once per classify call only when
   // the raw classified state actually changed since the last classify call
