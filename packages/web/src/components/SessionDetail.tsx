@@ -1887,9 +1887,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, []);
 
   useEffect(() => {
-    if (!isLoadingOlder) return;
     setIsLoadingOlder(false);
-  }, [conversation, isLoadingOlder]);
+    // Only a freshly loaded conversation should clear the older-page spinner;
+    // isLoadingOlder is intentionally excluded so setting it true doesn't
+    // immediately re-run this effect and clear it before the fetch resolves.
+  }, [conversation]);
 
   const handleAnswer = useCallback(
     async (optionIndex: number) => {

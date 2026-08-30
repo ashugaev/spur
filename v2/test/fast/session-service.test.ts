@@ -27516,6 +27516,31 @@ describe("SessionService", () => {
       expect(result.entries).toHaveLength(1);
     });
 
+    it("clamps an in-window from that outruns totalEntries after a transcript rotation", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "a", timestampMs: 1 }],
+        state: "waiting",
+        totalEntries: 30,
+        startIndex: 0,
+        hasMore: false,
+        reader: { filePath: "/x.jsonl" },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Browser held an offset from before rotation (from=400) that is now
+      // far beyond the post-rotation totalEntries (30). startIndex must never
+      // exceed totalEntries: an out-of-range startIndex would return an empty
+      // page forever with no scroll event to trigger a recovery re-fetch.
+      const result = await service.getConversation("api-1", { from: 400 });
+
+      expect(result.startIndex).toBe(30);
+      expect(result.startIndex + result.entries.length).toBeLessThanOrEqual(result.totalEntries);
+      expect(result.entries).toHaveLength(0);
+    });
+
     it("calls readAgentConversation exactly once for a claude from below the retained window", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
       readClaudeConversationTailMock.mockResolvedValue({

@@ -7280,7 +7280,7 @@ export class SessionService {
         const sliceStart =
           from === undefined
             ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
-            : Math.max(from, tailStartIndex);
+            : Math.min(Math.max(from, tailStartIndex), totalEntries);
         const entries = tailEntries.slice(sliceStart - tailStartIndex);
         return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
       }

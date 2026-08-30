@@ -2301,13 +2301,20 @@ describe("SessionDetail voice input", () => {
     expect(screen.queryByText(/showing last/i)).not.toBeInTheDocument();
   });
 
-  it("fetches an older page with ?from= on scroll-to-top, then resets to no-from on a session switch", async () => {
+  it("fetches an older page with ?from= on scroll-to-top and shows the loading row until it resolves", async () => {
     const fetchedUrls: string[] = [];
+    let resolveOlderPage: ((value: Response) => void) | undefined;
+    const olderPagePromise = new Promise<Response>((resolve) => {
+      resolveOlderPage = resolve;
+    });
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       fetchedUrls.push(url);
       if (url === "/api/sessions/api-a1") {
         return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation?from=100") {
+        return olderPagePromise;
       }
       if (url.startsWith("/api/sessions/api-a1/conversation")) {
         return new Response(
@@ -2341,6 +2348,79 @@ describe("SessionDetail voice input", () => {
       expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
         true,
       );
+    });
+
+    // The loading row must still be visible while the older-page fetch is
+    // in flight — it must not be cleared before the fetch resolves.
+    expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+    resolveOlderPage?.(
+      new Response(
+        JSON.stringify(conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true })),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    });
+  });
+
+  it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
+    const fetchedUrls: string[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      fetchedUrls.push(url);
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-b2") {
+        return new Response(JSON.stringify(sessionFixture({ id: "api-b2" })), { status: 200 });
+      }
+      if (url.startsWith("/api/sessions/api-a1/conversation")) {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/sessions/api-b2/conversation")) {
+        return new Response(
+          JSON.stringify(conversationFixture({ startIndex: 0, totalEntries: 2, hasMore: false })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    });
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scrollEl);
+
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
+        true,
+      );
+    });
+
+    rerender(<SessionDetail sessionId="api-b2" />);
+
+    // The switched-to session's fromIndex settles back to null (no `from`)
+    // even though the prior session had an older page loaded.
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-b2/conversation")).toBe(true);
     });
   });
 
