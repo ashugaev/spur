@@ -433,7 +433,16 @@ const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
 type SessionArtifact = DashboardSession["artifacts"][number];
 
 function artifactUrl(sessionId: string, artifactId: string): string {
-  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
+  const encodedPath = artifactId
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodedPath}`;
+}
+
+function artifactBasename(name: string): string {
+  const segments = name.split("/");
+  return segments[segments.length - 1] || name;
 }
 
 const ARTIFACT_VIEW_MODE_STORAGE_KEY = "spur:artifact-view-mode";
@@ -461,8 +470,9 @@ function artifactTabClass(active: boolean): string {
 }
 
 function artifactExtension(name: string): string {
-  const ext = name.split(".").pop();
-  return ext ? ext.toUpperCase() : "FILE";
+  const base = artifactBasename(name);
+  const dotIndex = base.lastIndexOf(".");
+  return dotIndex > 0 ? base.slice(dotIndex + 1).toUpperCase() : "FILE";
 }
 
 function isMarkdownArtifact(artifact: SessionArtifact): boolean {
@@ -730,7 +740,7 @@ function ArtifactCard({
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
-            download={artifact.name}
+            download={artifactBasename(artifact.name)}
             href={artifactHref}
             onClick={(event) => event.stopPropagation()}
           >
@@ -741,10 +751,11 @@ function ArtifactCard({
 
       <div className="flex flex-col gap-1 px-3 py-2">
         <div
-          className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[var(--color-text-primary)]"
+          className="overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-[var(--color-text-primary)]"
+          dir="rtl"
           title={artifact.name}
         >
-          {artifact.name}
+          <bdi dir="ltr">{artifact.name}</bdi>
         </div>
         {polishedAttachedImage ? (
           <div className="flex flex-wrap gap-1.5">
@@ -1165,8 +1176,12 @@ function ArtifactLightbox({
       <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-              {artifact.name}
+            <h2
+              className="truncate text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+              dir="rtl"
+              title={artifact.name}
+            >
+              <bdi dir="ltr">{artifact.name}</bdi>
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
               {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
@@ -1206,7 +1221,7 @@ function ArtifactLightbox({
             <a
               aria-label={`Download ${artifact.name}`}
               className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-              download={artifact.name}
+              download={artifactBasename(artifact.name)}
               href={artifactHref}
             >
               <ArtifactDownloadIcon />
@@ -1304,16 +1319,18 @@ function ArtifactLightbox({
                   <ArtifactFileIcon />
                 </div>
                 <div
-                  className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
+                  className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-[var(--color-text-primary)]"
+                  dir="rtl"
+                  title={artifact.name}
                 >
-                  {artifact.name}
+                  <bdi dir="ltr">{artifact.name}</bdi>
                 </div>
                 <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                   {artifactExtension(artifact.name)} · {artifact.mimeType}
                 </div>
                 <a
                   className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                  download={artifact.name}
+                  download={artifactBasename(artifact.name)}
                   href={artifactHref}
                 >
                   <ArtifactDownloadIcon />
@@ -3266,7 +3283,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
-              {session.artifacts.length > 0 ? (
+              {session.artifacts.length > 0 || session.artifactsTruncated ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Artifacts
@@ -3334,6 +3351,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       </div>
                     ) : null}
                   </div>
+                  {session.artifactsTruncated ? (
+                    <p className="pb-2 text-[var(--color-text-secondary)]">
+                      Nested artifacts were truncated; every root-level artifact is still listed.
+                    </p>
+                  ) : null}
                   {visibleArtifacts.length > 0 ? (
                     artifactViewMode === "list" ? (
                       <ArtifactList

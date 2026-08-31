@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
-import type { RuntimeInfo } from "../../src/types.js";
+import type { RuntimeInfo, TodoProjection } from "../../src/types.js";
 import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -171,6 +171,27 @@ export interface RuntimeTestContext {
   readAgentLog(sessionId: string): Promise<string>;
   writeGhState(state: FakeGhState): Promise<void>;
   cleanup(): Promise<void>;
+}
+
+// The fake agent fixture backgrounds its "add then complete" ToDo round trip
+// (record_fixture_todo, see the FAKE_AGENT_SCRIPT body below) so it never
+// blocks the session's workspace lock. That means the fixture item can still
+// be open for a window after the daemon reports the session "waiting" — a
+// caller that fires a ledger-gated manual status (e.g. `complete`) right
+// after spawn/resume can hit `todo_open_work` (PR #781 regression, see
+// GitHub Actions run 33044875236). Poll the session's ToDo projection until
+// it has no open or held items before issuing the gated call.
+export async function waitForCleanTodoLedger(
+  context: RuntimeTestContext,
+  sessionId: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const { timeoutMs = 15_000 } = opts;
+  await pollUntil(async () => context.fetchJson<TodoProjection>(`/sessions/${sessionId}/todo`), {
+    timeoutMs,
+    accept: (projection) => projection.counts.open === 0 && projection.counts.held === 0,
+    label: `clean Spur ToDo ledger for session ${sessionId}`,
+  });
 }
 
 export function fakeAgentScript(
