@@ -1370,9 +1370,19 @@
         text-anchor: middle;
         letter-spacing: 0.1em;
       }
+      /* Visually hidden, not display:none — display:none would drop the only
+         accessible copy of the stages out of the a11y tree above 860px, where
+         the SVG that replaces it visually is aria-hidden. */
       .wf-list,
       .wf-loop-note {
-        display: none;
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
       }
       @media (max-width: 860px) {
         .wf svg {
@@ -1380,9 +1390,16 @@
         }
         .wf-list {
           display: block;
+          position: static;
+          width: auto;
+          height: auto;
+          overflow: visible;
+          clip-path: none;
+          white-space: normal;
           list-style: none;
           margin: 0;
           padding: 0;
+          border: 0;
           border-left: 1px solid var(--b);
         }
         .wf-list li {
@@ -1424,7 +1441,15 @@
         }
         .wf-loop-note {
           display: block;
-          margin-top: 16px;
+          position: static;
+          width: auto;
+          height: auto;
+          overflow: visible;
+          clip-path: none;
+          white-space: normal;
+          margin: 16px 0 0;
+          padding: 0;
+          border: 0;
           color: var(--t4);
           font-size: 11px;
           letter-spacing: 0.12em;
@@ -2124,13 +2149,9 @@
               <p>Every hop is a real event. Same session, same worktree, same branch throughout.</p>
             </div>
 
-            <svg viewBox="0 0 960 300" role="img" aria-labelledby="wf-title wf-desc">
-              <title id="wf-title">Spur agent workflow</title>
-              <desc id="wf-desc">
-                An agent picks up a backlog item, opens a pull request, fixes red CI, answers review
-                comments, checks the UI in a real browser, and lands on main.
-              </desc>
-
+            <!-- Decorative: the list below is the accessible copy at every
+                 width, so this must not be announced as a second one. -->
+            <svg viewBox="0 0 960 300" aria-hidden="true">
               <line class="wf-track" x1="70" y1="56" x2="890" y2="56" />
               <rect class="wf-token" x="-4" y="52" width="8" height="8" />
 
@@ -2184,10 +2205,11 @@
               <text class="wf-loopt" x="480" y="262">next item, same daemon</text>
             </svg>
 
-            <!-- Phone layout: the six-across track scales to unreadable type
-                 under ~860px, so the same six stages run vertically instead,
-                 stepping on the same 9s cycle. -->
-            <ol class="wf-list" aria-hidden="true">
+            <!-- The one accessible copy of the six stages at every width. Under
+                 ~860px it is also the visible one, because the six-across track
+                 scales to unreadable type; above that it is visually hidden
+                 rather than display:none, so it stays in the a11y tree. -->
+            <ol class="wf-list">
               <li style="--i: 0"><b>Picks up work</b><span>Jira backlog or a cron tick</span></li>
               <li style="--i: 1"><b>Opens a PR</b><span>own worktree, own branch</span></li>
               <li style="--i: 2"><b>CI goes red</b><span>github-ci event, fix, push</span></li>
