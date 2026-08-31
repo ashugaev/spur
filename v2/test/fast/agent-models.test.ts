@@ -85,6 +85,22 @@ describe("parseCursorModelsOutput", () => {
       { id: "claude-opus-4-8-high", label: "Opus 4.8 1M" },
     ]);
   });
+
+  it("handles compound current/default tags and strips ANSI styling", () => {
+    const stdout = [
+      "\x1b[2mAvailable models\x1b[22m",
+      "",
+      "\x1b[36mauto\x1b[39m - \x1b[2mAuto\x1b[22m",
+      "\x1b[32mcomposer-2.5\x1b[39m - \x1b[2mComposer 2.5\x1b[22m \x1b[2m(current, default)\x1b[22m",
+      "\x1b[36mgpt-5\x1b[39m - \x1b[2mGPT-5\x1b[22m",
+    ].join("\n");
+    const models = parseCursorModelsOutput(stdout);
+    expect(models).toEqual([
+      { id: "auto", label: "Auto" },
+      { id: "composer-2.5", label: "Composer 2.5", isDefault: true, isCurrent: true },
+      { id: "gpt-5", label: "GPT-5" },
+    ]);
+  });
 });
 
 describe("listAgentModels cursor", () => {

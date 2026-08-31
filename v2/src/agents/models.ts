@@ -78,10 +78,14 @@ async function listCodexModels(codexHomePath: string): Promise<AgentModel[]> {
   return parseCodexModelsCache(raw);
 }
 
+// Strips ANSI styling (e.g. chalk colors) emitted when cursor CLI formats models for display.
+// eslint-disable-next-line no-control-regex
+const ANSI_REGEX = /\x1B\[[0-9;]*m/g;
+
 export function parseCursorModelsOutput(stdout: string): AgentModel[] {
   const models: AgentModel[] = [];
   for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
+    const trimmed = line.replace(ANSI_REGEX, "").trim();
     if (!trimmed || !trimmed.includes(" - ")) {
       continue;
     }
@@ -93,13 +97,14 @@ export function parseCursorModelsOutput(stdout: string): AgentModel[] {
     }
     let isDefault = false;
     let isCurrent = false;
-    if (label.endsWith(" (default)")) {
-      isDefault = true;
-      label = label.slice(0, -" (default)".length).trim();
-    }
-    if (label.endsWith(" (current)")) {
-      isCurrent = true;
-      label = label.slice(0, -" (current)".length).trim();
+    const match = label.match(/\s*\(([^)]+)\)$/);
+    if (match && match[1]) {
+      const tags = match[1].split(",").map((t) => t.trim());
+      if (tags.includes("default")) isDefault = true;
+      if (tags.includes("current")) isCurrent = true;
+      if (isDefault || isCurrent) {
+        label = label.slice(0, match.index).trim();
+      }
     }
     models.push({
       id,
