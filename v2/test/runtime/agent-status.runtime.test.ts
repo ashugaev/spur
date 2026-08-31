@@ -358,6 +358,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   it("Cursor: complete → stopped", async () => {
     const { context, configPath, port } = await setup("cursor-cpl");
     const session = await spawnSession(context, configPath, "cursor");
+    await waitForState(port, session.id, "waiting", 45_000);
 
     await context.execCli(["--config", configPath, "complete", session.id, "--json"]);
     const view = await waitForState(port, session.id, "stopped");

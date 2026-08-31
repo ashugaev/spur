@@ -1,6 +1,8 @@
 export interface RateLimitDetection {
   limited: boolean;
   reason: string;
+  /** Epoch ms the limit resets at, when the source text carries a parseable reset instant. */
+  resetAtMs?: number;
 }
 
 const NOT_LIMITED: RateLimitDetection = { limited: false, reason: "" };
@@ -117,6 +119,88 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
 export interface ClaudeRateLimitRecord {
   type: string;
   rateLimited?: boolean;
+  /** Epoch ms the limit resets at, parsed from the record's own banner text. */
+  rateLimitResetAtMs?: number;
+}
+
+// Matches "resets 7pm (UTC)" / "resets 11:20am (UTC)" (case-insensitive).
+// Timezone must be spelled out as "(UTC)" — anything else (or nothing) is
+// unparseable, since guessing a timezone would risk a wrong expiry.
+const RATE_LIMIT_RESET_RE = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(\s*utc\s*\)/i;
+
+// The only banner scope this parser trusts a reset instant from. RATE_LIMIT_MARKERS
+// / TMUX_BANNER_MARKERS also match "hit your weekly limit" and "hit your opus limit",
+// which can carry the same "resets HH (UTC)" clause for a reset days away — parsing
+// that would still land inside this function's forward-only (anchor, anchor+24h]
+// range and report a multi-day limit as expired within a day.
+const SESSION_LIMIT_BANNER = "hit your session limit";
+
+// The truncation window a minute-precision banner clock can hide: the true reset can
+// land up to 60s after the rendered minute.
+const BANNER_CLOCK_TRUNCATION_MS = 60_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Parses a claude session-limit banner's trailing "resets HH[:MM](am|pm) (UTC)"
+// clause into an absolute epoch-ms instant, anchored to the record's own
+// timestamp (never the caller's clock — see claude-jsonl-state.ts's
+// extractRecordTimestampMs). Scope-gated to the session limit: a weekly, opus,
+// or otherwise unrecognized banner returns `undefined` and keeps today's
+// time-blind, stuck-but-safe behavior — see SESSION_LIMIT_BANNER. Forward-only:
+// the returned instant is always strictly after `anchorMs`. The banner's clock
+// is minute-truncated, so the true reset can land up to 60s after the rendered
+// minute; the common case (the rendered minute is still ahead of the anchor)
+// returns that truncated minute as-is, which can be up to 60s earlier than the
+// true reset. Only when the anchor has already reached the rendered minute is
+// the candidate clamped forward to the end of that minute (candidate + 60s)
+// rather than rolled a full day, so it is never earlier than the true reset in
+// that same-minute case specifically. Once the anchor is 60s or more past the
+// rendered minute, the candidate rolls a full day forward instead. Returns
+// `undefined` for any unparseable, out-of-range, or non-UTC form — never a
+// guessed timezone or a fallback expiry.
+export function parseRateLimitResetAtMs(text: string, anchorMs: number): number | undefined {
+  if (!text.toLowerCase().includes(SESSION_LIMIT_BANNER)) {
+    return undefined;
+  }
+  const match = RATE_LIMIT_RESET_RE.exec(text);
+  if (!match) {
+    return undefined;
+  }
+  const hourRaw = Number(match[1]);
+  const minuteRaw = match[2] !== undefined ? Number(match[2]) : 0;
+  const meridiem = (match[3] ?? "").toLowerCase();
+  if (!Number.isFinite(hourRaw) || hourRaw < 1 || hourRaw > 12) {
+    return undefined;
+  }
+  if (!Number.isFinite(minuteRaw) || minuteRaw > 59) {
+    return undefined;
+  }
+  let hour24 = hourRaw % 12;
+  if (meridiem === "pm") {
+    hour24 += 12;
+  }
+  const anchorDate = new Date(anchorMs);
+  let candidate = Date.UTC(
+    anchorDate.getUTCFullYear(),
+    anchorDate.getUTCMonth(),
+    anchorDate.getUTCDate(),
+    hour24,
+    minuteRaw,
+    0,
+    0,
+  );
+  if (candidate <= anchorMs) {
+    candidate +=
+      anchorMs - candidate < BANNER_CLOCK_TRUNCATION_MS ? BANNER_CLOCK_TRUNCATION_MS : DAY_MS;
+  }
+  return candidate;
+}
+
+// True when `detection` carries a parsed reset instant that has already
+// passed as of `nowMs`. A detection with no `resetAtMs` (no parseable reset
+// text, or the source never carries one, e.g. pane banners) is never
+// expired — that's today's safe, time-blind fallback.
+export function rateLimitExpired(detection: RateLimitDetection, nowMs: number): boolean {
+  return detection.resetAtMs !== undefined && nowMs >= detection.resetAtMs;
 }
 
 // Bookkeeping / pass-through record types Claude Code appends after a turn
@@ -145,7 +229,13 @@ export function detectClaudeRateLimit(
       continue;
     }
     if (record.rateLimited) {
-      return { limited: true, reason: "claude rate_limit" };
+      return {
+        limited: true,
+        reason: "claude rate_limit",
+        ...(record.rateLimitResetAtMs !== undefined
+          ? { resetAtMs: record.rateLimitResetAtMs }
+          : {}),
+      };
     }
     return NOT_LIMITED;
   }
@@ -174,8 +264,21 @@ const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for lim
 const CLAUDE_USAGE_MENU_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*ask your admin for more usage$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
+// captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
+// banner search, not this check — without a tail bound, an already-dismissed menu
+// could still match here until ~200 lines of subsequent output scroll it out.
+// Bounded the same way as detectCodexMcpPermissionDialog's CODEX_MCP_DIALOG_TAIL_LINES:
+// only a menu inside the pane's last 20 non-blank lines matches. Unlike the codex
+// dialog, confirming this menu (Enter) produces no further pane output — the
+// session just goes idle — so "at the tail" narrows the false-positive window but
+// does not prove the menu is still live.
+const CLAUDE_USAGE_MENU_TAIL_LINES = 20;
+
 export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
-  const lines = paneText.split("\n").map((line) => line.trim());
+  const allLines = paneText.split("\n").map((line) => line.trim());
+  let end = allLines.length;
+  while (end > 0 && allLines[end - 1] === "") end--;
+  const lines = allLines.slice(Math.max(0, end - CLAUDE_USAGE_MENU_TAIL_LINES), end);
   const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
   const hasOptionTwo = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_TWO.test(line));
   const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
