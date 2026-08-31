@@ -45,6 +45,7 @@ import {
   readOpenCodeConversation,
   scanOpenCodeForNewUserMessage,
 } from "./opencode.js";
+import { agentExecutableCommand, agentProcessNames } from "./executable.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
@@ -252,9 +253,11 @@ function openCodePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
-function defaultProcessMatchers(launchCommand: string, fallbackBinary: string): string[] {
-  const binary = basename(extractCommandBinary(launchCommand, fallbackBinary));
-  return binary ? [binary] : [];
+function defaultProcessMatchers(agent: AgentName, launchCommand: string): string[] {
+  const derived = basename(extractCommandBinary(launchCommand, agentExecutableCommand(agent)));
+  return [...new Set([derived, ...agentProcessNames(agent)])].filter(
+    (matcher) => matcher.length > 0,
+  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -372,7 +375,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       }
       return result;
     },
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("claude", launchCommand),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
     sendsInterruptKey: true,
@@ -435,7 +438,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         ...(modelsCacheHome ? { modelsCacheHome } : {}),
       }),
     }),
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("codex", launchCommand),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
     sendsInterruptKey: true,
@@ -485,10 +488,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         },
       };
     },
-    processMatchers: (launchCommand) => {
-      const derived = defaultProcessMatchers(launchCommand, cursorCommand());
-      return [...new Set([...derived, "agent", "cursor-agent"])];
-    },
+    processMatchers: (launchCommand) => defaultProcessMatchers("cursor", launchCommand),
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
     sendsInterruptKey: false,
@@ -524,7 +524,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, opencodeCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
     stateStrategy: "opencode",
     sendMode: "bracketed_paste",
     sendsInterruptKey: true,
