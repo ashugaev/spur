@@ -12,6 +12,7 @@ import {
   type RuntimeInfo,
   type GithubPrCheckUnavailablePayload,
   type OpenPrActionRequiredPayload,
+  type SessionNotRestorablePayload,
   type SidecarPortConflictPayload,
 } from "./types.js";
 
@@ -104,6 +105,17 @@ function isGithubPrCheckUnavailablePayload(
   return record.code === "github_pr_check_unavailable" && typeof record.sessionId === "string";
 }
 
+function isSessionNotRestorablePayload(payload: unknown): payload is SessionNotRestorablePayload {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Partial<SessionNotRestorablePayload>;
+  return (
+    record.code === "session_not_restorable" &&
+    typeof record.sessionId === "string" &&
+    typeof record.reason === "string" &&
+    Array.isArray(record.availableActions)
+  );
+}
+
 function openPrActionCommand(path: string, sessionId: string): string | null {
   const action = path.match(/^\/sessions\/[^/]+\/(complete|kill)$/)?.[1];
   if (!action) return null;
@@ -133,6 +145,14 @@ function formatDaemonError(status: number, payload: unknown, path: string): stri
       ? "GitHub rate limit"
       : "commonly gh missing, unauthenticated, or unreachable";
     return `GitHub PR check unavailable for ${payload.sessionId}: ${cause}. ${retry}`;
+  }
+  if (isSessionNotRestorablePayload(payload)) {
+    const hints = payload.availableActions.map((action) =>
+      action === "force_kill"
+        ? `\`spur kill ${payload.sessionId} --force\` to discard it`
+        : `\`spur respawn ${payload.sessionId}\` to start a fresh session`,
+    );
+    return `${payload.reason}. Try ${hints.join(" or ")}.`;
   }
   if (typeof payload === "object" && payload !== null && "error" in payload) {
     return String(payload.error);
