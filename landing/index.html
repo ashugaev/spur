@@ -898,9 +898,25 @@
         height: auto;
         overflow: visible;
       }
+      /* Below the two-column hero it stops being an aside and becomes a block
+         under the CTAs — the fleet picture is the page's main claim, so it
+         reflows rather than disappearing. */
       @media (max-width: 1120px) {
         .fanout {
-          display: none;
+          position: static;
+          transform: none;
+          width: 100%;
+          max-width: 460px;
+          margin-top: clamp(36px, 6vh, 56px);
+        }
+        .fo-lbl {
+          font-size: 15px;
+        }
+        .fo-sig {
+          font-size: 13px;
+        }
+        .fo-cap {
+          font-size: 13px;
         }
       }
       .fo-wire {
@@ -1198,12 +1214,42 @@
         font-size: var(--step-0);
         max-width: 64ch;
       }
+      /* Scale to fit rather than scroll: an inner scrollbar hides half the
+         diagram behind a gesture nobody makes. Type is bumped in user units so
+         it survives the scale-down. */
+      /* Wrap the commands instead of hiding them behind a horizontal scroll.
+         pre-wrap breaks at spaces, so flags stay whole. */
+      @media (max-width: 900px) {
+        .cli pre {
+          white-space: pre-wrap;
+        }
+      }
       @media (max-width: 720px) {
         .arch {
-          overflow-x: auto;
+          padding: 14px 10px;
         }
-        .arch svg {
-          min-width: 660px;
+        .a-box-t {
+          font-size: 15px;
+        }
+        .a-ses text {
+          font-size: 14px;
+        }
+        .a-ag,
+        .a-br {
+          font-size: 13px !important;
+        }
+        .a-foot {
+          font-size: 13px;
+        }
+        .a-node-t {
+          font-size: 16px;
+        }
+        .a-node-s,
+        .a-dev text {
+          font-size: 13px;
+        }
+        .a-daemon-t {
+          font-size: 14px;
         }
       }
 
@@ -1324,12 +1370,64 @@
         text-anchor: middle;
         letter-spacing: 0.1em;
       }
+      .wf-list,
+      .wf-loop-note {
+        display: none;
+      }
       @media (max-width: 860px) {
-        .wf {
-          overflow-x: auto;
-        }
         .wf svg {
-          min-width: 800px;
+          display: none;
+        }
+        .wf-list {
+          display: block;
+          list-style: none;
+          margin: 0;
+          padding: 0;
+          border-left: 1px solid var(--b);
+        }
+        .wf-list li {
+          position: relative;
+          padding: 12px 0 12px 22px;
+        }
+        .wf-list li::before {
+          content: "";
+          position: absolute;
+          left: -5px;
+          top: 20px;
+          width: 9px;
+          height: 9px;
+          background: var(--t4);
+          animation: wfstep 9s linear infinite;
+          animation-delay: calc(var(--i) * 1.5s);
+        }
+        @keyframes wfstep {
+          0%,
+          16% {
+            background: var(--brand);
+          }
+          17%,
+          100% {
+            background: var(--t4);
+          }
+        }
+        .wf-list b {
+          display: block;
+          color: var(--t1);
+          font-size: var(--step-0);
+          font-weight: 700;
+        }
+        .wf-list span {
+          display: block;
+          margin-top: 3px;
+          color: var(--t3);
+          font-size: 11.5px;
+        }
+        .wf-loop-note {
+          display: block;
+          margin-top: 16px;
+          color: var(--t4);
+          font-size: 11px;
+          letter-spacing: 0.12em;
         }
       }
 
@@ -1544,7 +1642,9 @@
       .faq summary {
         list-style: none;
         cursor: pointer;
-        padding: 20px 0;
+        /* Right padding is load-bearing: the +/x marker's ink runs past its
+           content box, so with none it sits half off the gutter edge. */
+        padding: 20px 8px 20px 0;
         display: flex;
         align-items: center;
         gap: 14px;
@@ -2083,6 +2183,21 @@
               <path class="wf-arrow" d="M64 216 L70 206 L76 216" />
               <text class="wf-loopt" x="480" y="262">next item, same daemon</text>
             </svg>
+
+            <!-- Phone layout: the six-across track scales to unreadable type
+                 under ~860px, so the same six stages run vertically instead,
+                 stepping on the same 9s cycle. -->
+            <ol class="wf-list" aria-hidden="true">
+              <li style="--i: 0"><b>Picks up work</b><span>Jira backlog or a cron tick</span></li>
+              <li style="--i: 1"><b>Opens a PR</b><span>own worktree, own branch</span></li>
+              <li style="--i: 2"><b>CI goes red</b><span>github-ci event, fix, push</span></li>
+              <li style="--i: 3">
+                <b>Review lands</b><span>changes_requested, answer, push</span>
+              </li>
+              <li style="--i: 4"><b>Checks the UI</b><span>playwright MCP, real browser</span></li>
+              <li style="--i: 5"><b>Merged</b><span>semantic-release ships from main</span></li>
+            </ol>
+            <p class="wf-loop-note">next item, same daemon</p>
           </div>
         </section>
 
