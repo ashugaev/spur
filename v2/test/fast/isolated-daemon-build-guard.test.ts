@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -22,6 +23,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE_SCRIPT_DIR = resolve(HERE, "../../../scripts");
 const cleanupPaths: string[] = [];
 const DIST_FILE_NAMES = "cli.js isolated-instance-config.js isolated-project-config.js";
+const HOST_WRAPPER_SOURCE = "#!/usr/bin/env bash\necho host-wrapper\n";
 
 type FakeWorktree = {
   logPath: string;
@@ -70,6 +72,7 @@ function createFakeWorktree(): FakeWorktree {
 
   writeFileSync(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
   writeFileSync(join(repoDir, "home", "config.yaml"), "server:\n  port: 1\n", "utf8");
+  makeExecutable(join(toolDir, "spur"), HOST_WRAPPER_SOURCE);
 
   const logPath = join(repoDir, "calls.log");
   makeExecutable(
@@ -105,6 +108,17 @@ for file_name in ${DIST_FILE_NAMES}; do
     exit 81
   fi
 done
+if [[ "$1" == "$SPUR_TEST_REPO/v2/dist/cli.js" && "\${2:-}" == "--version" ]]; then
+  runtime_state=missing
+  if [[ -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
+    runtime_state=present
+  fi
+  echo "cli-probe runtime=$runtime_state" >> "$SPUR_TEST_LOG"
+  if [[ "\${SPUR_TEST_CLI_UNLOADABLE:-}" == "1" ]]; then
+    exit 1
+  fi
+  exit 0
+fi
 if [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
   echo "node-before-runtime $1" >> "$SPUR_TEST_LOG"
   exit 83
@@ -170,6 +184,7 @@ describe("spur-isolated-daemon build guard", () => {
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
       "build runtime=missing",
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -183,6 +198,7 @@ describe("spur-isolated-daemon build guard", () => {
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
       "build runtime=missing",
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -213,6 +229,7 @@ describe("spur-isolated-daemon build guard", () => {
     writeDistFiles(worktree.repoDir);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -233,9 +250,50 @@ describe("spur-isolated-daemon build guard", () => {
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
       "build runtime=missing",
+      "cli-probe runtime=missing",
       "instance-helper",
       "project-helper",
       "daemon-start",
     ]);
+  });
+
+  it("leaves the session spur wrapper untouched", async () => {
+    const worktree = createFakeWorktree();
+    const hostWrapperPath = join(worktree.toolDir, "spur");
+
+    await runIsolatedDaemon(worktree);
+
+    expect(readFileSync(hostWrapperPath, "utf8")).toBe(HOST_WRAPPER_SOURCE);
+    const isolatedWrapperPath = join(worktree.toolDir, "spur-isolated");
+    expect(existsSync(isolatedWrapperPath)).toBe(true);
+    expect(statSync(isolatedWrapperPath).mode & 0o100).toBe(0o100);
+    expect(readFileSync(isolatedWrapperPath, "utf8")).toMatch(/--config "[^"]+\/config\.yaml"/);
+  });
+
+  it("removes the isolated wrapper when the v2 build fails", async () => {
+    const worktree = createFakeWorktree();
+
+    await expect(runIsolatedDaemon(worktree, { SPUR_TEST_BUILD_FAIL: "1" })).rejects.toMatchObject({
+      code: 84,
+    });
+
+    expect(existsSync(join(worktree.toolDir, "spur-isolated"))).toBe(false);
+    expect(readFileSync(join(worktree.toolDir, "spur"), "utf8")).toBe(HOST_WRAPPER_SOURCE);
+  });
+
+  it("refuses to publish the runtime when the built CLI cannot load", async () => {
+    const worktree = createFakeWorktree();
+    writeDistFiles(worktree.repoDir);
+
+    await expect(
+      runIsolatedDaemon(worktree, { SPUR_TEST_CLI_UNLOADABLE: "1" }),
+    ).rejects.toBeTruthy();
+
+    expect(readFileSync(worktree.logPath, "utf8").trim().split("\n")).toEqual([
+      "cli-probe runtime=missing",
+    ]);
+    expect(existsSync(join(worktree.toolDir, "isolated-env.sh"))).toBe(false);
+    expect(existsSync(join(worktree.toolDir, "spur-isolated"))).toBe(false);
+    expect(readFileSync(join(worktree.toolDir, "spur"), "utf8")).toBe(HOST_WRAPPER_SOURCE);
   });
 });

@@ -17,6 +17,7 @@ V2_DIR="$REPO_ROOT/v2"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
+ISOLATED_WRAPPER="$TOOL_DIR/spur-isolated"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 RUNTIME_TMP_FILE="$RUNTIME_FILE.tmp.$$"
 PROJECT_CONFIG_RUNTIME_PATH="$CONFIG_DIR/project.yaml"
@@ -72,7 +73,7 @@ ensure_v2_build() {
 }
 
 cleanup() {
-  rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.*
+  rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.* "$ISOLATED_WRAPPER"
   rm -rf "$CONFIG_DIR"
 }
 trap cleanup EXIT
@@ -88,7 +89,7 @@ tmux:
   socketName: "spur-$AGENT_PORT"
 YAML
 
-cat > "$TOOL_DIR/spur" <<WRAPPER
+cat > "$ISOLATED_WRAPPER" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "$CONFIG_DIR/data"
@@ -103,9 +104,14 @@ JSON
 mv "\$registry_tmp" "$CONFIG_DIR/data/config-registry.json"
 exec "$NODE_BIN" "$CLI_PATH" --config "$CONFIG_DIR/config.yaml" "\$@"
 WRAPPER
-chmod +x "$TOOL_DIR/spur"
+chmod +x "$ISOLATED_WRAPPER"
 
 ensure_v2_build
+
+if ! "$NODE_BIN" "$CLI_PATH" --version >/dev/null; then
+  echo "spur-isolated-daemon: $CLI_PATH failed to load. If node_modules is a stale symlink, run: pnpm install --frozen-lockfile" >&2
+  exit 1
+fi
 
 # isolated-ui waits for this file before replacing symlinked dependency trees.
 # Publish it only after tsc finishes, and atomically so readers never source a
@@ -129,4 +135,4 @@ mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
 "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
-exec "$TOOL_DIR/spur" daemon start
+exec "$ISOLATED_WRAPPER" daemon start
