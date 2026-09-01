@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AutoPingService } from "../../src/auto-ping.js";
+import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.js";
 import type * as eventLogModule from "../../src/event-log.js";
 import { EventBus } from "../../src/event-bus.js";
 import type {
@@ -327,6 +327,26 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
               ],
               autoComplete: options?.autoComplete ?? true,
             },
+          },
+        },
+      },
+    },
+  };
+}
+
+function reviewSpawnConfig() {
+  return {
+    dataDir: DATA_DIR,
+    projects: {
+      api: {
+        sources: {
+          "pr-watch": { type: "github" },
+        },
+        triggers: {
+          review: {
+            source: "pr-watch",
+            event: "github:comment",
+            spawn: { blocks: [{ prompt: "Review {{prTitle}}." }] },
           },
         },
       },
@@ -931,11 +951,28 @@ describe("startConfiguredTriggers", () => {
       bus.emit(githubEvent());
       const advancing = vi.advanceTimersByTimeAsync(35_000);
       await started;
-      replacement = startConfiguredTriggers(deps);
+      const replacementBus = new EventBus();
+      replacement = startConfiguredTriggers({ ...deps, bus: replacementBus });
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot("comment:2"));
+      replacementBus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [
+            {
+              key: "comment:2",
+              kind: "comment",
+              text: "Only the replacement event.",
+            },
+          ],
+        },
+      });
       releaseDelivery();
       await advancing;
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(deliverMock).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(35_000);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      expect(deliverMock.mock.calls[1]?.[1]).toContain("Only the replacement event.");
+      expect(deliverMock.mock.calls[1]?.[1]).not.toContain("A new comment arrived.");
     } finally {
       releaseDelivery();
       await oldController.stop();
@@ -3193,6 +3230,102 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("filters suppressed review threads without dropping unrelated signals", async () => {
+    const policyDir = mkdtempSync(join(tmpdir(), "spur-review-policy-"));
+    const autoPing = new AutoPingService(policyDir);
+    const spawnMock = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-1" })
+      .mockResolvedValueOnce({ id: "api-2" });
+    const descriptor = {
+      version: 1 as const,
+      projectId: "api",
+      triggerId: "review",
+      sourceId: "pr-watch",
+      sourceType: "github" as const,
+      eventName: "github:comment",
+      actionKind: "spawn" as const,
+      destination: { kind: "trigger" as const },
+      spawnDeskGroup: false,
+    };
+    const fingerprint = autoPingRouteFingerprint(descriptor);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: reviewSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    });
+    const suppressedTarget = { kind: "github-review-thread" as const, threadId: "thread-a" };
+    const grant = autoPing.createGrant({
+      scope: "thread",
+      routeFingerprint: fingerprint,
+      destination: descriptor.destination,
+      target: suppressedTarget,
+      actorSessionId: "owner",
+    });
+    await autoPing.unsubscribe("owner", "thread", grant.handle);
+    const baseEvent = githubEvent();
+
+    try {
+      bus.emit({
+        ...baseEvent,
+        occurrenceId: "review-mixed-1",
+        data: {
+          ...baseEvent.data,
+          signals: [
+            {
+              key: "suppressed",
+              kind: "comment",
+              text: "suppressed thread",
+              providerThreadTarget: suppressedTarget,
+            },
+            { key: "lifecycle", kind: "approved", text: "unrelated approval" },
+          ],
+        },
+      });
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+      const firstSuffix = (spawnMock.mock.calls[0]?.[1] as { sensitivePromptSuffix?: string })
+        .sensitivePromptSuffix;
+      expect(firstSuffix).not.toContain("--thread");
+
+      bus.emit({
+        ...baseEvent,
+        occurrenceId: "review-mixed-2",
+        data: {
+          ...baseEvent.data,
+          signals: [
+            {
+              key: "suppressed",
+              kind: "comment",
+              text: "suppressed thread",
+              providerThreadTarget: suppressedTarget,
+            },
+            {
+              key: "active",
+              kind: "comment",
+              text: "active thread",
+              providerThreadTarget: {
+                kind: "github-review-thread",
+                threadId: "thread-b",
+              },
+            },
+          ],
+        },
+      });
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+      const secondSuffix = (spawnMock.mock.calls[1]?.[1] as { sensitivePromptSuffix?: string })
+        .sensitivePromptSuffix;
+      expect(secondSuffix?.match(/--thread/g)).toHaveLength(1);
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(policyDir, { recursive: true, force: true });
+    }
+  });
+
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();
@@ -3389,6 +3522,58 @@ describe("startConfiguredTriggers", () => {
       );
     } finally {
       await controller.stop();
+    }
+  });
+
+  it("checks subscription suppression before claiming a work item", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const records = useWorkItemLifecycleStore();
+    const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));
+    const autoPing = new AutoPingService(policyDir);
+    const descriptor = {
+      version: 1 as const,
+      projectId: "api",
+      triggerId: "pick-up",
+      sourceId: "pr-watch",
+      sourceType: "github" as const,
+      eventName: "github:work_item.new",
+      actionKind: "spawn" as const,
+      destination: { kind: "trigger" as const },
+      spawnDeskGroup: false,
+    };
+    const fingerprint = autoPingRouteFingerprint(descriptor);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    });
+    const grant = autoPing.createGrant({
+      scope: "subscription",
+      routeFingerprint: fingerprint,
+      destination: descriptor.destination,
+      target: { kind: "subscription" },
+      actorSessionId: "owner",
+    });
+    const suppression = await autoPing.unsubscribe("owner", "subscription", grant.handle);
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(records.size).toBe(0);
+
+      await autoPing.resume("owner", suppression.record.suppressionId);
+      bus.emit({ ...workItemEvent(), occurrenceId: "work-item-occurrence-2" });
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
+      expect(records.get("acme/api#42")).toMatchObject({ state: "running" });
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(policyDir, { recursive: true, force: true });
     }
   });
 

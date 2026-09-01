@@ -485,6 +485,44 @@ describe("runtime-tmux", () => {
     expect(buffers.size).toBe(0);
   });
 
+  it("does not treat a vanished target session as server-wide buffer absence", async () => {
+    const buffers = new Set<string>();
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "paste-buffer") {
+        throw Object.assign(new Error("paste failed"), { code: "PASTE_FAILED" });
+      }
+      if (args[0] === "delete-buffer") {
+        throw Object.assign(new Error("delete failed"), { code: "DELETE_FAILED" });
+      }
+      if (args[0] === "list-buffers") {
+        throw new Error("buffer listing failed");
+      }
+      return { stdout: "", stderr: "" };
+    });
+    for (let index = 0; index < 4; index += 1) {
+      spawnQueue.push(
+        new FakeSpawnChild({
+          beforeClose: () => {
+            const bufferName = spawnCalls[0]?.args[2];
+            if (bufferName) buffers.add(bufferName);
+          },
+        }),
+      );
+    }
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      sendSensitiveMessageToTmux("vanished-target", "secret", { agent: "claude" }),
+    ).rejects.toMatchObject({
+      name: "SensitiveTmuxCleanupError",
+      cleanupCode: "DELETE_FAILED",
+    });
+    expect(buffers.size).toBe(1);
+    expect(
+      execFileAsyncMock.mock.calls.filter(([, args]) => args[0] === "list-buffers"),
+    ).toHaveLength(3);
+  });
+
   it("waits for sensitive load close before cleanup and escalates TERM then KILL", async () => {
     const sentinel = "ap1_withheld_close_secret";
     const buffers = new Set<string>();

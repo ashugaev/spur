@@ -923,12 +923,12 @@ async function runTmuxWithStdin(
   }
 }
 
-async function sensitiveBufferAbsent(sessionName: string, bufferName: string): Promise<boolean> {
+async function sensitiveBufferAbsent(bufferName: string): Promise<boolean> {
   try {
     const output = await tmux("list-buffers", "-F", "#{buffer_name}");
     return !output.split("\n").some((line) => line.trim() === bufferName);
   } catch {
-    return !(await tmuxSessionExists(sessionName, { fresh: true }));
+    return false;
   }
 }
 
@@ -949,7 +949,6 @@ async function cleanupSensitiveTmuxBuffer(
     }
     try {
       await tmux("delete-buffer", "-b", bufferName);
-      return;
     } catch (error) {
       lastCleanupError = makeSensitiveTransportError(
         sessionName,
@@ -957,7 +956,7 @@ async function cleanupSensitiveTmuxBuffer(
         sensitiveErrorCode(error, "sensitive_tmux_delete_failed"),
       );
     }
-    if (await sensitiveBufferAbsent(sessionName, bufferName)) {
+    if (await sensitiveBufferAbsent(bufferName)) {
       return;
     }
   }

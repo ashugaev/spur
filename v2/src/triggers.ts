@@ -317,6 +317,34 @@ async function runSpawnTrigger(
     if (autoComplete && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
+    if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) {
+      return;
+    }
+    let filteredEventData = eventData;
+    if (isReviewEventData(eventData)) {
+      const signals = eventData.signals.filter(
+        (signal) =>
+          !signal.providerThreadTarget ||
+          !autoPing.isSuppressed(
+            routeFingerprint,
+            destination,
+            occurrenceId,
+            signal.providerThreadTarget,
+          ),
+      );
+      if (signals.length === 0) return;
+      filteredEventData = { ...eventData, signals };
+    } else {
+      const threadTargets = autoPingThreadTargets(eventData);
+      if (
+        threadTargets.length > 0 &&
+        threadTargets.every((target) =>
+          autoPing.isSuppressed(routeFingerprint, destination, occurrenceId, target),
+        )
+      ) {
+        return;
+      }
+    }
     if (
       workItemData &&
       !(await shouldClaimWorkItemSpawn(
@@ -346,17 +374,8 @@ async function runSpawnTrigger(
 
     let anchorSessionId: string | undefined;
     let controlsAssigned = false;
-    const threadTargets = autoPingThreadTargets(eventData);
+    const threadTargets = autoPingThreadTargets(filteredEventData);
     for (const [blockIndex, block] of blocks.entries()) {
-      const activeThreadTargets = threadTargets.filter(
-        (target) => !autoPing.isSuppressed(routeFingerprint, destination, occurrenceId, target),
-      );
-      if (
-        autoPing.isSuppressed(routeFingerprint, destination, occurrenceId) ||
-        (threadTargets.length > 0 && activeThreadTargets.length === 0)
-      ) {
-        continue;
-      }
       const isAnchorBlock = deskGroup === true && anchorSessionId === undefined;
       if (isAnchorBlock && blockIndex > 0) {
         logger.warn(
@@ -364,7 +383,7 @@ async function runSpawnTrigger(
         );
       }
       try {
-        const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
+        const renderedPrompt = renderSpawnPrompt(block.prompt, filteredEventData);
         const grants = controlsAssigned
           ? []
           : [
@@ -372,7 +391,7 @@ async function runSpawnTrigger(
                 scope: "event" as const,
                 target: { kind: "occurrence" as const, occurrenceId },
               },
-              ...activeThreadTargets.map((target) => ({ scope: "thread" as const, target })),
+              ...threadTargets.map((target) => ({ scope: "thread" as const, target })),
               { scope: "subscription" as const, target: { kind: "subscription" as const } },
             ].map(({ scope, target }) => ({
               scope,
@@ -1233,14 +1252,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     sendBatch: SendBatch,
   ): Promise<void> => {
     const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
-    const merged = pendingBatches.has(queueKey);
     const destination = { kind: "session" as const, sessionId: sendBatch.sessionId };
     const route = buildAutoPingRoute(deps.config, projectId, triggerId, trigger, destination);
     if (!route) return;
     const routeFingerprint = autoPingRouteFingerprint(route);
     const routeLeaseId = leaseForRoute(routeFingerprint, route);
     let batch: PendingBatch | undefined;
+    let merged = false;
     await autoPing.withRouteLock(routeFingerprint, async () => {
+      const cached = pendingBatches.get(queueKey);
+      const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
+      if (cached && !persisted) {
+        clearBatch(queueKey, { deletePersisted: false });
+      }
+      merged = pendingBatches.has(queueKey);
       if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) return;
       sendBatch.attachAutoPing({
         occurrenceId,

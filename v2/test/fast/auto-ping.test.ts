@@ -194,6 +194,28 @@ describe("AutoPingService", () => {
     service.dispose();
   });
 
+  it("collects an event suppression created after its occurrence became unreferenced", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const service = new AutoPingService(createDir());
+    const fingerprint = autoPingRouteFingerprint(route());
+    service.registerRoute(fingerprint);
+    const grant = service.createGrant({
+      scope: "event",
+      routeFingerprint: fingerprint,
+      destination: { kind: "session", sessionId: "owner" },
+      target: { kind: "occurrence", occurrenceId: "finished" },
+      actorSessionId: "owner",
+    });
+
+    await service.unsubscribe("owner", "event", grant.handle);
+    vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+    service.gc();
+
+    expect(service.list("owner")).toEqual([]);
+    service.dispose();
+  });
+
   it("retains a dormant send destination while its route exists and collects it after removal", async () => {
     const dir = createDir();
     const descriptor = route();

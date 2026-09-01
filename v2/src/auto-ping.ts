@@ -423,6 +423,11 @@ export class AutoPingService {
       );
       const created = !suppression;
       if (!suppression) {
+        const createdAt = new Date(this.now()).toISOString();
+        const occurrenceKey =
+          grant.target.kind === "occurrence"
+            ? `${grant.routeFingerprint}:${grant.target.occurrenceId}`
+            : null;
         suppression = {
           suppressionId: randomUUID(),
           scope: grant.scope,
@@ -431,7 +436,12 @@ export class AutoPingService {
           target: grant.target,
           canonicalKey: grant.canonicalKey,
           actorSessionId,
-          createdAt: new Date(this.now()).toISOString(),
+          createdAt,
+          ...(grant.scope === "event" &&
+          occurrenceKey !== null &&
+          !this.occurrenceReferences.has(occurrenceKey)
+            ? { unreferencedAt: createdAt }
+            : {}),
         };
         this.state.suppressions.push(suppression);
       } else if (suppression.actorSessionId !== actorSessionId) {
