@@ -50,4 +50,4 @@ RULES
   - Use `Objections: none` when no critical/high objections remain.
   - Consolidate similar issues into one finding.
   - Skip stylistic preferences unless they violate conventions.
-  - After 3 cycles: BLOCKED_REVIEW.
+  - Return one verdict for current invocation; manager owns rerun limits.
