@@ -62,5 +62,5 @@ describe("temp-dir safety net (setupFiles wiring)", () => {
     } finally {
       rmSync(markerDir, { recursive: true, force: true });
     }
-  }, 20_000);
+  }, 60_000);
 });

@@ -342,6 +342,7 @@ import {
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
+import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
@@ -913,6 +914,7 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
+  tokenUsage?: ProviderTokenUsageSample;
   // Epoch ms of the parsed claude rate-limit reset instant, set on every
   // classify call for as long as the expired detection stays in the tail
   // (see the expired arm below) — level-triggered, not edge-triggered. Safe
@@ -2456,6 +2458,7 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  private readonly tokenBudgetUnsupportedWarnings = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Report-only pre-spawn disk-headroom probe (see `warnIfHostDiskLow`),
@@ -3572,6 +3575,16 @@ export class SessionService {
     try {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
+        const tokenBudgetError = this.tokenBudgetActivationError(session);
+        if (tokenBudgetError) {
+          this.logEvent("session.wake.token_budget_blocked", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: tokenBudgetError,
+          });
+          continue;
+        }
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
@@ -4702,6 +4715,115 @@ export class SessionService {
     return minutes * 60_000;
   }
 
+  private resolveTokenBudget(
+    session: Pick<SessionRecord, "id" | "project" | "worktreePath">,
+  ): number | undefined {
+    return this.resolveProjectForSession(session)?.tokenBudget;
+  }
+
+  private assertAgentSupportsTokenBudget(
+    project: ProjectConfig,
+    agent: AgentName,
+    projectId: string,
+  ): void {
+    if (project.tokenBudget !== undefined && (agent === "cursor" || agent === "opencode")) {
+      throw new Error(
+        `${agent} does not expose structured token usage; remove projects.${projectId}.tokenBudget or choose claude/codex`,
+      );
+    }
+  }
+
+  private tokenBudgetActivationError(session: SessionRecord): string | undefined {
+    const budget = this.resolveTokenBudget(session);
+    if (budget === undefined) return undefined;
+    if (session.agent === "cursor" || session.agent === "opencode") {
+      return `Session ${session.id} uses ${session.agent}, which cannot enforce tokenBudget`;
+    }
+    if ((session.tokenUsage?.totalTokens ?? 0) >= budget) {
+      return `Session ${session.id} exhausted its token budget (${session.tokenUsage?.totalTokens} / ${budget})`;
+    }
+    return undefined;
+  }
+
+  private assertTokenBudgetAllowsActivation(session: SessionRecord): void {
+    const error = this.tokenBudgetActivationError(session);
+    if (error) throw new Error(error);
+  }
+
+  private warnIfTokenBudgetUnenforced(session: SessionRecord): void {
+    const budget = this.resolveTokenBudget(session);
+    if (
+      budget === undefined ||
+      session.status !== "running" ||
+      (session.agent !== "cursor" && session.agent !== "opencode")
+    ) {
+      this.tokenBudgetUnsupportedWarnings.delete(session.id);
+      return;
+    }
+    if (this.tokenBudgetUnsupportedWarnings.has(session.id)) return;
+    this.tokenBudgetUnsupportedWarnings.add(session.id);
+    this.logEvent("session.token_budget.unenforced", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Token budget is not enforced for ${session.id}: ${session.agent} does not expose structured token usage`,
+      details: { budget, agent: session.agent },
+    });
+  }
+
+  private async stopForTokenBudget(view: SessionView): Promise<void> {
+    await this.withWorkspaceLifecycleLocks(view.id, async () => {
+      const candidate = readSession(this.config.dataDir, view.id);
+      if (!candidate || candidate.status !== "running") return;
+      await this.withPaneWriteLock(candidate.tmuxSession, async () => {
+        const latest = readSession(this.config.dataDir, candidate.id);
+        if (!latest || latest.status !== "running") return;
+        const classified = await this.classifySessionRecord(latest);
+        const fresh = readSession(this.config.dataDir, latest.id) ?? classified.session;
+        if (fresh.status !== "running") return;
+        const sample = classified.tokenUsage;
+        const usage = sample ? reconcileTokenUsage(fresh.tokenUsage, sample) : fresh.tokenUsage;
+        const budget = this.resolveTokenBudget(fresh);
+        if (!usage || budget === undefined || usage.totalTokens < budget) return;
+        await this.killAgentPaneAndConfirmExit(fresh, { failOnSurvivors: false });
+        try {
+          await this.teardownSessionSidecars(fresh);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.token_budget.teardown_failed", {
+            level: "error",
+            sessionId: latest.id,
+            projectId: latest.project,
+            message: `Sidecar teardown failed after token budget exhaustion for ${latest.id}: ${message}`,
+          });
+        }
+        const cleaned = readSession(this.config.dataDir, fresh.id) ?? fresh;
+        const finalUsage =
+          cleaned.tokenUsage && cleaned.tokenUsage.totalTokens >= usage.totalTokens
+            ? cleaned.tokenUsage
+            : usage;
+        const stopped: SessionRecord = {
+          ...this.sessionWithReleasedSidecarPorts(cleaned),
+          tokenUsage: finalUsage,
+          status: "stopped",
+          stopReason: "token_budget",
+          updatedAt: nowIso(),
+        };
+        delete stopped.error;
+        writeSession(this.config.dataDir, stopped);
+        this.stateCache.delete(stopped.id);
+        await this.refreshDashboardCacheEntry(stopped);
+        this.logEvent("session.token_budget.exhausted", {
+          level: "warn",
+          sessionId: stopped.id,
+          projectId: stopped.project,
+          message: `Stopped ${stopped.id} after observing ${finalUsage.totalTokens} / ${budget} tokens`,
+          details: { used: finalUsage.totalTokens, budget },
+        });
+      });
+    });
+  }
+
   // Parks a running/waiting session that has been idle past staleAfterMinutes:
   // kills the agent pane, tears down its sidecars (not cleanupSessionServices —
   // service instances are out of scope here, matching reconcileUnexpectedStop),
@@ -4899,12 +5021,21 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
+          this.warnIfTokenBudgetUnenforced(session);
           const { view, classified } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
             sidecarProcSnapshot,
           );
+          if (
+            view.status === "running" &&
+            view.tokenUsageView?.status === "available" &&
+            view.tokenUsageView.exhausted
+          ) {
+            await this.stopForTokenBudget(view);
+            continue;
+          }
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
@@ -5035,6 +5166,11 @@ export class SessionService {
     for (const sessionId of this.wakeSuppressionNotified) {
       if (!liveIds.has(sessionId)) {
         this.wakeSuppressionNotified.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.tokenBudgetUnsupportedWarnings) {
+      if (!liveIds.has(sessionId)) {
+        this.tokenBudgetUnsupportedWarnings.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -8073,6 +8209,7 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      this.assertAgentSupportsTokenBudget(project, agent, request.project);
       resolvedModel = await resolveSpawnRequestLaunchModel(
         request,
         project,
@@ -8976,6 +9113,7 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      this.assertAgentSupportsTokenBudget(project, agent, request.project);
       resolvedModel = await resolveSpawnRequestLaunchModel(request, project, agent);
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
@@ -9878,6 +10016,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    this.assertTokenBudgetAllowsActivation(session);
     if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
@@ -11757,6 +11896,7 @@ export class SessionService {
   }
 
   private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
+    this.assertTokenBudgetAllowsActivation(session);
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
     let processAlive = false;
     if (runtimeAlive) {
@@ -12168,6 +12308,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    this.assertTokenBudgetAllowsActivation(session);
     // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
     // path reads the session directly rather than through that method, so
     // isRestorableSession's workspaceExists (computed by enrich() below) would
@@ -13859,6 +14000,7 @@ export class SessionService {
     rateLimit: RateLimitDetection | null;
     activityMs: number;
     model?: string;
+    tokenUsage?: ProviderTokenUsageSample;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
     const rolloutReader = this.codexRolloutReaders.get(sessionId) ?? { files: new Map() };
@@ -13901,6 +14043,7 @@ export class SessionService {
       rateLimit: rolloutRead.rateLimit,
       activityMs,
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
+      ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
     };
   }
 
@@ -14562,6 +14705,7 @@ export class SessionService {
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
+      session.stopReason === "token_budget" ||
       isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
       workspaceMissing ||
@@ -14579,6 +14723,7 @@ export class SessionService {
     if (
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
+      latest.stopReason === "token_budget" ||
       isStaleParked(latest) ||
       hasSessionErrorEvidence(latest)
     ) {
@@ -14708,6 +14853,7 @@ export class SessionService {
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
+    let tokenUsage: ProviderTokenUsageSample | undefined;
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
       const reconciled = await this.reconcileUnexpectedStop(
         effectiveSession,
@@ -14757,6 +14903,7 @@ export class SessionService {
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
           liveModel = jsonlResult.liveModel;
+          tokenUsage = jsonlResult.tokenUsage;
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -14786,6 +14933,7 @@ export class SessionService {
         rateLimit = codexState.rateLimit;
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
+        tokenUsage = codexState.tokenUsage;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
@@ -15055,6 +15203,7 @@ export class SessionService {
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
       ...(liveModel ? { liveModel } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
     };
   }
 
@@ -15070,6 +15219,7 @@ export class SessionService {
       pipeline: _pipeline,
       sidecarNames: _sidecarNames,
       sidecarPorts: _sidecarPorts,
+      tokenUsage: _tokenUsage,
       ...dashboardSession
     } = session;
     const workspacePresent = classified.workspacePresent;
@@ -15160,6 +15310,13 @@ export class SessionService {
   ): Promise<{ view: SessionView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
+    if (classified.tokenUsage) {
+      const reconciled = reconcileTokenUsage(session.tokenUsage, classified.tokenUsage);
+      if (JSON.stringify(reconciled) !== JSON.stringify(session.tokenUsage)) {
+        session = { ...session, tokenUsage: reconciled };
+        writeSession(this.config.dataDir, session);
+      }
+    }
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
@@ -15177,6 +15334,29 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
+    const budget = project?.tokenBudget;
+    const tokenUsageView =
+      session.agent === "cursor" || session.agent === "opencode"
+        ? {
+            status: "unavailable" as const,
+            ...(budget !== undefined ? { budget } : {}),
+            exhausted: false as const,
+            unenforced: budget !== undefined && session.status === "running",
+          }
+        : session.tokenUsage
+          ? {
+              status: "available" as const,
+              inputTokens: session.tokenUsage.inputTokens,
+              outputTokens: session.tokenUsage.outputTokens,
+              totalTokens: session.tokenUsage.totalTokens,
+              ...(budget !== undefined ? { budget } : {}),
+              exhausted: budget !== undefined && session.tokenUsage.totalTokens >= budget,
+            }
+          : {
+              status: "waiting" as const,
+              ...(budget !== undefined ? { budget } : {}),
+              exhausted: false as const,
+            };
     // Fetched at most once per enrich (zero extra IO for a non-desk session,
     // where deskAnchorRecord returns `session` itself unchanged): reused for
     // the sidecars' owner state (ports, still per-record) below. Passed into
@@ -15231,9 +15411,10 @@ export class SessionService {
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
     const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
+    const { tokenUsage: _tokenUsage, ...publicSession } = session;
 
     const view: SessionView = {
-      ...session,
+      ...publicSession,
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
       workspaceId: workspaceIdOf(session),
@@ -15257,6 +15438,7 @@ export class SessionService {
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
+      tokenUsageView,
     };
     return { view, classified };
   }

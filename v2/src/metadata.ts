@@ -22,6 +22,7 @@ import {
   type ServiceSourceState,
   type SessionPipelineState,
   type SessionRecord,
+  type SessionTokenUsageRecord,
   type SessionStateSubscription,
   type SidecarProcessIdentity,
   type TelegramBinding,
@@ -663,10 +664,53 @@ function normalizeStateSubscriptions(
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeTokenTotals(value: unknown): {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+} | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const totals = value as Record<string, unknown>;
+  const values = [totals["inputTokens"], totals["outputTokens"], totals["totalTokens"]];
+  if (!values.every((token) => Number.isSafeInteger(token) && (token as number) >= 0)) return null;
+  return {
+    inputTokens: totals["inputTokens"] as number,
+    outputTokens: totals["outputTokens"] as number,
+    totalTokens: totals["totalTokens"] as number,
+  };
+}
+
+function normalizeTokenUsage(value: unknown): SessionTokenUsageRecord | undefined {
+  const totals = normalizeTokenTotals(value);
+  if (!totals || typeof value !== "object" || value === null) return undefined;
+  const usage = value as Record<string, unknown>;
+  if (usage["provider"] !== "claude" && usage["provider"] !== "codex") return undefined;
+  const rawSources = usage["sources"];
+  if (typeof rawSources !== "object" || rawSources === null || Array.isArray(rawSources)) {
+    return undefined;
+  }
+  const sources: Record<string, typeof totals> = {};
+  for (const [sourceId, rawSource] of Object.entries(rawSources)) {
+    const source = normalizeTokenTotals(rawSource);
+    if (
+      !sourceId ||
+      !source ||
+      source.inputTokens > totals.inputTokens ||
+      source.outputTokens > totals.outputTokens ||
+      source.totalTokens > totals.totalTokens
+    )
+      return undefined;
+    sources[sourceId] = source;
+  }
+  if (Object.keys(sources).length === 0) return undefined;
+  return { ...totals, provider: usage["provider"], sources };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
@@ -705,6 +749,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     launchCommand: normalizedSession.launchCommand,
     status: normalizedSession.status,
     ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.lastOpenedAt ? { lastOpenedAt: normalizedSession.lastOpenedAt } : {}),

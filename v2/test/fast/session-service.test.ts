@@ -1009,7 +1009,19 @@ async function advanceSeconds(seconds: number): Promise<void> {
   }
 }
 
-function mockClaudeJsonlState(state: string, options?: { lastMtimeMs?: number }) {
+function mockClaudeJsonlState(
+  state: string,
+  options?: {
+    lastMtimeMs?: number;
+    tokenUsage?: {
+      provider: "claude";
+      sourceId: string;
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+    };
+  },
+) {
   readClaudeJsonlStateMock.mockResolvedValue({
     state,
     reader: {
@@ -1018,6 +1030,7 @@ function mockClaudeJsonlState(state: string, options?: { lastMtimeMs?: number })
       lastMtimeMs: options?.lastMtimeMs ?? 0,
       tailRecords: [],
     },
+    ...(options?.tokenUsage ? { tokenUsage: options.tokenUsage } : {}),
   });
 }
 
@@ -2406,6 +2419,26 @@ describe("SessionService", () => {
     expect(createWorktreeMock).not.toHaveBeenCalled();
     service.dispose();
   });
+
+  it.each(["spawn", "background"] as const)(
+    "rejects unsupported-agent %s activation under a project token budget",
+    async (path) => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const request = { project: "api", agent: "cursor" as const, prompt: "hello" };
+
+      await expect(
+        path === "spawn" ? service.spawn(request) : service.spawnInBackground(request),
+      ).rejects.toThrow("cursor does not expose structured token usage");
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    },
+  );
 
   it("rejects an unavailable explicit OpenCode model before preparing a background spawn", async () => {
     validateOpenCodeModelMock.mockRejectedValueOnce(
@@ -24385,7 +24418,9 @@ describe("SessionService", () => {
     mockClaudeJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
     loadProjectConfigMock.mockClear();
     logSpurEventMock.mockClear();
 
@@ -24433,7 +24468,9 @@ describe("SessionService", () => {
     mockClaudeJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
     loadProjectConfigMock.mockClear();
 
     await service.get("api-1");
@@ -33880,6 +33917,8 @@ describe("SessionService", () => {
       withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
       pollAttentionStates(baseline: boolean): Promise<void>;
       parkStaleSession(view: SessionView): Promise<void>;
+      stopForTokenBudget(view: SessionView): Promise<void>;
+      processScheduledWakes(): Promise<void>;
       teardownSessionSidecars(session: SessionRecord): Promise<void>;
       tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
     };
@@ -34063,6 +34102,241 @@ describe("SessionService", () => {
     });
 
     describe("pollAttentionStates parking", () => {
+      it("stops at observed token budget and persists one budget event", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        mockClaudeJsonlState("waiting", {
+          tokenUsage: {
+            provider: "claude",
+            sourceId: "test.jsonl",
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1" }));
+
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        const view = await service.get("api-1");
+        expect(view.tokenUsageView).toMatchObject({
+          status: "available",
+          budget: 100,
+          exhausted: true,
+        });
+        expect(view).not.toHaveProperty("tokenUsage");
+        await internals.stopForTokenBudget(view);
+        await internals.stopForTokenBudget(view);
+
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          stopReason: "token_budget",
+          tokenUsage: { totalTokens: 100 },
+        });
+        expect(
+          logSpurEventMock.mock.calls
+            .map(([, entry]) => entry)
+            .filter((entry) => entry.event === "session.token_budget.exhausted"),
+        ).toHaveLength(1);
+      });
+
+      it("preserves a newer usage write that lands during stop teardown", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        mockClaudeJsonlState("waiting", {
+          tokenUsage: {
+            provider: "claude",
+            sourceId: "test.jsonl",
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1" }));
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        vi.spyOn(internals, "teardownSessionSidecars").mockImplementation(async () => {
+          const current = sessions.get("api-1");
+          if (!current) throw new Error("missing session");
+          sessions.set("api-1", {
+            ...current,
+            tokenUsage: {
+              provider: "claude",
+              inputTokens: 95,
+              outputTokens: 25,
+              totalTokens: 120,
+              sources: {
+                "test.jsonl": { inputTokens: 95, outputTokens: 25, totalTokens: 120 },
+              },
+            },
+          });
+        });
+
+        await internals.stopForTokenBudget({ id: "api-1" } as SessionView);
+
+        expect(sessions.get("api-1")?.tokenUsage?.totalTokens).toBe(120);
+      });
+
+      it("leaves a due wake armed when the token budget blocks activation", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            status: "stopped",
+            stopReason: "token_budget",
+            tokenUsage: {
+              provider: "claude",
+              inputTokens: 80,
+              outputTokens: 20,
+              totalTokens: 100,
+              sources: {
+                "test.jsonl": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+              },
+            },
+            scheduledWake: {
+              dueAt: "2026-03-18T10:00:00.000Z",
+              message: "wake",
+            },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        await staleInternals(service).processScheduledWakes();
+
+        expect(sessions.get("api-1")?.scheduledWake?.message).toBe("wake");
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it.each(["deliver", "flush", "drain"] as const)(
+        "blocks exhausted token usage at the %s activation boundary",
+        async (entryPoint) => {
+          loadConfigMock.mockReturnValue({
+            ...baseConfig(),
+            projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+          });
+          const sessions = createSessionStore();
+          const queued = entryPoint === "deliver" ? undefined : ["queued follow up"];
+          sessions.set(
+            "api-1",
+            runningSession({
+              id: "api-1",
+              ...(queued ? { queuedMessages: { messages: queued, awaitingPrompt: false } } : {}),
+              tokenUsage: {
+                provider: "claude",
+                inputTokens: 80,
+                outputTokens: 20,
+                totalTokens: 100,
+                sources: {
+                  "test.jsonl": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+                },
+              },
+            }),
+          );
+          const service = await createDisposedSessionService();
+
+          if (entryPoint === "deliver") {
+            await expect(service.deliver("api-1", "follow up")).rejects.toThrow(
+              "exhausted its token budget",
+            );
+          } else if (entryPoint === "flush") {
+            await expect(service.flushQueuedMessage("api-1", "queued follow up")).rejects.toThrow(
+              "exhausted its token budget",
+            );
+          } else {
+            await expect(staleInternals(service).tryDeliverQueuedMessage("api-1")).resolves.toBe(
+              true,
+            );
+          }
+
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(queued);
+        },
+      );
+
+      it.each([
+        ["raises", 200],
+        ["removes", undefined],
+      ] as const)(
+        "does not stop when config %s the budget during locked classification",
+        async (_, nextBudget) => {
+          const config = {
+            ...baseConfig(),
+            projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+          };
+          loadConfigMock.mockReturnValue(config);
+          const runtimeConfigRef: { current?: AppConfig } = {};
+          readClaudeJsonlStateMock.mockImplementation(async () => {
+            const project = runtimeConfigRef.current?.projects["api"];
+            if (!project) throw new Error("missing runtime project");
+            if (nextBudget === undefined) {
+              Reflect.deleteProperty(project, "tokenBudget");
+            } else {
+              project.tokenBudget = nextBudget;
+            }
+            return {
+              state: "waiting",
+              reader: {
+                filePath: "test.jsonl",
+                lastOffset: 0,
+                lastMtimeMs: 0,
+                tailRecords: [],
+              },
+              tokenUsage: {
+                provider: "claude",
+                sourceId: "test.jsonl",
+                inputTokens: 80,
+                outputTokens: 20,
+                totalTokens: 100,
+              },
+            };
+          });
+          const sessions = createSessionStore();
+          sessions.set("api-1", runningSession({ id: "api-1" }));
+          const service = await createDisposedSessionService();
+          runtimeConfigRef.current = (service as unknown as { config: AppConfig }).config;
+
+          await staleInternals(service).stopForTokenBudget({ id: "api-1" } as SessionView);
+
+          expect(sessions.get("api-1")?.status).toBe("running");
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it("warns once for a live unsupported agent under a token budget", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1", agent: "cursor" }));
+        mockCursorJsonlState("waiting");
+
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        await internals.pollAttentionStates(false);
+        await internals.pollAttentionStates(false);
+
+        const warnings = logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.token_budget.unenforced");
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatchObject({
+          level: "warn",
+          sessionId: "api-1",
+          details: { budget: 100, agent: "cursor" },
+        });
+      });
+
       it("parks a running+waiting session idle past the threshold: kills the pane, captures live sidecars, and logs session.stale.parked", async () => {
         loadConfigMock.mockReturnValue({
           ...baseConfig(),
@@ -36831,71 +37105,77 @@ describe("SessionService", () => {
       });
     });
 
-    describe("reconcileStaleStoppedSession leaves a stale_timeout record alone", () => {
-      it("skips promotion via the pre-read guard when the snapshot passed in already carries stopReason stale_timeout, even though the disk record does not", async () => {
-        // Isolates the FIRST (pre-read) guard copy from the second: the
-        // stored record has no stopReason at all (so the internal re-read
-        // alone would happily promote it), but the snapshot handed to
-        // classifySessionRecord — the same shape enrich() passes in — is a
-        // stale_timeout snapshot from a park that raced ahead of this read.
-        // Only the pre-read guard can catch this; the post-read guard would
-        // see a clean record and promote.
-        const sessions = createSessionStore();
-        const stored = runningSession({ id: "api-1", status: "stopped" });
-        sessions.set("api-1", stored);
-        // The disk record is genuinely promotable (no stopReason at all), so
-        // the background attention-monitor tick fired at construction would
-        // legitimately promote it on its own and pollute the writeSessionMock
-        // assertion below. Starve it: this test only exercises
-        // classifySessionRecord directly, not the tick.
-        listSessionsMock.mockReturnValue([]);
-        tmuxSessionExistsMock.mockResolvedValue(true);
-        isProcessRunningInTmuxMock.mockResolvedValue(true);
+    describe("reconcileStaleStoppedSession leaves locked stop reasons alone", () => {
+      it.each(["stale_timeout", "token_budget"] as const)(
+        "skips promotion via the pre-read guard for %s",
+        async (stopReason) => {
+          // Isolates the FIRST (pre-read) guard copy from the second: the
+          // stored record has no stopReason at all (so the internal re-read
+          // alone would happily promote it), but the snapshot handed to
+          // classifySessionRecord — the same shape enrich() passes in — is a
+          // stale_timeout snapshot from a park that raced ahead of this read.
+          // Only the pre-read guard can catch this; the post-read guard would
+          // see a clean record and promote.
+          const sessions = createSessionStore();
+          const stored = runningSession({ id: "api-1", status: "stopped" });
+          sessions.set("api-1", stored);
+          // The disk record is genuinely promotable (no stopReason at all), so
+          // the background attention-monitor tick fired at construction would
+          // legitimately promote it on its own and pollute the writeSessionMock
+          // assertion below. Starve it: this test only exercises
+          // classifySessionRecord directly, not the tick.
+          listSessionsMock.mockReturnValue([]);
+          tmuxSessionExistsMock.mockResolvedValue(true);
+          isProcessRunningInTmuxMock.mockResolvedValue(true);
 
-        const service = await createDisposedSessionService();
-        const internals = sessionServiceInternals(service);
-        const result = await internals.classifySessionRecord({
-          ...stored,
-          stopReason: "stale_timeout",
-        });
+          const service = await createDisposedSessionService();
+          const internals = sessionServiceInternals(service);
+          const result = await internals.classifySessionRecord({
+            ...stored,
+            stopReason,
+          });
 
-        expect(result.state).toBe("stale");
-        expect(sessions.get("api-1")?.status).toBe("stopped");
-        expect(writeSessionMock).not.toHaveBeenCalled();
-      });
+          expect(result.state).toBe(stopReason === "stale_timeout" ? "stale" : "stopped");
+          expect(sessions.get("api-1")?.status).toBe("stopped");
+          expect(writeSessionMock).not.toHaveBeenCalled();
+        },
+      );
 
-      it("skips promotion via the post-read guard when the record is parked concurrently between the snapshot and the re-read", async () => {
-        const sessions = createSessionStore();
-        // The snapshot handed to classifySessionRecord has no stopReason yet;
-        // isProcessRunningInTmux's own probe (which runs before
-        // reconcileStaleStoppedSession's internal re-read) simulates a
-        // concurrent parkStaleSession landing in between, so only the
-        // second (re-read) guard copy can catch this.
-        sessions.set("api-1", runningSession({ id: "api-1", status: "stopped" }));
-        // Same isolation as the pre-read guard test above: keep the
-        // background attention-monitor tick from independently touching
-        // api-1 and polluting the writeSessionMock assertion below.
-        listSessionsMock.mockReturnValue([]);
-        tmuxSessionExistsMock.mockResolvedValue(true);
-        isProcessRunningInTmuxMock.mockImplementation(async () => {
-          const current = sessions.get("api-1");
-          if (current) {
-            sessions.set("api-1", {
-              ...current,
-              stopReason: "stale_timeout",
-              staleSidecars: [],
-            });
-          }
-          return true;
-        });
+      it.each(["stale_timeout", "token_budget"] as const)(
+        "skips promotion via the post-read guard for concurrent %s",
+        async (stopReason) => {
+          const sessions = createSessionStore();
+          // The snapshot handed to classifySessionRecord has no stopReason yet;
+          // isProcessRunningInTmux's own probe (which runs before
+          // reconcileStaleStoppedSession's internal re-read) simulates a
+          // concurrent parkStaleSession landing in between, so only the
+          // second (re-read) guard copy can catch this.
+          sessions.set("api-1", runningSession({ id: "api-1", status: "stopped" }));
+          // Same isolation as the pre-read guard test above: keep the
+          // background attention-monitor tick from independently touching
+          // api-1 and polluting the writeSessionMock assertion below.
+          listSessionsMock.mockReturnValue([]);
+          tmuxSessionExistsMock.mockResolvedValue(true);
+          isProcessRunningInTmuxMock.mockImplementation(async () => {
+            const current = sessions.get("api-1");
+            if (current) {
+              sessions.set("api-1", {
+                ...current,
+                stopReason,
+                ...(stopReason === "stale_timeout" ? { staleSidecars: [] } : {}),
+              });
+            }
+            return true;
+          });
 
-        const service = await createDisposedSessionService();
-        const result = await service.get("api-1");
+          const service = await createDisposedSessionService();
+          const result = await service.get("api-1");
 
-        expect(result.status).toBe("stopped");
-        expect(sessions.get("api-1")?.stopReason).toBe("stale_timeout");
-        expect(writeSessionMock).not.toHaveBeenCalled();
-      });
+          expect(result.status).toBe("stopped");
+          expect(sessions.get("api-1")?.stopReason).toBe(stopReason);
+          expect(writeSessionMock).not.toHaveBeenCalled();
+        },
+      );
     });
 
     describe("reapOrphanedTmux", () => {

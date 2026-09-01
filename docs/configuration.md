@@ -258,6 +258,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.worktree`: optional, default `true`. `false` runs in the project path instead of an owned worktree. Override per session with `--worktree`/`--shared` or `trigger.spawn.overrides.worktree`.
 - `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on boot. See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.maxLiveSessions`: optional positive integer. Per-project cap on top of the global `admission.maxLiveSessions` cap — a spawn or restore that would put this project over its own cap is refused even while the host is under the global cap. Works in both instance and project config.
+- `projects.<id>.tokenBudget`: optional positive integer. Per-session lifetime token limit. Claude counts input, cache-creation input, cache-read input, and output tokens; Codex uses provider `total_tokens`. Spur stops the session after structured usage first reports `used >= tokenBudget`. Overshoot bound: one active response plus the 5-second attention sweep. Usage survives daemon restart and native-agent resume inside the same Spur session. `send`, scheduled wake, and restore refuse when recorded usage already meets the current budget. Raising or removing the limit permits manual restore; it never auto-restores. Cursor and OpenCode cannot start or restore while a budget applies; a live unsupported session stays running with budget enforcement marked unavailable.
 - `projects.<id>.staleAfterMinutes`: optional non-negative number. Overrides the instance `staleAfterMinutes` for this project only. See [Stale mode](#stale-mode).
 - `projects.<id>.sidecars.<name>`: optional sidecar map (mutually exclusive with `devServer`); a built-in name (`playwright`) needs no `command` and rejects any key besides `autoStart` (`dependsOn` included). See [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars).
 - `projects.<id>.sidecars.<name>.idleTtlMinutes`: optional positive integer. Overrides `sidecarGc.idleTtlMinutes` for this sidecar. See [Sidecar reaping](#sidecar-reaping).
@@ -446,6 +447,8 @@ GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `gr
 Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
 
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
+
+Token-budget events: `session.token_budget.exhausted` once per budget stop, `session.token_budget.unenforced` once while a live Cursor/OpenCode session has budget enforcement unavailable, `session.wake.token_budget_blocked` when budget activation refusal leaves a scheduled wake armed.
 
 ## Daemon restarts
 
