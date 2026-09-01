@@ -833,6 +833,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       ) {
         return { status: "suppressed" };
       }
+      const authoritativeBatch = restoreSendBatch(persisted.batch);
+      if (!authoritativeBatch || authoritativeBatch.sessionId !== batch.batch.sessionId) {
+        return { status: "suppressed" };
+      }
+      batch.batch = authoritativeBatch;
+      batch.revision = persisted.revision ?? 0;
+      syncBatchOccurrenceReferences(queueKey, batch);
       const claimId = randomUUID();
       const claimedRevision = (persisted.revision ?? 0) + 1;
       const claimed = {
@@ -1264,6 +1271,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
       if (cached && !persisted) {
         clearBatch(queueKey, { deletePersisted: false });
+      } else if (cached && persisted && persisted.workId === cached.workId) {
+        const authoritativeBatch = restoreSendBatch(persisted.batch);
+        if (authoritativeBatch && authoritativeBatch.sessionId === cached.batch.sessionId) {
+          cached.batch = authoritativeBatch;
+          cached.revision = persisted.revision ?? 0;
+          syncBatchOccurrenceReferences(queueKey, cached);
+        }
       }
       merged = pendingBatches.has(queueKey);
       if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) return;

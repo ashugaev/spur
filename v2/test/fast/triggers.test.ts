@@ -982,6 +982,90 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("delivers a replacement live event once after an old-controller retry", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-retry-reload-"));
+    const autoPing = new AutoPingService(dataDir);
+    let releaseDelivery!: () => void;
+    const heldDelivery = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const deliverMock = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        markStarted();
+        await heldDelivery;
+        throw new Error("retry old delivery");
+      })
+      .mockResolvedValue(undefined);
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const oldBus = new EventBus();
+    const deps = {
+      config: { ...config(), dataDir } as never,
+      bus: oldBus,
+      sessionService: { get: getMock, deliver: deliverMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    };
+    const oldController = startConfiguredTriggers(deps);
+    let replacement: ReturnType<typeof startConfiguredTriggers> | undefined;
+    try {
+      oldBus.emit(githubEvent());
+      const advancing = vi.advanceTimersByTimeAsync(35_000);
+      await started;
+      const replacementBus = new EventBus();
+      replacement = startConfiguredTriggers({ ...deps, bus: replacementBus });
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        storedSnapshot([
+          { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+          { key: "comment:2", kind: "comment", text: "Replacement live event." },
+        ]),
+      );
+      replacementBus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [
+            {
+              key: "comment:2",
+              kind: "comment",
+              text: "Replacement live event.",
+            },
+          ],
+        },
+      });
+      releaseDelivery();
+      await advancing;
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+      expect(deliverMock.mock.calls[1]?.[1]).toContain("A new comment arrived.");
+      expect(deliverMock.mock.calls[1]?.[1]).toContain("Replacement live event.");
+      expect(
+        deliverMock.mock.calls.filter((call) =>
+          String(call[1]).includes("Replacement live event."),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      releaseDelivery();
+      await oldController.stop();
+      await replacement?.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("delivers GitHub updates immediately to a stale-parked session with no idle wait", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
