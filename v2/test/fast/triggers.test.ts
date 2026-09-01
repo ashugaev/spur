@@ -1134,8 +1134,22 @@ describe("startConfiguredTriggers", () => {
         storedSnapshot([{ key: "comment:2", kind: "comment", text: "Replacement work survives." }]),
       );
       sessionState = "stale";
-      deliveryController = startConfiguredTriggers({ ...deps, bus: new EventBus() });
-      await vi.advanceTimersByTimeAsync(10_000);
+      const deliveryBus = new EventBus();
+      deliveryController = startConfiguredTriggers({ ...deps, bus: deliveryBus });
+      deliveryBus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [
+            {
+              key: "comment:2",
+              kind: "comment",
+              text: "Replacement work survives.",
+            },
+          ],
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1);
       expect(deliverMock).toHaveBeenCalledOnce();
       expect(deliverMock.mock.calls[0]?.[1]).toContain("Replacement work survives.");
       expect(deliverMock.mock.calls[0]?.[1]).not.toContain("Delayed stale event.");
