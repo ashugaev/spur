@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AutoPingSuppressionView } from "../../src/types.js";
 
 const getJsonMock = vi.fn();
 const postJsonMock = vi.fn();
@@ -52,6 +53,26 @@ function outputText(): string {
   return writeStdoutMock.mock.calls.map((call) => String(call[0])).join("\n");
 }
 
+function suppression(
+  suppressionId: string,
+  scope: "event" | "thread" | "subscription",
+): AutoPingSuppressionView {
+  const target: AutoPingSuppressionView["target"] =
+    scope === "event"
+      ? { kind: "occurrence", occurrenceId: "occurrence-1" }
+      : scope === "thread"
+        ? { kind: "github-review-thread", threadId: "thread-1" }
+        : { kind: "subscription" };
+  return {
+    suppressionId,
+    scope,
+    routeFingerprint: "route-1",
+    destination: { kind: "session", sessionId: "ses-1" },
+    target,
+    createdAt: "2026-09-01T00:00:00.000Z",
+  };
+}
+
 describe("auto-ping CLI", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -70,7 +91,7 @@ describe("auto-ping CLI", () => {
   it("posts an event unsubscribe with the session from SPUR_SESSION", async () => {
     process.env["SPUR_SESSION"] = "ses-1";
     postJsonMock.mockResolvedValue({
-      record: { id: "sup-1", scope: "event", createdAt: "2026-09-01T00:00:00.000Z" },
+      record: suppression("sup-1", "event"),
       created: true,
     });
 
@@ -127,18 +148,9 @@ describe("auto-ping CLI", () => {
     expect(postJsonMock).not.toHaveBeenCalled();
   });
 
-  it("lists auto-ping suppressions for an explicit human target session", async () => {
+  it("lists suppression ids accepted by resume", async () => {
     getJsonMock.mockResolvedValue({
-      records: [
-        {
-          id: "sup-1",
-          scope: "subscription",
-          sourceType: "github",
-          eventName: "github:comment",
-          triggerId: "review-comments",
-          destination: "ses-1",
-        },
-      ],
+      records: [suppression("sup-list-1", "subscription")],
     });
 
     await parseAutoPing(["auto-ping", "list", "--session", "ses-1"]);
@@ -148,12 +160,25 @@ describe("auto-ping CLI", () => {
       "/sessions/ses-1/auto-ping-suppressions",
       "/tmp/spur.yaml",
     );
-    expect(outputText()).toContain("sup-1\tsubscription\tactive\tgithub");
+    expect(outputText()).toContain("sup-list-1\tsubscription\tses-1");
+
+    postJsonMock.mockResolvedValue({
+      records: [suppression("sup-list-1", "subscription")],
+      removed: true,
+    });
+    await parseAutoPing(["auto-ping", "resume", "sup-list-1", "--session", "ses-1"]);
+    expect(postJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/ses-1/auto-ping-suppressions/sup-list-1/resume",
+      {},
+      "/tmp/spur.yaml",
+    );
+    expect(outputText()).toContain("Resumed auto-ping suppression sup-list-1.");
   });
 
   it("posts resume and preserves the raw JSON response under --json", async () => {
     postJsonMock.mockResolvedValue({
-      records: [{ id: "sup-1", scope: "thread" }],
+      records: [suppression("sup-1", "thread")],
       removed: false,
     });
 
@@ -166,7 +191,7 @@ describe("auto-ping CLI", () => {
       "/tmp/spur.yaml",
     );
     expect(JSON.parse(outputText())).toEqual({
-      records: [{ id: "sup-1", scope: "thread" }],
+      records: [suppression("sup-1", "thread")],
       removed: false,
     });
   });

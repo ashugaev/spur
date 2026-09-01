@@ -99,6 +99,11 @@ import {
   SESSION_STATES,
   isSessionState,
   type AppConfig,
+  type AutoPingResumeResponse,
+  type AutoPingScope,
+  type AutoPingSuppressionListResponse,
+  type AutoPingSuppressionView,
+  type AutoPingUnsubscribeResponse,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
   type RespawnSessionRequest,
@@ -690,23 +695,15 @@ function resolveAutoPingUnsubscribe(args: {
 }
 
 function renderAutoPingSuppression(record: AutoPingSuppressionView): string {
-  const parts = [
-    record.id,
-    record.scope,
-    record.state ?? "active",
-    record.sourceType,
-    record.sourceId,
-    record.eventName,
-    record.triggerId,
-    record.actionKind,
-    record.destination,
-    record.createdAt,
-    record.resumedAt ? `resumed ${record.resumedAt}` : undefined,
-  ].filter((part): part is string => typeof part === "string" && part.length > 0);
+  const destination =
+    record.destination.kind === "session" ? record.destination.sessionId : record.destination.kind;
+  const parts = [record.suppressionId, record.scope, destination, record.createdAt].filter(
+    (part): part is string => typeof part === "string" && part.length > 0,
+  );
   return parts.join("\t");
 }
 
-function renderAutoPingList(response: AutoPingListResponse): string {
+function renderAutoPingList(response: AutoPingSuppressionListResponse): string {
   if (response.records.length === 0) {
     return dimText("No auto-ping suppressions.");
   }
@@ -715,12 +712,12 @@ function renderAutoPingList(response: AutoPingListResponse): string {
 
 function renderAutoPingUnsubscribe(response: AutoPingUnsubscribeResponse): string {
   const prefix = response.created ? "Created" : "Already active";
-  return `${prefix} auto-ping ${response.record.scope} suppression ${response.record.id}.`;
+  return `${prefix} auto-ping ${response.record.scope} suppression ${response.record.suppressionId}.`;
 }
 
 function renderAutoPingResume(response: AutoPingResumeResponse): string {
   const prefix = response.removed ? "Resumed" : "Already resumed";
-  const ids = response.records.map((record) => record.id).join(", ");
+  const ids = response.records.map((record) => record.suppressionId).join(", ");
   return ids ? `${prefix} auto-ping suppression ${ids}.` : `${prefix} auto-ping suppression.`;
 }
 
@@ -763,36 +760,6 @@ type SubscribeCommandOptions = {
   list?: boolean;
   remove?: string;
   json?: boolean;
-};
-
-type AutoPingScope = "event" | "thread" | "subscription";
-
-type AutoPingSuppressionView = {
-  id: string;
-  scope: AutoPingScope;
-  state?: string;
-  createdAt?: string;
-  resumedAt?: string;
-  sourceType?: string;
-  sourceId?: string;
-  eventName?: string;
-  triggerId?: string;
-  actionKind?: string;
-  destination?: string;
-};
-
-type AutoPingListResponse = {
-  records: AutoPingSuppressionView[];
-};
-
-type AutoPingUnsubscribeResponse = {
-  record: AutoPingSuppressionView;
-  created: boolean;
-};
-
-type AutoPingResumeResponse = {
-  records: AutoPingSuppressionView[];
-  removed: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -3145,7 +3112,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "loading auto-ping suppressions",
         action: () =>
-          getJson<AutoPingListResponse>(
+          getJson<AutoPingSuppressionListResponse>(
             cliEntrypoint,
             `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions`,
             configPath,

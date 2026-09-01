@@ -50,12 +50,8 @@ describe("published interface contracts", () => {
     expect(daemonApi).toContain("`409` for pending grants or consumed-then-resumed grants");
     expect(configuration).toContain("`github-ci`: event and subscription for spawn triggers");
     expect(configuration).toContain("Cron, Sentry, and GitHub CI send triggers stay unsupported");
-    expect(agentSkill).toContain(
-      "Auto-ping: `spur auto-ping unsubscribe --event|--thread|--subscription <handle>`",
-    );
-    expect(agentSkill).toContain("Lists expose no handles or hashes");
-    expect(agentSkill).toContain("Unredeemed handles expire after 30 days");
-    expect(agentSkill).toContain("GitHub inline review comments");
+    expect(agentSkill).toContain("Auto-ping interface: `docs/commands.md#auto-ping`");
+    expect(agentSkill).toContain("HTTP routes: `docs/daemon-api.md`");
     expect(claudeSkill).toBe(agentSkill);
   });
 });

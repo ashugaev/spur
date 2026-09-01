@@ -20,8 +20,7 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   `SPUR_CLOSEOUT_OWNER=1`: assigned closeout owner for writable worktree, including transferred handoff ownership on reused workspace. `0`: non-owner, including read-only/shared sessions; auto-push Stop hook skips git and PR closeout. Missing: standalone hook enforcement stays active.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409), human override via `--todo-override-reason`. Contract: `docs/commands.md#todo`.
-  Auto-ping: `spur auto-ping unsubscribe --event|--thread|--subscription <handle>`, `list`, `resume <suppressionId>`. `SPUR_SESSION` owns target; different `--session` rejects; outside session pass `--session`. Scopes: event occurrence, provider thread, source/event/trigger/action subscription. Lists expose no handles or hashes. Contract: `docs/commands.md#auto-ping`.
-  Auto-ping handles are session credentials. `grant_not_ready`: retry the same command. Thread support: GitHub inline review comments, GitLab non-individual discussions, Telegram topics. Unredeemed handles expire after 30 days; event suppression after 24 hours unreferenced; thread/subscription until resume or route removal.
+  Auto-ping interface: `docs/commands.md#auto-ping`; HTTP routes: `docs/daemon-api.md`.
 
 SAFETY
 
@@ -44,5 +43,5 @@ DOCS
 
 EDITING THIS FILE
 
-  Reader has no checkout; resolve every doc path through the rule above, never a relative link.
+  Reader has no checkout; resolve each doc path through the rule above, never a relative link.
   Context only, never mechanism, repo internals, or a command/config field/workflow another doc owns.
