@@ -227,6 +227,8 @@ export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
       byId.set(item.id, item);
       continue;
     }
+    // No writer left: overrides ended when a human close stopped being gated.
+    // Ledgers written before that still replay, so the branch stays.
     if (event.type === "finish_override_recorded") {
       const unfinished = items
         .filter((item) => item.status === "open" || item.status === "held")
@@ -416,21 +418,3 @@ export function unfinishedTodo(projection: TodoProjection) {
   };
 }
 
-export function recordTodoFinishOverride(
-  dataDir: string,
-  sessionId: string,
-  reason: string,
-  actor: TodoActor,
-  projection: TodoProjection,
-): TodoProjection {
-  const unfinishedItemIds = projection.items
-    .filter((item) => item.status === "open" || item.status === "held")
-    .map((item) => item.id);
-  appendEvent(dataDir, {
-    ...eventBase(sessionId, actor),
-    type: "finish_override_recorded",
-    reason: reason.trim(),
-    unfinishedItemIds,
-  });
-  return replayTodo(dataDir, sessionId);
-}
