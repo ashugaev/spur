@@ -1,4 +1,4 @@
-import { chmod, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -83,8 +83,12 @@ async function makeStatusFailureStub(binDir: string): Promise<void> {
 }
 
 async function runAutoPushHook(args: string[], env: NodeJS.ProcessEnv): Promise<HookRun> {
+  const processEnv = { ...process.env };
+  if (!("SPUR_CLOSEOUT_OWNER" in env)) delete processEnv.SPUR_CLOSEOUT_OWNER;
+  if (!("SPUR_SESSION" in env)) delete processEnv.SPUR_SESSION;
+  if (!("SPUR_SESSION_TOOL_DIR" in env)) delete processEnv.SPUR_SESSION_TOOL_DIR;
   const { stderr, stdout } = await execFileAsync(autoPushHook, args, {
-    env: { ...process.env, ...env },
+    env: { ...processEnv, ...env },
   });
   return { stderr: String(stderr), stdout: String(stdout) };
 }
@@ -103,6 +107,20 @@ function getStopHookCommands(content: string): string[] {
 }
 
 describe("auto-push Stop hook", () => {
+  it("exits before git or gh for a non-owner session", async () => {
+    const { binDir, calledPath } = await makeGhStub();
+
+    const result = await runAutoPushHook(["codex"], {
+      CLAUDE_PROJECT_DIR: "/path/that/does/not/exist",
+      GH_CALLED_PATH: calledPath,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      SPUR_CLOSEOUT_OWNER: "0",
+    });
+
+    expect(result).toEqual({ stderr: "", stdout: "" });
+    await expect(readFile(calledPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("emits valid Codex Stop JSON for dirty branches without a PR", async () => {
     const repoDir = await makeDirtyRepo();
     const { binDir, calledPath } = await makeGhStub();
@@ -136,6 +154,86 @@ describe("auto-push Stop hook", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("$github");
     expect(result.stdout).toContain("Problems: uncommitted no-pr");
+  });
+
+  it("emits one block for an unchanged Spur closeout obligation", async () => {
+    const repoDir = await makeDirtyRepo();
+    const toolDir = await makeTempDir("spur-auto-push-tools-");
+    const { binDir, calledPath } = await makeGhStub();
+    const env = {
+      CLAUDE_PROJECT_DIR: repoDir,
+      GH_CALLED_PATH: calledPath,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      SPUR_CLOSEOUT_OWNER: "1",
+      SPUR_SESSION: "api-1",
+      SPUR_SESSION_TOOL_DIR: toolDir,
+    };
+
+    const first = await runAutoPushHook(["codex"], env);
+    const second = await runAutoPushHook(["codex"], env);
+
+    expect(JSON.parse(first.stdout)).toMatchObject({ decision: "block" });
+    expect(second).toEqual({ stderr: "", stdout: "" });
+    await expect(readFile(join(toolDir, "auto-push-stop-state"), "utf8")).resolves.toMatch(
+      /^[a-f0-9]{64}\n$/,
+    );
+    const markerStat = await stat(join(toolDir, "auto-push-stop-state"));
+    expect(markerStat.mode & 0o777).toBe(0o600);
+  });
+
+  it.each(["branch", "head", "porcelain", "problem-set"])(
+    "permits one new block after a %s change",
+    async (change) => {
+      const repoDir = await makeCommittedRepo();
+      await writeFile(join(repoDir, "dirty.txt"), "dirty\n", "utf8");
+      const toolDir = await makeTempDir("spur-auto-push-tools-");
+      const { binDir, calledPath } = await makeGhStub();
+      const env = {
+        CLAUDE_PROJECT_DIR: repoDir,
+        GH_CALLED_PATH: calledPath,
+        GH_EXIT_CODE: "1",
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        SPUR_CLOSEOUT_OWNER: "1",
+        SPUR_SESSION: "api-1",
+        SPUR_SESSION_TOOL_DIR: toolDir,
+      };
+      await runAutoPushHook([], env);
+
+      if (change === "branch") {
+        await execFileAsync("git", ["switch", "-c", "feature/changed"], { cwd: repoDir });
+      } else if (change === "head") {
+        await execFileAsync("git", ["commit", "--allow-empty", "-m", "changed head"], {
+          cwd: repoDir,
+        });
+      } else if (change === "porcelain") {
+        await writeFile(join(repoDir, "another.txt"), "changed\n", "utf8");
+      } else {
+        env.GH_EXIT_CODE = "0";
+      }
+
+      const changed = await runAutoPushHook([], env);
+      const repeated = await runAutoPushHook([], env);
+
+      expect(changed.stdout).toContain("Use the github close-out gate");
+      expect(repeated).toEqual({ stderr: "", stdout: "" });
+    },
+  );
+
+  it("emits no block when the per-session marker cannot be written", async () => {
+    const repoDir = await makeDirtyRepo();
+    const toolParent = await makeTempDir("spur-auto-push-tools-");
+    const { binDir, calledPath } = await makeGhStub();
+
+    const result = await runAutoPushHook(["codex"], {
+      CLAUDE_PROJECT_DIR: repoDir,
+      GH_CALLED_PATH: calledPath,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      SPUR_CLOSEOUT_OWNER: "1",
+      SPUR_SESSION: "api-1",
+      SPUR_SESSION_TOOL_DIR: join(toolParent, "missing"),
+    });
+
+    expect(result).toEqual({ stderr: "", stdout: "" });
   });
 
   it("skips PR lookup for a clean branch with no diff from origin HEAD", async () => {

@@ -425,6 +425,40 @@ describe("session workspaceId normalization", () => {
 
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-9");
   });
+
+  it("preserves explicit closeout ownership through a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      workspaceId: "api-1",
+      tmuxSession: "api-2",
+      closeoutOwner: true,
+    });
+
+    expect(readSession(dataDir, "api-2")?.closeoutOwner).toBe(true);
+  });
+
+  it.each([
+    { name: "exclusive writable worktree", overrides: {}, expected: true },
+    { name: "restricted worktree", overrides: { restrictWrites: true }, expected: false },
+    { name: "shared checkout", overrides: { worktree: false }, expected: false },
+    { name: "reused workspace", overrides: { workspaceId: "api-1" }, expected: false },
+    { name: "malformed ownership", overrides: { closeoutOwner: "yes" }, expected: true },
+  ])(
+    "derives conservative ownership for a legacy $name record",
+    async ({ overrides, expected }) => {
+      const dataDir = await newDataDir();
+      writeSession(dataDir, {
+        ...legacyBase,
+        ...overrides,
+        id: "api-2",
+        tmuxSession: "api-2",
+      } as SessionRecord);
+
+      expect(readSession(dataDir, "api-2")?.closeoutOwner).toBe(expected);
+    },
+  );
 });
 
 describe("staleSidecars", () => {
