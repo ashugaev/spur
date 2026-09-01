@@ -54,9 +54,10 @@
         href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
       />
       <style>
-        .rv {
-          opacity: 1;
-          transform: none;
+        html .rv {
+          opacity: 1 !important;
+          transform: none !important;
+          transition: none !important;
         }
         h1 .line > span {
           transform: none;
@@ -155,7 +156,7 @@
                 "name": "Does my code leave the box?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Only where your agent already sends it. Spur itself is a local daemon on loopback; spur init opens the UI to your tailnet. There is no Spur cloud, no account, no seat."
+                  "text": "Spur stores its state on your machine and has no Spur cloud. Agent CLIs and configured integrations still send data to their own providers. The web UI binds to loopback; the default Tailscale setup adds your tailnet IP, and public exposure is an explicit override."
                 }
               }
             ]
@@ -760,128 +761,26 @@
         opacity: 1;
         transform: none;
       }
-
-      /* ── scenario timeline ─────────────────────────────────────────── */
-      .tl {
-        list-style: none;
-        margin: 0 0 48px;
-        padding: 0;
-        border-left: 1px solid var(--b);
-      }
-      .tl li {
-        display: flex;
-        gap: 16px;
-        align-items: baseline;
-        padding: 11px 0 11px 22px;
-        position: relative;
-        flex-wrap: wrap;
-      }
-      .tl li::before {
-        content: "";
+      .sr-only {
         position: absolute;
-        left: -4px;
-        top: 19px;
-        width: 7px;
-        height: 7px;
-        background: var(--b-strong);
-      }
-      .tl li:last-child::before {
-        background: var(--brand);
-      }
-      .tl .t {
-        color: var(--brand);
-        font-size: 12px;
-        letter-spacing: 0.06em;
-        flex: none;
-        width: 52px;
-      }
-      .tl .e {
-        color: var(--t2);
-        font-size: var(--step-0);
-        line-height: 1.65;
-        flex: 1;
-        min-width: 220px;
-      }
-
-      /* ── pipeline ──────────────────────────────────────────────────── */
-      .pipe {
-        display: grid;
-        gap: 1px;
-        background: var(--b-sub);
-        border: 1px solid var(--b-sub);
-      }
-      @media (min-width: 900px) {
-        .pipe {
-          grid-template-columns: 1fr 1fr 1fr;
-        }
-      }
-      .pipe-col {
-        background: var(--bg);
-        padding: 32px 28px 36px;
-        position: relative;
-        overflow: hidden;
-      }
-      .pipe-col h3 {
-        font-size: var(--step-1);
-        letter-spacing: -0.02em;
-        margin-bottom: 6px;
-      }
-      .pipe-col .step {
-        font-size: 10.5px;
-        letter-spacing: 0.22em;
-        color: var(--brand);
-        text-transform: uppercase;
-        margin-bottom: 14px;
-      }
-      .pipe-col p {
-        color: var(--t2);
-        font-size: var(--step-0);
-        margin-bottom: 18px;
-      }
-      .chips {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-      }
-      .chip {
-        border: 1px solid var(--b);
-        padding: 4px 9px;
-        font-size: 11px;
-        color: var(--t2);
-        transition: 0.2s;
-      }
-      .flow {
-        position: absolute;
-        left: 0;
-        bottom: 0;
+        width: 1px;
         height: 1px;
-        width: 100%;
-        background: var(--brand);
-        transform: scaleX(0);
-        transform-origin: left;
-      }
-      .pipe.in .flow {
-        animation: handoff 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-      }
-      .pipe.in .pipe-col:nth-child(2) .flow {
-        animation-delay: 0.5s;
-      }
-      .pipe.in .pipe-col:nth-child(3) .flow {
-        animation-delay: 1s;
-      }
-      @keyframes handoff {
-        to {
-          transform: scaleX(1);
-        }
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
       }
 
       /* ── hero fan-out ──────────────────────────────────────────────── */
       .fanout {
         position: absolute;
         right: var(--gut);
-        top: 56%;
-        transform: translateY(-46%);
-        width: min(34vw, 380px);
+        top: 52%;
+        transform: translateY(-42%);
+        width: min(37vw, 460px);
+        margin: 0;
         pointer-events: none;
       }
       @media (min-width: 1121px) {
@@ -889,7 +788,7 @@
         header.hero > h1,
         header.hero > .lede,
         header.hero > .hero-cta {
-          max-width: calc(100% - 420px);
+          max-width: calc(100% - 500px);
         }
       }
       .fanout svg {
@@ -898,31 +797,49 @@
         height: auto;
         overflow: visible;
       }
-      /* Below the two-column hero it stops being an aside and becomes a block
-         under the CTAs — the fleet picture is the page's main claim, so it
-         reflows rather than disappearing. */
       @media (max-width: 1120px) {
         .fanout {
           position: static;
           transform: none;
           width: 100%;
-          max-width: 460px;
+          max-width: 520px;
           margin-top: clamp(36px, 6vh, 56px);
-        }
-        .fo-lbl {
-          font-size: 15px;
-        }
-        .fo-sig {
-          font-size: 13px;
-        }
-        .fo-cap {
-          font-size: 13px;
         }
       }
       .fo-wire {
         fill: none;
-        stroke: url(#fo-wire-fade);
+        stroke: var(--b);
         stroke-width: 1.25;
+      }
+      .fo-wire-main {
+        stroke: var(--b-strong);
+      }
+      .fo-source rect,
+      .fo-agent rect,
+      .fo-you-frame,
+      .fo-frame {
+        fill: var(--bg);
+        stroke: var(--b);
+        stroke-width: 1.5;
+        transition: stroke 0.25s;
+      }
+      .fo-source.is-active rect,
+      .fo-agent.is-active rect {
+        stroke: var(--brand);
+      }
+      .fo-agent.is-ready rect {
+        stroke: var(--ready);
+      }
+      .fo-icon {
+        fill: var(--t3);
+        stroke: none;
+      }
+      .fo-icon-stroke {
+        fill: none;
+        stroke: var(--t3);
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
       .fo-you {
         fill: var(--t1);
@@ -951,14 +868,8 @@
           opacity: 0;
         }
       }
-      .fo-you-frame {
-        fill: none;
-        stroke: var(--b);
-        stroke-width: 1.5;
-      }
       .fo-you-frame,
       .fo-frame {
-        transition: stroke 0.25s;
         transform-box: fill-box;
         transform-origin: center;
       }
@@ -977,7 +888,7 @@
       .fo-cap {
         fill: var(--t4);
         font-family: var(--mono);
-        font-size: 10px;
+        font-size: 12px;
         letter-spacing: 0.18em;
         text-transform: uppercase;
         text-anchor: middle;
@@ -999,61 +910,42 @@
         }
       }
       .fo-frame {
-        fill: var(--bg);
         stroke: var(--b-strong);
-        stroke-width: 1.5;
       }
-      .fo-lbl {
+      .fo-primary-label {
         fill: var(--t3);
         font-family: var(--mono);
-        font-size: 11px;
+        font-size: 16px;
+        font-weight: 500;
       }
-      .fo-lbl-hot {
+      .fo-source.is-active .fo-primary-label,
+      .fo-agent.is-active .fo-primary-label,
+      .fo-agent.is-ready .fo-primary-label {
         fill: var(--t1);
       }
-      .fo-sig {
+      .fo-secondary-label,
+      .fo-agent-state {
         fill: var(--t4);
         font-family: var(--mono);
-        font-size: 9.5px;
+        font-size: 11px;
         letter-spacing: 0.1em;
+      }
+      .fo-agent-state {
         opacity: 0;
-        transition: opacity 0.3s;
+        transition: opacity 0.25s;
       }
-      .fo-dot {
-        transition: fill 0.35s;
-      }
-      .d-idle {
-        fill: var(--t4);
+      .fo-agent.is-active .fo-agent-state,
+      .fo-agent.is-ready .fo-agent-state {
+        opacity: 1;
       }
       .fo-pkt {
         fill: var(--brand);
-        offset-rotate: 0deg;
-        offset-distance: 0%;
         opacity: 0;
       }
-      .fo-p0 {
-        offset-path: path("M46 160 H116");
-      }
-      .fo-p1 {
-        offset-path: path("M174 160 C 245 160 255 28 318 28");
-      }
-      .fo-p2 {
-        offset-path: path("M174 160 C 245 160 255 72 318 72");
-      }
-      .fo-p3 {
-        offset-path: path("M174 160 C 245 160 255 116 318 116");
-      }
-      .fo-p4 {
-        offset-path: path("M174 160 H318");
-      }
-      .fo-p5 {
-        offset-path: path("M174 160 C 245 160 255 204 318 204");
-      }
-      .fo-p6 {
-        offset-path: path("M174 160 C 245 160 255 248 318 248");
-      }
-      .fo-p7 {
-        offset-path: path("M174 160 C 245 160 255 292 318 292");
+      @media (max-width: 430px) {
+        .fo-secondary-label:not(.fo-context-label) {
+          display: none;
+        }
       }
 
       /* ── architecture diagram ──────────────────────────────────────── */
@@ -1061,6 +953,7 @@
         border: 1px solid var(--b);
         background: var(--term);
         padding: clamp(18px, 3vw, 34px);
+        margin: 0;
       }
       .arch svg {
         display: block;
@@ -1073,152 +966,57 @@
         font-size: 13px;
         fill: var(--t2);
       }
-      .a-dev rect,
-      .a-dev line {
+      .arch-route--mobile {
+        display: none !important;
+      }
+      .a-stage > rect {
         fill: none;
         stroke: var(--b-strong);
         stroke-width: 1.5;
       }
-      .a-dev text {
-        text-anchor: middle;
-        font-size: 12px;
-        fill: var(--t3);
-      }
-      .a-wire path {
+      .a-route {
         fill: none;
-        stroke: var(--b);
+        stroke: var(--b-strong);
         stroke-width: 1.5;
       }
-      .a-node rect {
-        fill: none;
-        stroke: var(--brand);
-        stroke-width: 1.5;
-      }
-      .a-node-t {
+      .a-stage-label {
         text-anchor: middle;
-        fill: var(--brand);
-        font-size: 14px;
+        fill: var(--t1) !important;
+        font-size: 14px !important;
         font-weight: 700;
         letter-spacing: 0.14em;
       }
-      .a-node-s {
+      .a-stage-sub {
         text-anchor: middle;
         fill: var(--t3);
-        font-size: 11px;
+        font-size: 12px;
       }
       .a-pkt {
         fill: var(--brand);
+        offset-rotate: 0deg;
+        animation: arch-route 5.8s ease-in-out infinite;
       }
-      .a-pkt-in {
-        animation: pktin 2.6s linear infinite;
+      .arch-route--desktop .a-pkt {
+        offset-path: path("M110 200 H390 H550 H890");
       }
-      .a-pkt-out {
-        animation: pktout 2.6s linear infinite;
-        animation-delay: 1.3s;
-        fill: var(--working);
+      .arch-route--mobile .a-pkt {
+        offset-path: path("M170 64 V145 V242");
       }
-      @keyframes pktin {
-        from {
-          transform: translateX(384px);
+      @keyframes arch-route {
+        0%,
+        100% {
+          offset-distance: 0%;
           opacity: 0;
         }
-        12% {
+        8%,
+        92% {
           opacity: 1;
         }
-        88% {
-          opacity: 1;
-        }
-        to {
-          transform: translateX(512px);
-          opacity: 0;
+        44%,
+        56% {
+          offset-distance: 100%;
         }
       }
-      @keyframes pktout {
-        from {
-          transform: translateX(512px);
-          opacity: 0;
-        }
-        12% {
-          opacity: 1;
-        }
-        88% {
-          opacity: 1;
-        }
-        to {
-          transform: translateX(384px);
-          opacity: 0;
-        }
-      }
-      .a-box > rect,
-      .a-box line {
-        fill: none;
-        stroke: var(--b-strong);
-        stroke-width: 1.5;
-      }
-      .a-box-t {
-        fill: var(--t1);
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 0.16em;
-      }
-      .a-box > rect.a-daemon {
-        fill: rgba(255, 61, 154, 0.12);
-        stroke: var(--brand);
-        stroke-width: 1.5;
-      }
-      .a-daemon-t {
-        fill: var(--brand);
-        font-size: 12px;
-      }
-      .a-ses rect:first-child {
-        fill: none;
-        stroke: var(--b);
-        stroke-width: 1.5;
-      }
-      .a-ses text {
-        fill: var(--t1);
-        font-size: 12px;
-      }
-      .a-ag {
-        fill: var(--t3) !important;
-        font-size: 11px !important;
-      }
-      .a-br {
-        fill: var(--t3) !important;
-        font-size: 11px !important;
-        text-anchor: end;
-      }
-      .d-working {
-        fill: var(--working);
-        animation: pulse2 1.6s infinite;
-      }
-      .d-attention {
-        fill: var(--attention);
-        animation: pulse2 1.2s infinite;
-      }
-      .d-ready {
-        fill: var(--ready);
-      }
-      .d-error {
-        fill: var(--error);
-        animation: pulse2 1.4s infinite;
-      }
-      .a-foot {
-        fill: var(--t3);
-        font-size: 11px;
-        letter-spacing: 0.08em;
-      }
-      .arch-note {
-        margin-top: 22px;
-        color: var(--t2);
-        font-size: var(--step-0);
-        max-width: 64ch;
-      }
-      /* Scale to fit rather than scroll: an inner scrollbar hides half the
-         diagram behind a gesture nobody makes. Type is bumped in user units so
-         it survives the scale-down. */
-      /* Wrap the commands instead of hiding them behind a horizontal scroll.
-         pre-wrap breaks at spaces, so flags stay whole. */
       @media (max-width: 900px) {
         .cli pre {
           white-space: pre-wrap;
@@ -1228,231 +1026,143 @@
         .arch {
           padding: 14px 10px;
         }
-        .a-box-t {
-          font-size: 15px;
+        .arch-route--desktop {
+          display: none !important;
         }
-        .a-ses text {
-          font-size: 14px;
-        }
-        .a-ag,
-        .a-br {
-          font-size: 13px !important;
-        }
-        .a-foot {
-          font-size: 13px;
-        }
-        .a-node-t {
-          font-size: 16px;
-        }
-        .a-node-s,
-        .a-dev text {
-          font-size: 13px;
-        }
-        .a-daemon-t {
-          font-size: 14px;
+        .arch-route--mobile {
+          display: block !important;
         }
       }
 
-      /* ── workflow loop ─────────────────────────────────────────────── */
-      .wf {
-        margin-top: clamp(40px, 6vh, 72px);
+      /* ── incident flow ─────────────────────────────────────────────── */
+      .incident {
+        max-width: 820px;
         border: 1px solid var(--b);
         background: var(--term);
-        padding: clamp(20px, 3vw, 34px);
+        padding: clamp(22px, 4vw, 40px);
       }
-      .wf-head {
-        margin-bottom: 26px;
-        max-width: 68ch;
-      }
-      .wf-head p {
-        margin-top: 12px;
-        color: var(--t2);
-        font-size: var(--step-0);
-        line-height: 1.7;
-      }
-      .wf svg {
-        display: block;
-        width: 100%;
-        height: auto;
-      }
-      .wf text {
-        font-family: var(--mono);
-      }
-      .wf-track {
-        stroke: var(--b);
-        stroke-width: 1.5;
-      }
-      .wf-token {
-        fill: var(--brand);
-        animation: wftok 9s steps(1) infinite;
-      }
-      @keyframes wftok {
-        0%,
-        16.6% {
-          transform: translateX(70px);
-        }
-        16.7%,
-        33.3% {
-          transform: translateX(234px);
-        }
-        33.4%,
-        50% {
-          transform: translateX(398px);
-        }
-        50.1%,
-        66.6% {
-          transform: translateX(562px);
-        }
-        66.7%,
-        83.3% {
-          transform: translateX(726px);
-        }
-        83.4%,
-        100% {
-          transform: translateX(890px);
-        }
-      }
-      .wf-dot {
-        fill: var(--t4);
-        animation: wfdot 9s linear infinite;
-        animation-delay: calc(var(--i) * 1.5s);
-      }
-      @keyframes wfdot {
-        0%,
-        16% {
-          fill: var(--brand);
-        }
-        17%,
-        100% {
-          fill: var(--t4);
-        }
-      }
-      .wf-card {
-        fill: none;
-        stroke: var(--b);
-        stroke-width: 1.5;
-        animation: wfcard 9s linear infinite;
-        animation-delay: calc(var(--i) * 1.5s);
-      }
-      @keyframes wfcard {
-        0%,
-        16% {
-          stroke: var(--brand);
-        }
-        17%,
-        100% {
-          stroke: var(--b);
-        }
-      }
-      .wf-t {
-        fill: var(--t1);
-        font-size: 13px;
-        font-weight: 700;
-      }
-      .wf-s {
-        fill: var(--t3);
-        font-size: 11px;
-      }
-      .wf-loop {
-        fill: none;
-        stroke: var(--b);
-        stroke-width: 1.5;
-        stroke-dasharray: 4 5;
-      }
-      .wf-arrow {
-        fill: none;
-        stroke: var(--b-strong);
-        stroke-width: 1.5;
-      }
-      .wf-loopt {
-        fill: var(--t3);
-        font-size: 11px;
-        text-anchor: middle;
-        letter-spacing: 0.1em;
-      }
-      /* Visually hidden, not display:none — display:none would drop the only
-         accessible copy of the stages out of the a11y tree above 860px, where
-         the SVG that replaces it visually is aria-hidden. */
-      .wf-list,
-      .wf-loop-note {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        margin: -1px;
+      .incident-flow {
+        list-style: none;
+        margin: 0;
         padding: 0;
-        border: 0;
-        overflow: hidden;
-        clip-path: inset(50%);
       }
-      @media (max-width: 860px) {
-        .wf svg {
-          display: none;
+      .incident-step {
+        position: relative;
+        padding: 0 0 30px 38px;
+        min-width: 0;
+      }
+      .incident-step:last-child {
+        padding-bottom: 0;
+      }
+      .incident-step::before {
+        content: "";
+        position: absolute;
+        left: 7px;
+        top: 8px;
+        bottom: -8px;
+        width: 1px;
+        background: var(--b);
+      }
+      .incident-step:last-child::before {
+        display: none;
+      }
+      .incident-dot {
+        position: absolute;
+        left: 2px;
+        top: 4px;
+        width: 11px;
+        height: 11px;
+        border: 1px solid var(--b-strong);
+        background: var(--term);
+        animation: incident-dot 11s linear infinite;
+        animation-delay: calc(var(--i) * 2.2s);
+      }
+      .incident-step h3 {
+        font-size: max(11px, var(--step-1));
+        letter-spacing: -0.02em;
+        margin-bottom: 5px;
+      }
+      .incident-step > p {
+        color: var(--t2);
+        line-height: 1.65;
+      }
+      @keyframes incident-dot {
+        0%,
+        17% {
+          border-color: var(--brand);
+          background: var(--brand);
+          transform: scale(1.25);
         }
-        .wf-list {
-          display: block;
-          position: static;
-          width: auto;
-          height: auto;
-          overflow: visible;
-          clip-path: none;
-          white-space: normal;
-          list-style: none;
-          margin: 0;
-          padding: 0;
-          border: 0;
-          border-left: 1px solid var(--b);
+        20%,
+        100% {
+          border-color: var(--b-strong);
+          background: var(--term);
+          transform: scale(1);
         }
-        .wf-list li {
-          position: relative;
-          padding: 12px 0 12px 22px;
+      }
+      .agent-work {
+        margin-top: 16px;
+        border: 1px solid var(--b);
+        padding: 16px;
+        display: grid;
+        gap: 10px;
+      }
+      .agent-work-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--t1);
+        font-size: 12px;
+      }
+      .agent-activity {
+        width: 8px;
+        height: 8px;
+        background: var(--working);
+        animation: agent-pulse 1.1s ease-in-out infinite;
+      }
+      @keyframes agent-pulse {
+        50% {
+          opacity: 0.25;
+          transform: scale(0.7);
         }
-        .wf-list li::before {
-          content: "";
-          position: absolute;
-          left: -5px;
-          top: 20px;
-          width: 9px;
-          height: 9px;
-          background: var(--t4);
-          animation: wfstep 9s linear infinite;
-          animation-delay: calc(var(--i) * 1.5s);
-        }
-        @keyframes wfstep {
-          0%,
-          16% {
-            background: var(--brand);
-          }
-          17%,
-          100% {
-            background: var(--t4);
-          }
-        }
-        .wf-list b {
-          display: block;
+      }
+      .agent-states {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .agent-state {
+        border: 1px solid var(--b-sub);
+        padding: 8px;
+        color: var(--t3);
+        font-size: 11px;
+        line-height: 1.45;
+        animation: agent-state 6.6s linear infinite;
+        animation-delay: calc(var(--state) * 2.2s);
+      }
+      @keyframes agent-state {
+        0%,
+        28% {
+          border-color: var(--brand);
           color: var(--t1);
-          font-size: var(--step-0);
-          font-weight: 700;
+          opacity: 1;
         }
-        .wf-list span {
-          display: block;
-          margin-top: 3px;
+        34%,
+        100% {
+          border-color: var(--b-sub);
           color: var(--t3);
-          font-size: 11.5px;
+          opacity: 0.55;
         }
-        .wf-loop-note {
-          display: block;
-          position: static;
-          width: auto;
-          height: auto;
-          overflow: visible;
-          clip-path: none;
-          white-space: normal;
-          margin: 16px 0 0;
-          padding: 0;
-          border: 0;
-          color: var(--t4);
-          font-size: 11px;
-          letter-spacing: 0.12em;
+      }
+      @media (max-width: 520px) {
+        .incident {
+          padding: 20px 16px;
+        }
+        .incident-step {
+          padding-left: 30px;
+        }
+        .agent-states {
+          grid-template-columns: 1fr;
         }
       }
 
@@ -1622,13 +1332,6 @@
         .cell:hover {
           background: rgba(255, 255, 255, 0.035);
         }
-        .pipe-col:hover {
-          background: rgba(255, 255, 255, 0.02);
-        }
-        .chip:hover {
-          color: var(--t1);
-          border-color: var(--brand);
-        }
         .row:hover {
           background: rgba(255, 255, 255, 0.03);
         }
@@ -1761,16 +1464,9 @@
         h1 .line > span {
           transform: none;
         }
-        .flow {
-          transform: scaleX(1);
-        }
         .a-pkt,
-        .wf-token,
         .fo-pkt {
           display: none;
-        }
-        .fo-dot {
-          opacity: 1;
         }
         .fo-you g {
           opacity: 1;
@@ -1778,8 +1474,9 @@
         .fo-you g + g {
           display: none;
         }
-        .wf-dot {
-          fill: var(--brand);
+        .agent-state {
+          opacity: 1;
+          color: var(--t1);
         }
       }
     </style>
@@ -1843,90 +1540,117 @@
             <a class="btn" href="#dashboard">See it running</a>
           </div>
 
-          <div class="fanout" aria-hidden="true">
-            <svg viewBox="0 0 420 338">
-              <defs>
-                <linearGradient id="fo-wire-fade" gradientUnits="userSpaceOnUse" x1="56" x2="330">
-                  <stop offset="0" stop-color="var(--b)" />
-                  <stop offset="0.42" stop-color="var(--b-strong)" />
-                  <stop offset="1" stop-color="var(--b)" />
-                </linearGradient>
-              </defs>
-              <path class="fo-wire" d="M56 160 H116" />
-              <path class="fo-wire" d="M174 160 C 245 160 255 28 318 28" />
-              <path class="fo-wire" d="M174 160 C 245 160 255 72 318 72" />
-              <path class="fo-wire" d="M174 160 C 245 160 255 116 318 116" />
-              <path class="fo-wire" d="M174 160 H318" />
-              <path class="fo-wire" d="M174 160 C 245 160 255 204 318 204" />
-              <path class="fo-wire" d="M174 160 C 245 160 255 248 318 248" />
-              <path class="fo-wire" d="M174 160 C 245 160 255 292 318 292" />
+          <figure class="fanout" role="img" aria-labelledby="fanout-desc">
+            <svg viewBox="0 0 460 400" aria-hidden="true" focusable="false">
+              <path class="fo-wire" d="M124 112 C155 112 158 190 190 190" />
+              <path class="fo-wire" d="M124 158 C155 158 158 190 190 190" />
+              <path class="fo-wire" d="M124 204 H190" />
+              <path class="fo-wire" d="M124 250 C155 250 158 190 190 190" />
+              <path class="fo-wire" d="M124 296 C155 296 158 190 190 190" />
+              <path class="fo-wire" d="M124 342 C155 342 158 190 190 190" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 112 334 112" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 174 334 174" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 236 334 236" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 298 334 298" />
+              <path class="fo-wire fo-wire-main" d="M220 160 V76" />
 
-              <rect class="fo-you-frame" x="4" y="134" width="52" height="52" />
-              <g class="fo-you" transform="translate(12.6 142.6) scale(1.45)">
-                <g><path d="M12 12 L18.89 6.21 A9 9 0 1 0 18.89 17.79 Z" /></g>
-                <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
-                <g><path d="M12 12 L20.80 10.13 A9 9 0 1 0 20.80 13.87 Z" /></g>
-                <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
+              <g class="fo-user">
+                <rect class="fo-you-frame" x="194" y="16" width="52" height="52" />
+                <g class="fo-you" transform="translate(202.6 24.6) scale(1.45)">
+                  <g><path d="M12 12 L18.89 6.21 A9 9 0 1 0 18.89 17.79 Z" /></g>
+                  <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
+                  <g><path d="M12 12 L20.80 10.13 A9 9 0 1 0 20.80 13.87 Z" /></g>
+                  <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
+                </g>
+                <text class="fo-cap" x="220" y="88">you</text>
               </g>
-              <text class="fo-cap" x="30" y="202">you</text>
 
-              <rect class="fo-frame" x="116" y="131" width="58" height="58" />
-              <g transform="translate(127 142) scale(1.5)">
-                <g class="fo-logo">
+              <g class="fo-hub">
+                <rect class="fo-frame" x="190" y="160" width="60" height="60" />
+                <g transform="translate(202 172) scale(1.5)">
+                  <g class="fo-logo">
+                    <path
+                      d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4"
+                    />
+                  </g>
+                </g>
+                <text class="fo-cap" x="220" y="238">Spur</text>
+              </g>
+
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="112">
+                <rect x="6" y="94" width="118" height="36" />
+                <g class="fo-icon" transform="translate(16 104) scale(.95)">
                   <path
-                    d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4"
+                    d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
                   />
                 </g>
+                <text class="fo-primary-label" x="40" y="111">GitHub</text>
+                <text class="fo-secondary-label" x="40" y="123">PR / CI</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="158">
+                <rect x="6" y="140" width="118" height="36" />
+                <g class="fo-icon" transform="translate(16 150) scale(.95)">
+                  <path
+                    d="M8.001 15.15 10.945 6.09h-5.89L8 15.15Z M8.001 15.15 5.055 6.09H.925l7.076 9.06Z M.925 6.09.03 8.845a.611.611 0 0 0 .221.683l7.75 5.622L.925 6.09Z M.925 6.09h4.13L3.28.633a.306.306 0 0 0-.581 0L.925 6.09Z M8.001 15.15 10.945 6.09h4.13L8 15.15Z M15.075 6.09l.895 2.755a.611.611 0 0 1-.221.683l-7.75 5.622 7.076-9.06Z M15.075 6.09h-4.13L12.72.633a.306.306 0 0 1 .581 0l1.774 5.457Z"
+                  />
+                </g>
+                <text class="fo-primary-label" x="40" y="163">GitLab</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="204">
+                <rect x="6" y="186" width="118" height="36" />
+                <path class="fo-icon-stroke" d="M17 210l5-13 5 13m-8-5h6" />
+                <text class="fo-primary-label" x="40" y="209">Sentry</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="250">
+                <rect x="6" y="232" width="118" height="36" />
+                <path class="fo-icon" d="M15 249l15-7-5 16-4-5-3 3 1-5z" />
+                <text class="fo-primary-label" x="40" y="255">Telegram</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="296">
+                <rect x="6" y="278" width="118" height="36" />
+                <circle class="fo-icon-stroke" cx="22" cy="296" r="8" />
+                <path class="fo-icon-stroke" d="M22 291v5l4 2" />
+                <text class="fo-primary-label" x="40" y="301">cron</text>
+              </g>
+              <g class="fo-source" data-source-kind="context">
+                <rect x="6" y="324" width="118" height="36" />
+                <g class="fo-icon" transform="translate(14 333) scale(.75)">
+                  <path
+                    d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53zM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77zM2 11.6a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72A4.362 4.362 0 0 0 12.48 22V12.44a.84.84 0 0 0-.84-.84H2z"
+                  />
+                </g>
+                <text class="fo-primary-label" x="40" y="341">Jira</text>
+                <text class="fo-secondary-label fo-context-label" x="40" y="353">backlog</text>
               </g>
 
-              <g class="fo-pkt-wrap">
-                <rect class="fo-pkt fo-p0" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-p1" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-p2" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-p3" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-p4" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-p5" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-p6" x="0" y="0" width="7" height="7" />
-                <rect class="fo-pkt fo-p7" x="0" y="0" width="7" height="7" />
+              <g class="fo-agent" data-x="334" data-y="112">
+                <rect x="334" y="92" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="110">claude</text>
+                <text class="fo-agent-state" x="346" y="124">working</text>
+              </g>
+              <g class="fo-agent" data-x="334" data-y="174">
+                <rect x="334" y="154" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="172">codex</text>
+                <text class="fo-agent-state" x="346" y="186">working</text>
+              </g>
+              <g class="fo-agent" data-x="334" data-y="236">
+                <rect x="334" y="216" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="234">cursor</text>
+                <text class="fo-agent-state" x="346" y="248">working</text>
+              </g>
+              <g class="fo-agent" data-x="334" data-y="298">
+                <rect x="334" y="278" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="296">opencode</text>
+                <text class="fo-agent-state" x="346" y="310">working</text>
               </g>
 
-              <g class="fo-node">
-                <rect class="fo-dot d-idle" x="318" y="24" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="32">claude</text>
-                <text class="fo-sig" x="340" y="46"></text>
-              </g>
-              <g class="fo-node">
-                <rect class="fo-dot d-idle" x="318" y="68" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="76">codex</text>
-                <text class="fo-sig" x="340" y="90"></text>
-              </g>
-              <g class="fo-node">
-                <rect class="fo-dot d-idle" x="318" y="112" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="120">cursor</text>
-                <text class="fo-sig" x="340" y="134"></text>
-              </g>
-              <g class="fo-node">
-                <rect class="fo-dot d-idle" x="318" y="156" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="164">opencode</text>
-                <text class="fo-sig" x="340" y="178"></text>
-              </g>
-              <g class="fo-node">
-                <rect class="fo-dot d-idle" x="318" y="200" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="208">claude</text>
-                <text class="fo-sig" x="340" y="222"></text>
-              </g>
-              <g class="fo-node">
-                <rect class="fo-dot d-idle" x="318" y="244" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="252">cursor</text>
-                <text class="fo-sig" x="340" y="266"></text>
-              </g>
-              <g class="fo-node">
-                <rect class="fo-dot d-idle" x="318" y="288" width="8" height="8" />
-                <text class="fo-lbl" x="340" y="296">codex</text>
-                <text class="fo-sig" x="340" y="310"></text>
-              </g>
+              <rect class="fo-pkt" x="-4" y="-4" width="8" height="8" />
             </svg>
-          </div>
+            <figcaption id="fanout-desc" class="sr-only">
+              GitHub, GitLab, Sentry, cron, and Telegram events enter Spur, which routes work to one
+              CLI agent and returns the result to you. Jira supplies backlog context.
+            </figcaption>
+          </figure>
         </header>
 
         <section id="architecture" class="shell" aria-labelledby="architecture-h">
@@ -1937,95 +1661,72 @@
               Agents live in tmux on a machine you own. Every device attaches to the same running
               session.
             </p>
-          </div>
-
-          <div class="arch rv">
-            <svg viewBox="0 0 960 400" role="img" aria-labelledby="arch-title arch-desc">
-              <title id="arch-title">Spur access architecture</title>
-              <desc id="arch-desc">
-                A phone, a tablet and a laptop connect over Tailscale to a machine you own, which
-                runs the Spur daemon and long-lived tmux agent sessions.
-              </desc>
-
-              <!-- device column -->
-              <g class="a-dev">
-                <rect x="20" y="54" width="52" height="92" />
-                <line x1="32" y1="136" x2="60" y2="136" />
-                <text x="46" y="170">Phone</text>
-
-                <rect x="14" y="196" width="64" height="86" />
-                <line x1="28" y1="272" x2="64" y2="272" />
-                <text x="46" y="306">Tablet</text>
-
-                <rect x="10" y="326" width="72" height="44" />
-                <line x1="2" y1="372" x2="90" y2="372" />
-                <text x="46" y="394">Laptop</text>
-              </g>
-
-              <!-- device to bus -->
-              <g class="a-wire">
-                <path d="M78 100 H150 V228 H210" />
-                <path d="M84 239 H210" />
-                <path d="M88 348 H150 V250 H210" />
-              </g>
-
-              <!-- tailscale node -->
-              <g class="a-node">
-                <rect x="210" y="204" width="170" height="70" />
-                <text class="a-node-t" x="295" y="234">TAILSCALE</text>
-                <text class="a-node-s" x="295" y="256">private network</text>
-              </g>
-
-              <!-- tailscale to machine -->
-              <g class="a-wire">
-                <path id="a-trunk" d="M380 239 H520" />
-              </g>
-              <g class="a-flow">
-                <rect class="a-pkt a-pkt-in" x="0" y="235" width="8" height="8" />
-                <rect class="a-pkt a-pkt-out" x="0" y="235" width="8" height="8" />
-              </g>
-
-              <!-- machine -->
-              <g class="a-box">
-                <rect x="520" y="34" width="430" height="332" />
-                <text class="a-box-t" x="544" y="64">YOUR MACHINE</text>
-                <line x1="520" y1="82" x2="950" y2="82" />
-
-                <rect class="a-daemon" x="544" y="102" width="382" height="34" />
-                <text class="a-daemon-t" x="560" y="124">spur daemon</text>
-
-                <g class="a-ses">
-                  <rect x="544" y="156" width="382" height="42" />
-                  <rect class="d-working" x="562" y="173" width="8" height="8" />
-                  <text x="586" y="182">ses_a41f</text>
-                  <text class="a-ag" x="690" y="182">claude</text>
-                  <text class="a-br" x="910" y="182">feature/queue-flush</text>
-                </g>
-                <g class="a-ses">
-                  <rect x="544" y="208" width="382" height="42" />
-                  <rect class="d-attention" x="562" y="225" width="8" height="8" />
-                  <text x="586" y="234">ses_9c02</text>
-                  <text class="a-ag" x="690" y="234">codex</text>
-                  <text class="a-br" x="910" y="234">feature/todo-ledger</text>
-                </g>
-                <g class="a-ses">
-                  <rect x="544" y="260" width="382" height="42" />
-                  <rect class="d-ready" x="562" y="277" width="8" height="8" />
-                  <text x="586" y="286">ses_77bd</text>
-                  <text class="a-ag" x="690" y="286">cursor</text>
-                  <text class="a-br" x="910" y="286">feature/web-terminal</text>
-                </g>
-
-                <text class="a-foot" x="544" y="340">
-                  tmux &middot; one git worktree each &middot; always on
-                </text>
-              </g>
-            </svg>
-
-            <p class="arch-note">
-              Nothing binds to a public interface. The tailnet is the only way in.
+            <p>
+              The web UI binds to loopback; the default Tailscale setup adds your tailnet IP. Public
+              exposure requires the explicit <code>--expose-web</code> flag.
             </p>
           </div>
+
+          <figure class="arch rv" role="img" aria-labelledby="arch-desc">
+            <svg
+              class="arch-route--desktop"
+              viewBox="0 0 960 400"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path class="a-route" d="M110 200 H390 H550 H890" />
+              <g class="a-stage">
+                <rect x="20" y="120" width="180" height="160" />
+                <text class="a-stage-label" x="110" y="154">YOUR DEVICES</text>
+                <text class="a-stage-sub" x="110" y="190">phone · tablet</text>
+                <text class="a-stage-sub" x="110" y="214">laptop · browser</text>
+              </g>
+              <g class="a-stage">
+                <rect x="300" y="150" width="180" height="100" />
+                <text class="a-stage-label" x="390" y="188">TAILSCALE</text>
+                <text class="a-stage-sub" x="390" y="216">private network</text>
+              </g>
+              <g class="a-stage">
+                <rect x="550" y="88" width="390" height="224" />
+                <text class="a-stage-label" x="745" y="124">YOUR MACHINE</text>
+                <text class="a-stage-sub" x="745" y="174">Spur daemon</text>
+                <text class="a-stage-sub" x="745" y="210">agent sessions</text>
+                <text class="a-stage-sub" x="745" y="246">tmux · one worktree each</text>
+              </g>
+              <rect class="a-pkt" x="-5" y="-5" width="10" height="10" />
+            </svg>
+
+            <svg
+              class="arch-route--mobile"
+              viewBox="0 0 340 340"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path class="a-route" d="M170 64 V145 V242" />
+              <g class="a-stage">
+                <rect x="40" y="14" width="260" height="76" />
+                <text class="a-stage-label" x="170" y="44">YOUR DEVICES</text>
+                <text class="a-stage-sub" x="170" y="68">phone · tablet · laptop</text>
+              </g>
+              <g class="a-stage">
+                <rect x="70" y="112" width="200" height="68" />
+                <text class="a-stage-label" x="170" y="140">TAILSCALE</text>
+                <text class="a-stage-sub" x="170" y="162">private network</text>
+              </g>
+              <g class="a-stage">
+                <rect x="40" y="206" width="260" height="120" />
+                <text class="a-stage-label" x="170" y="234">YOUR MACHINE</text>
+                <text class="a-stage-sub" x="170" y="260">Spur daemon · agent sessions</text>
+                <text class="a-stage-sub" x="170" y="286">tmux · one worktree each</text>
+              </g>
+              <rect class="a-pkt" x="-5" y="-5" width="10" height="10" />
+            </svg>
+            <figcaption id="arch-desc" class="sr-only">
+              Your devices reach the Spur daemon and its agent sessions through Tailscale; responses
+              return over the same private route. The web UI remains on loopback, and public
+              exposure is an explicit override.
+            </figcaption>
+          </figure>
         </section>
 
         <section id="dashboard" class="shell" aria-labelledby="dashboard-h">
@@ -2089,144 +1790,52 @@
             </p>
           </div>
 
-          <ol class="tl rv">
-            <li>
-              <span class="t">02:41</span><span class="e">CI goes red on <code>main</code>.</span>
-            </li>
-            <li>
-              <span class="t">02:41</span
-              ><span class="e"
-                >A trigger fires. Spur spawns claude on a fresh worktree, branched off origin.</span
-              >
-            </li>
-            <li>
-              <span class="t">02:58</span
-              ><span class="e">It reads the failing job, fixes the test, opens a PR.</span>
-            </li>
-            <li>
-              <span class="t">08:10</span
-              ><span class="e">Telegram hands you the link over breakfast.</span>
-            </li>
-          </ol>
-
-          <div class="pipe rv">
-            <article class="pipe-col">
-              <div class="step">01 &mdash; Source</div>
-              <h3>Six pollers</h3>
-              <p>Turn the outside world into events.</p>
-              <div class="chips">
-                <span class="chip">cron</span><span class="chip">github</span
-                ><span class="chip">github-ci</span><span class="chip">gitlab</span>
-                <span class="chip">sentry</span><span class="chip">telegram</span>
-              </div>
-              <span class="flow"></span>
-            </article>
-            <article class="pipe-col">
-              <div class="step">02 &mdash; Trigger</div>
-              <h3>Two actions</h3>
-              <p>Match event, pick agent and model, then:</p>
-              <div class="chips">
-                <span class="chip">spawn a session</span
-                ><span class="chip">send into a live one</span>
-              </div>
-              <span class="flow"></span>
-            </article>
-            <article class="pipe-col">
-              <div class="step">03 &mdash; Session</div>
-              <h3>Own worktree</h3>
-              <p>A tmux pane with its own checkout, branch and dev servers.</p>
-              <div class="chips">
-                <span class="chip">worktree</span><span class="chip">branch</span>
-                <span class="chip">sidecars</span><span class="chip">step ledger</span>
-              </div>
-              <span class="flow"></span>
-            </article>
-          </div>
-
-          <div class="wf rv">
-            <div class="wf-head">
-              <span class="mono-label">One ticket, start to merge</span>
-              <p>Every hop is a real event. Same session, same worktree, same branch throughout.</p>
-            </div>
-
-            <!-- Decorative: the list below is the accessible copy at every
-                 width, so this must not be announced as a second one. -->
-            <svg viewBox="0 0 960 300" aria-hidden="true">
-              <line class="wf-track" x1="70" y1="56" x2="890" y2="56" />
-              <rect class="wf-token" x="-4" y="52" width="8" height="8" />
-
-              <g class="wf-n" style="--i: 0">
-                <rect class="wf-dot" x="66" y="52" width="8" height="8" />
-                <rect class="wf-card" x="0" y="90" width="140" height="104" />
-                <text class="wf-t" x="16" y="118">Picks up work</text>
-                <text class="wf-s" x="16" y="140">Jira backlog</text>
-                <text class="wf-s" x="16" y="158">or a cron tick</text>
-              </g>
-              <g class="wf-n" style="--i: 1">
-                <rect class="wf-dot" x="230" y="52" width="8" height="8" />
-                <rect class="wf-card" x="164" y="90" width="140" height="104" />
-                <text class="wf-t" x="180" y="118">Opens a PR</text>
-                <text class="wf-s" x="180" y="140">own worktree,</text>
-                <text class="wf-s" x="180" y="158">own branch</text>
-              </g>
-              <g class="wf-n" style="--i: 2">
-                <rect class="wf-dot" x="394" y="52" width="8" height="8" />
-                <rect class="wf-card" x="328" y="90" width="140" height="104" />
-                <text class="wf-t" x="344" y="118">CI goes red</text>
-                <text class="wf-s" x="344" y="140">github-ci event</text>
-                <text class="wf-s" x="344" y="158">fix, push</text>
-              </g>
-              <g class="wf-n" style="--i: 3">
-                <rect class="wf-dot" x="558" y="52" width="8" height="8" />
-                <rect class="wf-card" x="492" y="90" width="140" height="104" />
-                <text class="wf-t" x="508" y="118">Review lands</text>
-                <text class="wf-s" x="508" y="140">changes_requested</text>
-                <text class="wf-s" x="508" y="158">answer, push</text>
-              </g>
-              <g class="wf-n" style="--i: 4">
-                <rect class="wf-dot" x="722" y="52" width="8" height="8" />
-                <rect class="wf-card" x="656" y="90" width="140" height="104" />
-                <text class="wf-t" x="672" y="118">Checks the UI</text>
-                <text class="wf-s" x="672" y="140">playwright MCP</text>
-                <text class="wf-s" x="672" y="158">in a real browser</text>
-              </g>
-              <g class="wf-n" style="--i: 5">
-                <rect class="wf-dot" x="886" y="52" width="8" height="8" />
-                <rect class="wf-card" x="820" y="90" width="140" height="104" />
-                <text class="wf-t" x="836" y="118">Merged</text>
-                <text class="wf-s" x="836" y="140">semantic-release</text>
-                <text class="wf-s" x="836" y="158">ships from main</text>
-              </g>
-
-              <path class="wf-loop" d="M890 238 H70" />
-              <path class="wf-loop" d="M890 194 V238" />
-              <path class="wf-loop" d="M70 238 V210" />
-              <path class="wf-arrow" d="M64 216 L70 206 L76 216" />
-              <text class="wf-loopt" x="480" y="262">next item, same daemon</text>
-            </svg>
-
-            <!-- The one accessible copy of the six stages at every width. Under
-                 ~860px it is also the visible one, because the six-across track
-                 scales to unreadable type; above that it is visually hidden
-                 rather than display:none, so it stays in the a11y tree. -->
-            <ol class="wf-list">
-              <li style="--i: 0"><b>Picks up work</b><span>Jira backlog or a cron tick</span></li>
-              <li style="--i: 1"><b>Opens a PR</b><span>own worktree, own branch</span></li>
-              <li style="--i: 2"><b>CI goes red</b><span>github-ci event, fix, push</span></li>
-              <li style="--i: 3">
-                <b>Review lands</b><span>changes_requested, answer, push</span>
+          <article class="incident rv">
+            <ol class="incident-flow">
+              <li class="incident-step" style="--i: 0">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>CI fails on main</h3>
+                <p>GitHub CI reports the failed job to Spur.</p>
               </li>
-              <li style="--i: 4"><b>Checks the UI</b><span>playwright MCP, real browser</span></li>
-              <li style="--i: 5"><b>Merged</b><span>semantic-release ships from main</span></li>
+              <li class="incident-step" style="--i: 1">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Spur starts one agent</h3>
+                <p>A fresh worktree and branch isolate the repair.</p>
+              </li>
+              <li class="incident-step" style="--i: 2">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Agent investigates and fixes</h3>
+                <p>The same agent owns the job from failure to patch.</p>
+                <div class="agent-work">
+                  <div class="agent-work-head">
+                    <span class="agent-activity" aria-hidden="true"></span>
+                    <span>claude · feature/fix-main-ci</span>
+                  </div>
+                  <div class="agent-states" aria-label="Agent work states">
+                    <span class="agent-state" style="--state: 0">reading failed job</span>
+                    <span class="agent-state" style="--state: 1">editing</span>
+                    <span class="agent-state" style="--state: 2">fix ready</span>
+                  </div>
+                </div>
+              </li>
+              <li class="incident-step" style="--i: 3">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Checks pass</h3>
+                <p>Tests and build finish, then the branch is pushed.</p>
+              </li>
+              <li class="incident-step" style="--i: 4">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Merged after review</h3>
+                <p>You review the focused diff and merge it.</p>
+              </li>
             </ol>
-            <p class="wf-loop-note">next item, same daemon</p>
-          </div>
+          </article>
         </section>
 
         <section id="features" class="shell" aria-labelledby="features-h">
           <div class="sec-head rv" data-n="04">
             <span class="mono-label">What you get</span>
-            <h2 id="features-h">The tenth agent costs the same as the first.</h2>
+            <h2 id="features-h">One control plane for every agent.</h2>
           </div>
 
           <div class="bento rv">
@@ -2282,8 +1891,8 @@
               </svg>
               <h3>Nothing dies with your shell</h3>
               <p>
-                The daemon owns the tmux sessions. Close the lid, drop SSH, reboot — they come back
-                with the transcript.
+                Close the shell or drop SSH and tmux keeps running. Daemon restarts rediscover live
+                sessions; restore after a host reboot is opt-in per project.
               </p>
             </article>
             <article class="cell">
@@ -2393,10 +2002,10 @@
                 <path d="M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7z" />
                 <path d="M9 12l2 2 4-4" />
               </svg>
-              <h3>Never leaves your machine</h3>
+              <h3>Spur has no cloud relay.</h3>
               <p>
-                Daemon binds to loopback. <code>spur init</code> opens it to your tailnet, nothing
-                else. Your hardware, your subscriptions.
+                Spur stores its state on your machine. Agent CLIs and configured integrations still
+                send data to their own providers.
               </p>
             </article>
           </div>
@@ -2520,21 +2129,27 @@
           </div>
           <div class="faq rv">
             <details open>
-              <summary>Which agents does Spur run?<span class="pm">+</span></summary>
+              <summary>
+                Which agents does Spur run?<span class="pm" aria-hidden="true">+</span>
+              </summary>
               <div class="ans">
                 claude, codex, cursor, opencode. Each gets its own tmux session and a default model
                 from config.
               </div>
             </details>
             <details>
-              <summary>Do I have to change how I use my agents?<span class="pm">+</span></summary>
+              <summary>
+                Do I have to change how I use my agents?<span class="pm" aria-hidden="true">+</span>
+              </summary>
               <div class="ans">
                 No. Same binary, your auth, your model config, in a real tmux pane. Stop the daemon
                 and you are left with ordinary git worktrees.
               </div>
             </details>
             <details>
-              <summary>Which operating systems work?<span class="pm">+</span></summary>
+              <summary>
+                Which operating systems work?<span class="pm" aria-hidden="true">+</span>
+              </summary>
               <div class="ans">
                 Ubuntu is the tested target, bare metal or a VM; verified on 24.04 down to a ~1 GB
                 box, 2 GB recommended. macOS and Windows are partial — expect to sort out host
@@ -2542,32 +2157,41 @@
               </div>
             </details>
             <details>
-              <summary>Do parallel agents step on each other?<span class="pm">+</span></summary>
+              <summary>
+                Do parallel agents step on each other?<span class="pm" aria-hidden="true">+</span>
+              </summary>
               <div class="ans">
                 No. A session owns a git worktree and branch — ten agents, ten checkouts. The shared
                 project path is opt-in.
               </div>
             </details>
             <details>
-              <summary>Can I use it from my phone?<span class="pm">+</span></summary>
+              <summary>
+                Can I use it from my phone?<span class="pm" aria-hidden="true">+</span>
+              </summary>
               <div class="ans">
                 Yes. The dashboard is mobile-first, the terminal takes touch input, and Telegram
                 spawns sessions and relays text and voice.
               </div>
             </details>
             <details>
-              <summary>What can trigger an agent automatically?<span class="pm">+</span></summary>
+              <summary>
+                What can trigger an agent automatically?<span class="pm" aria-hidden="true">+</span>
+              </summary>
               <div class="ans">
                 Six pollers: cron, GitHub, GitHub CI, GitLab, Sentry, Telegram. A trigger spawns a
                 session or sends a message into a live one.
               </div>
             </details>
             <details>
-              <summary>Does my code leave the box?<span class="pm">+</span></summary>
+              <summary>
+                Does my code leave the box?<span class="pm" aria-hidden="true">+</span>
+              </summary>
               <div class="ans">
-                Only where your agent already sends it. Spur itself is a local daemon on loopback;
-                <code>spur init</code> opens the UI to your tailnet. There is no Spur cloud, no
-                account, no seat.
+                Spur stores its state on your machine and has no Spur cloud. Agent CLIs and
+                configured integrations still send data to their own providers. The web UI binds to
+                loopback; the default Tailscale setup adds your tailnet IP, and public exposure is
+                an explicit override.
               </div>
             </details>
           </div>
@@ -2859,17 +2483,15 @@
           }
         }
 
-        /* hero fan-out: one scripted round of fleet work */
+        /* hero routing: one source, one agent, one result per round */
         (function () {
           var fanout = document.querySelector(".fanout");
           if (!fanout) return;
-          var dots = fanout.querySelectorAll(".fo-dot");
-          var sigs = fanout.querySelectorAll(".fo-sig");
-          var pkts = fanout.querySelectorAll(".fo-pkt");
-          var link = pkts[0];
+          var sources = fanout.querySelectorAll('.fo-source[data-source-kind="event"]');
+          var agents = fanout.querySelectorAll(".fo-agent");
+          var packet = fanout.querySelector(".fo-pkt");
           var youFrame = fanout.querySelector(".fo-you-frame");
           var hubFrame = fanout.querySelector(".fo-frame");
-          var STATES = ["d-idle", "d-working", "d-attention", "d-error", "d-ready"];
 
           function hit(node, colour) {
             node.style.stroke = colour;
@@ -2882,24 +2504,17 @@
             }, 420);
           }
 
-          function setState(i, state, sig) {
-            var dot = dots[i];
-            STATES.forEach(function (c) {
-              dot.classList.remove(c);
+          function reset() {
+            sources.forEach(function (source) {
+              source.classList.remove("is-active");
             });
-            dot.classList.add("d-" + state);
-            sigs[i].textContent = sig || "";
-            sigs[i].style.opacity = sig ? "1" : "0";
+            agents.forEach(function (agent) {
+              agent.classList.remove("is-active", "is-ready");
+              agent.querySelector(".fo-agent-state").textContent = "working";
+            });
           }
 
-          if (reduce) {
-            ["working", "working", "ready", "attention", "working", "ready", "working"].forEach(
-              function (s, i) {
-                setState(i, s, s === "attention" ? "needs input" : "");
-              },
-            );
-            return;
-          }
+          if (reduce) return;
 
           var alive = false;
           var token = 0;
@@ -2910,93 +2525,71 @@
             });
           }
 
-          function flight(pkt, back, colour, dur) {
-            pkt.style.fill = colour;
-            var from = back ? "100%" : "0%";
-            var to = back ? "0%" : "100%";
-            var mid1 = back ? "90%" : "10%";
-            var mid2 = back ? "10%" : "90%";
-            var anim = pkt.animate(
+          function flight(fromX, fromY, toX, toY, colour, duration) {
+            packet.style.fill = colour;
+            var anim = packet.animate(
               [
-                { offsetDistance: from, opacity: 0 },
-                { offsetDistance: mid1, opacity: 1 },
-                { offsetDistance: mid2, opacity: 1 },
-                { offsetDistance: to, opacity: 0 },
+                { transform: "translate(" + fromX + "px," + fromY + "px)", opacity: 0 },
+                {
+                  transform: "translate(" + fromX + "px," + fromY + "px)",
+                  opacity: 1,
+                  offset: 0.1,
+                },
+                { transform: "translate(" + toX + "px," + toY + "px)", opacity: 1, offset: 0.9 },
+                { transform: "translate(" + toX + "px," + toY + "px)", opacity: 0 },
               ],
-              { duration: dur, easing: "linear" },
+              { duration: duration, easing: "cubic-bezier(.4,0,.2,1)" },
             );
             return anim.finished.catch(function () {});
           }
 
-          async function round(mine) {
+          async function round(mine, roundIndex) {
             var stale = function () {
               return mine !== token;
             };
+            var source = sources[roundIndex % sources.length];
+            var agent = agents[roundIndex % agents.length];
+            var sourceX = Number(source.dataset.x);
+            var sourceY = Number(source.dataset.y);
+            var agentX = Number(agent.dataset.x);
+            var agentY = Number(agent.dataset.y);
+            var agentState = agent.querySelector(".fo-agent-state");
 
-            for (var i = 0; i < dots.length; i++) setState(i, "idle");
-            await wait(500);
+            reset();
+            await wait(450);
             if (stale()) return;
 
-            // you dispatch work, every agent spawns and starts working
-            hit(youFrame, "var(--t1)");
-            await flight(link, false, "var(--t1)", 520);
+            source.classList.add("is-active");
+            await flight(sourceX, sourceY, 190, 190, "var(--brand)", 760);
+            if (stale()) return;
             hit(hubFrame, "var(--brand)");
-            for (var s = 0; s < dots.length; s++) {
-              (function (idx) {
-                flight(pkts[idx + 1], false, "var(--brand)", 620).then(function () {
-                  if (!stale()) setState(idx, "working");
-                });
-              })(s);
-              await wait(170);
-              if (stale()) return;
-            }
-            await wait(1100);
+
+            await flight(250, 190, agentX, agentY, "var(--brand)", 720);
             if (stale()) return;
+            agent.classList.add("is-active");
+            agentState.textContent = "working";
+            await wait(1000);
 
-            // one agent blocks, asks, gets an answer, resumes
-            var conversation = [
-              { at: 3, state: "attention", sig: "needs input", colour: "var(--attention)" },
-              { at: 5, state: "error", sig: "error", colour: "var(--error)" },
-            ];
-            for (var c = 0; c < conversation.length; c++) {
-              var turn = conversation[c];
-              setState(turn.at, turn.state, turn.sig);
-              await wait(600);
-              if (stale()) return;
-              await flight(pkts[turn.at + 1], true, turn.colour, 620);
-              hit(hubFrame, turn.colour);
-              await flight(link, true, turn.colour, 520);
-              hit(youFrame, turn.colour);
-              if (stale()) return;
-              await wait(1000);
-              hit(youFrame, "var(--t1)");
-              await flight(link, false, "var(--t1)", 520);
-              hit(hubFrame, "var(--t1)");
-              await flight(pkts[turn.at + 1], false, "var(--t1)", 620);
-              if (stale()) return;
-              setState(turn.at, "working");
-              await wait(800);
-              if (stale()) return;
-            }
-
-            // work lands, each agent reports done
-            for (var d = 0; d < dots.length; d++) {
-              setState(d, "ready");
-              flight(pkts[d + 1], true, "var(--ready)", 620).then(function () {
-                if (!stale()) hit(hubFrame, "var(--ready)");
-              });
-              await wait(240);
-              if (stale()) return;
-            }
-            await flight(link, true, "var(--ready)", 520);
+            agent.classList.remove("is-active");
+            agent.classList.add("is-ready");
+            agentState.textContent = "result ready";
+            await flight(agentX, agentY, 250, 190, "var(--ready)", 720);
+            if (stale()) return;
+            hit(hubFrame, "var(--ready)");
+            await flight(220, 160, 220, 68, "var(--ready)", 640);
+            if (stale()) return;
             hit(youFrame, "var(--ready)");
-            await wait(2400);
+            await wait(1200);
           }
 
           async function loop() {
             var mine = ++token;
+            var roundIndex = 0;
             alive = true;
-            while (alive && mine === token) await round(mine);
+            while (alive && mine === token) {
+              await round(mine, roundIndex);
+              roundIndex++;
+            }
           }
 
           function stop() {
