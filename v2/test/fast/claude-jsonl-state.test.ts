@@ -315,8 +315,52 @@ describe("parseJsonlRecord token usage", () => {
     );
     expect(record).toMatchObject({
       messageId: "msg-1",
-      tokenUsage: { inputTokens: 60, outputTokens: 4 },
+      tokenUsage: {
+        inputTokens: 10,
+        cacheCreationInputTokens: 20,
+        cacheReadInputTokens: 30,
+        outputTokens: 4,
+      },
     });
+  });
+
+  it("takes component-wise maxima for duplicate message records", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-usage-components-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const record = (usage: Record<string, number>) =>
+      JSON.stringify({
+        type: "assistant",
+        message: { id: "msg-1", role: "assistant", usage },
+      });
+    try {
+      await writeFile(
+        filePath,
+        `${record({ input_tokens: 10, output_tokens: 2 })}\n${record({ cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 1 })}\n`,
+        "utf8",
+      );
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result?.tokenUsage).toMatchObject({
+        inputTokens: 60,
+        outputTokens: 2,
+        totalTokens: 62,
+      });
+
+      await writeFile(filePath, `${record({ input_tokens: 1 })}\n`, "utf8");
+      const afterTruncation = await readClaudeJsonlState(tempDir, result?.reader);
+      expect(afterTruncation?.tokenUsage).toMatchObject({
+        inputTokens: 1,
+        outputTokens: 0,
+        totalTokens: 1,
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

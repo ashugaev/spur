@@ -1036,6 +1036,8 @@ function extractCodexTokenUsageLine(
   const inputTokens = total["input_tokens"];
   const outputTokens = total["output_tokens"];
   const totalTokens = total["total_tokens"];
+  const timestamp = parsed["timestamp"];
+  const observedAtMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
   if (
     typeof inputTokens !== "number" ||
     !Number.isFinite(inputTokens) ||
@@ -1045,10 +1047,18 @@ function extractCodexTokenUsageLine(
     outputTokens < 0 ||
     typeof totalTokens !== "number" ||
     !Number.isFinite(totalTokens) ||
-    totalTokens < 0
+    totalTokens < 0 ||
+    !Number.isFinite(observedAtMs)
   )
     return undefined;
-  return { provider: "codex", sourceId: filePath, inputTokens, outputTokens, totalTokens };
+  return {
+    provider: "codex",
+    sourceId: filePath,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    observedAtMs,
+  };
 }
 
 function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
@@ -1168,10 +1178,17 @@ export async function readCodexRolloutState(
       (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
       null,
     )?.result.model;
-  const tokenUsage = existing
+  const newestTokenUsage = existing
     .filter((candidate) => candidate.result.tokenUsage)
     .reduce<CodexRolloutCandidate | null>(
-      (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
+      (left, right) => {
+        if (left === null) return right;
+        const leftTs = left.result.tokenUsage?.observedAtMs ?? 0;
+        const rightTs = right.result.tokenUsage?.observedAtMs ?? 0;
+        return rightTs > leftTs || (rightTs === leftTs && right.mtimeMs > left.mtimeMs)
+          ? right
+          : left;
+      },
       null,
     )?.result.tokenUsage;
   const stateful = existing.filter(
@@ -1187,6 +1204,7 @@ export async function readCodexRolloutState(
       }
       return right.mtimeMs > left.mtimeMs ? right : left;
     });
+    const tokenUsage = best.result.tokenUsage ?? newestTokenUsage;
     return { ...best.result, ...(model ? { model } : {}), ...(tokenUsage ? { tokenUsage } : {}) };
   }
   const newestByMtime = stateful.reduce<CodexRolloutCandidate | null>(
@@ -1197,7 +1215,7 @@ export async function readCodexRolloutState(
     rollout: null,
     rateLimit: newestByMtime?.result.rateLimit ?? null,
     ...(model ? { model } : {}),
-    ...(tokenUsage ? { tokenUsage } : {}),
+    ...(newestTokenUsage ? { tokenUsage: newestTokenUsage } : {}),
   };
 }
 

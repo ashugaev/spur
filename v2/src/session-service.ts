@@ -4775,19 +4775,21 @@ export class SessionService {
     await this.withWorkspaceLifecycleLocks(view.id, async () => {
       const candidate = readSession(this.config.dataDir, view.id);
       if (!candidate || candidate.status !== "running") return;
-      const classified = await this.classifySessionRecord(candidate);
-      const sample = classified.tokenUsage;
-      const usage = sample
-        ? reconcileTokenUsage(classified.session.tokenUsage, sample)
-        : classified.session.tokenUsage;
-      const budget = this.resolveTokenBudget(classified.session);
-      if (!usage || budget === undefined || usage.totalTokens < budget) return;
       await this.withPaneWriteLock(candidate.tmuxSession, async () => {
         const latest = readSession(this.config.dataDir, candidate.id);
         if (!latest || latest.status !== "running") return;
-        await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+        const classified = await this.classifySessionRecord(latest);
+        const fresh = readSession(this.config.dataDir, latest.id) ?? classified.session;
+        if (fresh.status !== "running") return;
+        const sample = classified.tokenUsage;
+        const usage = sample
+          ? reconcileTokenUsage(fresh.tokenUsage, sample)
+          : fresh.tokenUsage;
+        const budget = this.resolveTokenBudget(fresh);
+        if (!usage || budget === undefined || usage.totalTokens < budget) return;
+        await this.killAgentPaneAndConfirmExit(fresh, { failOnSurvivors: false });
         try {
-          await this.teardownSessionSidecars(latest);
+          await this.teardownSessionSidecars(fresh);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logEvent("session.token_budget.teardown_failed", {
@@ -4797,10 +4799,14 @@ export class SessionService {
             message: `Sidecar teardown failed after token budget exhaustion for ${latest.id}: ${message}`,
           });
         }
-        const cleaned = readSession(this.config.dataDir, latest.id) ?? latest;
+        const cleaned = readSession(this.config.dataDir, fresh.id) ?? fresh;
+        const finalUsage =
+          cleaned.tokenUsage && cleaned.tokenUsage.totalTokens >= usage.totalTokens
+            ? cleaned.tokenUsage
+            : usage;
         const stopped: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(cleaned),
-          tokenUsage: usage,
+          tokenUsage: finalUsage,
           status: "stopped",
           stopReason: "token_budget",
           updatedAt: nowIso(),
@@ -4813,8 +4819,8 @@ export class SessionService {
           level: "warn",
           sessionId: stopped.id,
           projectId: stopped.project,
-          message: `Stopped ${stopped.id} after observing ${usage.totalTokens} / ${budget} tokens`,
-          details: { used: usage.totalTokens, budget },
+          message: `Stopped ${stopped.id} after observing ${finalUsage.totalTokens} / ${budget} tokens`,
+          details: { used: finalUsage.totalTokens, budget },
         });
       });
     });
@@ -11892,6 +11898,7 @@ export class SessionService {
   }
 
   private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
+    this.assertTokenBudgetAllowsActivation(session);
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
     let processAlive = false;
     if (runtimeAlive) {
@@ -14718,6 +14725,7 @@ export class SessionService {
     if (
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
+      latest.stopReason === "token_budget" ||
       isStaleParked(latest) ||
       hasSessionErrorEvidence(latest)
     ) {

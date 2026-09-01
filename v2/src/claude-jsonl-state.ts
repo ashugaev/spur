@@ -9,6 +9,13 @@ import {
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 
+interface ClaudeMessageTokenUsage {
+  inputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  outputTokens: number;
+}
+
 /** Minimal shape extracted from a JSONL record for state classification. */
 export interface ParsedRecord {
   type: string;
@@ -31,7 +38,7 @@ export interface ParsedRecord {
   /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
   model?: string;
   messageId?: string;
-  tokenUsage?: { inputTokens: number; outputTokens: number };
+  tokenUsage?: ClaudeMessageTokenUsage;
   timestampMs: number;
 }
 
@@ -40,7 +47,7 @@ export interface ClaudeJsonlReaderState {
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: ParsedRecord[];
-  usageByMessage?: Map<string, { inputTokens: number; outputTokens: number }>;
+  usageByMessage?: Map<string, ClaudeMessageTokenUsage>;
 }
 
 /**
@@ -311,10 +318,9 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       const value = usage?.[key];
       return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
     };
-    const inputTokens =
-      token("input_tokens") +
-      token("cache_creation_input_tokens") +
-      token("cache_read_input_tokens");
+    const inputTokens = token("input_tokens");
+    const cacheCreationInputTokens = token("cache_creation_input_tokens");
+    const cacheReadInputTokens = token("cache_read_input_tokens");
     const outputTokens = token("output_tokens");
     const messageId = typeof message["id"] === "string" ? message["id"] : undefined;
     return {
@@ -330,8 +336,16 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
         ? { model: message["model"] }
         : {}),
       ...(messageId ? { messageId } : {}),
-      ...(messageId && inputTokens + outputTokens > 0
-        ? { tokenUsage: { inputTokens, outputTokens } }
+      ...(messageId &&
+      inputTokens + cacheCreationInputTokens + cacheReadInputTokens + outputTokens > 0
+        ? {
+            tokenUsage: {
+              inputTokens,
+              cacheCreationInputTokens,
+              cacheReadInputTokens,
+              outputTokens,
+            },
+          }
         : {}),
       timestampMs: recordTimestampMs,
     };
@@ -422,21 +436,28 @@ export async function readClaudeJsonlState(
     return null;
   }
 
-  const currentReader: ClaudeJsonlReaderState = reader ?? {
-    filePath,
-    lastOffset: 0,
-    lastMtimeMs: 0,
-    tailRecords: [],
-    usageByMessage: new Map(),
-  };
+  const reuse =
+    reader !== undefined &&
+    reader.filePath === filePath &&
+    fileStat.size >= reader.lastOffset &&
+    fileStat.mtimeMs >= reader.lastMtimeMs;
+  const currentReader: ClaudeJsonlReaderState = reuse
+    ? reader
+    : {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+        usageByMessage: new Map(),
+      };
   const usageByMessage = currentReader.usageByMessage ?? new Map();
-  currentReader.usageByMessage = usageByMessage;
 
   const usageSample = (): ProviderTokenUsageSample | undefined => {
     let inputTokens = 0;
     let outputTokens = 0;
     for (const usage of usageByMessage.values()) {
-      inputTokens += usage.inputTokens;
+      inputTokens +=
+        usage.inputTokens + usage.cacheCreationInputTokens + usage.cacheReadInputTokens;
       outputTokens += usage.outputTokens;
     }
     return inputTokens + outputTokens > 0
@@ -491,6 +512,14 @@ export async function readClaudeJsonlState(
         const prior = usageByMessage.get(record.messageId);
         usageByMessage.set(record.messageId, {
           inputTokens: Math.max(prior?.inputTokens ?? 0, record.tokenUsage.inputTokens),
+          cacheCreationInputTokens: Math.max(
+            prior?.cacheCreationInputTokens ?? 0,
+            record.tokenUsage.cacheCreationInputTokens,
+          ),
+          cacheReadInputTokens: Math.max(
+            prior?.cacheReadInputTokens ?? 0,
+            record.tokenUsage.cacheReadInputTokens,
+          ),
           outputTokens: Math.max(prior?.outputTokens ?? 0, record.tokenUsage.outputTokens),
         });
       }

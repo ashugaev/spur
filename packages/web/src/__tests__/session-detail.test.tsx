@@ -5424,6 +5424,30 @@ describe("SessionDetail token usage", () => {
     expect(screen.getByText("Unavailable · budget unenforced")).toBeInTheDocument();
   });
 
+  it.each([
+    [{ status: "waiting", budget: 2000, exhausted: false } as const, "Waiting for usage"],
+    [
+      { status: "unavailable", budget: 2000, exhausted: false, unenforced: false } as const,
+      "Unavailable",
+    ],
+    [
+      {
+        status: "available",
+        inputTokens: 1000,
+        outputTokens: 234,
+        totalTokens: 1234,
+        exhausted: false,
+      } as const,
+      "1,234",
+    ],
+  ])("renders token status %# without assuming a budget", async (tokenUsageView, label) => {
+    stubFetch({ tokenUsageView });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+  });
+
   it("hides Restore when the token budget is exhausted", async () => {
     stubFetch({
       status: "stopped",

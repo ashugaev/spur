@@ -486,6 +486,33 @@ describe("SessionRow", () => {
     expect(screen.getByRole("button", { name: "Restore session api-a1" })).toBeInTheDocument();
   });
 
+  it("hides restore for an exhausted token budget", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
+    render(
+      <SessionRow
+        session={makeSession({
+          status: "stopped",
+          state: "stopped",
+          runtimeAlive: false,
+          tokenUsageView: {
+            status: "available",
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            budget: 100,
+            exhausted: true,
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Restore session api-a1" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides restore when the workspace no longer exists", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",

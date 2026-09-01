@@ -607,10 +607,7 @@ export interface TokenUsageTotals {
 
 export interface SessionTokenUsageRecord extends TokenUsageTotals {
   provider: "claude" | "codex";
-  sourceId: string;
-  sourceInputTokens: number;
-  sourceOutputTokens: number;
-  sourceTotalTokens: number;
+  sources: Record<string, TokenUsageTotals>;
 }
 
 export type SessionTokenUsageView =
