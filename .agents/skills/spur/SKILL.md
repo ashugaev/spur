@@ -18,9 +18,8 @@ INTERFACES
   CLI: `spur --help`, then `spur <command> --help`.
   `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them. Call each as `"$SPUR_SESSION_TOOL_DIR/<tool>"`, never bare.
   Session variables: `env | grep '^SPUR_'`.
-  `SPUR_CLOSEOUT_OWNER=1`: assigned closeout owner for writable worktree, including transferred handoff ownership on reused workspace. `0`: non-owner, including read-only/shared sessions; auto-push Stop hook skips git and PR closeout. Missing: standalone hook enforcement stays active.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409), human override via `--todo-override-reason`. Contract: `docs/commands.md#todo`.
-  Auto-ping interface: `docs/commands.md#auto-ping`; HTTP routes: `docs/daemon-api.md`.
+  Stop unwanted auto-pings with `spur auto-ping unsubscribe`. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
 
