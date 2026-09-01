@@ -4782,9 +4782,7 @@ export class SessionService {
         const fresh = readSession(this.config.dataDir, latest.id) ?? classified.session;
         if (fresh.status !== "running") return;
         const sample = classified.tokenUsage;
-        const usage = sample
-          ? reconcileTokenUsage(fresh.tokenUsage, sample)
-          : fresh.tokenUsage;
+        const usage = sample ? reconcileTokenUsage(fresh.tokenUsage, sample) : fresh.tokenUsage;
         const budget = this.resolveTokenBudget(fresh);
         if (!usage || budget === undefined || usage.totalTokens < budget) return;
         await this.killAgentPaneAndConfirmExit(fresh, { failOnSurvivors: false });

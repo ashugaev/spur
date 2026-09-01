@@ -1180,17 +1180,14 @@ export async function readCodexRolloutState(
     )?.result.model;
   const newestTokenUsage = existing
     .filter((candidate) => candidate.result.tokenUsage)
-    .reduce<CodexRolloutCandidate | null>(
-      (left, right) => {
-        if (left === null) return right;
-        const leftTs = left.result.tokenUsage?.observedAtMs ?? 0;
-        const rightTs = right.result.tokenUsage?.observedAtMs ?? 0;
-        return rightTs > leftTs || (rightTs === leftTs && right.mtimeMs > left.mtimeMs)
-          ? right
-          : left;
-      },
-      null,
-    )?.result.tokenUsage;
+    .reduce<CodexRolloutCandidate | null>((left, right) => {
+      if (left === null) return right;
+      const leftTs = left.result.tokenUsage?.observedAtMs ?? 0;
+      const rightTs = right.result.tokenUsage?.observedAtMs ?? 0;
+      return rightTs > leftTs || (rightTs === leftTs && right.mtimeMs > left.mtimeMs)
+        ? right
+        : left;
+    }, null)?.result.tokenUsage;
   const stateful = existing.filter(
     (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
   );
