@@ -221,7 +221,9 @@ function sentInputPayloads(): string[] {
 function sentRawPayloads(): string[] {
   return wsSend.mock.calls
     .map(([payload]) => payload)
-    .filter((payload): payload is string => typeof payload === "string" && !payload.startsWith("{"));
+    .filter(
+      (payload): payload is string => typeof payload === "string" && !payload.startsWith("{"),
+    );
 }
 
 beforeEach(() => {
@@ -731,18 +733,8 @@ describe("DirectTerminal scroll integration", () => {
   it.each([
     ["zero width", new DOMRect(100, 50, 0, 480), 80, 24],
     ["zero height", new DOMRect(100, 50, 800, 0), 80, 24],
-    [
-      "infinite width",
-      { left: 100, top: 50, width: Infinity, height: 480 } as DOMRect,
-      80,
-      24,
-    ],
-    [
-      "NaN height",
-      { left: 100, top: 50, width: 800, height: Number.NaN } as DOMRect,
-      80,
-      24,
-    ],
+    ["infinite width", { left: 100, top: 50, width: Infinity, height: 480 } as DOMRect, 80, 24],
+    ["NaN height", { left: 100, top: 50, width: 800, height: Number.NaN } as DOMRect, 80, 24],
     ["zero columns", new DOMRect(100, 50, 800, 480), 0, 24],
     ["infinite rows", new DOMRect(100, 50, 800, 480), 80, Infinity],
   ])("retains touch movement while %s is invalid", async (_name, rect, cols, rows) => {
@@ -761,10 +753,7 @@ describe("DirectTerminal scroll integration", () => {
     mockTerminal.cols = 80;
     mockTerminal.rows = 24;
     dispatchTouch(touchTarget!, "touchmove", [{ clientX: 500, clientY: 200 }]);
-    expect(sentRawPayloads()).toEqual([
-      "\x1b[<65;40;8M",
-      "\x1b[<65;40;8M",
-    ]);
+    expect(sentRawPayloads()).toEqual(["\x1b[<65;40;8M", "\x1b[<65;40;8M"]);
   });
 
   it("removes touch listeners on unmount", async () => {
