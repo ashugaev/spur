@@ -2458,6 +2458,7 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  private readonly tokenBudgetUnsupportedWarnings = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Report-only pre-spawn disk-headroom probe (see `warnIfHostDiskLow`),
@@ -4749,6 +4750,27 @@ export class SessionService {
     if (error) throw new Error(error);
   }
 
+  private warnIfTokenBudgetUnenforced(session: SessionRecord): void {
+    const budget = this.resolveTokenBudget(session);
+    if (
+      budget === undefined ||
+      session.status !== "running" ||
+      (session.agent !== "cursor" && session.agent !== "opencode")
+    ) {
+      this.tokenBudgetUnsupportedWarnings.delete(session.id);
+      return;
+    }
+    if (this.tokenBudgetUnsupportedWarnings.has(session.id)) return;
+    this.tokenBudgetUnsupportedWarnings.add(session.id);
+    this.logEvent("session.token_budget.unenforced", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Token budget is not enforced for ${session.id}: ${session.agent} does not expose structured token usage`,
+      details: { budget, agent: session.agent },
+    });
+  }
+
   private async stopForTokenBudget(view: SessionView): Promise<void> {
     await this.withWorkspaceLifecycleLocks(view.id, async () => {
       const candidate = readSession(this.config.dataDir, view.id);
@@ -4995,6 +5017,7 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
+          this.warnIfTokenBudgetUnenforced(session);
           const { view, classified } = await this.enrichWithClassified(
             session,
             claudeAccounts,
@@ -5139,6 +5162,11 @@ export class SessionService {
     for (const sessionId of this.wakeSuppressionNotified) {
       if (!liveIds.has(sessionId)) {
         this.wakeSuppressionNotified.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.tokenBudgetUnsupportedWarnings) {
+      if (!liveIds.has(sessionId)) {
+        this.tokenBudgetUnsupportedWarnings.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {

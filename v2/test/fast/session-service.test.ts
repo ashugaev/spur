@@ -24418,7 +24418,9 @@ describe("SessionService", () => {
     mockClaudeJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
     loadProjectConfigMock.mockClear();
     logSpurEventMock.mockClear();
 
@@ -24466,7 +24468,9 @@ describe("SessionService", () => {
     mockClaudeJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
     loadProjectConfigMock.mockClear();
 
     await service.get("api-1");
@@ -34172,6 +34176,31 @@ describe("SessionService", () => {
 
         expect(sessions.get("api-1")?.scheduledWake?.message).toBe("wake");
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("warns once for a live unsupported agent under a token budget", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1", agent: "cursor" }));
+        mockCursorJsonlState("waiting");
+
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        await internals.pollAttentionStates(false);
+        await internals.pollAttentionStates(false);
+
+        const warnings = logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.token_budget.unenforced");
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatchObject({
+          level: "warn",
+          sessionId: "api-1",
+          details: { budget: 100, agent: "cursor" },
+        });
       });
 
       it("parks a running+waiting session idle past the threshold: kills the pane, captures live sidecars, and logs session.stale.parked", async () => {
