@@ -316,12 +316,6 @@ export class AutoPingService {
     return this.leases.has(leaseId);
   }
 
-  setConfiguredRoutes(routeFingerprints: Iterable<string>): void {
-    this.configuredRoutes.clear();
-    for (const fingerprint of routeFingerprints) this.configuredRoutes.add(fingerprint);
-    this.gc();
-  }
-
   setConfiguredRouteAuthorities(routes: Iterable<AutoPingRouteDescriptor>): void {
     this.configuredRouteAuthorities.clear();
     for (const route of routes) this.configuredRouteAuthorities.add(routeAuthority(route));
