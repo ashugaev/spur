@@ -1,5 +1,6 @@
 import { open, readFile, stat } from "node:fs/promises";
 import type { SessionState, TranscriptEntry } from "./types.js";
+import type { ProviderTokenUsageSample } from "./token-usage.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
   CLAUDE_BOOKKEEPING_RECORD_TYPES,
@@ -29,6 +30,8 @@ export interface ParsedRecord {
   serverError?: boolean;
   /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
   model?: string;
+  messageId?: string;
+  tokenUsage?: { inputTokens: number; outputTokens: number };
   timestampMs: number;
 }
 
@@ -37,6 +40,7 @@ export interface ClaudeJsonlReaderState {
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: ParsedRecord[];
+  usageByMessage?: Map<string, { inputTokens: number; outputTokens: number }>;
 }
 
 /**
@@ -299,6 +303,20 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       isRateLimit && ownTimestampMs !== undefined
         ? parseRateLimitResetAtMs(extractTextContent(message), ownTimestampMs)
         : undefined;
+    const usage =
+      typeof message["usage"] === "object" && message["usage"] !== null
+        ? (message["usage"] as Record<string, unknown>)
+        : undefined;
+    const token = (key: string): number => {
+      const value = usage?.[key];
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+    };
+    const inputTokens =
+      token("input_tokens") +
+      token("cache_creation_input_tokens") +
+      token("cache_read_input_tokens");
+    const outputTokens = token("output_tokens");
+    const messageId = typeof message["id"] === "string" ? message["id"] : undefined;
     return {
       type: "assistant",
       role: "assistant",
@@ -310,6 +328,10 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
       ...(typeof message["model"] === "string" && message["model"] !== SYNTHETIC_MODEL
         ? { model: message["model"] }
+        : {}),
+      ...(messageId ? { messageId } : {}),
+      ...(messageId && inputTokens + outputTokens > 0
+        ? { tokenUsage: { inputTokens, outputTokens } }
         : {}),
       timestampMs: recordTimestampMs,
     };
@@ -379,6 +401,7 @@ export async function readClaudeJsonlState(
   rateLimit: RateLimitDetection | null;
   serverError: boolean;
   liveModel?: string;
+  tokenUsage?: ProviderTokenUsageSample;
 } | null> {
   // With a pinned id, resolve the transcript by id and never fall back to the
   // newest-mtime scan (which could cross-bind to a sibling session sharing the
@@ -404,6 +427,27 @@ export async function readClaudeJsonlState(
     lastOffset: 0,
     lastMtimeMs: 0,
     tailRecords: [],
+    usageByMessage: new Map(),
+  };
+  const usageByMessage = currentReader.usageByMessage ?? new Map();
+  currentReader.usageByMessage = usageByMessage;
+
+  const usageSample = (): ProviderTokenUsageSample | undefined => {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    for (const usage of usageByMessage.values()) {
+      inputTokens += usage.inputTokens;
+      outputTokens += usage.outputTokens;
+    }
+    return inputTokens + outputTokens > 0
+      ? {
+          provider: "claude",
+          sourceId: filePath,
+          inputTokens,
+          outputTokens,
+          totalTokens: inputTokens + outputTokens,
+        }
+      : undefined;
   };
 
   // Nothing appended (same mtime and size) and we already have records → skip
@@ -415,12 +459,14 @@ export async function readClaudeJsonlState(
     currentReader.tailRecords.length > 0
   ) {
     const cachedLiveModel = deriveClaudeLiveModel(currentReader.tailRecords);
+    const tokenUsage = usageSample();
     return {
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
       rateLimit: detectClaudeRateLimit(currentReader.tailRecords),
       serverError: hasTrailingClaudeServerError(currentReader.tailRecords),
       ...(cachedLiveModel ? { liveModel: cachedLiveModel } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
     };
   }
 
@@ -441,6 +487,13 @@ export async function readClaudeJsonlState(
     const record = parseJsonlRecord(trimmed, nowMs);
     if (record) {
       newRecords.push(record);
+      if (record.messageId && record.tokenUsage) {
+        const prior = usageByMessage.get(record.messageId);
+        usageByMessage.set(record.messageId, {
+          inputTokens: Math.max(prior?.inputTokens ?? 0, record.tokenUsage.inputTokens),
+          outputTokens: Math.max(prior?.outputTokens ?? 0, record.tokenUsage.outputTokens),
+        });
+      }
     }
   }
 
@@ -450,6 +503,7 @@ export async function readClaudeJsonlState(
     lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords: combined,
+    usageByMessage,
   };
 
   if (combined.length === 0) {
@@ -457,12 +511,14 @@ export async function readClaudeJsonlState(
   }
 
   const liveModel = deriveClaudeLiveModel(combined);
+  const tokenUsage = usageSample();
   return {
     state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
     rateLimit: detectClaudeRateLimit(combined),
     serverError: hasTrailingClaudeServerError(combined),
     ...(liveModel ? { liveModel } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
   };
 }
 

@@ -229,6 +229,33 @@ describe("readCodexRolloutState", () => {
     });
   });
 
+  it("uses provider total_tokens without adding cached or reasoning subsets", async () => {
+    const sessionsDir = await makeSessionsDir(
+      JSON.stringify({
+        timestamp: "2026-06-28T09:03:41.314Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 90,
+              cached_input_tokens: 50,
+              output_tokens: 30,
+              reasoning_output_tokens: 20,
+              total_tokens: 120,
+            },
+          },
+        },
+      }),
+      "rollout-usage.jsonl",
+    );
+    expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toMatchObject({
+      inputTokens: 90,
+      outputTokens: 30,
+      totalTokens: 120,
+    });
+  });
+
   it("reads waiting from a real interrupted turn_aborted tail", async () => {
     const content = await readFile(INTERRUPTED_TAIL_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-interrupted.jsonl");

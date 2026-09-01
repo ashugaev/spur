@@ -1009,7 +1009,19 @@ async function advanceSeconds(seconds: number): Promise<void> {
   }
 }
 
-function mockClaudeJsonlState(state: string, options?: { lastMtimeMs?: number }) {
+function mockClaudeJsonlState(
+  state: string,
+  options?: {
+    lastMtimeMs?: number;
+    tokenUsage?: {
+      provider: "claude";
+      sourceId: string;
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+    };
+  },
+) {
   readClaudeJsonlStateMock.mockResolvedValue({
     state,
     reader: {
@@ -1018,6 +1030,7 @@ function mockClaudeJsonlState(state: string, options?: { lastMtimeMs?: number })
       lastMtimeMs: options?.lastMtimeMs ?? 0,
       tailRecords: [],
     },
+    ...(options?.tokenUsage ? { tokenUsage: options.tokenUsage } : {}),
   });
 }
 
@@ -2406,6 +2419,26 @@ describe("SessionService", () => {
     expect(createWorktreeMock).not.toHaveBeenCalled();
     service.dispose();
   });
+
+  it.each(["spawn", "background"] as const)(
+    "rejects unsupported-agent %s activation under a project token budget",
+    async (path) => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const request = { project: "api", agent: "cursor" as const, prompt: "hello" };
+
+      await expect(
+        path === "spawn" ? service.spawn(request) : service.spawnInBackground(request),
+      ).rejects.toThrow("cursor does not expose structured token usage");
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    },
+  );
 
   it("rejects an unavailable explicit OpenCode model before preparing a background spawn", async () => {
     validateOpenCodeModelMock.mockRejectedValueOnce(
@@ -33880,6 +33913,8 @@ describe("SessionService", () => {
       withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
       pollAttentionStates(baseline: boolean): Promise<void>;
       parkStaleSession(view: SessionView): Promise<void>;
+      stopForTokenBudget(view: SessionView): Promise<void>;
+      processScheduledWakes(): Promise<void>;
       teardownSessionSidecars(session: SessionRecord): Promise<void>;
       tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
     };
@@ -34063,6 +34098,81 @@ describe("SessionService", () => {
     });
 
     describe("pollAttentionStates parking", () => {
+      it("stops at observed token budget and persists one budget event", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        mockClaudeJsonlState("waiting", {
+          tokenUsage: {
+            provider: "claude",
+            sourceId: "test.jsonl",
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1" }));
+
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        const view = await service.get("api-1");
+        expect(view.tokenUsageView).toMatchObject({
+          status: "available",
+          budget: 100,
+          exhausted: true,
+        });
+        await internals.stopForTokenBudget(view);
+        await internals.stopForTokenBudget(view);
+
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          stopReason: "token_budget",
+          tokenUsage: { totalTokens: 100 },
+        });
+        expect(
+          logSpurEventMock.mock.calls
+            .map(([, entry]) => entry)
+            .filter((entry) => entry.event === "session.token_budget.exhausted"),
+        ).toHaveLength(1);
+      });
+
+      it("leaves a due wake armed when the token budget blocks activation", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            status: "stopped",
+            stopReason: "token_budget",
+            tokenUsage: {
+              provider: "claude",
+              sourceId: "test.jsonl",
+              inputTokens: 80,
+              outputTokens: 20,
+              totalTokens: 100,
+              sourceInputTokens: 80,
+              sourceOutputTokens: 20,
+              sourceTotalTokens: 100,
+            },
+            scheduledWake: {
+              dueAt: "2026-03-18T10:00:00.000Z",
+              message: "wake",
+            },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        await staleInternals(service).processScheduledWakes();
+
+        expect(sessions.get("api-1")?.scheduledWake?.message).toBe("wake");
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      });
+
       it("parks a running+waiting session idle past the threshold: kills the pane, captures live sidecars, and logs session.stale.parked", async () => {
         loadConfigMock.mockReturnValue({
           ...baseConfig(),

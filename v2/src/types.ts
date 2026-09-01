@@ -595,8 +595,28 @@ export interface ProjectConfig {
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
+  tokenBudget?: number;
   staleAfterMinutes?: number;
 }
+
+export interface TokenUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface SessionTokenUsageRecord extends TokenUsageTotals {
+  provider: "claude" | "codex";
+  sourceId: string;
+  sourceInputTokens: number;
+  sourceOutputTokens: number;
+  sourceTotalTokens: number;
+}
+
+export type SessionTokenUsageView =
+  | ({ status: "available"; budget?: number; exhausted: boolean } & TokenUsageTotals)
+  | { status: "waiting"; budget?: number; exhausted: false }
+  | { status: "unavailable"; budget?: number; exhausted: false; unenforced: boolean };
 
 export type ProviderReasoningEffort = "low" | "medium" | "high";
 export type AgentReasoningEffortConfig = Partial<
@@ -877,7 +897,8 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
-  stopReason?: "manual_pause" | "stale_timeout";
+  stopReason?: "manual_pause" | "stale_timeout" | "token_budget";
+  tokenUsage?: SessionTokenUsageRecord;
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;
@@ -980,6 +1001,7 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
   queuedMessages?: SessionQueuedMessagesView;
+  tokenUsageView?: SessionTokenUsageView;
 }
 
 export interface DashboardSessionView extends SessionRecord {

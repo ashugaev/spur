@@ -467,6 +467,37 @@ describe("staleSidecars", () => {
   });
 });
 
+describe("tokenUsage", () => {
+  it("survives the session metadata whitelist", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      tokenUsage: {
+        provider: "codex",
+        sourceId: "rollout.jsonl",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        sourceInputTokens: 80,
+        sourceOutputTokens: 20,
+        sourceTotalTokens: 100,
+      },
+    });
+    expect(readSession(dataDir, "api-1")?.tokenUsage?.totalTokens).toBe(100);
+  });
+});
+
 describe("sidecarProcs", () => {
   const base = {
     project: "api",

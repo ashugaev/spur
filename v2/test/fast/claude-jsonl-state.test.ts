@@ -295,6 +295,31 @@ describe("parseJsonlRecord server_error detection", () => {
   });
 });
 
+describe("parseJsonlRecord token usage", () => {
+  it("counts cache input and exposes a message id for deduplication", () => {
+    const record = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          id: "msg-1",
+          role: "assistant",
+          usage: {
+            input_tokens: 10,
+            cache_creation_input_tokens: 20,
+            cache_read_input_tokens: 30,
+            output_tokens: 4,
+          },
+        },
+      }),
+      0,
+    );
+    expect(record).toMatchObject({
+      messageId: "msg-1",
+      tokenUsage: { inputTokens: 60, outputTokens: 4 },
+    });
+  });
+});
+
 // ── parseJsonlRecord rate-limit reset detection ─────────────────────────
 
 describe("parseJsonlRecord rate_limit reset detection", () => {

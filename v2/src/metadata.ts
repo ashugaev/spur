@@ -705,6 +705,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     launchCommand: normalizedSession.launchCommand,
     status: normalizedSession.status,
     ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
+    ...(normalizedSession.tokenUsage ? { tokenUsage: normalizedSession.tokenUsage } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.lastOpenedAt ? { lastOpenedAt: normalizedSession.lastOpenedAt } : {}),
