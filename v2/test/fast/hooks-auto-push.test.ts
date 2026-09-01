@@ -62,9 +62,19 @@ async function makeGhStub(): Promise<GhStub> {
   const binDir = await makeTempDir("spur-auto-push-bin-");
   const ghPath = join(binDir, "gh");
   const calledPath = join(binDir, "called");
+  const defaultExitCode = "$" + "{GH_EXIT_CODE:-1}";
   await writeFile(
     ghPath,
-    '#!/usr/bin/env sh\nprintf "called\\n" > "$GH_CALLED_PATH"\nexit "$' + '{GH_EXIT_CODE:-1}"\n',
+    `#!/usr/bin/env sh
+printf "called\\n" > "$GH_CALLED_PATH"
+if [ -n "$GH_BARRIER_DIR" ]; then
+  : > "$GH_BARRIER_DIR/$HOOK_CALL_ID"
+  while [ "$(find "$GH_BARRIER_DIR" -type f | wc -l)" -lt "$GH_BARRIER_EXPECTED" ]; do
+    sleep 0.01
+  done
+fi
+exit "${defaultExitCode}"
+`,
     "utf8",
   );
   await chmod(ghPath, 0o755);
@@ -179,6 +189,114 @@ describe("auto-push Stop hook", () => {
     );
     const markerStat = await stat(join(toolDir, "auto-push-stop-state"));
     expect(markerStat.mode & 0o777).toBe(0o600);
+  });
+
+  it("emits one block across 12 simultaneous identical calls in 12 rounds", async () => {
+    const repoDir = await makeDirtyRepo();
+    const { binDir, calledPath } = await makeGhStub();
+
+    for (let round = 0; round < 12; round += 1) {
+      const toolDir = await makeTempDir(`spur-auto-push-tools-${round}-`);
+      const barrierDir = await makeTempDir(`spur-auto-push-barrier-${round}-`);
+      const results = await Promise.all(
+        Array.from({ length: 12 }, (_, call) =>
+          runAutoPushHook(["codex"], {
+            CLAUDE_PROJECT_DIR: repoDir,
+            GH_BARRIER_DIR: barrierDir,
+            GH_BARRIER_EXPECTED: "12",
+            GH_CALLED_PATH: calledPath,
+            HOOK_CALL_ID: String(call),
+            PATH: `${binDir}:${process.env.PATH ?? ""}`,
+            SPUR_CLOSEOUT_OWNER: "1",
+            SPUR_SESSION: "api-1",
+            SPUR_SESSION_TOOL_DIR: toolDir,
+          }),
+        ),
+      );
+
+      expect(results.filter((result) => result.stdout.length > 0)).toHaveLength(1);
+    }
+  });
+
+  it("blocks the same obligation again after a clean outcome resolves it", async () => {
+    const repoDir = await makeCommittedRepo();
+    await setOriginHead(repoDir);
+    const dirtyPath = join(repoDir, "dirty.txt");
+    await writeFile(dirtyPath, "dirty\n", "utf8");
+    const toolDir = await makeTempDir("spur-auto-push-tools-");
+    const { binDir, calledPath } = await makeGhStub();
+    const env = {
+      CLAUDE_PROJECT_DIR: repoDir,
+      GH_CALLED_PATH: calledPath,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      SPUR_CLOSEOUT_OWNER: "1",
+      SPUR_SESSION: "api-1",
+      SPUR_SESSION_TOOL_DIR: toolDir,
+    };
+
+    const first = await runAutoPushHook(["codex"], env);
+    await rm(dirtyPath);
+    const resolved = await runAutoPushHook(["codex"], env);
+    await writeFile(dirtyPath, "dirty\n", "utf8");
+    const recurred = await runAutoPushHook(["codex"], env);
+
+    expect(first.stdout).not.toBe("");
+    expect(resolved).toEqual({ stderr: "", stdout: "" });
+    expect(recurred.stdout).not.toBe("");
+  });
+
+  it("blocks the same no-PR obligation again after a PR resolves it", async () => {
+    const repoDir = await makeCommittedRepo();
+    await setOriginHead(repoDir);
+    await writeFile(join(repoDir, "feature.txt"), "feature\n", "utf8");
+    await execFileAsync("git", ["add", "feature.txt"], { cwd: repoDir });
+    await execFileAsync("git", ["commit", "-m", "feature"], { cwd: repoDir });
+    const toolDir = await makeTempDir("spur-auto-push-tools-");
+    const { binDir, calledPath } = await makeGhStub();
+    const env = {
+      CLAUDE_PROJECT_DIR: repoDir,
+      GH_CALLED_PATH: calledPath,
+      GH_EXIT_CODE: "1",
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      SPUR_CLOSEOUT_OWNER: "1",
+      SPUR_SESSION: "api-1",
+      SPUR_SESSION_TOOL_DIR: toolDir,
+    };
+
+    const first = await runAutoPushHook(["codex"], env);
+    env.GH_EXIT_CODE = "0";
+    const resolved = await runAutoPushHook(["codex"], env);
+    env.GH_EXIT_CODE = "1";
+    const recurred = await runAutoPushHook(["codex"], env);
+
+    expect(first.stdout).not.toBe("");
+    expect(resolved).toEqual({ stderr: "", stdout: "" });
+    expect(recurred.stdout).not.toBe("");
+  });
+
+  it("blocks the same obligation again after visiting the default branch", async () => {
+    const repoDir = await makeCommittedRepo();
+    await writeFile(join(repoDir, "dirty.txt"), "dirty\n", "utf8");
+    const toolDir = await makeTempDir("spur-auto-push-tools-");
+    const { binDir, calledPath } = await makeGhStub();
+    const env = {
+      CLAUDE_PROJECT_DIR: repoDir,
+      GH_CALLED_PATH: calledPath,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      SPUR_CLOSEOUT_OWNER: "1",
+      SPUR_SESSION: "api-1",
+      SPUR_SESSION_TOOL_DIR: toolDir,
+    };
+
+    const first = await runAutoPushHook(["codex"], env);
+    await execFileAsync("git", ["switch", "main"], { cwd: repoDir });
+    const resolved = await runAutoPushHook(["codex"], env);
+    await execFileAsync("git", ["switch", "feature/hook-json"], { cwd: repoDir });
+    const recurred = await runAutoPushHook(["codex"], env);
+
+    expect(first.stdout).not.toBe("");
+    expect(resolved).toEqual({ stderr: "", stdout: "" });
+    expect(recurred.stdout).not.toBe("");
   });
 
   it.each(["branch", "head", "porcelain", "problem-set"])(
