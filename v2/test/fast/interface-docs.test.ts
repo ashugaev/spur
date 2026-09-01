@@ -17,11 +17,13 @@ describe("published interface contracts", () => {
       readRepoFile(".claude/skills/spur/SKILL.md"),
     ]);
 
-    expect(commands).toContain("`$SPUR_CLOSEOUT_OWNER=1` marks a writable session");
-    expect(commands).toContain("`0` marks read-only or shared-workspace sessions");
+    expect(commands).toContain("marks the assigned closeout owner for a writable worktree");
+    expect(commands).toContain("transferred handoff ownership on a reused workspace");
+    expect(commands).toContain("`0` marks non-owners, including read-only and shared-workspace");
     expect(commands).toContain("missing variable preserves standalone hook enforcement");
-    expect(agentSkill).toContain("`SPUR_CLOSEOUT_OWNER=1`: writable worktree owner");
-    expect(agentSkill).toContain("`0`: auto-push Stop hook skips git and PR closeout");
+    expect(agentSkill).toContain("assigned closeout owner for writable worktree");
+    expect(agentSkill).toContain("transferred handoff ownership on reused workspace");
+    expect(agentSkill).toContain("`0`: non-owner, including read-only/shared sessions");
     expect(agentSkill).toContain("Missing: standalone hook enforcement stays active");
     expect(claudeSkill).toBe(agentSkill);
   });
