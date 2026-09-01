@@ -4,6 +4,10 @@ import test from "node:test";
 import { URL } from "node:url";
 
 const html = await readFile(new URL("../../landing/index.html", import.meta.url), "utf8");
+const structured = JSON.parse(
+  html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)[1],
+);
+const faq = structured["@graph"].find((entry) => entry["@type"] === "FAQPage");
 
 function section(id) {
   const start = html.indexOf(`<section id="${id}"`);
@@ -11,6 +15,20 @@ function section(id) {
   const end = html.indexOf("</section>", start);
   assert.notEqual(end, -1, `unclosed #${id}`);
   return html.slice(start, end + 10);
+}
+
+function faqAnswer(question) {
+  const visible = html
+    .match(
+      new RegExp(
+        `<summary>\\s*${question.replace("?", "\\?")}[\\s\\S]*?<div class="ans">([\\s\\S]*?)<\\/div>`,
+      ),
+    )?.[1]
+    ?.replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const json = faq.mainEntity.find((entry) => entry.name === question).acceptedAnswer.text;
+  return { visible, json };
 }
 
 test("hero routes supported events through one accessible visual", () => {
@@ -100,23 +118,44 @@ test("truth copy and FAQ structured data stay aligned", () => {
   );
   const answer =
     "Spur stores its state on your machine and has no Spur cloud. Agent CLIs and configured integrations still send data to their own providers. The web UI binds to loopback; the default Tailscale setup adds your tailnet IP, and public exposure is an explicit override.";
-  const visible = html
-    .match(
-      /<summary>\s*Does my code leave the box\?[\s\S]*?<div class="ans">([\s\S]*?)<\/div>/,
-    )?.[1]
-    ?.replace(/<[^>]+>/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  const structured = JSON.parse(
-    html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)[1],
-  );
-  const faq = structured["@graph"].find((entry) => entry["@type"] === "FAQPage");
-  const jsonAnswer = faq.mainEntity.find((entry) => entry.name === "Does my code leave the box?")
-    .acceptedAnswer.text;
+  const { visible, json } = faqAnswer("Does my code leave the box?");
   assert.equal(visible, answer);
-  assert.equal(jsonAnswer, answer);
-  assert.equal(visible, jsonAnswer);
+  assert.equal(json, answer);
   assert.equal((html.match(/class="pm" aria-hidden="true"/g) ?? []).length, 7);
+});
+
+test("event-source copy counts only pollers that emit events", () => {
+  const claim =
+    "Six pollers: cron, GitHub, GitHub CI, GitLab, Sentry, Telegram. A trigger spawns a session or sends a message into a live one.";
+  const { visible, json } = faqAnswer("What can trigger an agent automatically?");
+
+  assert.equal(visible, claim);
+  assert.equal(json, claim);
+  assert.doesNotMatch(html, /Seven pollers|systemd service logs/i);
+});
+
+test("canvas settles while hidden and wakes when visible or touched", () => {
+  const canvasScript = html.slice(
+    html.indexOf("var energy = 0"),
+    html.indexOf("})();\n    </script>"),
+  );
+  const touchHandler = canvasScript.slice(
+    canvasScript.indexOf('"touchstart"'),
+    canvasScript.indexOf('"scroll"'),
+  );
+  const visibilityHandler = canvasScript.slice(
+    canvasScript.indexOf('document.addEventListener("visibilitychange"'),
+  );
+
+  assert.match(canvasScript, /function wake\(\)/);
+  assert.match(canvasScript, /if \(!live && !document\.hidden\)/);
+  assert.match(canvasScript, /raf = requestAnimationFrame\(frame\)/);
+  assert.match(touchHandler, /energy = Math\.min\(1, energy \+ 0\.25\)/);
+  assert.match(touchHandler, /wake\(\)/);
+  for (const required of ["cancelAnimationFrame(raf)", "live = false", "energy = 0", "paint()"]) {
+    assert.match(visibilityHandler, new RegExp(required.replace(/[()]/g, "\\$&")));
+  }
+  assert.match(visibilityHandler, /else \{[\s\S]*wake\(\)/);
 });
 
 test("motion-safe CSS keeps all static meaning visible", () => {
