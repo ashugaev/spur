@@ -5365,6 +5365,88 @@ describe("SessionDetail display state", () => {
   });
 });
 
+describe("SessionDetail token usage", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  function stubFetch(session: Partial<SpurSessionView>) {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture(session)), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  it("shows used and budget tokens in the runtime sidebar", async () => {
+    stubFetch({
+      tokenUsageView: {
+        status: "available",
+        inputTokens: 1000,
+        outputTokens: 234,
+        totalTokens: 1234,
+        budget: 2000,
+        exhausted: false,
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Tokens")).toBeInTheDocument();
+    expect(screen.getByText("1,234 / 2,000")).toBeInTheDocument();
+  });
+
+  it("marks unsupported live sessions as unenforced", async () => {
+    stubFetch({
+      agent: "cursor",
+      tokenUsageView: {
+        status: "unavailable",
+        unenforced: true,
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Tokens")).toBeInTheDocument();
+    expect(screen.getByText("Unavailable · budget unenforced")).toBeInTheDocument();
+  });
+
+  it("hides Restore when the token budget is exhausted", async () => {
+    stubFetch({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      stopReason: "token_budget",
+      tokenUsageView: {
+        status: "available",
+        inputTokens: 1700,
+        outputTokens: 300,
+        totalTokens: 2000,
+        budget: 2000,
+        exhausted: true,
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("2,000 / 2,000 · limit hit")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
+});
+
 describe("SessionDetail document title", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
