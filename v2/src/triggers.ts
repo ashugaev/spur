@@ -1271,6 +1271,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
       if (cached && !persisted) {
         clearBatch(queueKey, { deletePersisted: false });
+      } else if (persisted && (!cached || persisted.workId !== cached.workId)) {
+        return;
       } else if (cached && persisted && persisted.workId === cached.workId) {
         const authoritativeBatch = restoreSendBatch(persisted.batch);
         if (authoritativeBatch && authoritativeBatch.sessionId === cached.batch.sessionId) {

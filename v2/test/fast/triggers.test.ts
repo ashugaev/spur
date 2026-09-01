@@ -1066,6 +1066,88 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("does not let a stale controller overwrite replacement work", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-work-replaced-"));
+    const autoPing = new AutoPingService(dataDir);
+    let sessionState: "working" | "stale" = "working";
+    const getMock = vi.fn().mockImplementation(async () => ({
+      id: "api-1",
+      status: sessionState === "stale" ? "stopped" : "running",
+      state: sessionState,
+      ...(sessionState === "stale" ? { stopReason: "stale_timeout" } : {}),
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    }));
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const oldBus = new EventBus();
+    const deps = {
+      config: { ...config(), dataDir } as never,
+      bus: oldBus,
+      sessionService: { get: getMock, deliver: deliverMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    };
+    const oldController = startConfiguredTriggers(deps);
+    let replacement: ReturnType<typeof startConfiguredTriggers> | undefined;
+    let deliveryController: ReturnType<typeof startConfiguredTriggers> | undefined;
+    try {
+      oldBus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      const records = readPendingSendBatchesMock();
+      const firstWorkId = records.values().next().value?.workId;
+      expect(firstWorkId).toBeDefined();
+
+      const replacementBus = new EventBus();
+      replacement = startConfiguredTriggers({ ...deps, bus: replacementBus });
+      records.clear();
+      replacementBus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [
+            {
+              key: "comment:2",
+              kind: "comment",
+              text: "Replacement work survives.",
+            },
+          ],
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      const replacementWorkId = records.values().next().value?.workId;
+      expect(replacementWorkId).toBeDefined();
+      expect(replacementWorkId).not.toBe(firstWorkId);
+
+      oldBus.emit({
+        ...githubEvent("comment:3"),
+        data: {
+          ...githubEvent("comment:3").data,
+          signals: [{ key: "comment:3", kind: "comment", text: "Delayed stale event." }],
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(records.values().next().value?.workId).toBe(replacementWorkId);
+
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        storedSnapshot([{ key: "comment:2", kind: "comment", text: "Replacement work survives." }]),
+      );
+      sessionState = "stale";
+      deliveryController = startConfiguredTriggers({ ...deps, bus: new EventBus() });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(deliverMock).toHaveBeenCalledOnce();
+      expect(deliverMock.mock.calls[0]?.[1]).toContain("Replacement work survives.");
+      expect(deliverMock.mock.calls[0]?.[1]).not.toContain("Delayed stale event.");
+    } finally {
+      await oldController.stop();
+      await replacement?.stop();
+      await deliveryController?.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("delivers GitHub updates immediately to a stale-parked session with no idle wait", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
