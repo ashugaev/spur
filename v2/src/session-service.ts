@@ -15185,6 +15185,7 @@ export class SessionService {
       pipeline: _pipeline,
       sidecarNames: _sidecarNames,
       sidecarPorts: _sidecarPorts,
+      tokenUsage: _tokenUsage,
       ...dashboardSession
     } = session;
     const workspacePresent = classified.workspacePresent;
@@ -15376,9 +15377,10 @@ export class SessionService {
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
     const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
+    const { tokenUsage: _tokenUsage, ...publicSession } = session;
 
     const view: SessionView = {
-      ...session,
+      ...publicSession,
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
       workspaceId: workspaceIdOf(session),

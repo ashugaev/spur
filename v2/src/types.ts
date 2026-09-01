@@ -984,7 +984,7 @@ export interface SessionSidecarView {
   ageWarn?: boolean;
 }
 
-export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
+export interface SessionView extends Omit<SessionRecord, "queuedMessages" | "tokenUsage"> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -1004,7 +1004,7 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   tokenUsageView?: SessionTokenUsageView;
 }
 
-export interface DashboardSessionView extends SessionRecord {
+export interface DashboardSessionView extends Omit<SessionRecord, "tokenUsage"> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;

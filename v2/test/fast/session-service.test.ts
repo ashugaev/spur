@@ -34123,6 +34123,7 @@ describe("SessionService", () => {
           budget: 100,
           exhausted: true,
         });
+        expect(view).not.toHaveProperty("tokenUsage");
         await internals.stopForTokenBudget(view);
         await internals.stopForTokenBudget(view);
 
