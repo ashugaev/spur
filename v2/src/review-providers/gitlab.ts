@@ -1,5 +1,6 @@
 import { glab } from "../glab.js";
 import type {
+  AutoPingThreadTarget,
   ReviewCheck,
   ReviewEventData,
   ReviewRequestSummary,
@@ -42,6 +43,10 @@ type GitLabDiscussion = {
   id: string;
   individual_note?: boolean;
   notes: GitLabDiscussionNote[];
+};
+
+type ReviewSignalWithThreadTarget = ReviewSignal & {
+  providerThreadTarget?: AutoPingThreadTarget;
 };
 
 function encodeProjectPath(projectPath: string): string {
@@ -153,13 +158,23 @@ async function collectCommentSignals(
       const path = note.position?.new_path ?? note.position?.old_path;
       const line = note.position?.new_line ?? note.position?.old_line;
       const location = path ? ` on ${path}${line ? `:${String(line)}` : ""}` : "";
-      signals.push({
+      const signal: ReviewSignalWithThreadTarget = {
         key: discussion.individual_note
           ? `comment:${String(note.id)}`
           : `discussion:${discussion.id}:${String(note.id)}`,
         kind: "comment",
         text: `New merge request comment from ${author}${location}: "${shortText(note.body)}"`,
-      });
+        ...(discussion.individual_note
+          ? {}
+          : {
+              providerThreadTarget: {
+                kind: "gitlab-discussion",
+                mergeRequestIid,
+                discussionId: discussion.id,
+              },
+            }),
+      };
+      signals.push(signal);
     }
   }
   return { signals, unresolvedDiscussions };

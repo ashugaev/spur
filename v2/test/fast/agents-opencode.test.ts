@@ -2,6 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { buildAgentLaunchPlan } from "../../src/agents/index.js";
 import {
   findOpenCodeSessionId,
   readOpenCodeJson,
@@ -21,6 +22,18 @@ import {
 } from "../../src/agents/opencode.js";
 
 describe("OpenCode adapter", () => {
+  it("keeps deferred controls out of the launch command", () => {
+    const handle = `ap1_${"a".repeat(43)}`;
+    const plan = buildAgentLaunchPlan("opencode", "ordinary prompt", undefined, {
+      text: handle,
+      sensitive: true,
+    });
+    expect(plan.launchCommand).toContain("ordinary prompt");
+    expect(plan.launchCommand).not.toContain(handle);
+    expect(plan.initialMessage).not.toContain(handle);
+    expect(plan.deferredSensitiveInitialMessage).toEqual({ text: handle, sensitive: true });
+  });
+
   it("launches with permission auto-approval and a selected model", () => {
     vi.stubEnv("SPUR_OPENCODE_BIN", "/opt/Open Code/opencode");
     expect(buildOpenCodePlan("work", { model: "openai/gpt-5" })).toEqual({

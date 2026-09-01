@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { redactAutoPingHandles } from "./auto-ping.js";
 import { iterArchivedThenLive, iterLiveLines, parseJsonLine, tryRotate } from "./jsonl-log-io.js";
 import type { SessionLogScope } from "./types.js";
 
@@ -71,6 +72,17 @@ export function setEventLogConfig(config: EventLogConfig): void {
 }
 
 type SpurLogEntryInput = Omit<SpurLogEntry, "timestamp"> & { timestamp?: string };
+
+function redactAutoPingLogValue(value: unknown): unknown {
+  if (typeof value === "string") return redactAutoPingHandles(value);
+  if (Array.isArray(value)) return value.map((entry) => redactAutoPingLogValue(entry));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, redactAutoPingLogValue(entry)]),
+    );
+  }
+  return value;
+}
 
 interface SessionLogQuery {
   limit?: number;
@@ -211,11 +223,12 @@ export function resetEventLogCollapse(): void {
 
 export function logSpurEvent(dataDir: string, entry: SpurLogEntryInput): void {
   try {
-    if (entry.level === "warn" || entry.level === "error") {
-      collapseOrAppend(dataDir, entry);
+    const redacted = redactAutoPingLogValue(entry) as SpurLogEntryInput;
+    if (redacted.level === "warn" || redacted.level === "error") {
+      collapseOrAppend(dataDir, redacted);
       return;
     }
-    appendEventLog(dataDir, entry);
+    appendEventLog(dataDir, redacted);
   } catch {
     // Logging must never block Spur runtime behavior.
   }

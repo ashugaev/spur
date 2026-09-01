@@ -1,4 +1,6 @@
+import { EventEmitter } from "node:events";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,13 +19,69 @@ const execFileMock: ((...args: unknown[]) => void) & {
 } = Object.assign(vi.fn(), {
   [promisify.custom]: execFileAsyncMock,
 });
+class FakeSpawnChild extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly stdinChunks: string[] = [];
+  readonly killedSignals: string[] = [];
+  pid: number | undefined = 1234;
+  private didClose = false;
+
+  constructor(
+    private readonly options: {
+      autoClose?: boolean;
+      code?: number | null;
+      signal?: NodeJS.Signals | null;
+      beforeClose?: () => void;
+    } = {},
+  ) {
+    super();
+    this.stdin.on("data", (chunk: Buffer) => {
+      this.stdinChunks.push(chunk.toString("utf8"));
+    });
+    this.stdin.on("finish", () => {
+      if (this.options.autoClose !== false) {
+        queueMicrotask(() => this.close());
+      }
+    });
+  }
+
+  kill(signal?: NodeJS.Signals | number): boolean {
+    this.killedSignals.push(String(signal));
+    return true;
+  }
+
+  close(): void {
+    if (this.didClose) {
+      this.emit("close", this.options.code ?? 0, this.options.signal ?? null);
+      return;
+    }
+    this.didClose = true;
+    this.options.beforeClose?.();
+    this.emit("close", this.options.code ?? 0, this.options.signal ?? null);
+  }
+}
+
+const spawnCalls: Array<{
+  file: string;
+  args: string[];
+  options: unknown;
+  child: FakeSpawnChild;
+}> = [];
+const spawnQueue: FakeSpawnChild[] = [];
+const spawnMock = vi.fn((file: string, args: string[], options: unknown) => {
+  const child = spawnQueue.shift() ?? new FakeSpawnChild();
+  spawnCalls.push({ file, args, options, child });
+  return child;
+});
 const sleepMock = vi.fn().mockResolvedValue(undefined);
 
-vi.mock("node:child_process", () => ({
+vi.doMock("node:child_process", () => ({
   execFile: execFileMock,
+  spawn: spawnMock,
 }));
 
-vi.mock("node:timers/promises", () => ({
+vi.doMock("node:timers/promises", () => ({
   setTimeout: sleepMock,
 }));
 
@@ -39,6 +97,9 @@ describe("runtime-tmux", () => {
 
   afterEach(() => {
     execFileAsyncMock.mockReset();
+    spawnMock.mockClear();
+    spawnCalls.length = 0;
+    spawnQueue.length = 0;
     sleepMock.mockReset().mockResolvedValue(undefined);
     if (originalSkipCodexSubmitAck === undefined) {
       delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
@@ -296,6 +357,214 @@ describe("runtime-tmux", () => {
     const { readFileSync } = await import("node:fs");
     const config = readFileSync(expectedConfigPath, "utf-8");
     expect(config).toMatch(/^set -g status off$/m);
+  });
+
+  it("sends sensitive single-line payloads through tmux load-buffer stdin only", async () => {
+    const sentinel = "ap1_secret_handle";
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" });
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.file).toBe("tmux");
+    expect(spawnCalls[0]?.args.slice(0, 2)).toEqual(["load-buffer", "-b"]);
+    expect(spawnCalls[0]?.args.at(-1)).toBe("-");
+    expect(spawnCalls[0]?.args).not.toContain(sentinel);
+    expect(JSON.stringify(spawnCalls[0]?.options)).not.toContain(sentinel);
+    expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+    for (const [, args] of execFileAsyncMock.mock.calls) {
+      expect(args).not.toContain(sentinel);
+    }
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-d");
+    expect(pasteCall?.[1]).not.toContain("-p");
+    expect(execFileAsyncMock.mock.calls.at(-1)?.[1]).toContain("Enter");
+  });
+
+  it("keeps sensitive multiline and long payloads out of send-keys, argv, and temp files", async () => {
+    const { readdirSync } = await import("node:fs");
+    const originalTmpdir = process.env["TMPDIR"];
+    const parent = await createTempDir("spur-sensitive-tmux-test-");
+    process.env["TMPDIR"] = parent;
+    const sentinel = `ap1_secret_handle\n${"x".repeat(250)}`;
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    try {
+      const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+      await sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" });
+
+      expect(spawnCalls).toHaveLength(1);
+      expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+      expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
+      expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("load-buffer"))).toBe(
+        false,
+      );
+      expect(readdirSync(parent)).toEqual([]);
+    } finally {
+      if (originalTmpdir === undefined) {
+        delete process.env["TMPDIR"];
+      } else {
+        process.env["TMPDIR"] = originalTmpdir;
+      }
+    }
+  });
+
+  it.each([
+    { agent: "codex" as const, bracketed: true, waits: false },
+    { agent: "opencode" as const, bracketed: true, waits: false },
+    { agent: "claude" as const, bracketed: false, waits: true },
+    { agent: "cursor" as const, bracketed: false, waits: true },
+  ])("uses the sensitive send mode for $agent", async ({ agent, bracketed, waits }) => {
+    const sentinel = `ap1_${agent}_secret`;
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendSensitiveMessageToTmux("api-1", sentinel, { agent });
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+    expect(spawnCalls[0]?.args).not.toContain(sentinel);
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1].includes("-p")).toBe(bracketed);
+    if (waits) {
+      expect(sleepMock).toHaveBeenCalledWith(300);
+    } else {
+      expect(sleepMock).not.toHaveBeenCalledWith(300);
+    }
+  });
+
+  it("scrubs and deletes the named buffer after a sensitive paste failure", async () => {
+    const sentinel = "ap1_paste_failure_secret";
+    const buffers = new Set<string>();
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "paste-buffer") {
+        throw Object.assign(new Error("paste failed " + sentinel), { code: "PASTE_FAILED" });
+      }
+      if (args[0] === "delete-buffer") {
+        buffers.delete(String(args.at(-1)));
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "list-buffers") {
+        return { stdout: [...buffers].join("\n"), stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    spawnQueue.push(
+      new FakeSpawnChild({
+        beforeClose: () => {
+          const bufferName = spawnCalls[0]?.args[2];
+          if (bufferName) buffers.add(bufferName);
+        },
+      }),
+      new FakeSpawnChild({
+        beforeClose: () => {
+          const bufferName = spawnCalls[1]?.args[2];
+          if (bufferName) buffers.add(bufferName);
+        },
+      }),
+    );
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" }),
+    ).rejects.toMatchObject({
+      name: "SensitiveTmuxTransportError",
+      code: "PASTE_FAILED",
+      operation: "paste-buffer",
+    });
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+    expect(spawnCalls[1]?.child.stdinChunks.join("")).toBe("");
+    expect(JSON.stringify(execFileAsyncMock.mock.calls)).not.toContain(sentinel);
+    expect(JSON.stringify(spawnCalls.map(({ args }) => args))).not.toContain(sentinel);
+    expect(buffers.size).toBe(0);
+  });
+
+  it("waits for sensitive load close before cleanup and escalates TERM then KILL", async () => {
+    const sentinel = "ap1_withheld_close_secret";
+    const buffers = new Set<string>();
+    const waits: Array<() => void> = [];
+    sleepMock.mockImplementation(() => new Promise<void>((resolve) => waits.push(resolve)));
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "delete-buffer") {
+        buffers.delete(String(args.at(-1)));
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "list-buffers") {
+        return { stdout: [...buffers].join("\n"), stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const originalLoad = new FakeSpawnChild({
+      autoClose: false,
+      beforeClose: () => {
+        const bufferName = spawnCalls[0]?.args[2];
+        if (bufferName) buffers.add(bufferName);
+      },
+    });
+    spawnQueue.push(originalLoad);
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    let settled = false;
+    const sent = sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" }).finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(spawnCalls).toHaveLength(1));
+    originalLoad.stdin.emit(
+      "error",
+      Object.assign(new Error("boom " + sentinel), { code: "EPIPE" }),
+    );
+    await Promise.resolve();
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "paste-buffer")).toBe(false);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "delete-buffer")).toBe(
+      false,
+    );
+    waits.shift()?.();
+    await vi.waitFor(() => expect(originalLoad.killedSignals).toEqual(["SIGTERM"]));
+    expect(originalLoad.killedSignals).toEqual(["SIGTERM"]);
+    waits.shift()?.();
+    await vi.waitFor(() => expect(originalLoad.killedSignals).toEqual(["SIGTERM", "SIGKILL"]));
+    expect(originalLoad.killedSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "paste-buffer")).toBe(false);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "delete-buffer")).toBe(
+      false,
+    );
+    expect(settled).toBe(false);
+    originalLoad.close();
+    await expect(sent).rejects.toMatchObject({
+      name: "SensitiveTmuxTransportError",
+      code: "EPIPE",
+      operation: "load-buffer",
+    });
+    expect(spawnCalls[1]?.child.stdinChunks.join("")).toBe("");
+    expect(buffers.size).toBe(0);
+    originalLoad.emit("error", new Error("late " + sentinel));
+    originalLoad.close();
+    expect(spawnCalls).toHaveLength(2);
+  });
+
+  it("waits for sensitive load close before paste on success", async () => {
+    const sentinel = "ap1_success_wait_secret";
+    const originalLoad = new FakeSpawnChild({ autoClose: false });
+    spawnQueue.push(originalLoad);
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    const sent = sendSensitiveMessageToTmux("api-1", sentinel, { agent: "codex" });
+    await vi.waitFor(() => expect(spawnCalls).toHaveLength(1));
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "paste-buffer")).toBe(false);
+    originalLoad.close();
+    await expect(sent).resolves.toBeUndefined();
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-p");
+    expect(execFileAsyncMock.mock.calls.at(-1)?.[1]).toContain("Enter");
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {

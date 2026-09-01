@@ -1,4 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AutoPingService } from "../../src/auto-ping.js";
 import type * as eventLogModule from "../../src/event-log.js";
 import { EventBus } from "../../src/event-bus.js";
 import type {
@@ -23,6 +27,9 @@ const deleteWorkItemLifecycleMock = vi.fn();
 const readPendingSendBatchesMock = vi.fn();
 const recordPendingSendBatchMock = vi.fn();
 const deletePendingSendBatchMock = vi.fn();
+const readPendingSendBatchMock = vi.fn();
+const updatePendingSendBatchConditionalMock = vi.fn();
+const deletePendingSendBatchConditionalMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
 
@@ -53,6 +60,9 @@ vi.mock("../../src/metadata.js", () => ({
   readPendingSendBatches: readPendingSendBatchesMock,
   recordPendingSendBatch: recordPendingSendBatchMock,
   deletePendingSendBatch: deletePendingSendBatchMock,
+  readPendingSendBatch: readPendingSendBatchMock,
+  updatePendingSendBatchConditional: updatePendingSendBatchConditionalMock,
+  deletePendingSendBatchConditional: deletePendingSendBatchConditionalMock,
 }));
 
 function config(options?: { event?: string; interrupt?: boolean; prompt?: string }) {
@@ -435,6 +445,7 @@ function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }
 function sentryEvent() {
   return {
     name: "sentry:issue.new",
+    occurrenceId: "sentry-occurrence-1",
     projectId: "api",
     sourceId: "sentry-issues",
     data: {
@@ -475,6 +486,7 @@ function serviceConfig(options?: { prompt?: string }) {
 function githubEvent(signalKey = "comment:1") {
   return {
     name: "github:comment",
+    occurrenceId: `github-${signalKey}`,
     projectId: "api",
     sourceId: "pr-watch",
     data: {
@@ -500,6 +512,7 @@ function commentSnapshot(signalKey = "comment:1"): ReviewSnapshot {
 function gitlabEvent(signalKey = "comment:1") {
   return {
     name: "gitlab:comment",
+    occurrenceId: `gitlab-${signalKey}`,
     projectId: "api",
     sourceId: "mr-watch",
     data: {
@@ -521,6 +534,7 @@ function gitlabEvent(signalKey = "comment:1") {
 function ciFailedEvent() {
   return {
     name: "github:ci_failed",
+    occurrenceId: "github-ci-failed-1",
     projectId: "api",
     sourceId: "pr-watch",
     data: {
@@ -550,6 +564,7 @@ function mergeConflictSignal(): ReviewSignal {
 function mergeConflictEvent() {
   return {
     name: "github:merge_conflict",
+    occurrenceId: "github-merge-conflict-1",
     projectId: "api",
     sourceId: "pr-watch",
     data: {
@@ -579,6 +594,7 @@ function mergeConflictSnapshot(): ReviewSnapshot {
 function cronEvent() {
   return {
     name: "cron:tick",
+    occurrenceId: "cron-occurrence-1",
     projectId: "api",
     sourceId: "morning",
     data: {},
@@ -588,6 +604,7 @@ function cronEvent() {
 function fanoutCronEvent() {
   return {
     name: "cron:tick",
+    occurrenceId: "fanout-cron-occurrence-1",
     projectId: "api",
     sourceId: "morning",
     data: {
@@ -599,6 +616,7 @@ function fanoutCronEvent() {
 function serviceEvent(ruleId = "crash") {
   return {
     name: `service:${ruleId}`,
+    occurrenceId: `service-${ruleId}-1`,
     projectId: "api",
     sourceId: "web-watch",
     data: {
@@ -620,6 +638,7 @@ function recentActivity(): string {
 function workItemEvent() {
   return {
     name: "github:work_item.new",
+    occurrenceId: "work-item-occurrence-1",
     projectId: "api",
     sourceId: "pr-watch",
     data: {
@@ -670,7 +689,34 @@ function useWorkItemLifecycleStore(initial?: WorkItemLifecycleRecord[]) {
 
 async function loadTriggersModule() {
   vi.resetModules();
-  return import("../../src/triggers.js");
+  const module = await import("../../src/triggers.js");
+  type TriggerDeps = Parameters<typeof module.startConfiguredTriggers>[0];
+  return {
+    ...module,
+    startConfiguredTriggers(deps: Omit<TriggerDeps, "autoPing"> & { autoPing?: AutoPingService }) {
+      if (deps.autoPing) return module.startConfiguredTriggers(deps as TriggerDeps);
+      const policyDir = mkdtempSync(join(tmpdir(), "spur-trigger-policy-"));
+      const autoPing = new AutoPingService(policyDir);
+      const sessionService = Object.create(deps.sessionService) as TriggerDeps["sessionService"];
+      sessionService.deliver = async (sessionId, message, options) =>
+        deps.sessionService.deliver(sessionId, message, {
+          ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+        });
+      sessionService.spawn = async (request) => deps.sessionService.spawn(request);
+      const controller = module.startConfiguredTriggers({
+        ...deps,
+        sessionService,
+        autoPing,
+      } as TriggerDeps);
+      return {
+        async stop(): Promise<void> {
+          await controller.stop();
+          autoPing.dispose();
+          rmSync(policyDir, { recursive: true, force: true });
+        },
+      };
+    },
+  };
 }
 
 async function advanceSendWindow(): Promise<void> {
@@ -686,8 +732,66 @@ describe("startConfiguredTriggers", () => {
     recordWorkItemLifecycleMock.mockReset();
     deleteWorkItemLifecycleMock.mockReset();
     readPendingSendBatchesMock.mockReset().mockReturnValue(new Map());
-    recordPendingSendBatchMock.mockReset();
-    deletePendingSendBatchMock.mockReset();
+    recordPendingSendBatchMock
+      .mockReset()
+      .mockImplementation((_dataDir: string, record: PersistedPendingBatch) => {
+        readPendingSendBatchesMock().set(record.queueKey, record);
+      });
+    deletePendingSendBatchMock
+      .mockReset()
+      .mockImplementation((_dataDir: string, queueKey: string) => {
+        readPendingSendBatchesMock().delete(queueKey);
+      });
+    readPendingSendBatchMock
+      .mockReset()
+      .mockImplementation(
+        (_dataDir: string, workId: string) =>
+          [...readPendingSendBatchesMock().values()].find(
+            (record: PersistedPendingBatch) => record.workId === workId,
+          ) ?? null,
+      );
+    updatePendingSendBatchConditionalMock
+      .mockReset()
+      .mockImplementation(
+        (
+          _dataDir: string,
+          expected: { workId: string; revision: number; claimId?: string },
+          next: PersistedPendingBatch,
+        ) => {
+          const records = readPendingSendBatchesMock();
+          const current = [...records.values()].find(
+            (record: PersistedPendingBatch) => record.workId === expected.workId,
+          );
+          if (
+            !current ||
+            current.revision !== expected.revision ||
+            (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+          ) {
+            return false;
+          }
+          records.set(next.queueKey, next);
+          return true;
+        },
+      );
+    deletePendingSendBatchConditionalMock
+      .mockReset()
+      .mockImplementation(
+        (_dataDir: string, expected: { workId: string; revision: number; claimId: string }) => {
+          const records = readPendingSendBatchesMock();
+          const current = [...records.values()].find(
+            (record: PersistedPendingBatch) => record.workId === expected.workId,
+          );
+          if (
+            !current ||
+            current.revision !== expected.revision ||
+            current.claim?.claimId !== expected.claimId
+          ) {
+            return false;
+          }
+          records.delete(current.queueKey);
+          return true;
+        },
+      );
     logSpurEventMock.mockReset();
   });
 
@@ -747,6 +851,100 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("suppresses a retried occurrence after its recipient redeems the event grant", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-auto-ping-"));
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const autoPing = new AutoPingService(dataDir);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: { ...config(), dataDir } as never,
+      bus,
+      sessionService: { get: getMock, deliver: deliverMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit({ ...githubEvent(), occurrenceId: "same-occurrence" });
+      await advanceSendWindow();
+      const suffix = (
+        deliverMock.mock.calls[0]?.[2] as { sensitivePromptSuffix?: string } | undefined
+      )?.sensitivePromptSuffix;
+      const handle = suffix?.match(/--event (ap1_[A-Za-z0-9_-]{43})/)?.[1];
+      expect(handle).toBeDefined();
+      await autoPing.unsubscribe("api-1", "event", handle ?? "");
+      deliverMock.mockClear();
+
+      bus.emit({ ...githubEvent(), occurrenceId: "same-occurrence" });
+      await advanceSendWindow();
+      expect(deliverMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a replacement re-read a completed claimed batch without a second delivery", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-reload-"));
+    const autoPing = new AutoPingService(dataDir);
+    let releaseDelivery!: () => void;
+    const deliverStarted = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const deliverMock = vi.fn().mockImplementation(async () => {
+      markStarted();
+      await deliverStarted;
+    });
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const deps = {
+      config: { ...config(), dataDir } as never,
+      bus,
+      sessionService: { get: getMock, deliver: deliverMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    };
+    const oldController = startConfiguredTriggers(deps);
+    let replacement: ReturnType<typeof startConfiguredTriggers> | undefined;
+    try {
+      bus.emit(githubEvent());
+      const advancing = vi.advanceTimersByTimeAsync(35_000);
+      await started;
+      replacement = startConfiguredTriggers(deps);
+      releaseDelivery();
+      await advancing;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(deliverMock).toHaveBeenCalledOnce();
+    } finally {
+      releaseDelivery();
+      await oldController.stop();
+      await replacement?.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("delivers GitHub updates immediately to a stale-parked session with no idle wait", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
@@ -788,6 +986,7 @@ describe("startConfiguredTriggers", () => {
   it("retains the first-arrival deadline when a second event merges into the same queue key", async () => {
     const secondEvent = {
       name: "github:comment",
+      occurrenceId: "github-comment-2",
       projectId: "api",
       sourceId: "pr-watch",
       data: {
@@ -3731,7 +3930,10 @@ describe("startConfiguredTriggers", () => {
       bus.emit(githubEvent());
       await advanceSendWindow();
       expect(deliverMock).toHaveBeenCalledTimes(1);
-      expect(deletePendingSendBatchMock).toHaveBeenCalledWith(DATA_DIR, "api:send:api-1");
+      expect(deletePendingSendBatchConditionalMock).toHaveBeenCalledWith(
+        DATA_DIR,
+        expect.objectContaining({ workId: expect.any(String), claimId: expect.any(String) }),
+      );
     } finally {
       await controller.stop();
     }

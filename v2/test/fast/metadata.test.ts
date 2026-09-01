@@ -1,15 +1,17 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveSessions,
   deletePendingSendBatch,
+  deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   listSessions,
   readCommentSeenRegistry,
   readPendingSendBatches,
+  readPendingSendBatch,
   readTelegramBindings,
   readTelegramLastUpdateId,
   readTelegramReplyTarget,
@@ -23,6 +25,7 @@ import {
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
+  updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
 import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
@@ -323,6 +326,46 @@ describe("pending send batches", () => {
     const record = reviewPendingBatch();
     recordPendingSendBatch(dataDir, record);
     expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+    expect(statSync(join(dataDir, "pending-send-batches.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("updates and deletes only the matching work revision and claim", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch({ workId: "work-1", revision: 3 });
+    recordPendingSendBatch(dataDir, record);
+    const claimed = {
+      ...record,
+      revision: 4,
+      claim: {
+        controllerId: "controller-1",
+        routeLeaseId: "lease-1",
+        claimId: "claim-1",
+        claimedAt: "2026-09-01T00:00:00.000Z",
+      },
+    };
+
+    expect(
+      updatePendingSendBatchConditional(dataDir, { workId: "work-1", revision: 2 }, claimed),
+    ).toBe(false);
+    expect(
+      updatePendingSendBatchConditional(dataDir, { workId: "work-1", revision: 3 }, claimed),
+    ).toBe(true);
+    expect(readPendingSendBatch(dataDir, "work-1")).toEqual(claimed);
+    expect(
+      deletePendingSendBatchConditional(dataDir, {
+        workId: "work-1",
+        revision: 4,
+        claimId: "foreign-claim",
+      }),
+    ).toBe(false);
+    expect(
+      deletePendingSendBatchConditional(dataDir, {
+        workId: "work-1",
+        revision: 4,
+        claimId: "claim-1",
+      }),
+    ).toBe(true);
+    expect(readPendingSendBatch(dataDir, "work-1")).toBeNull();
   });
 
   it("round-trips a service batch record", async () => {

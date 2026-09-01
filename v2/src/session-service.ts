@@ -231,6 +231,7 @@ import {
   sendMenuSelectionKeys,
   setTmuxSocketName,
   sendMessageToTmux,
+  sendSensitiveMessageToTmux,
   tmuxPaneDead,
   tmuxSessionExists,
   waitForTmuxReady,
@@ -8036,6 +8037,7 @@ export class SessionService {
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
       closeoutOwnerTransfer?: boolean;
+      sensitivePromptSuffix?: string;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -8378,7 +8380,7 @@ export class SessionService {
           );
         }
       }
-      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+      const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
           id: sessionId,
@@ -8388,7 +8390,13 @@ export class SessionService {
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
-      });
+      };
+      const launchPlan = options?.sensitivePromptSuffix
+        ? buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions, {
+            text: options.sensitivePromptSuffix,
+            sensitive: true,
+          })
+        : buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
       const promptDeliveredOnLaunch =
         launchPlan.initialMessageDeliveredOnLaunch === true ||
         (startupImagePaths.length > 0 &&
@@ -8523,6 +8531,25 @@ export class SessionService {
       }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
+      }
+
+      if (launchPlan.deferredSensitiveInitialMessage) {
+        stage = "prompt.sensitive_controls";
+        await this.sendDeferredSensitiveInitialMessage(
+          runningRecord,
+          launchPlan.deferredSensitiveInitialMessage.text,
+        );
+        this.logEvent("session.spawn.sensitive_controls_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent automatic ping controls to ${sessionId}`,
+          details: {
+            controlCount: (launchPlan.deferredSensitiveInitialMessage.text.match(/ap1_/g) ?? [])
+              .length,
+            outcome: "submitted",
+          },
+        });
       }
 
       stage = "record.write";
@@ -10004,7 +10031,7 @@ export class SessionService {
   async deliver(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean },
+    options?: { interrupt?: boolean; sensitivePromptSuffix?: string },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -10017,7 +10044,16 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
+    const result = await this.deliverPrepared(sessionId, message, {
+      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+      entryPoint: "deliver",
+    });
+    if (options?.sensitivePromptSuffix) {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) throw new Error(`Session not found: ${sessionId}`);
+      await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+    }
+    return result;
   }
 
   // Content-keyed: both queue ops locate the exact string in the queue rather
@@ -10471,6 +10507,37 @@ export class SessionService {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
     );
+  }
+
+  private async sendDeferredSensitiveInitialMessage(
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
+    message: string,
+  ): Promise<AgentSendOutcome> {
+    return this.withPaneWriteLock(session.tmuxSession, async () => {
+      const binding = agentWaitsForSubmitAck(session.agent)
+        ? await createAgentSubmitAckBinding(session.agent, {
+            worktreePath: session.worktreePath,
+            codexSessionsDir: join(
+              codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+              "sessions",
+            ),
+            ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+            freshLaunch: false,
+          })
+        : null;
+      await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+      if (!binding) return "submitted" as const;
+      const pacing = agentSubmitAckPacing(session.agent, { freshLaunch: false });
+      for (let attempt = 0; attempt <= pacing.maxResends; attempt += 1) {
+        const result = await this.waitForSubmitAck(binding, message, pacing.windowMs);
+        if (result.found) return "submitted" as const;
+        if (attempt < pacing.maxResends) await sendSubmitKeyToTmux(session.tmuxSession);
+      }
+      throw new Error(`Agent did not acknowledge deferred controls for ${session.id}`);
+    });
   }
 
   private async writeAgentMessage(

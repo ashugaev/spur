@@ -1,6 +1,11 @@
 import { readGitHubSourceSnapshot, readReviewSourceSnapshot } from "./metadata.js";
 import { reviewProvider } from "./review-providers/index.js";
 import type {
+  AutoPingDestination,
+  AutoPingScope,
+  AutoPingTarget,
+  AutoPingThreadTarget,
+  PersistedAutoPingBatchState,
   PersistedSendBatch,
   ReviewEventData,
   ReviewProviderId,
@@ -16,12 +21,105 @@ export interface SendBatch {
   prune(dataDir: string): void;
   isEmpty(): boolean;
   format(): string;
+  formatAutoPingControls(): string;
+  attachAutoPing(input: AutoPingBatchAttachment): void;
+  restoreAutoPing(state: PersistedAutoPingBatchState | undefined): void;
+  filterAutoPing(
+    suppressed: (occurrenceId: string, threadTarget?: AutoPingThreadTarget) => boolean,
+  ): void;
   serialize(): PersistedSendBatch;
+}
+
+export interface AutoPingBatchAttachment {
+  occurrenceId: string;
+  routeFingerprint: string;
+  destination: AutoPingDestination;
+  createGrant(scope: AutoPingScope, target: AutoPingTarget): string;
+}
+
+function controlCommand(scope: AutoPingScope, handle: string): string {
+  return `"$SPUR_SESSION_TOOL_DIR/spur" auto-ping unsubscribe --${scope} ${handle}`;
+}
+
+function mergeAutoPingState(
+  existing: PersistedAutoPingBatchState | undefined,
+  incoming: PersistedAutoPingBatchState | undefined,
+): PersistedAutoPingBatchState | undefined {
+  if (!incoming) return existing;
+  if (!existing) return incoming;
+  Object.assign(existing.items, incoming.items);
+  return existing;
+}
+
+abstract class AutoPingAwareBatch {
+  protected autoPing: PersistedAutoPingBatchState | undefined;
+
+  protected abstract autoPingItems(): Array<{ key: string; threadTarget?: AutoPingThreadTarget }>;
+  protected abstract removeAutoPingItem(key: string): void;
+
+  attachAutoPing(input: AutoPingBatchAttachment): void {
+    const items: PersistedAutoPingBatchState["items"] = {};
+    for (const item of this.autoPingItems()) {
+      items[item.key] = {
+        occurrenceId: input.occurrenceId,
+        eventHandle: input.createGrant("event", {
+          kind: "occurrence",
+          occurrenceId: input.occurrenceId,
+        }),
+        ...(item.threadTarget
+          ? {
+              threadTarget: item.threadTarget,
+              threadHandle: input.createGrant("thread", item.threadTarget),
+            }
+          : {}),
+      };
+    }
+    this.autoPing = {
+      routeFingerprint: input.routeFingerprint,
+      destination: input.destination,
+      subscriptionHandle: input.createGrant("subscription", { kind: "subscription" }),
+      items,
+    };
+  }
+
+  restoreAutoPing(state: PersistedAutoPingBatchState | undefined): void {
+    this.autoPing = state;
+  }
+
+  filterAutoPing(
+    suppressed: (occurrenceId: string, threadTarget?: AutoPingThreadTarget) => boolean,
+  ): void {
+    if (!this.autoPing) return;
+    const retained: PersistedAutoPingBatchState["items"] = {};
+    for (const [key, item] of Object.entries(this.autoPing.items)) {
+      if (suppressed(item.occurrenceId, item.threadTarget)) {
+        this.removeAutoPingItem(key);
+      } else {
+        retained[key] = item;
+      }
+    }
+    this.autoPing.items = retained;
+  }
+
+  formatAutoPingControls(): string {
+    if (!this.autoPing) return "";
+    const lines = ["Automatic ping controls (handles are session credentials):"];
+    for (const [key, item] of Object.entries(this.autoPing.items)) {
+      lines.push(`- ${key} event: ${controlCommand("event", item.eventHandle)}`);
+      if (item.threadHandle) {
+        lines.push(`- ${key} thread: ${controlCommand("thread", item.threadHandle)}`);
+      }
+    }
+    lines.push(
+      `- subscription: ${controlCommand("subscription", this.autoPing.subscriptionHandle)}`,
+    );
+    return lines.join("\n");
+  }
 }
 
 export type SendBatchParser = (data: unknown) => SendBatch | null;
 
-class ReviewSendBatch implements SendBatch {
+class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
   static parse(
     providerId: ReviewProviderId,
     projectId: string,
@@ -45,6 +143,7 @@ class ReviewSendBatch implements SendBatch {
     private readonly prompt: string | undefined,
     data: ReviewEventData,
   ) {
+    super();
     this.sessionId = data.sessionId;
     this.prNumber = data.prNumber;
     this.prTitle = data.prTitle;
@@ -61,6 +160,7 @@ class ReviewSendBatch implements SendBatch {
     for (const signal of next.signals.values()) {
       this.signals.set(signal.key, signal);
     }
+    this.autoPing = mergeAutoPingState(this.autoPing, next.autoPing);
   }
 
   prune(dataDir: string): void {
@@ -96,7 +196,19 @@ class ReviewSendBatch implements SendBatch {
       prNumber: this.prNumber,
       prTitle: this.prTitle,
       signals: [...this.signals.values()],
+      ...(this.autoPing ? { autoPing: this.autoPing } : {}),
     };
+  }
+
+  protected autoPingItems(): Array<{ key: string; threadTarget?: AutoPingThreadTarget }> {
+    return [...this.signals.values()].map((signal) => ({
+      key: signal.key,
+      ...(signal.providerThreadTarget ? { threadTarget: signal.providerThreadTarget } : {}),
+    }));
+  }
+
+  protected removeAutoPingItem(key: string): void {
+    this.signals.delete(key);
   }
 
   private buildActionLines(): string[] {
@@ -149,7 +261,7 @@ class ReviewSendBatch implements SendBatch {
   }
 }
 
-class ServiceSendBatch implements SendBatch {
+class ServiceSendBatch extends AutoPingAwareBatch implements SendBatch {
   static parse(prompt: string | undefined, data: unknown): ServiceSendBatch | null {
     if (!isServiceProblemEventData(data)) return null;
     return new ServiceSendBatch(prompt, data);
@@ -182,6 +294,7 @@ class ServiceSendBatch implements SendBatch {
     private readonly prompt: string | undefined,
     data: ServiceProblemEventData,
   ) {
+    super();
     this.sessionId = data.sessionId;
     this.serviceId = data.serviceId;
     this.ruleIds.add(data.ruleId);
@@ -192,6 +305,7 @@ class ServiceSendBatch implements SendBatch {
     for (const ruleId of next.ruleIds) {
       this.ruleIds.add(ruleId);
     }
+    this.autoPing = mergeAutoPingState(this.autoPing, next.autoPing);
   }
 
   prune(_dataDir: string): void {
@@ -209,7 +323,16 @@ class ServiceSendBatch implements SendBatch {
       sessionId: this.sessionId,
       serviceId: this.serviceId,
       ruleIds: [...this.ruleIds].sort(),
+      ...(this.autoPing ? { autoPing: this.autoPing } : {}),
     };
+  }
+
+  protected autoPingItems(): Array<{ key: string }> {
+    return [...this.ruleIds].map((key) => ({ key }));
+  }
+
+  protected removeAutoPingItem(key: string): void {
+    this.ruleIds.delete(key);
   }
 
   format(): string {
@@ -224,7 +347,7 @@ class ServiceSendBatch implements SendBatch {
   }
 }
 
-class TelegramSendBatch implements SendBatch {
+class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
   static parse(prompt: string | undefined, data: unknown): TelegramSendBatch | null {
     if (!isTelegramMessageEventData(data)) return null;
     return new TelegramSendBatch(prompt, data);
@@ -251,6 +374,7 @@ class TelegramSendBatch implements SendBatch {
     private readonly prompt: string | undefined,
     data: TelegramMessageEventData,
   ) {
+    super();
     this.sessionId = data.sessionId;
     this.messages = [data];
   }
@@ -258,6 +382,7 @@ class TelegramSendBatch implements SendBatch {
   merge(incoming: SendBatch): void {
     const next = incoming as TelegramSendBatch;
     this.messages.push(...next.messages);
+    this.autoPing = mergeAutoPingState(this.autoPing, next.autoPing);
   }
 
   prune(_dataDir: string): void {
@@ -274,7 +399,28 @@ class TelegramSendBatch implements SendBatch {
       ...(this.prompt !== undefined ? { prompt: this.prompt } : {}),
       sessionId: this.sessionId,
       messages: [...this.messages],
+      ...(this.autoPing ? { autoPing: this.autoPing } : {}),
     };
+  }
+
+  protected autoPingItems(): Array<{ key: string; threadTarget?: AutoPingThreadTarget }> {
+    return this.messages.map((message) => ({
+      key: String(message.messageId),
+      ...(message.messageThreadId !== undefined
+        ? {
+            threadTarget: {
+              kind: "telegram-topic" as const,
+              chatId: message.chatId,
+              messageThreadId: message.messageThreadId,
+            },
+          }
+        : {}),
+    }));
+  }
+
+  protected removeAutoPingItem(key: string): void {
+    const index = this.messages.findIndex((message) => String(message.messageId) === key);
+    if (index >= 0) this.messages.splice(index, 1);
   }
 
   format(): string {
@@ -354,6 +500,31 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
+function parsePersistedAutoPingState(value: unknown): PersistedAutoPingBatchState | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const state = value as Record<string, unknown>;
+  const destination = state["destination"];
+  const destinationValid =
+    destination !== null &&
+    typeof destination === "object" &&
+    !Array.isArray(destination) &&
+    ((destination as Record<string, unknown>)["kind"] === "trigger" ||
+      ((destination as Record<string, unknown>)["kind"] === "session" &&
+        typeof (destination as Record<string, unknown>)["sessionId"] === "string"));
+  if (
+    typeof state["routeFingerprint"] !== "string" ||
+    !destinationValid ||
+    typeof state["subscriptionHandle"] !== "string" ||
+    !state["items"] ||
+    typeof state["items"] !== "object" ||
+    Array.isArray(state["items"])
+  ) {
+    return undefined;
+  }
+  return value as PersistedAutoPingBatchState;
+}
+
 // Rehydrates a batch persisted via `SendBatch.serialize()` on daemon startup.
 // Validates the full shape here (unlike the shallow `isPersistedPendingBatch`
 // guard in metadata.ts) and returns null instead of throwing on any mismatch,
@@ -376,7 +547,7 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
     ) {
       return null;
     }
-    return ReviewSendBatch.parse(
+    const batch = ReviewSendBatch.parse(
       providerId,
       record["projectId"],
       record["sourceId"],
@@ -388,6 +559,8 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
         signals: record["signals"],
       },
     );
+    batch?.restoreAutoPing(parsePersistedAutoPingState(record["autoPing"]));
+    return batch;
   }
 
   if (record["kind"] === "service") {
@@ -399,11 +572,13 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
     ) {
       return null;
     }
-    return ServiceSendBatch.restore(record["prompt"], {
+    const batch = ServiceSendBatch.restore(record["prompt"], {
       sessionId: record["sessionId"],
       serviceId: record["serviceId"],
       ruleIds: record["ruleIds"],
     });
+    batch.restoreAutoPing(parsePersistedAutoPingState(record["autoPing"]));
+    return batch;
   }
 
   if (record["kind"] === "telegram") {
@@ -414,10 +589,12 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
     ) {
       return null;
     }
-    return TelegramSendBatch.restore(record["prompt"], {
+    const batch = TelegramSendBatch.restore(record["prompt"], {
       sessionId: record["sessionId"],
       messages: record["messages"],
     });
+    batch?.restoreAutoPing(parsePersistedAutoPingState(record["autoPing"]));
+    return batch;
   }
 
   return null;

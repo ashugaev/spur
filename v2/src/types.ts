@@ -463,6 +463,56 @@ export interface ReviewSignal {
   key: string;
   kind: ReviewSignalKind | GitHubLifecycleKind;
   text: string;
+  providerThreadTarget?: AutoPingThreadTarget;
+}
+
+export type AutoPingScope = "event" | "thread" | "subscription";
+
+export type AutoPingDestination = { kind: "session"; sessionId: string } | { kind: "trigger" };
+
+export type AutoPingThreadTarget =
+  | { kind: "github-review-thread"; threadId: string }
+  | { kind: "gitlab-discussion"; mergeRequestIid: number; discussionId: string }
+  | { kind: "telegram-topic"; chatId: number; messageThreadId: number };
+
+export type AutoPingTarget =
+  | { kind: "occurrence"; occurrenceId: string }
+  | AutoPingThreadTarget
+  | { kind: "subscription" };
+
+export interface AutoPingRouteDescriptor {
+  version: 1;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  sourceType: SourceType;
+  eventName: string;
+  actionKind: "send" | "spawn";
+  destination: AutoPingDestination;
+  spawnDeskGroup: boolean;
+}
+
+export interface AutoPingSuppressionView {
+  suppressionId: string;
+  scope: AutoPingScope;
+  routeFingerprint: string;
+  destination: AutoPingDestination;
+  target: AutoPingTarget;
+  createdAt: string;
+}
+
+export interface AutoPingSuppressionListResponse {
+  records: AutoPingSuppressionView[];
+}
+
+export interface AutoPingUnsubscribeResponse {
+  record: AutoPingSuppressionView;
+  created: boolean;
+}
+
+export interface AutoPingResumeResponse {
+  records: AutoPingSuppressionView[];
+  removed: boolean;
 }
 
 // The PR/MR the snapshot's signals were collected from. `null` covers legacy
@@ -523,7 +573,21 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
-export type PersistedSendBatch =
+export interface PersistedAutoPingBatchItem {
+  occurrenceId: string;
+  eventHandle: string;
+  threadTarget?: AutoPingThreadTarget;
+  threadHandle?: string;
+}
+
+export interface PersistedAutoPingBatchState {
+  routeFingerprint: string;
+  destination: AutoPingDestination;
+  subscriptionHandle: string;
+  items: Record<string, PersistedAutoPingBatchItem>;
+}
+
+export type PersistedSendBatch = (
   | {
       kind: "review";
       providerId: ReviewProviderId;
@@ -547,10 +611,19 @@ export type PersistedSendBatch =
       prompt?: string;
       sessionId: string;
       messages: TelegramMessageEventData[];
-    };
+    }
+) & { autoPing?: PersistedAutoPingBatchState };
 
 export interface PersistedPendingBatch {
   queueKey: string;
+  workId?: string;
+  revision?: number;
+  claim?: {
+    controllerId: string;
+    routeLeaseId: string;
+    claimId: string;
+    claimedAt: string;
+  };
   projectId: string;
   triggerId: string;
   sourceId: string;

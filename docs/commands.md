@@ -95,6 +95,34 @@ Each session's ToDo ledger starts empty — no code path seeds an item; the agen
 
 `$SPUR_TODO_COMMAND`: session-bound `spur-todo` wrapper, same actions, no `--session`, can't target another ledger. Routes/error codes: [daemon-api.md](daemon-api.md#session-routes).
 
+## auto-ping
+
+`spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`
+`spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`
+`spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`
+`spur auto-ping list [--session <id>] [--json]`
+`spur auto-ping resume <suppressionId> [--session <id>] [--json]`
+
+`unsubscribe` requires exactly one scope flag. The flag must match the handle scope.
+
+Handles are session credentials. Do not log, persist, or share them. `grant_not_ready` means activation is still finishing; retry the same command with the same handle.
+
+`--event` suppresses one emitted source occurrence for this trigger route and destination.
+`--thread` suppresses one supported provider thread for this trigger route and destination.
+`--subscription` suppresses one source/event/trigger/action route and destination.
+
+Inside a session, `SPUR_SESSION` supplies the target session. Passing a different `--session` fails. Outside a session, pass `--session`.
+
+Trigger prompts print the session-bound wrapper form, for example:
+
+`"$SPUR_SESSION_TOOL_DIR/spur" auto-ping unsubscribe --event <handle>`
+
+`list` prints active suppressions owned by the target session, never raw handles or handle hashes. `resume` removes a suppression by id; repeating it for a known removed id succeeds with `removed:false` under `--json`.
+
+Unredeemed handles expire after 30 days. Event suppressions expire 24 hours after the occurrence has no pending or in-flight work. Thread and subscription suppressions remain until resume or removal of their configured route.
+
+Routes and status codes: [daemon-api.md](daemon-api.md#session-routes). Source support: [configuration.md#events](configuration.md#events).
+
 ## send, queue
 
 `spur send <sessionId> <message>`. While an agent is busy, `send` queues per session, flushes on return to prompt, ahead of the next auto-step. Prints `Delivered message to <id>.` when the response carries no real queued messages, `Queued message for <id> (<N> pending).` otherwise; N counts real queued messages, never a pipeline's own auto-steps. A `stopped`/`paused` session with an existing workspace: `send` tries native resume first, then a fresh launch.

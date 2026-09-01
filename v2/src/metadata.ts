@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -556,6 +557,18 @@ function writeJsonFile(path: string, value: unknown): void {
   const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", "utf-8");
   renameSync(tmpPath, path);
+}
+
+function writePrivateJsonFile(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, path);
+  chmodSync(path, 0o600);
 }
 
 // Discriminates the current envelope (`{prNumber, signals}`) from the legacy
@@ -1290,7 +1303,7 @@ export function readPendingSendBatches(dataDir: string): Map<string, PersistedPe
 export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
@@ -1300,11 +1313,66 @@ export function recordPendingSendBatch(dataDir: string, record: PersistedPending
 export function deletePendingSendBatch(dataDir: string, queueKey: string): void {
   const records = readPendingSendBatches(dataDir);
   if (!records.delete(queueKey)) return;
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
   });
+}
+
+export function readPendingSendBatch(
+  dataDir: string,
+  workId: string,
+): PersistedPendingBatch | null {
+  return (
+    [...readPendingSendBatches(dataDir).values()].find((record) => record.workId === workId) ?? null
+  );
+}
+
+export function updatePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision: number; claimId?: string },
+  next: PersistedPendingBatch,
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    current.revision !== expected.revision ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  records.set(next.queueKey, next);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
+}
+
+export function deletePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision: number; claimId: string },
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    current.revision !== expected.revision ||
+    current.claim?.claimId !== expected.claimId
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
 }
 
 export function readServiceSourceState(

@@ -830,6 +830,10 @@ describe("github source", () => {
         signals: [expect.objectContaining({ key: "review-comment:7001" })],
       }),
     );
+    const commentPayload = emit.mock.calls.find((call) => call[0] === "github:comment")?.[1] as
+      | { signals: Array<ReviewSignal & { providerThreadTarget?: unknown }> }
+      | undefined;
+    expect(commentPayload?.signals[0]).not.toHaveProperty("providerThreadTarget");
     expect(recordCommentSeenMock).not.toHaveBeenCalled();
     handle.stop();
   });
