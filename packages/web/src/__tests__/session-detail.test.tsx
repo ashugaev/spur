@@ -5311,14 +5311,14 @@ describe("SessionDetail links", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Recover" }));
     fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
 
-      await waitFor(() => {
-        expect(killed).toBe(true);
-        expect(screen.getByPlaceholderText("Initial message...")).toBeInTheDocument();
-      });
+    await waitFor(() => {
+      expect(killed).toBe(true);
+      expect(screen.getByPlaceholderText("Initial message...")).toBeInTheDocument();
     });
   });
+});
 
-  describe("SessionDetail GitHub PR check unavailable", () => {
+describe("SessionDetail GitHub PR check unavailable", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     pushMock.mockReset();
