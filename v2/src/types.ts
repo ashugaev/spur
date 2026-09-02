@@ -863,6 +863,7 @@ export interface SessionRecord {
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  closeoutOwner?: boolean;
   claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
