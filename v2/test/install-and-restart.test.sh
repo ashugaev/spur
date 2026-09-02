@@ -291,7 +291,7 @@ wait "$first_pid" "$second_pid"
 # give-up now runs under the armed trap; A1). No daemon writes the "running"
 # record here, so the :64-78 wait loop spins its full ~2s before the lock is
 # even attempted — acceptable, noted in the spec's test plan. Held long enough
-# (5s) to outlast that 2s wait plus the 1s lock-wait timeout below.
+# (12s) to outlast that 2s wait plus the 1s lock-wait timeout below.
 flock "$LOCK_FILE" -c "sleep 12" &
 holder_pid=$!
 # Barrier, not a sleep: wait until the holder actually owns the lock. A fixed
@@ -326,6 +326,8 @@ if [ -e "$LEDGER_FILE14" ]; then
 fi
 # The hold outlasts the helper's wait by a wide margin so a slow runner cannot
 # release it early; release it now rather than sitting out the remainder.
+# Kill both the backgrounded flock wrapper and any child sleep holding the fd.
+pkill -P "$holder_pid" 2>/dev/null || true
 kill "$holder_pid" 2>/dev/null || true
 wait "$holder_pid" 2>/dev/null || true
 
