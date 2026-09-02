@@ -417,4 +417,3 @@ export function unfinishedTodo(projection: TodoProjection) {
     heldItemIds: projection.items.filter((item) => item.status === "held").map((item) => item.id),
   };
 }
-
