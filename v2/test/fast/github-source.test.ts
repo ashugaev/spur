@@ -110,6 +110,33 @@ function storedSnapshot(signals: ReviewSignal[], prNumber: number | null = 42): 
   return { prNumber, signals: new Map(signals.map((signal) => [signal.key, signal])) };
 }
 
+// Builds a GraphQL envelope carrying a "PR not found" style error for the
+// review batch alias shape (review-providers/github.ts buildGitHubReviewBatchQuery:
+// aliases are a0, a1, ... in target order). `withPath` attaches a `path` naming the
+// alias, which routes the message through gqlErrorsByAlias (pr-lookup.ts:260-287) so
+// only that alias's session sees it; omitting it forces the joined-message fallback
+// (graphqlEnvelopeErrorMessage, review-providers/github.ts:733-739) onto every alias
+// in the batch — the batch-poisoning shape.
+function notFoundEnvelope(
+  prNumber: number,
+  opts: { withPath?: boolean; alias?: string } = {},
+): string {
+  const alias = opts.alias ?? "a0";
+  return JSON.stringify({
+    data: {
+      rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+      r: { [alias]: null },
+    },
+    errors: [
+      {
+        type: "NOT_FOUND",
+        ...(opts.withPath ? { path: ["r", alias] } : {}),
+        message: `Could not resolve to a PullRequest with the number of ${prNumber}.`,
+      },
+    ],
+  });
+}
+
 function parseMockJson(raw: unknown, fallback: unknown): unknown {
   if (typeof raw !== "string") return fallback;
   try {
@@ -548,7 +575,8 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("keeps retrying a transient poll failure and does not treat it as a dead worktree", async () => {
+  it("keeps retrying a transient poll failure past its backoff window and does not treat it as a dead worktree", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([makeSession()]);
     ghMock.mockRejectedValue(new Error("gh offline"));
@@ -565,11 +593,14 @@ describe("github source", () => {
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
 
-    // A non-classified error is retried on every poll: gh count grows each time.
+    // A non-classified error is retried past its transient backoff window
+    // (SESSION_POLL_BACKOFF_BASE_MS = 120_000ms), not on every poll.
     handle.runOnStart?.();
     await flushPollCycle();
+    vi.setSystemTime(new Date(Date.now() + 120_001));
     handle.runOnStart?.();
     await flushPollCycle();
+    vi.setSystemTime(new Date(Date.now() + 240_001));
     handle.runOnStart?.();
     await flushPollCycle();
 
@@ -2606,6 +2637,9 @@ describe("github source", () => {
       // session in this cycle reported ciActive), so the deadline gate alone would
       // suppress every further tick. The flag must instead survive the errored cycle,
       // keeping ticks forced well inside the slow window (deadline stays at 00:10:00).
+      // Past the session's own transient poll backoff (120_000ms base) so the next
+      // tick's poll is not gated before it can retry.
+      vi.setSystemTime(new Date(Date.now() + 120_001));
       queuePollResponse("SUCCESS");
       await waitForGhCallCount(11);
 
@@ -2645,6 +2679,8 @@ describe("github source", () => {
       // so the deadline gate alone would suppress every further tick. The flag must
       // instead survive, keeping ticks forced well inside the slow window (deadline
       // stays at 00:10:00).
+      // Past the session's own transient poll backoff so the next tick is not gated.
+      vi.setSystemTime(new Date(Date.now() + 120_001));
       queuePollResponse("SUCCESS");
       await waitForGhCallCount(10);
 
@@ -2678,11 +2714,16 @@ describe("github source", () => {
       // The same session errors on every subsequent cycle (e.g. a persistent
       // 404/permission issue) — never producing a clean observation. The first
       // CI_HYSTERESIS_ERROR_TOLERANCE (3) consecutive failures still preserve the
-      // flag, each one bypassing the deadline gate for the next tick in turn.
+      // flag, each one bypassing the deadline gate for the next tick in turn. Each
+      // failure also arms this session's own transient poll backoff (doubling from
+      // 120_000ms), so Date must advance past it before the session is eligible
+      // for the next attempt.
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
       await waitForGhCallCount(6);
+      vi.setSystemTime(new Date(Date.now() + 120_001));
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
       await waitForGhCallCount(7);
+      vi.setSystemTime(new Date(Date.now() + 240_001));
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
       await waitForGhCallCount(8);
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
@@ -2690,6 +2731,7 @@ describe("github source", () => {
       // The 4th consecutive failure for this session exceeds the tolerance: it no
       // longer counts toward the hysteresis flag, so with no other session reporting
       // active CI this cycle, lastCycleCiActive finally drops to false.
+      vi.setSystemTime(new Date(Date.now() + 480_001));
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
       await waitForGhCallCount(9);
 
@@ -2760,6 +2802,461 @@ describe("github source", () => {
       vi.setSystemTime(new Date("2026-07-30T00:10:01.000Z"));
       queuePollResponse("SUCCESS");
       await waitForGhCallCount(11);
+
+      handle.stop();
+    });
+
+    it("does not force an adaptive tick for a permanently disabled session", async () => {
+      // Overridden entirely: bypasses legacyGhAdapter/ghMock, so only
+      // waitForTransportCallCount (not waitForGhCallCount) can observe progress.
+      ghTransportMock.mockResolvedValue(notFoundEnvelope(42, { withPath: true }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      // start()'s own ungated poll (runOnStart: false) seeds the permanent map.
+      await waitForTransportCallCount(1);
+      const seeded = listSessionsMock.mock.calls.length;
+
+      // Recent session activity would otherwise force every real tick (the last
+      // `hasRecentSessionUserAction` branch in shouldPollThisTick) regardless of
+      // whether this session has already been attempted. With the
+      // shouldPollThisTick gate in place, the permanently-disabled session hits its
+      // own `continue` before that branch is ever reached, so each real tick makes
+      // only the ONE listPollableSessions call inside shouldPollThisTick itself and
+      // never invokes pollCycle. Without the gate, the activity check would force
+      // pollCycle every tick, adding a SECOND listPollableSessions call from inside
+      // pollSignals (github.ts:381) — listSessions is the only observable here: an
+      // ungated tick still builds an empty batch and issues zero gh calls either way.
+      hasRecentSessionUserActionMock.mockReturnValue(true);
+      await new Promise((resolve) => setTimeout(resolve, REAL_INTERVAL_MS * 8));
+
+      expect(listSessionsMock.mock.calls.length - seeded).toBeLessThanOrEqual(12);
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      handle.stop();
+    });
+  });
+
+  describe("permanent PR not found", () => {
+    function disabledEvents(): { event: string }[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry as { event?: string })
+        .filter((entry): entry is { event: string } => entry.event === "source.poll.disabled");
+    }
+
+    function errorEvents(): { event: string; sessionId?: string }[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry as { event?: string; sessionId?: string })
+        .filter(
+          (entry): entry is { event: string; sessionId?: string } =>
+            entry.event === "source.poll.error",
+        );
+    }
+
+    it("stops polling a session whose bound PR does not exist after one source.poll.disabled", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValue(notFoundEnvelope(42, { withPath: true }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      handle.runOnStart?.();
+      await flushPollCycle();
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(disabledEvents()).toHaveLength(1);
+      expect(disabledEvents()[0]).toEqual(
+        expect.objectContaining({
+          event: "source.poll.disabled",
+          level: "error",
+          projectId: "api",
+          sourceId: "pr-watch",
+          sessionId: "api-a1b2",
+          details: { prNumber: 42 },
+        }),
+      );
+      expect(errorEvents()).toHaveLength(0);
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      handle.stop();
+    });
+
+    it("keeps polling a co-batched session when the joined GraphQL error names another PR", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      const otherSession = makeSession({
+        id: "api-c3d4",
+        workspaceId: "api-c3d4",
+        pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+      });
+      listSessionsMock.mockReturnValue([makeSession(), otherSession]);
+      // No `path`: forces the joined-message fallback onto every alias in the batch.
+      ghTransportMock.mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null, a1: null },
+          },
+          errors: [
+            {
+              type: "NOT_FOUND",
+              message: "Could not resolve to a PullRequest with the number of 43.",
+            },
+          ],
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(disabledEvents()).toHaveLength(1);
+      expect(disabledEvents()[0]).toEqual(
+        expect.objectContaining({ sessionId: "api-c3d4", details: { prNumber: 43 } }),
+      );
+      expect(errorEvents().some((entry) => entry.sessionId === "api-a1b2")).toBe(true);
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      // Without advancing past api-a1b2's own transient backoff (armed by the same
+      // poisoned cycle), the next cycle would find it gated too and issue zero gh
+      // calls — the assertion below would be wrong, not the code.
+      vi.setSystemTime(new Date(Date.now() + 120_001));
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      // The "Once" not-found mock above is consumed, so this reverts to the base
+      // legacyGhAdapter implementation set in the outer beforeEach.
+      mockLifecyclePoll(prView());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+      expect(writeReviewSourceSnapshotMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "github",
+        "api",
+        "pr-watch",
+        "api-a1b2",
+        expect.anything(),
+      );
+
+      handle.stop();
+    });
+
+    it("does not disable a session when the joined error names two PR numbers", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValue(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null },
+          },
+          errors: [
+            {
+              type: "NOT_FOUND",
+              message: "Could not resolve to a PullRequest with the number of 42.",
+            },
+            {
+              type: "NOT_FOUND",
+              message: "Could not resolve to a PullRequest with the number of 43.",
+            },
+          ],
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: false, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      expect(disabledEvents()).toHaveLength(0);
+      expect(errorEvents().filter((entry) => entry.sessionId === "api-a1b2")).toHaveLength(1);
+
+      handle.stop();
+    });
+
+    it("backs off a transient poll failure instead of retrying every cycle", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockRejectedValue(new Error("gh offline"));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(errorEvents()).toHaveLength(1);
+
+      // Two more cycles with Date frozen: still gated, no new attempt.
+      handle.runOnStart?.();
+      await flushPollCycle();
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(errorEvents()).toHaveLength(1);
+
+      // Past the 120_000ms base delay: retries, doubling failures to 2.
+      vi.setSystemTime(new Date(Date.now() + 120_001));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+      expect(errorEvents()).toHaveLength(2);
+
+      // Frozen again: still gated.
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+
+      // Only 120_000ms past the SECOND failure (window doubled to 240_000): still gated.
+      vi.setSystemTime(new Date(Date.now() + 120_001));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+
+      // Past the full 240_000ms doubled window from the second failure: retries again.
+      vi.setSystemTime(new Date(Date.now() + 240_001));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(3);
+      expect(errorEvents()).toHaveLength(3);
+
+      handle.stop();
+    });
+
+    it("clears the transient backoff after a clean poll so the next failure restarts at the base delay", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockRejectedValueOnce(new Error("gh offline"));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      // Frozen Date: the failure just recorded still gates the very next cycle.
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      // Past the base delay: a healthy poll clears the backoff entirely. The
+      // preceding "Once" rejection is consumed, so this reverts to legacyGhAdapter.
+      vi.setSystemTime(new Date(Date.now() + 120_001));
+      mockLifecyclePoll(prView());
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+
+      // The next failure restarts at the base delay, not the doubled one: a mere
+      // 120_001ms advance (not 240_001) is enough for the following retry to fire.
+      ghTransportMock.mockRejectedValueOnce(new Error("gh offline again"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(3);
+
+      vi.setSystemTime(new Date(Date.now() + 120_001));
+      ghTransportMock.mockRejectedValueOnce(new Error("still offline"));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(4);
+
+      expect(disabledEvents()).toHaveLength(0);
+
+      handle.stop();
+    });
+
+    it("re-polls a session after it rebinds to a different PR number", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(notFoundEnvelope(42, { withPath: true }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(disabledEvents()).toHaveLength(1);
+
+      listSessionsMock.mockReturnValue([
+        makeSession({
+          pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+        }),
+      ]);
+      // The "Once" not-found mock above is consumed, so this reverts to legacyGhAdapter.
+      mockLifecyclePoll(prView({ number: 43, url: "https://github.com/acme/api/pull/43" }));
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+      expect(disabledEvents()).toHaveLength(1);
+
+      handle.stop();
+    });
+
+    it("never disables an unbound session on a not-found error", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeUnboundSession()]);
+      ghTransportMock.mockResolvedValue(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: { nodes: [] } },
+          },
+          errors: [
+            {
+              type: "NOT_FOUND",
+              message: "Could not resolve to a PullRequest with the number of 42.",
+            },
+          ],
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(disabledEvents()).toHaveLength(0);
+      expect(errorEvents()).toHaveLength(1);
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(new Date(Date.now() + 120_001));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+
+      handle.stop();
+    });
+
+    it("drops permanent and backoff state when the session disappears", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(notFoundEnvelope(42, { withPath: true }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(disabledEvents()).toHaveLength(1);
+
+      // Session disappears: the sweep at the end of the cycle drops its permanent
+      // entry (github.ts's currentSessionIds sweep).
+      listSessionsMock.mockReturnValue([]);
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      // Session reappears (same id, still bound to PR 42), healthy this time. Date is
+      // left frozen, so nothing here can be explained by a backoff/gate expiry — only
+      // the sweep having cleared the permanent entry lets this poll happen at all.
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      // The "Once" not-found mock above is consumed, so this reverts to legacyGhAdapter.
+      mockLifecyclePoll(prView());
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+      expect(writeReviewSourceSnapshotMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "github",
+        "api",
+        "pr-watch",
+        "api-a1b2",
+        expect.anything(),
+      );
+      expect(disabledEvents()).toHaveLength(1);
 
       handle.stop();
     });
