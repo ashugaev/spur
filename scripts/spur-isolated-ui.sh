@@ -8,35 +8,51 @@ source "$SCRIPT_DIR/spur-sidecar-common.sh"
 NVMRC_FILE="$SCRIPT_DIR/../.nvmrc"
 ROOT_PACKAGE_JSON="$SCRIPT_DIR/../package.json"
 NODE_ENGINES_RANGE=""
+NODE_CHECK_ERROR=""
 
 # True when the `node` on PATH right now satisfies the root package.json's
-# engines.node range; sets NODE_ENGINES_RANGE as a side effect so callers can
-# name the range in a failure message. Mirrors satisfiesClause in
-# v2/src/host-install.ts:460-483 — same two clause forms (`^X.Y.Z` and
-# `>=X[.Y[.Z]]`), anything else is false — so minor/patch precision is real;
-# bash arithmetic can't tell 22.13.0 from 22.5.0. The fast test pins this
-# check's verdicts against the exported satisfiesNodeEngineRange so the two
-# implementations cannot drift apart.
+# engines.node range. Mirrors satisfiesClause in v2/src/host-install.ts:460-483
+# — same two clause forms (`^X.Y.Z` and `>=X[.Y[.Z]]`), anything else is
+# false — so minor/patch precision is real; bash arithmetic can't tell
+# 22.13.0 from 22.5.0. The fast test pins this check's verdicts against the
+# exported satisfiesNodeEngineRange so the two implementations cannot drift
+# apart.
 # The version compared is `node -v`'s own output, passed as an argv string,
 # rather than that same process's `process.versions.node` — the two are
 # always identical for a real node binary, and going through argv is what
 # lets the fast test swap in a fake `node -v` without needing a real install
 # of every version under test.
+#
+# Sets two globals as a side effect, read only by ensure_node_ready's failure
+# message, never printed here:
+#   NODE_ENGINES_RANGE — the literal engines.node string. Only ever assigned
+#     that string, refreshed each time the check below actually runs to
+#     completion; never prose, never a placeholder.
+#   NODE_CHECK_ERROR — empty on a clean verdict (satisfied, or a genuine
+#     engines mismatch the check evaluated and rejected); a short reason
+#     when the check could not be run at all (node missing, `node -v`
+#     unparseable, or `node -e` produced no output regardless of its exit
+#     status) so the caller can withhold the "nvm install <pin>" remedy —
+#     picking a different node version does not fix a node install that
+#     cannot execute the check in the first place.
 node_satisfies_engines() {
+  NODE_CHECK_ERROR=""
+
   if ! command -v node >/dev/null 2>&1; then
-    NODE_ENGINES_RANGE="(node not found on PATH)"
+    NODE_CHECK_ERROR="node not found on PATH"
     return 1
   fi
 
   local current_version
   current_version="$(node -v 2>/dev/null || true)"
   if [[ ! "$current_version" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
-    NODE_ENGINES_RANGE="(could not parse node -v output: '$current_version')"
+    NODE_CHECK_ERROR="node -v produced unparseable output: '$current_version'"
     return 1
   fi
 
   local status=0
-  NODE_ENGINES_RANGE="$(node -e '
+  local output
+  output="$(node -e '
     const fs = require("fs");
     let pkg;
     try {
@@ -103,10 +119,16 @@ node_satisfies_engines() {
     exit 1
   fi
 
-  if [[ -z "$NODE_ENGINES_RANGE" ]]; then
-    NODE_ENGINES_RANGE="the required Node range"
+  # The only success condition is exit 0 AND non-empty output that is the
+  # engines range — a node that exits 0 (or any other status) while printing
+  # nothing ran the invocation but never reached process.stdout.write(range),
+  # so it did not evaluate the check and must not read as satisfied.
+  if [[ -z "$output" ]]; then
+    NODE_CHECK_ERROR="node $current_version could not run the engines check (node -e exited $status with no output)"
+    return 1
   fi
 
+  NODE_ENGINES_RANGE="$output"
   return "$status"
 }
 
@@ -150,6 +172,15 @@ ensure_node_ready() {
 
   if node_satisfies_engines; then
     return 0
+  fi
+
+  # NODE_CHECK_ERROR is non-empty only when node could not even run the
+  # check (missing, unparseable -v, or a silent/failed -e) — activating a
+  # different node major via nvm does not fix that, so this branch never
+  # names "nvm install" as the remedy.
+  if [[ -n "$NODE_CHECK_ERROR" ]]; then
+    echo "spur-isolated-ui: $NODE_CHECK_ERROR — cannot verify against engines.node." >&2
+    exit 1
   fi
 
   echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the required range $NODE_ENGINES_RANGE. $NVMRC_FILE pins node $pinned — install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2

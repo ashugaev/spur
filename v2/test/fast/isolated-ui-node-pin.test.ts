@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -204,6 +205,20 @@ function writeStubNvm(nvmDir: string): void {
   writeFileSync(join(nvmDir, "nvm.sh"), STUB_NVM_SH, "utf8");
 }
 
+// A PATH entry that carries only what ensure_node_ready's early failure
+// paths need to run (bash itself, dirname for SCRIPT_DIR, tr for parsing
+// .nvmrc) and deliberately no `node` — real `/usr/bin` and `/bin` both carry
+// a real node on this host, so a plain fallback PATH can never reproduce
+// "node not found on PATH".
+function createNodeFreePathDir(repoDir: string): string {
+  const dir = join(repoDir, "no-node-path");
+  mkdirSync(dir, { recursive: true });
+  for (const bin of ["bash", "dirname", "tr"]) {
+    symlinkSync(`/usr/bin/${bin}`, join(dir, bin));
+  }
+  return dir;
+}
+
 function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     HOME: join(worktree.repoDir, "home"),
@@ -336,6 +351,77 @@ describe("spur-isolated-ui node pin", () => {
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
+  // Finding 1 (PR #824 review): a node that answers `-v` but exits 0 with
+  // EMPTY stdout for the `-e` engines check must never read as "satisfied".
+  // Reproduced against the pre-fix script: this same stub made
+  // node_satisfies_engines return 0 and the script proceeded straight to
+  // `pnpm install`/`pnpm dev` on an engines-invalid node — a fail-open gate.
+  it("fails closed when node exits 0 but prints nothing for the engines check (finding 1)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    makeExecutable(
+      join(worktree.pathDir, "node"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-v" ]]; then
+  printf 'v18.0.0\\n'
+  exit 0
+fi
+exit 0
+`,
+    );
+
+    const rejection = await runIsolatedUiExpectFailure(worktree);
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/could not run the engines check/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
+  // Finding 2 (PR #824 review): a node that answers `-v` normally but
+  // cannot execute the `-e` check at all (modeling a NODE_OPTIONS rejection,
+  // exit 9, empty stdout) must get its own accurate message — never the
+  // garbled "does not satisfy the required range the required Node range"
+  // text, and never "nvm install" as a remedy, since picking a different
+  // node major does not fix a node that cannot execute the check.
+  it("names the real failure, not a garbled range or nvm install, when node cannot execute the check (finding 2)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    makeExecutable(
+      join(worktree.pathDir, "node"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-v" ]]; then
+  printf 'v21.7.3\\n'
+  exit 0
+fi
+exit 9
+`,
+    );
+
+    const rejection = await runIsolatedUiExpectFailure(worktree);
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/could not run the engines check/);
+    expect(rejection.stderr).not.toMatch(/required range the required/);
+    expect(rejection.stderr).not.toMatch(/nvm install/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
+  // Finding 2: node missing from PATH entirely names that fact and never
+  // claims to know an engines range it never got to read.
+  it("names node as missing, not an engines range, when node is absent from PATH", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    const nodeFreePathDir = createNodeFreePathDir(worktree.repoDir);
+
+    const rejection = await runIsolatedUiExpectFailure(worktree, { PATH: nodeFreePathDir });
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/node not found on PATH/);
+    expect(rejection.stderr).not.toMatch(/\^20\.19\.0/);
+  });
+
   it("pins a bare major that satisfies the root engines range", () => {
     const nvmrcPath = join(REPO_ROOT, ".nvmrc");
     const pin = readFileSync(nvmrcPath, "utf8").trim();
@@ -402,9 +488,9 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
 
       const script = `#!/usr/bin/env bash
 set -euo pipefail
-SCRIPT_DIR="${worktree.repoDir}/scripts"
 ROOT_PACKAGE_JSON="${worktree.repoDir}/package.json"
 NODE_ENGINES_RANGE=""
+NODE_CHECK_ERROR=""
 ${functionMatch[0]}
 if node_satisfies_engines; then
   exit 0
