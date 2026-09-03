@@ -124,6 +124,14 @@ Each live session gets a `spur` wrapper on `PATH`, bound to that session's confi
 
 Scopes resolve server-side from the caller's session, never from client input: `task` (`<dataDir>/memory/task/<workspaceId>/<key>.md`, per workspace), `project` (`<dataDir>/memory/project/<projectId>/<key>.md`, per project), `global` (`<dataDir>/memory/global/<key>.md`, one per instance). Spawn prompt tells agents to read `task`/`project` on start, write durable, high-value facts only.
 
+## agent-issue
+
+`spur agent-issue log <text...>` / `spur agent-issue list [--project <id>] [--session <id>] [--limit <n>] [--json]`.
+
+Friction an agent hits operating Spur itself: a sidecar that won't start, an unclear test path, a branch preflight rejection. Boundary — friction blocking the agent's own operation lands here; a code defect in a repo goes to that repo's issue tracker, never here.
+
+`log` needs `SPUR_PROJECT` set to a known project (a live session), stamps the running session id, appends to `<dataDir>/agent-issues.jsonl` (mode `0600`, rotates at 50 MB, keeps 5 archives). `list` prints newest first; `--limit` default `200`.
+
 ## subscribe
 
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`.
