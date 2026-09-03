@@ -272,4 +272,33 @@ describe("spur-isolated-ui node pin", () => {
     expect(pin).toMatch(/^\d+$/);
     expect(satisfiesNodeEngineRange(rootPackage.engines.node, pin)).toBe(true);
   });
+
+  // node_major_at_least (spur-isolated-ui.sh) is a floor check: any major >=
+  // the pin skips `nvm use`. That is sound only because the pin sits on
+  // engines' unbounded `>=` clause — if .nvmrc ever moved to a major covered
+  // by a bounded `^` clause instead (e.g. 22 or 20), a major above the pin
+  // could still fail engines, and the floor check would wrongly let it
+  // through. Prove the pin is on the unbounded clause by checking majors
+  // arbitrarily far above it, not just the pin itself.
+  it("sits on engines' unbounded >= clause, so every major at or above the pin also satisfies engines", () => {
+    const pin = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim();
+    const rootPackage = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+      engines: { node: string };
+    };
+    const pinMajor = Number.parseInt(pin, 10);
+
+    for (const major of [pinMajor, pinMajor + 1, pinMajor + 50]) {
+      expect(satisfiesNodeEngineRange(rootPackage.engines.node, String(major))).toBe(true);
+    }
+  });
+
+  it("is a no-op when the system node is newer than the pin", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+
+    await expect(runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v25.2.0" })).resolves.toEqual([
+      "install node=v25.2.0",
+      "dev node=v25.2.0",
+    ]);
+  });
 });

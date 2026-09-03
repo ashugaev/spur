@@ -9,6 +9,9 @@ NVMRC_FILE="$SCRIPT_DIR/../.nvmrc"
 
 # Only valid as an `if` condition: the trailing (( )) returns 1 on a false
 # comparison, which `set -e` would treat as a failure anywhere else.
+# Deliberately a floor, not exact-major equality: the pin sits on the root
+# engines range's unbounded `>=` clause, so every major at or above it also
+# satisfies engines (see the isolated-ui-node-pin.test.ts pin/engines tests).
 node_major_at_least() {
   local want="$1"
   local version
