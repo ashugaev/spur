@@ -35,6 +35,15 @@ import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
+import {
+  ArtifactList,
+  DEFAULT_ARTIFACT_SORT,
+  sortArtifacts,
+  type ArtifactSortState,
+} from "@/components/ArtifactList";
+import { ArtifactDownloadIcon } from "@/components/icons/ArtifactDownloadIcon";
+import { ArtifactOpenExternalIcon } from "@/components/icons/ArtifactOpenExternalIcon";
+import { ArtifactPreviewIcon } from "@/components/icons/ArtifactPreviewIcon";
 import { ConversationView } from "@/components/ConversationView";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
@@ -49,6 +58,7 @@ import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
+  formatBytes,
   formatRelativeTime,
   formatSidecarAge,
   getSessionTitle,
@@ -252,52 +262,6 @@ function PromptSectionCopyButton({
   );
 }
 
-function ArtifactDownloadIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.7"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 4v12" />
-      <path d="m6 12 6 6 6-6" />
-      <path d="M4 20h16" />
-    </svg>
-  );
-}
-
-function ArtifactOpenExternalIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.7"
-      viewBox="0 0 24 24"
-    >
-      <path d="M14 4h6v6" />
-      <path d="m20 4-8 8" />
-      <path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
-    </svg>
-  );
-}
-
-function ArtifactPreviewIcon() {
-  return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
 function ArtifactImagePreviewIcon() {
   return (
     <svg
@@ -412,6 +376,9 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
+// Page size for a scroll-back fetch. Must match the daemon's
+// CONVERSATION_PAGE_ENTRIES (v2/src/claude-jsonl-state.ts).
+const CONVERSATION_SCROLL_PAGE_ENTRIES = 100;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
@@ -463,12 +430,46 @@ const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
 type SessionArtifact = DashboardSession["artifacts"][number];
 
 function artifactUrl(sessionId: string, artifactId: string): string {
-  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
+  const encodedPath = artifactId
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodedPath}`;
+}
+
+function artifactBasename(name: string): string {
+  const segments = name.split("/");
+  return segments[segments.length - 1] || name;
+}
+
+const ARTIFACT_VIEW_MODE_STORAGE_KEY = "spur:artifact-view-mode";
+
+type ArtifactViewMode = "grid" | "list";
+
+function readArtifactViewMode(): ArtifactViewMode {
+  if (typeof window === "undefined") return "grid";
+  // `localStorage` access can throw `SecurityError` (e.g. site data blocked);
+  // this runs as a `useState` initializer, so an uncaught throw would unwind
+  // the whole SessionDetail tree rather than just the artifacts panel.
+  try {
+    return window.localStorage.getItem(ARTIFACT_VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid";
+  } catch {
+    return "grid";
+  }
+}
+
+function artifactTabClass(active: boolean): string {
+  return `border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
+    active
+      ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
+      : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+  }`;
 }
 
 function artifactExtension(name: string): string {
-  const ext = name.split(".").pop();
-  return ext ? ext.toUpperCase() : "FILE";
+  const base = artifactBasename(name);
+  const dotIndex = base.lastIndexOf(".");
+  return dotIndex > 0 ? base.slice(dotIndex + 1).toUpperCase() : "FILE";
 }
 
 function isMarkdownArtifact(artifact: SessionArtifact): boolean {
@@ -736,7 +737,7 @@ function ArtifactCard({
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
-            download={artifact.name}
+            download={artifactBasename(artifact.name)}
             href={artifactHref}
             onClick={(event) => event.stopPropagation()}
           >
@@ -747,10 +748,11 @@ function ArtifactCard({
 
       <div className="flex flex-col gap-1 px-3 py-2">
         <div
-          className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[var(--color-text-primary)]"
+          className="overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-[var(--color-text-primary)]"
+          dir="rtl"
           title={artifact.name}
         >
-          {artifact.name}
+          <bdi dir="ltr">{artifact.name}</bdi>
         </div>
         {polishedAttachedImage ? (
           <div className="flex flex-wrap gap-1.5">
@@ -1171,8 +1173,12 @@ function ArtifactLightbox({
       <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-              {artifact.name}
+            <h2
+              className="truncate text-left font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+              dir="rtl"
+              title={artifact.name}
+            >
+              <bdi dir="ltr">{artifact.name}</bdi>
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
               {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
@@ -1212,7 +1218,7 @@ function ArtifactLightbox({
             <a
               aria-label={`Download ${artifact.name}`}
               className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-              download={artifact.name}
+              download={artifactBasename(artifact.name)}
               href={artifactHref}
             >
               <ArtifactDownloadIcon />
@@ -1310,16 +1316,18 @@ function ArtifactLightbox({
                   <ArtifactFileIcon />
                 </div>
                 <div
-                  className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
+                  className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-[var(--color-text-primary)]"
+                  dir="rtl"
+                  title={artifact.name}
                 >
-                  {artifact.name}
+                  <bdi dir="ltr">{artifact.name}</bdi>
                 </div>
                 <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                   {artifactExtension(artifact.name)} · {artifact.mimeType}
                 </div>
                 <a
                   className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                  download={artifact.name}
+                  download={artifactBasename(artifact.name)}
                   href={artifactHref}
                 >
                   <ArtifactDownloadIcon />
@@ -1554,12 +1562,6 @@ const LOG_LEVEL_COLORS: Record<string, string> = {
   error: "var(--color-status-error)",
 };
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 interface SessionDetailProps {
   sessionId: string;
   projectId?: string;
@@ -1691,11 +1693,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setHandoffNotes((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  // Absolute transcript index of the oldest page currently requested. null
+  // means "follow the live tail" (the default, no `from` query param).
+  const [fromIndex, setFromIndex] = useState<number | null>(null);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
+  const [artifactViewMode, setArtifactViewMode] = useState<ArtifactViewMode>(readArtifactViewMode);
+  // Not persisted to localStorage: the list's sort resets to the default on
+  // reload, same as before it was lifted out of ArtifactList's local state.
+  const [artifactListSort, setArtifactListSort] =
+    useState<ArtifactSortState>(DEFAULT_ARTIFACT_SORT);
+  const setArtifactViewModeAndPersist = (mode: ArtifactViewMode) => {
+    setArtifactViewMode(mode);
+    try {
+      window.localStorage.setItem(ARTIFACT_VIEW_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore: the view mode still applies below, just isn't persisted.
+    }
+  };
   const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
   const [showAllDeskMembers, setShowAllDeskMembers] = useState(false);
   const sessionRef = useRef<DashboardSession | null>(null);
@@ -1723,6 +1742,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
     setError(null);
     setConversation(null);
+    setFromIndex(null);
     dismissLoadErrorToast();
   }, [dismissLoadErrorToast, sessionId]);
 
@@ -1837,10 +1857,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setConversation(null);
       return;
     }
+    const query = fromIndex !== null ? `?from=${fromIndex}` : "";
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`, {
-        cache: "no-store",
-      });
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
+        { cache: "no-store" },
+      );
       if (res.ok) {
         setConversation((await res.json()) as ConversationResponse);
       } else {
@@ -1849,13 +1871,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     } catch {
       setConversation(null);
     }
-  }, [session?.agent, sessionId]);
+  }, [session?.agent, sessionId, fromIndex]);
 
   useEffect(() => {
     void loadConversation();
     const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadConversation]);
+
+  const handleLoadOlder = useCallback(() => {
+    const startIndex = conversation?.startIndex ?? 0;
+    if (startIndex <= 0) return;
+    setIsLoadingOlder(true);
+    setFromIndex(Math.max(0, startIndex - CONVERSATION_SCROLL_PAGE_ENTRIES));
+  }, [conversation?.startIndex]);
+
+  const handleResumeTail = useCallback(() => {
+    setFromIndex(null);
+  }, []);
+
+  useEffect(() => {
+    setIsLoadingOlder(false);
+    // Only a freshly loaded conversation should clear the older-page spinner;
+    // isLoadingOlder is intentionally excluded so setting it true doesn't
+    // immediately re-run this effect and clear it before the fetch resolves.
+  }, [conversation]);
 
   const handleAnswer = useCallback(
     async (optionIndex: number) => {
@@ -2412,31 +2452,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session],
   );
   const allArtifacts = session?.artifacts ?? [];
-  const selectedArtifactIndex = selectedArtifactId
-    ? allArtifacts.findIndex((artifact) => artifact.id === selectedArtifactId)
-    : -1;
-  const selectedArtifact =
-    selectedArtifactIndex >= 0 ? (allArtifacts[selectedArtifactIndex] ?? null) : null;
-  const selectedArtifactHref =
-    session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
-  const canSelectPreviousArtifact = selectedArtifactIndex > 0;
-  const canSelectNextArtifact =
-    selectedArtifactIndex >= 0 && selectedArtifactIndex < allArtifacts.length - 1;
-  const selectArtifactOffset = useCallback(
-    (offset: -1 | 1) => {
-      setSelectedArtifactId((currentId) => {
-        const currentIndex = allArtifacts.findIndex((artifact) => artifact.id === currentId);
-        if (currentIndex < 0) return currentId;
-        return allArtifacts[currentIndex + offset]?.id ?? currentId;
-      });
-    },
-    [allArtifacts],
-  );
-  const selectPreviousArtifact = useCallback(
-    () => selectArtifactOffset(-1),
-    [selectArtifactOffset],
-  );
-  const selectNextArtifact = useCallback(() => selectArtifactOffset(1), [selectArtifactOffset]);
   const agentArtifacts = useMemo(
     () =>
       session?.artifacts.filter(
@@ -2468,6 +2483,43 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
     [visibleArtifacts],
   );
+  // List mode's viewer navigation must step over the same sort the list
+  // renders, not the raw payload order. It still walks every category
+  // (matching `allArtifacts` below, same as grid mode) — jumping across
+  // categories on next/prev is a pre-existing, separate gap, out of scope
+  // here.
+  const listSortedArtifacts = useMemo(
+    () => sortArtifacts(allArtifacts, artifactListSort),
+    [allArtifacts, artifactListSort],
+  );
+  const artifactNavigationOrder = artifactViewMode === "list" ? listSortedArtifacts : allArtifacts;
+  const selectedArtifactIndex = selectedArtifactId
+    ? artifactNavigationOrder.findIndex((artifact) => artifact.id === selectedArtifactId)
+    : -1;
+  const selectedArtifact =
+    selectedArtifactIndex >= 0 ? (artifactNavigationOrder[selectedArtifactIndex] ?? null) : null;
+  const selectedArtifactHref =
+    session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
+  const canSelectPreviousArtifact = selectedArtifactIndex > 0;
+  const canSelectNextArtifact =
+    selectedArtifactIndex >= 0 && selectedArtifactIndex < artifactNavigationOrder.length - 1;
+  const selectArtifactOffset = useCallback(
+    (offset: -1 | 1) => {
+      setSelectedArtifactId((currentId) => {
+        const currentIndex = artifactNavigationOrder.findIndex(
+          (artifact) => artifact.id === currentId,
+        );
+        if (currentIndex < 0) return currentId;
+        return artifactNavigationOrder[currentIndex + offset]?.id ?? currentId;
+      });
+    },
+    [artifactNavigationOrder],
+  );
+  const selectPreviousArtifact = useCallback(
+    () => selectArtifactOffset(-1),
+    [selectArtifactOffset],
+  );
+  const selectNextArtifact = useCallback(() => selectArtifactOffset(1), [selectArtifactOffset]);
   const startupArtifacts = useMemo(() => {
     const startupAttachmentIds = session?.startupAttachmentIds ?? [];
     return (
@@ -2519,6 +2571,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setArtifactCategory("agent");
     }
   }, [artifactCategory, agentArtifacts.length, attachedArtifacts.length, systemArtifacts.length]);
+
+  // The list's sort used to reset via `key={artifactCategory}` remounting
+  // ArtifactList's own local state. Lifting that state up here means the
+  // remount no longer resets it, so reset it explicitly on category change.
+  useEffect(() => {
+    setArtifactListSort(DEFAULT_ARTIFACT_SORT);
+  }, [artifactCategory]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -2971,6 +3030,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 entries={conversation?.entries ?? []}
                 messages={conversation?.messages ?? []}
                 durationMs={conversation?.durationMs ?? 0}
+                startIndex={conversation?.startIndex ?? 0}
+                hasMore={conversation?.hasMore}
+                isLoadingOlder={isLoadingOlder}
+                hasOlderLoaded={fromIndex !== null}
+                onLoadOlder={handleLoadOlder}
+                onResumeTail={handleResumeTail}
                 isWorking={displayState === "working"}
                 agent={session.agent}
                 onAnswer={handleAnswer}
@@ -3197,7 +3262,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
-              {session.artifacts.length > 0 ? (
+              {session.artifacts.length > 0 || session.artifactsTruncated ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Artifacts
@@ -3206,34 +3271,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </span>
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
-                  {attachedArtifacts.length > 0 || systemArtifacts.length > 0 ? (
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
                     <div
-                      aria-label="Artifact category"
-                      className="mb-3 inline-flex border border-[var(--color-border-default)]"
+                      aria-label="Artifact view"
+                      className="inline-flex border border-[var(--color-border-default)]"
                       role="tablist"
                     >
                       {(
                         [
-                          ["agent", `Agent (${agentArtifacts.length})`],
-                          ...(attachedArtifacts.length > 0
-                            ? ([["attached", `Attached (${attachedArtifacts.length})`]] as const)
-                            : []),
-                          ...(systemArtifacts.length > 0
-                            ? ([["system", `System (${systemArtifacts.length})`]] as const)
-                            : []),
-                        ] as ReadonlyArray<readonly [ArtifactCategory, string]>
+                          ["grid", "Grid"],
+                          ["list", "List"],
+                        ] as ReadonlyArray<readonly [ArtifactViewMode, string]>
                       ).map(([value, label]) => {
-                        const active = artifactCategory === value;
+                        const active = artifactViewMode === value;
                         return (
                           <button
                             key={value}
                             aria-pressed={active}
-                            className={`border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
-                              active
-                                ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
-                                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-                            }`}
-                            onClick={() => setArtifactCategory(value)}
+                            className={artifactTabClass(active)}
+                            onClick={() => setArtifactViewModeAndPersist(value)}
                             type="button"
                           >
                             {label}
@@ -3241,40 +3297,87 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         );
                       })}
                     </div>
+                    {attachedArtifacts.length > 0 || systemArtifacts.length > 0 ? (
+                      <div
+                        aria-label="Artifact category"
+                        className="inline-flex border border-[var(--color-border-default)]"
+                        role="tablist"
+                      >
+                        {(
+                          [
+                            ["agent", `Agent (${agentArtifacts.length})`],
+                            ...(attachedArtifacts.length > 0
+                              ? ([["attached", `Attached (${attachedArtifacts.length})`]] as const)
+                              : []),
+                            ...(systemArtifacts.length > 0
+                              ? ([["system", `System (${systemArtifacts.length})`]] as const)
+                              : []),
+                          ] as ReadonlyArray<readonly [ArtifactCategory, string]>
+                        ).map(([value, label]) => {
+                          const active = artifactCategory === value;
+                          return (
+                            <button
+                              key={value}
+                              aria-pressed={active}
+                              className={artifactTabClass(active)}
+                              onClick={() => setArtifactCategory(value)}
+                              type="button"
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                  {session.artifactsTruncated ? (
+                    <p className="pb-2 text-[var(--color-text-secondary)]">
+                      Nested artifacts were truncated; every root-level artifact is still listed.
+                    </p>
                   ) : null}
                   {visibleArtifacts.length > 0 ? (
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                      {visibleArtifacts.map((artifact) => {
-                        const artifactHref = artifactUrl(session.id, artifact.id);
-                        const previewState = artifactPreviewStates[artifact.id] ?? "loading";
-                        return (
-                          <ArtifactCard
-                            key={`${session.id}-${artifact.id}`}
-                            artifact={artifact}
-                            artifactHref={artifactHref}
-                            onPreview={setSelectedArtifactId}
-                            onPreviewError={(artifactId) =>
-                              setArtifactPreviewStates((current) => ({
-                                ...current,
-                                [artifactId]: "error",
-                              }))
-                            }
-                            onPreviewReady={(artifactId) =>
-                              setArtifactPreviewStates((current) => ({
-                                ...current,
-                                [artifactId]: "ready",
-                              }))
-                            }
-                            previewState={previewState}
-                            variant={
-                              artifactCategory === "attached" && artifact.kind === "image"
-                                ? "attachedImage"
-                                : "compact"
-                            }
-                          />
-                        );
-                      })}
-                    </div>
+                    artifactViewMode === "list" ? (
+                      <ArtifactList
+                        artifacts={visibleArtifacts}
+                        hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
+                        onPreview={setSelectedArtifactId}
+                        onSortChange={setArtifactListSort}
+                        sort={artifactListSort}
+                      />
+                    ) : (
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                        {visibleArtifacts.map((artifact) => {
+                          const artifactHref = artifactUrl(session.id, artifact.id);
+                          const previewState = artifactPreviewStates[artifact.id] ?? "loading";
+                          return (
+                            <ArtifactCard
+                              key={`${session.id}-${artifact.id}`}
+                              artifact={artifact}
+                              artifactHref={artifactHref}
+                              onPreview={setSelectedArtifactId}
+                              onPreviewError={(artifactId) =>
+                                setArtifactPreviewStates((current) => ({
+                                  ...current,
+                                  [artifactId]: "error",
+                                }))
+                              }
+                              onPreviewReady={(artifactId) =>
+                                setArtifactPreviewStates((current) => ({
+                                  ...current,
+                                  [artifactId]: "ready",
+                                }))
+                              }
+                              previewState={previewState}
+                              variant={
+                                artifactCategory === "attached" && artifact.kind === "image"
+                                  ? "attachedImage"
+                                  : "compact"
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+                    )
                   ) : (
                     <p className="py-2 text-[var(--color-text-secondary)]">None.</p>
                   )}

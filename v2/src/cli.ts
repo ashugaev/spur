@@ -646,7 +646,7 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
 function postSessionAction(
   cliEntrypoint: string,
   sessionId: string,
-  action: "pause" | "complete" | "kill" | "reopen",
+  action: "pause" | "complete" | "kill" | "reopen" | "restore",
   configPath?: string,
   body: object = {},
 ): Promise<SessionView> {
@@ -3059,6 +3059,30 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("restore")
+    .description("Resume the existing conversation of a stopped or errored session.")
+    .argument("<sessionId>", "Session id")
+    .option(
+      "--force",
+      "Restore even if a live agent process for this session id already exists outside its pane",
+    )
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options: { force?: boolean; json?: boolean }, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body: { force?: true } = {};
+      if (options.force) {
+        body.force = true;
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "restoring session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "restore", configPath, body),
+        success: (session) => `Restored ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
     .command("reopen")
     .description("Restart a completed session in place, keeping its id and history.")
     .argument("<sessionId>", "Session id")
@@ -4025,12 +4049,47 @@ export function createProgram(cliEntrypoint: string): Command {
   return program;
 }
 
+/**
+ * Commander checks for -h/--help before it checks for an unknown command, so
+ * `spur bogus --help` prints root help and exits 0 instead of reporting the
+ * unknown command. Strip stray help flags off an unrecognized command word so
+ * commander's own unknownCommand() handler runs instead, exiting 1 with its
+ * did-you-mean suggestion. Known commands and help requests for them are left
+ * untouched.
+ */
+export function argvWithoutStrayHelpFlags(program: Command, argv: string[]): string[] {
+  const knownCommands = new Set(
+    program.commands.flatMap((command) => [command.name(), ...command.aliases()]),
+  );
+  let commandWord: string | undefined;
+  for (let index = 2; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--config") {
+      index += 1;
+      continue;
+    }
+    if (token?.startsWith("-")) {
+      continue;
+    }
+    commandWord = token;
+    break;
+  }
+  if (commandWord === undefined || knownCommands.has(commandWord)) {
+    return argv;
+  }
+  const hasHelpFlag = argv.slice(2).some((token) => token === "-h" || token === "--help");
+  if (!hasHelpFlag) {
+    return argv;
+  }
+  return argv.filter((token) => token !== "-h" && token !== "--help");
+}
+
 export async function run(argv = process.argv): Promise<void> {
   const cliEntrypoint = argv[1] ?? "";
   const program = createProgram(cliEntrypoint);
 
   try {
-    await program.parseAsync(argv);
+    await program.parseAsync(argvWithoutStrayHelpFlags(program, argv));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.error(message, { output: process.stderr, symbol: brandMark(), withGuide: false });

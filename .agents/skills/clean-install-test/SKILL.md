@@ -38,7 +38,7 @@ Upload the committed reset script over stdin so the box always runs the version 
   cat tests/itest/reset-vm.sh | ssh ... 'cat > ~/itest-reset.sh && chmod +x ~/itest-reset.sh'
   ssh ... 'bash ~/itest-reset.sh'
 
-`tests/itest/reset-vm.sh` never removes `~/.itest-harness`, `~/.claude/.credentials.json`, or `~/.config/cursor/auth.json` — the Claude harness node and both agents' credentials survive a reset by design. It does clear system-scope `spur-*.service` units and `/etc/spur`, which the source-install deploy mode leaves behind: a stale system daemon holds 4310 across a reset and the next npm run reads it as its own. It also wipes `~/.claude/skills` and `~/.codex` wholesale (never `~/.claude` itself) so a persistent box re-exercises the fresh-host branch of host-skills install every run. Its state table ends with `port-4310`, `harness`, `harness-creds`, and `agent-skills` — `BUSY`, `MISSING`, or `leftover` there means stop and fix the box, not run the test.
+`tests/itest/reset-vm.sh` never removes `~/.itest-harness`, `~/.claude/.credentials.json`, or `~/.config/cursor/auth.json` — the Claude harness node and both agents' credentials survive a reset by design. It does clear system-scope `spur-*.service` units and `/etc/spur`, which the source-install deploy mode leaves behind: a stale system daemon holds 4310 across a reset and the next npm run reads it as its own. Same source: `~/spur` and `~/spur-mirror`, plus `~/projects` from a previous run's smoke project — a tested agent that finds that checkout's maintainer `spur.yaml` spends turns deciding whether to connect live GitHub and Telegram sources, friction the harness created. It also wipes `~/.claude/skills` and `~/.codex` wholesale (never `~/.claude` itself) so a persistent box re-exercises the fresh-host branch of host-skills install every run. Its state table ends with `port-4310`, `harness`, `harness-creds`, `agent-skills`, and `source-clone` — `BUSY`, `MISSING`, or `leftover` there means stop and fix the box, not run the test.
 
 3 PLANT THE AGENTS (ITEST-ONLY HARNESS) — BOTH REQUIRED, OFF THE TESTED PATH
 
@@ -66,6 +66,8 @@ Launch with a sanitized environment so its child shells see the node-free box un
   ssh ... 'env -i HOME=$HOME USER=$USER TERM=dumb PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.local/bin ~/.itest-harness/bin/claude -p "$(cat /tmp/prompt.txt)" --dangerously-skip-permissions --output-format stream-json --verbose'
 
 Verified: a planted Claude launched this way runs `command -v node` and gets NO-NODE. Same itest-only credential caveat as cursor-agent applies.
+
+`env -i` also drops `XDG_RUNTIME_DIR`, so the agent's first `spur init` exits 1 with `npm-init: user systemd is unavailable`. Harness artifact, not doc friction — a plain `ssh host '<cmd>'` shell gets that variable from pam_systemd, so a real operator never sees it. An agent that exports `XDG_RUNTIME_DIR=/run/user/$(id -u)` and re-runs still counts as single-shot.
 
 4 RUN THE TEST — README INSTALL BLOCK, SINGLE-SHOT, NO HINTS
 

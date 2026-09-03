@@ -289,6 +289,8 @@ export interface SpurSessionView {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
+  /** True only when a nested-artifact budget cut the daemon's walk short. */
+  artifactsTruncated?: boolean;
   sidecars?: SpurSessionSidecarView[];
   runningSidecarNames?: string[];
   slots?: {
@@ -634,6 +636,8 @@ export interface DashboardSession {
   worktreePath: string;
   services: SpurServiceView[];
   artifacts: SpurSessionArtifact[];
+  /** True only when a nested-artifact budget cut the daemon's walk short. */
+  artifactsTruncated?: boolean;
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
@@ -718,6 +722,7 @@ export function toDashboardSession(
     worktreePath: session.worktreePath,
     services: session.services ?? [],
     artifacts: session.artifacts ?? [],
+    ...(session.artifactsTruncated ? { artifactsTruncated: true } : {}),
     queuedMessages,
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
@@ -849,6 +854,12 @@ export interface ConversationResponse {
   entries: TranscriptEntry[];
   durationMs: number;
   state: SpurSessionState;
+  /** Absolute index of `entries[0]` within the full transcript. */
+  startIndex: number;
+  /** Total number of entries in the full transcript. */
+  totalEntries: number;
+  /** True when there are older entries before `startIndex` (startIndex > 0). */
+  hasMore?: boolean;
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {

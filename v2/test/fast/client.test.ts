@@ -387,4 +387,52 @@ describe("client.ensureServer", () => {
       "GitHub PR check unavailable for api-1: GitHub rate limit. Retry `spur complete api-1 --skip-pr-check` to skip it.",
     );
   });
+
+  it("formats a session-not-restorable error with both restore-recovery commands", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "session_not_restorable",
+            sessionId: "api-1",
+            reason: "Session api-1 is not restorable",
+            availableActions: ["force_kill", "respawn"],
+          }),
+          { status: 409 },
+        ),
+      );
+
+    const { postJson } = await loadClientModule();
+
+    await expect(
+      postJson("/tmp/dist/cli.js", "/sessions/api-1/restore", {}, "/tmp/spur.yaml"),
+    ).rejects.toThrow(
+      "Session api-1 is not restorable. Try `spur kill api-1 --force` to discard it or `spur respawn api-1` to start a fresh session.",
+    );
+  });
+
+  it("formats a session-not-restorable error with only force_kill when respawn is unavailable", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "session_not_restorable",
+            sessionId: "api-1",
+            reason: "Session api-1 is not restorable",
+            availableActions: ["force_kill"],
+          }),
+          { status: 409 },
+        ),
+      );
+
+    const { postJson } = await loadClientModule();
+
+    await expect(
+      postJson("/tmp/dist/cli.js", "/sessions/api-1/restore", {}, "/tmp/spur.yaml"),
+    ).rejects.toThrow(
+      "Session api-1 is not restorable. Try `spur kill api-1 --force` to discard it.",
+    );
+  });
 });

@@ -252,7 +252,7 @@ const logSpurEventMock = vi.fn();
 const flushEventLogCollapseMock = vi.fn();
 const tryRotateMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
-const readClaudeConversationMock = vi.fn();
+const readClaudeConversationTailMock = vi.fn();
 const readClaudeSessionStatusMock = vi.fn();
 const listAccountsMock = vi.fn();
 const findAccountMock = vi.fn();
@@ -370,8 +370,9 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
 });
 
 vi.mock("../../src/claude-jsonl-state.js", () => ({
+  CONVERSATION_PAGE_ENTRIES: 100,
   readClaudeJsonlState: readClaudeJsonlStateMock,
-  readClaudeConversation: readClaudeConversationMock,
+  readClaudeConversationTail: readClaudeConversationTailMock,
 }));
 
 vi.mock("../../src/claude-session-status.js", () => ({
@@ -1349,7 +1350,7 @@ describe("SessionService", () => {
     findLatestClaudeSessionFileMock.mockReset().mockResolvedValue(null);
     readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
-    readClaudeConversationMock.mockReset().mockResolvedValue(null);
+    readClaudeConversationTailMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     readTelegramBindingsMock.mockReset().mockReturnValue(new Map());
@@ -1467,7 +1468,7 @@ describe("SessionService", () => {
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     deleteSessionArtifactsExceptMock.mockReset();
-    listSessionArtifactsMock.mockReset().mockReturnValue([]);
+    listSessionArtifactsMock.mockReset().mockReturnValue({ artifacts: [], truncated: false });
     readSessionArtifactMock.mockReset().mockReturnValue(null);
     setSessionArtifactOriginMock.mockReset();
     setSessionArtifactUserAddedMock.mockReset();
@@ -8966,6 +8967,622 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("classifies waiting once the parsed rate-limit reset has passed", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+    service.dispose();
+  });
+
+  it("keeps rate_limited until the parsed reset instant", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T11:00:00.000Z"),
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+    expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+    service.dispose();
+  });
+
+  it("keeps rate_limited when the detection carries no parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: { limited: true, reason: "claude rate_limit" },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+    expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+    service.dispose();
+  });
+
+  it("keeps waiting when only a stale pane banner remains after the parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    // The pane still renders the banner: it survives in scrollback
+    // indefinitely with no dismissal, so admitting it as re-confirmation
+    // would restore the permanent-rate_limited bug this expiry check exists
+    // to fix. Only a live usage-limit menu re-confirms (see the sibling test).
+    captureTmuxPaneMock.mockResolvedValue("■ Usage limit reached ∙ resets 3pm");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+    service.dispose();
+  });
+
+  it("keeps rate_limited when the live usage-limit menu re-confirms after the parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    // Cursor on option 2 so confirmClaudeUsageLimitMenu's option-one-selected
+    // gate does not fire — this test pins re-confirmation, not the Enter send.
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    // The background dashboard/attention ticks that fire on construction may
+    // already have logged an earlier (pre-live-scan) classification for this
+    // session, so take the LAST classified call, not the first.
+    const classifiedCalls = logSpurEventMock.mock.calls.filter(
+      ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+    );
+    expect(classifiedCalls.at(-1)?.[1].message).toBe(
+      "State: rate_limited (claude rate_limit, pane menu re-confirmed after expiry)",
+    );
+    service.dispose();
+  });
+
+  it("stops re-confirming a live usage-limit menu once nowMs is a full day past the parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-17T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-17T09:00:00.000Z"),
+      },
+    });
+    // Same live menu as the sibling test above, cursor on option 2 so
+    // confirmClaudeUsageLimitMenu's option-one-selected gate does not fire.
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    // 25h after resetAtMs: past CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS (24h).
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+    service.dispose();
+  });
+
+  it("ignores stale menu scrollback after the parsed reset", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    const menuText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "> 2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    captureTmuxPaneMock.mockResolvedValue(`${menuText}\n${subsequentOutput}`);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    service.dispose();
+  });
+
+  it("reports working when compaction runs after the parsed reset passed", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue("✳ Compacting conversation… (18s)");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // The service's own background dashboard/attention ticks classify this
+    // session before this first call, seeding stabilizeState's STATE_HOLD_MS
+    // hold with "waiting". "working" is not an exempt transition, so it
+    // needs a settled hold window (mirrors the pinned :8858 sibling case)
+    // before it reads back as the classifier's true output.
+    await service.get("api-1");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+    service.dispose();
+  });
+
+  it("keeps the compaction detail when the parsed reset has passed", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue("✳ Compacting conversation… (18s)");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.get("api-1");
+    await vi.advanceTimersByTimeAsync(4_001);
+    await service.get("api-1");
+
+    // The compaction override must own classifiedDetail; the expired-rate-
+    // limit arm must not clobber it with "rate limit expired ..." (THREAD 7).
+    // Take the LAST classified call: the background dashboard/attention ticks
+    // and the first service.get() above may have already logged an earlier
+    // "waiting" classification for this session.
+    const classifiedCalls = logSpurEventMock.mock.calls.filter(
+      ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+    );
+    expect(classifiedCalls.at(-1)?.[1].message).toBe("State: working (claude compacting)");
+    expect(classifiedCalls.at(-1)?.[1].message).not.toContain("rate limit expired");
+    service.dispose();
+  });
+
+  it("keeps rate_limited on the dashboard tick after a live menu re-confirmed an expired limit", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // A live (scanPane:true) classify sees the menu and re-confirms.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+    const rateLimitedAtAfterLive = sessions.get("api-1")?.rateLimitedAt;
+    captureTmuxPaneMock.mockClear();
+
+    // The next scanPane:false dashboard tick must reuse the re-confirmation
+    // override instead of flapping to waiting, and must not re-stamp
+    // rateLimitedAt (no new episode minted for a still-limited session). Past
+    // STATE_HOLD_MS (4s), not just one 2s tick: within the hold window a
+    // "waiting" reclassify would be masked by stabilizeState's cache anyway
+    // (rate_limited isn't the exempt direction), so this assertion would pass
+    // even without the reconfirm override actually being reused.
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
+    expect(sessions.get("api-1")?.rateLimitedAt).toBe(rateLimitedAtAfterLive);
+    service.dispose();
+  });
+
+  it("survives a failed pane capture but clears on a genuine non-empty pane with no menu", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks, then freeze
+    // both background loops so the rest of this test is driven only by the
+    // explicit calls below — the periodic dashboard tick's own exempt
+    // rate_limited re-affirmations would otherwise keep refreshing
+    // stabilizeState's hold window against a real clock advance and mask
+    // the very transitions this test checks.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+      runDashboardCacheTick: () => Promise<void>;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    // A live (scanPane:true) classify sees the menu and re-confirms.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+
+    // captureTmuxPane collapses a failed capture-pane fork into "" (its own
+    // comment notes the distinction is discarded at the return). An empty
+    // capture is not an observation in either direction: this live tick must
+    // reuse the stored override rather than recomputing paneReconfirmedLimit
+    // fresh off a null menuHit, which would otherwise flip this exact tick
+    // to "waiting" — reopening the delivery-suppression window stateHistory
+    // feeds isLiveStateRateLimited, even if only for one tick.
+    captureTmuxPaneMock.mockResolvedValue("");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterFailedCapture = await service.get("api-1");
+    expect(afterFailedCapture.state).toBe("rate_limited");
+
+    // The scanPane:false dashboard tick never captures its own pane, so it
+    // only sees "rate_limited" here if the override survived the empty
+    // capture above.
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+    expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
+
+    // A genuine (non-empty) pane with no menu is a real observation: it must
+    // still clear the override so the dashboard doesn't strand rate_limited
+    // forever once the menu is actually gone.
+    captureTmuxPaneMock.mockResolvedValue("line 1: doing unrelated follow-up work");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterRealClear = await service.get("api-1");
+    expect(afterRealClear.state).toBe("waiting");
+
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterRealClear = await service.list({ view: "dashboard" });
+    expect(dashboardAfterRealClear[0]).toMatchObject({ id: "api-1", state: "waiting" });
+
+    service.dispose();
+  });
+
+  it("stops holding rate_limited on an empty-capture live tick once the ceiling is crossed", async () => {
+    const sessions = createSessionStore();
+    // Same edge as the sibling dashboard-tick ceiling test: 23h59m59s before
+    // the live scan's clock, still inside CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+    // (24h) when the override is set.
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-17T10:05:01.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-17T10:05:01.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+
+    // Switch to an empty capture and freeze both background loops so only
+    // this explicit clock advance and the explicit get() below drive the
+    // next tick — no periodic re-affirmation to mask the transition.
+    captureTmuxPaneMock.mockClear();
+    captureTmuxPaneMock.mockResolvedValue("");
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    // 5s: crosses the 24h ceiling (relative to resetAtMs) by a few seconds,
+    // and clears STATE_HOLD_MS (4s). The override is still in the Set (an
+    // empty capture never deletes it), but the ceiling gate on the reuse
+    // branch must refuse to apply it past this point — an empty capture
+    // must not out-live the same ceiling a real menu re-confirmation is
+    // bound by.
+    await vi.advanceTimersByTimeAsync(5_000);
+    const afterCeiling = await service.get("api-1");
+    expect(afterCeiling.state).toBe("waiting");
+
+    service.dispose();
+  });
+
+  it("keeps rate_limited on the dashboard tick across a live-scan gap longer than the old fixed TTL", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks first so
+    // neither races the deliberate live classify below nor resets the
+    // guard we force busy afterward.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    // A live (scanPane:true) classify sees the menu and re-confirms.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+    captureTmuxPaneMock.mockClear();
+
+    // Force the attention-monitor re-entrancy guard busy for the rest of
+    // this test, simulating a sweep stalled on other sessions in a larger
+    // fleet: the interval still fires every ATTENTION_POLL_INTERVAL_MS (5s)
+    // but pollAttentionStates's own guard makes every one of those a no-op,
+    // so no fresh live scan reaches this session again.
+    internals.attentionMonitorRunning = true;
+
+    // 20s: past the old CLAUDE_RATE_LIMIT_RECONFIRM_TTL_MS (15s) plus
+    // STATE_HOLD_MS (4s) — the periodic scanPane:false dashboard-cache tick
+    // re-confirms "rate_limited" against the override every
+    // DASHBOARD_CACHE_INTERVAL_MS (2s) while it's still valid, which keeps
+    // refreshing stabilizeState's own hold window, so the flap this test
+    // guards against only becomes externally visible once the gap clears
+    // both windows. Well under CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS (24h).
+    // A TTL-gated override would have lapsed long before this point and the
+    // scanPane:false dashboard tick would flap to "waiting" even though
+    // nothing has actually cleared the live menu.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
+    service.dispose();
+  });
+
+  it("stops replaying the re-confirmation override on the dashboard tick once a stalled sweep crosses the ceiling", async () => {
+    const sessions = createSessionStore();
+    // The suite's global beforeEach pins the fake clock to
+    // 2026-03-18T10:05:00.000Z (not the SessionService constructor's
+    // `startedAt` label, which is metadata only). 23h59m59s before that
+    // clock is still inside CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS (24h)
+    // when the live scan below runs, so the override is set.
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-17T10:05:01.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-17T10:05:01.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks first so
+    // neither races the deliberate live classify below nor resets the
+    // guard we force busy afterward.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+    captureTmuxPaneMock.mockClear();
+
+    // Force the attention-monitor guard busy so no fresh live scan ever
+    // reaches this session again — a sweep stalled indefinitely, the shape
+    // this ceiling exists to bound.
+    internals.attentionMonitorRunning = true;
+
+    // 5s: crosses the 24h ceiling (relative to resetAtMs) by a few seconds,
+    // and clears STATE_HOLD_MS (4s) so the non-exempt rate_limited->waiting
+    // transition is observable on this tick rather than held from the prior
+    // classification.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+
+    const dashboardListed = await service.list({ view: "dashboard" });
+    expect(dashboardListed[0]).toMatchObject({ id: "api-1", state: "waiting" });
+    service.dispose();
+  });
+
   it("propagates a codex MCP dialog override into the dashboard tick after a live scan confirms it", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -15275,9 +15892,10 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:00:00.000Z",
     };
-    listSessionArtifactsMock.mockImplementation((_dataDir: string, sessionId: string) =>
-      sessionId === "api-1" ? [sharedArtifact] : [],
-    );
+    listSessionArtifactsMock.mockImplementation((_dataDir: string, sessionId: string) => ({
+      artifacts: sessionId === "api-1" ? [sharedArtifact] : [],
+      truncated: false,
+    }));
     readSessionArtifactMock.mockImplementation(
       (_dataDir: string, sessionId: string, artifactId: string) =>
         sessionId === "api-1" && artifactId === "shot.png"
@@ -15295,6 +15913,24 @@ describe("SessionService", () => {
     const artifact = service.getArtifact("api-2", "shot.png");
     expect(artifact.id).toBe("shot.png");
     expect(readSessionArtifactMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", "shot.png");
+  });
+
+  it("flags a truncated artifact listing on the session view", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    listSessionArtifactsMock.mockReturnValue({ artifacts: [], truncated: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const view = await service.get("api-1");
+    expect(view.artifactsTruncated).toBe(true);
+
+    listSessionArtifactsMock.mockReturnValue({ artifacts: [], truncated: false });
+    const untruncatedView = await service.get("api-1");
+    expect(untruncatedView.artifactsTruncated).toBeUndefined();
+    expect(Object.keys(untruncatedView)).not.toContain("artifactsTruncated");
   });
 
   it("reuses the dashboard-cache classification for desk siblings instead of re-classifying them per viewer", async () => {
@@ -22441,6 +23077,20 @@ describe("SessionService", () => {
       };
     }
 
+    it("refuses a non-completed session with a message naming restore and respawn", async () => {
+      seedReopenableSession({ status: "stopped" });
+
+      const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
+      const error = await service.reopen("api-1").catch((caught: unknown) => caught);
+      expect((error as Error).message).toContain("spur restore api-1");
+      expect((error as Error).message).toContain("spur respawn api-1");
+      expect((error as Error).message).toContain("conversation");
+      expect((error as Error).message).not.toContain("use restore or respawn");
+    });
+
     it("rebuilds a missing worktree with the spawn-shaped input and returns a running view", async () => {
       seedReopenableSession();
       let worktreeCreated = false;
@@ -27507,12 +28157,12 @@ describe("SessionService", () => {
       const result = await service.getConversation("api-1");
 
       expect(result.state).toBe("working");
-      expect(readClaudeConversationMock).not.toHaveBeenCalled();
+      expect(readClaudeConversationTailMock).not.toHaveBeenCalled();
     });
 
     it("falls back to error state when claude errored session has no conversation file", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "errored" }));
-      readClaudeConversationMock.mockResolvedValue(null);
+      readClaudeConversationTailMock.mockResolvedValue(null);
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -27524,7 +28174,7 @@ describe("SessionService", () => {
 
     it("falls back to killed state when claude killed session has no conversation file", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "killed" }));
-      readClaudeConversationMock.mockResolvedValue(null);
+      readClaudeConversationTailMock.mockResolvedValue(null);
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -27538,7 +28188,7 @@ describe("SessionService", () => {
       readSessionMock.mockReturnValue(
         baseSession({ agent: "claude", status: "stopped", error: "agent exited 1" }),
       );
-      readClaudeConversationMock.mockResolvedValue(null);
+      readClaudeConversationTailMock.mockResolvedValue(null);
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -27550,7 +28200,7 @@ describe("SessionService", () => {
 
     it("falls back to stopped state when claude completed session has no conversation file", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "completed" }));
-      readClaudeConversationMock.mockResolvedValue(null);
+      readClaudeConversationTailMock.mockResolvedValue(null);
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -27560,9 +28210,16 @@ describe("SessionService", () => {
       expect(result.state).toBe("stopped");
     });
 
-    it("preserves JSONL-derived state when claude conversation read succeeds", async () => {
+    it("preserves JSONL-derived state and forwards transcript totals on success", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
-      readClaudeConversationMock.mockResolvedValue({ messages: [], state: "waiting" });
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "hi", timestampMs: 1 }],
+        state: "waiting",
+        totalEntries: 42,
+        startIndex: 41,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -27570,6 +28227,305 @@ describe("SessionService", () => {
       const result = await service.getConversation("api-1");
 
       expect(result.state).toBe("waiting");
+      expect(result.messages).toHaveLength(1);
+      expect(result.totalEntries).toBe(42);
+      expect(result.hasMore).toBe(true);
+    });
+
+    it("does not call readAgentConversation for a claude default (from-absent) request", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "hi", timestampMs: 1 }],
+        state: "waiting",
+        totalEntries: 1,
+        startIndex: 0,
+        hasMore: false,
+        reader: { filePath: "/x.jsonl" },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("does not call readAgentConversation for a claude from within the retained window", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [
+          { kind: "message", role: "user", text: "a", timestampMs: 1 },
+          { kind: "message", role: "assistant", text: "b", timestampMs: 2 },
+        ],
+        state: "waiting",
+        totalEntries: 10,
+        startIndex: 8,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1", { from: 9 });
+
+      expect(readAgentConversationMock).not.toHaveBeenCalled();
+      expect(result.startIndex).toBe(9);
+      expect(result.entries).toHaveLength(1);
+    });
+
+    it("clamps an in-window from that outruns totalEntries after a transcript rotation", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "a", timestampMs: 1 }],
+        state: "waiting",
+        totalEntries: 30,
+        startIndex: 0,
+        hasMore: false,
+        reader: { filePath: "/x.jsonl" },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Browser held an offset from before rotation (from=400) that is now
+      // far beyond the post-rotation totalEntries (30). startIndex must never
+      // exceed totalEntries, and the response must still carry the tail page
+      // instead of an empty page: an out-of-range or empty page would leave
+      // no scroll event to trigger a recovery re-fetch.
+      const result = await service.getConversation("api-1", { from: 400 });
+
+      expect(result.startIndex).toBeLessThan(result.totalEntries);
+      expect(result.startIndex + result.entries.length).toBeLessThanOrEqual(result.totalEntries);
+      expect(result.entries.length).toBeGreaterThan(0);
+    });
+
+    it("returns a non-empty tail page when the transcript shrinks far below a deep-scroll-back from", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "tail", timestampMs: 5 }],
+        state: "waiting",
+        // Retained window starts well above the stale `from` (100), so this
+        // falls into the deep-scroll-back full-read branch.
+        totalEntries: 410,
+        startIndex: 400,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      readAgentConversationMock.mockResolvedValue(
+        Array.from({ length: 9 }, (_, i) => ({
+          kind: "message",
+          role: "assistant",
+          text: `m${i}`,
+          timestampMs: i,
+        })),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Browser pinned from=100 against a 410-entry transcript that has since
+      // shrunk (rotation/truncation/respawn) to 9 entries in the full read.
+      const result = await service.getConversation("api-1", { from: 100 });
+
+      expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+      expect(result.entries.length).toBeGreaterThan(0);
+      expect(result.startIndex + result.entries.length).toBeLessThanOrEqual(result.totalEntries);
+      expect(result.totalEntries).toBe(9);
+    });
+
+    it("calls readAgentConversation exactly once for a claude from below the retained window", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "tail", timestampMs: 5 }],
+        state: "waiting",
+        totalEntries: 10,
+        startIndex: 9,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      readAgentConversationMock.mockResolvedValue(
+        Array.from({ length: 10 }, (_, i) => ({
+          kind: "message",
+          role: "assistant",
+          text: `m${i}`,
+          timestampMs: i,
+        })),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1", { from: 2 });
+
+      expect(readAgentConversationMock).toHaveBeenCalledTimes(1);
+      expect(result.startIndex).toBe(2);
+      expect(result.totalEntries).toBe(10);
+      expect(result.entries).toHaveLength(8);
+    });
+
+    it("uses the tail classifier's state on a deep from-read even when it diverges from statusFallbackState", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "stopped" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [{ kind: "message", role: "assistant", text: "tail", timestampMs: 5 }],
+        state: "working",
+        totalEntries: 10,
+        startIndex: 9,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      readAgentConversationMock.mockResolvedValue(
+        Array.from({ length: 10 }, (_, i) => ({
+          kind: "message",
+          role: "assistant",
+          text: `m${i}`,
+          timestampMs: i,
+        })),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1", { from: 0 });
+
+      // statusFallbackState for a plain "stopped" session (no error) is "stopped",
+      // which must never win over the classifier's "working".
+      expect(result.state).toBe("working");
+    });
+
+    it("resolves the transcript by pinned agentSessionId", async () => {
+      readSessionMock.mockReturnValue(
+        baseSession({ agent: "claude", status: "running", agentSessionId: "sess-abc" }),
+      );
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [],
+        state: "working",
+        totalEntries: 0,
+        startIndex: 0,
+        hasMore: false,
+        reader: { filePath: "/x.jsonl" },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.getConversation("api-1");
+
+      expect(readClaudeConversationTailMock).toHaveBeenCalledWith(
+        "/tmp/spur-worktrees/api/api-1",
+        undefined,
+        "sess-abc",
+      );
+    });
+
+    it("reuses the cached conversation reader across successive calls", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      const readerA = { filePath: "/x.jsonl", lastOffset: 10 };
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [],
+        state: "working",
+        totalEntries: 0,
+        startIndex: 0,
+        hasMore: false,
+        reader: readerA,
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.getConversation("api-1");
+      await service.getConversation("api-1");
+
+      expect(readClaudeConversationTailMock).toHaveBeenLastCalledWith(
+        "/tmp/spur-worktrees/api/api-1",
+        readerA,
+        undefined,
+      );
+    });
+
+    it("serializes overlapping reads so the shared reader is not clobbered", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+
+      // Each read builds on the reader it was handed: consume 5 more entries
+      // and advance the offset. Two overlapping polls that both snapshot the
+      // same stale reader would double-count and regress the offset; serialized
+      // reads must chain so the second sees the first's advanced reader.
+      readClaudeConversationTailMock.mockImplementation(
+        async (_worktree: string, reader?: { lastOffset?: number; totalEntries?: number }) => {
+          const prevOffset = reader?.lastOffset ?? 0;
+          const prevTotal = reader?.totalEntries ?? 0;
+          await Promise.resolve();
+          const totalEntries = prevTotal + 5;
+          return {
+            entries: [],
+            state: "working",
+            totalEntries,
+            startIndex: 0,
+            hasMore: false,
+            reader: { filePath: "/x.jsonl", lastOffset: prevOffset + 100, totalEntries },
+          };
+        },
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const [a, b] = await Promise.all([
+        service.getConversation("api-1"),
+        service.getConversation("api-1"),
+      ]);
+
+      // Sequential accumulation: one read saw offset 0, the other saw offset 100.
+      const totals = [a.totalEntries, b.totalEntries].sort((x, y) => (x ?? 0) - (y ?? 0));
+      expect(totals).toEqual([5, 10]);
+      expect(readClaudeConversationTailMock).toHaveBeenLastCalledWith(
+        "/tmp/spur-worktrees/api/api-1",
+        expect.objectContaining({ lastOffset: 100, totalEntries: 5 }),
+        undefined,
+      );
+    });
+
+    it("derives messages as entries.filter(kind === message) across from-absent, deep-from, and from=0", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: [
+          { kind: "message", role: "user", text: "a", timestampMs: 1 },
+          { kind: "tool", name: "Read", timestampMs: 2 },
+        ],
+        state: "waiting",
+        totalEntries: 20,
+        startIndex: 18,
+        hasMore: true,
+        reader: { filePath: "/x.jsonl" },
+      });
+      const fullEntries = [
+        { kind: "message", role: "user", text: "full-a", timestampMs: 1 },
+        { kind: "tool", name: "Read", timestampMs: 2 },
+        { kind: "message", role: "assistant", text: "full-b", timestampMs: 3 },
+      ];
+      readAgentConversationMock.mockResolvedValue(fullEntries);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      for (const from of [undefined, 0] as const) {
+        const result = await service.getConversation(
+          "api-1",
+          from === undefined ? undefined : { from },
+        );
+        const expectedMessages = result.entries
+          .filter(
+            (entry): entry is Extract<typeof entry, { kind: "message" }> =>
+              entry.kind === "message",
+          )
+          .map((entry) => ({
+            role: entry.role,
+            text: entry.text,
+            timestampMs: entry.timestampMs ?? 0,
+          }));
+        expect(result.messages).toEqual(expectedMessages);
+      }
     });
 
     it("derives messages and entries from the codex transcript reader", async () => {
@@ -33129,6 +34085,40 @@ describe("SessionService", () => {
       });
     });
 
+    describe("resolveParkActivityAt", () => {
+      it("returns null when agentActivityAt is null (fail-safe: never park)", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        expect(
+          resolveParkActivityAt({ agentActivityAt: null, rateLimitExpiredAtMs: 1_000 }),
+        ).toBeNull();
+        expect(resolveParkActivityAt({ agentActivityAt: null })).toBeNull();
+      });
+
+      it("returns rateLimitExpiredAtMs when it is later than agentActivityAt", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        const agentActivityAt = new Date("2026-03-18T09:00:00.000Z");
+        const rateLimitExpiredAtMs = Date.parse("2026-03-18T09:05:00.000Z");
+        expect(resolveParkActivityAt({ agentActivityAt, rateLimitExpiredAtMs })).toEqual(
+          new Date(rateLimitExpiredAtMs),
+        );
+      });
+
+      it("returns agentActivityAt when it is later than rateLimitExpiredAtMs", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        const agentActivityAt = new Date("2026-03-18T09:10:00.000Z");
+        const rateLimitExpiredAtMs = Date.parse("2026-03-18T09:00:00.000Z");
+        expect(resolveParkActivityAt({ agentActivityAt, rateLimitExpiredAtMs })).toBe(
+          agentActivityAt,
+        );
+      });
+
+      it("returns agentActivityAt unchanged when rateLimitExpiredAtMs is absent", async () => {
+        const { resolveParkActivityAt } = await loadSessionServiceModule();
+        const agentActivityAt = new Date("2026-03-18T09:00:00.000Z");
+        expect(resolveParkActivityAt({ agentActivityAt })).toBe(agentActivityAt);
+      });
+    });
+
     describe("isRestorableSession stale support", () => {
       it("accepts a stopped record classified stale, given a live workspace", async () => {
         // statusFallbackState only ever produces state "stale" for
@@ -33237,6 +34227,52 @@ describe("SessionService", () => {
           },
         });
         expect(events[0]?.details?.idleMs).toBeGreaterThanOrEqual(60 * 60_000);
+        service.dispose();
+      });
+
+      it("keeps a just-expired rate-limited session out of the stale park sweep", async () => {
+        // staleParkableSession is 65 minutes idle by transcript mtime alone
+        // (STALE_PARK_ACTIVITY_MS == its own updatedAt), comfortably past the
+        // 60-minute staleAfterMinutes threshold below. But its parsed
+        // rate-limit reset (10:04) is only 1 minute before "now" (10:05):
+        // resolveParkActivityAt must anchor the idle clock to that later
+        // instant, so the session gets a fresh idle window from the reset
+        // and must NOT be parked on the very next tick past expiry.
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          staleAfterMinutes: 60,
+        });
+        readClaudeJsonlStateMock.mockResolvedValue({
+          state: "waiting",
+          reader: {
+            filePath: "test.jsonl",
+            lastOffset: 0,
+            lastMtimeMs: STALE_PARK_ACTIVITY_MS,
+            tailRecords: [],
+          },
+          rateLimit: {
+            limited: true,
+            reason: "claude rate_limit",
+            resetAtMs: Date.parse("2026-03-18T10:04:00.000Z"),
+          },
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession());
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(0);
+        expect(sessions.get("api-1")?.status).toBe("running");
         service.dispose();
       });
 

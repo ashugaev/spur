@@ -45,6 +45,7 @@ import {
   readOpenCodeConversation,
   scanOpenCodeForNewUserMessage,
 } from "./opencode.js";
+import { agentExecutableCommand, agentProcessNames } from "./executable.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
@@ -152,6 +153,7 @@ interface AgentAdapter {
     worktreePath: string;
     sessionToolDir: string;
     mcpBindings?: SidecarMcpBinding[];
+    mcpExclude?: string[];
     restrictWrites?: boolean;
     cursorConfigDir?: string;
     claudeConfigDir?: string;
@@ -251,9 +253,11 @@ function openCodePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
-function defaultProcessMatchers(launchCommand: string, fallbackBinary: string): string[] {
-  const binary = basename(extractCommandBinary(launchCommand, fallbackBinary));
-  return binary ? [binary] : [];
+function defaultProcessMatchers(agent: AgentName, launchCommand: string): string[] {
+  const derived = basename(extractCommandBinary(launchCommand, agentExecutableCommand(agent)));
+  return [...new Set([derived, ...agentProcessNames(agent)])].filter(
+    (matcher) => matcher.length > 0,
+  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -292,13 +296,22 @@ function mergeMcpServers(
 // Merges the same MCP server sources Claude itself loads (user < project <
 // local, later wins), so --strict-mcp-config only drops servers Claude
 // wouldn't have loaded anyway rather than every host/project MCP server.
+//
+// settings.json is deliberately NOT a source: Claude 2.1.221 ignores an
+// "mcpServers" block there (verified against a scratch CLAUDE_CONFIG_DIR —
+// `claude mcp list` lists a probe planted in .claude.json and not the same
+// probe in settings.json). Reading it would make Spur START servers Claude
+// never loads, which is the opposite of what --strict-mcp-config is for here.
 async function readHostClaudeMcpServers(args: {
   worktreePath: string;
   claudeConfigDir?: string;
 }): Promise<Record<string, unknown>> {
   const merged: Record<string, unknown> = {};
-  const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
-  const userConfig = await readJsonFile(userConfigPath);
+  // Independent files: read together, merge in precedence order below.
+  const [userConfig, projectConfig] = await Promise.all([
+    readJsonFile(join(args.claudeConfigDir ?? homedir(), ".claude.json")),
+    readJsonFile(join(args.worktreePath, ".mcp.json")),
+  ]);
   let localProject: unknown;
   if (isPlainObject(userConfig)) {
     mergeMcpServers(merged, userConfig.mcpServers);
@@ -307,8 +320,6 @@ async function readHostClaudeMcpServers(args: {
       localProject = projects[args.worktreePath];
     }
   }
-  const projectConfigPath = join(args.worktreePath, ".mcp.json");
-  const projectConfig = await readJsonFile(projectConfigPath);
   if (isPlainObject(projectConfig)) {
     mergeMcpServers(merged, projectConfig.mcpServers);
   }
@@ -332,6 +343,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       worktreePath,
       sessionToolDir,
       mcpBindings,
+      mcpExclude,
       restrictWrites,
       claudeConfigDir,
     }) => {
@@ -339,13 +351,22 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       if (restrictWrites) {
         result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
       }
-      if (mcpBindings?.length) {
+      // Either an MCP sidecar to inject or a host server to suppress makes the
+      // generated file authoritative (--strict-mcp-config). With neither, stay
+      // out of the way and let Claude resolve MCP servers itself.
+      if (mcpBindings?.length || mcpExclude?.length) {
         const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
-        const mcpServers = await readHostClaudeMcpServers({
+        const hostServers = await readHostClaudeMcpServers({
           worktreePath,
           ...(claudeConfigDir ? { claudeConfigDir } : {}),
         });
-        for (const binding of mcpBindings) {
+        // Exclude first: a project that suppresses the host "playwright" still
+        // gets Spur's managed playwright sidecar binding under the same name.
+        const excluded = new Set(mcpExclude ?? []);
+        const mcpServers = Object.fromEntries(
+          Object.entries(hostServers).filter(([name]) => !excluded.has(name)),
+        );
+        for (const binding of mcpBindings ?? []) {
           mcpServers[binding.server] = { type: "http", url: binding.url };
         }
         const mcpConfig = { mcpServers };
@@ -354,7 +375,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       }
       return result;
     },
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("claude", launchCommand),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
     sendsInterruptKey: true,
@@ -406,16 +427,18 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       sessionToolDir,
       worktreePath,
       mcpBindings,
+      mcpExclude,
       restrictWrites,
       modelsCacheHome,
     }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(mcpBindings?.length ? { mcpBindings } : {}),
+        ...(mcpExclude?.length ? { mcpExclude } : {}),
         ...(modelsCacheHome ? { modelsCacheHome } : {}),
       }),
     }),
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("codex", launchCommand),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
     sendsInterruptKey: true,
@@ -465,10 +488,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         },
       };
     },
-    processMatchers: (launchCommand) => {
-      const derived = defaultProcessMatchers(launchCommand, cursorCommand());
-      return [...new Set([...derived, "agent", "cursor-agent"])];
-    },
+    processMatchers: (launchCommand) => defaultProcessMatchers("cursor", launchCommand),
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
     sendsInterruptKey: false,
@@ -504,7 +524,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, opencodeCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
     stateStrategy: "opencode",
     sendMode: "bracketed_paste",
     sendsInterruptKey: true,
@@ -612,6 +632,7 @@ export async function setupAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   mcpBindings?: SidecarMcpBinding[];
+  mcpExclude?: string[];
   restrictWrites?: boolean;
   cursorConfigDir?: string;
   claudeConfigDir?: string;

@@ -157,15 +157,22 @@ function conversationFixture(
     messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }>;
     durationMs: number;
     state: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+    startIndex: number;
+    totalEntries: number;
+    hasMore: boolean;
   }>,
 ) {
+  const messages = overrides?.messages ?? [
+    { role: "user" as const, text: "Original prompt", timestampMs: 1 },
+    { role: "assistant" as const, text: "First reply", timestampMs: 2 },
+  ];
   return {
-    messages: [
-      { role: "user" as const, text: "Original prompt", timestampMs: 1 },
-      { role: "assistant" as const, text: "First reply", timestampMs: 2 },
-    ],
+    messages,
+    entries: messages.map((message) => ({ kind: "message" as const, ...message })),
     durationMs: 60_000,
     state: "waiting" as const,
+    startIndex: 0,
+    totalEntries: messages.length,
     ...overrides,
   };
 }
@@ -2214,6 +2221,209 @@ describe("SessionDetail voice input", () => {
     expect(screen.getAllByText("working")).toHaveLength(1);
   });
 
+  it("renders the tail delivered by a large-transcript response with no count hint", async () => {
+    const messages = Array.from({ length: 300 }, (_, index) => ({
+      role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      text: `message-${index + 200}`,
+      timestampMs: index + 1,
+    }));
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              messages,
+              startIndex: 200,
+              totalEntries: 500,
+              hasMore: true,
+              state: "waiting",
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("message-499")).toBeInTheDocument();
+    });
+
+    // Tail present, older-than-tail message absent (server dropped it).
+    expect(screen.getByText("message-200")).toBeInTheDocument();
+    expect(screen.queryByText("message-199")).not.toBeInTheDocument();
+
+    // No "showing last N of M" hint is ever rendered.
+    expect(screen.queryByText(/showing last/i)).not.toBeInTheDocument();
+  });
+
+  it("omits any count hint when the full transcript fits", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              startIndex: 0,
+              totalEntries: 2,
+              hasMore: false,
+              state: "waiting",
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /dialog/i })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(/showing last/i)).not.toBeInTheDocument();
+  });
+
+  it("fetches an older page with ?from= on scroll-to-top and shows the loading row until it resolves", async () => {
+    const fetchedUrls: string[] = [];
+    let resolveOlderPage: ((value: Response) => void) | undefined;
+    const olderPagePromise = new Promise<Response>((resolve) => {
+      resolveOlderPage = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      fetchedUrls.push(url);
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation?from=100") {
+        return olderPagePromise;
+      }
+      if (url.startsWith("/api/sessions/api-a1/conversation")) {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    // Wait for the conversation fetch (hasMore: true) to land, not just the
+    // static heading — the scroll handler's guard needs hasMore already set.
+    await waitFor(() => {
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    });
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scrollEl);
+
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
+        true,
+      );
+    });
+
+    // The loading row must still be visible while the older-page fetch is
+    // in flight — it must not be cleared before the fetch resolves.
+    expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+    resolveOlderPage?.(
+      new Response(
+        JSON.stringify(conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true })),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    });
+  });
+
+  it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
+    const fetchedUrls: string[] = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      fetchedUrls.push(url);
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-b2") {
+        return new Response(JSON.stringify(sessionFixture({ id: "api-b2" })), { status: 200 });
+      }
+      if (url.startsWith("/api/sessions/api-a1/conversation")) {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/sessions/api-b2/conversation")) {
+        return new Response(
+          JSON.stringify(conversationFixture({ startIndex: 0, totalEntries: 2, hasMore: false })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    });
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scrollEl);
+
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
+        true,
+      );
+    });
+
+    rerender(<SessionDetail sessionId="api-b2" />);
+
+    // The switched-to session's fromIndex settles back to null (no `from`)
+    // even though the prior session had an older page loaded.
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-b2/conversation")).toBe(true);
+    });
+  });
+
   it("hard-wraps long dialog and queued message tokens without widening the layout", async () => {
     const longToken = "supercalifragilisticexpialidocious".repeat(8);
 
@@ -3197,6 +3407,7 @@ describe("SessionDetail logs", () => {
 describe("SessionDetail artifacts", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.localStorage.clear();
   });
 
   it("renders image, video, and download artifacts from the session payload", async () => {
@@ -3275,6 +3486,172 @@ describe("SessionDetail artifacts", () => {
       "href",
       "/api/sessions/api-a1/artifacts/shot.png",
     );
+  });
+
+  it("renders a nested artifact under its relative path", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "design/design-spec.md",
+                  name: "design/design-spec.md",
+                  size: 400,
+                  mimeType: "text/markdown; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("design/design-spec.md")).toBeInTheDocument();
+    const downloadLink = screen.getByRole("link", { name: "Download design/design-spec.md" });
+    expect(downloadLink).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/design/design-spec.md",
+    );
+    expect(downloadLink).toHaveAttribute("download", "design-spec.md");
+  });
+
+  it("shows the truncation line when artifactsTruncated is set", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "shot.png",
+                  name: "shot.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+              artifactsTruncated: true,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/truncated/i)).toBeInTheDocument();
+  });
+
+  it("shows the truncation line when every artifact row was truncated away", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [],
+              artifactsTruncated: true,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/truncated/i)).toBeInTheDocument();
+    expect(screen.getByText("None.")).toBeInTheDocument();
+  });
+
+  it("shows no truncation line without the flag", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "shot.png",
+                  name: "shot.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(/truncated/i)).not.toBeInTheDocument();
   });
 
   it("navigates image, video, and file artifacts in session order from the lightbox", async () => {
@@ -4406,6 +4783,365 @@ describe("SessionDetail artifacts", () => {
     expect(screen.queryByText("agent-history.jsonl")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /system \(/i })).not.toBeInTheDocument();
   }, 12_000);
+
+  function threeArtifactsFixture() {
+    return sessionFixture({
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1200,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+        {
+          id: "run.webm",
+          name: "run.webm",
+          size: 2200,
+          mimeType: "video/webm",
+          kind: "video",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T11:00:00.000Z",
+        },
+        {
+          id: "trace.log",
+          name: "trace.log",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+  }
+
+  function mockThreeArtifacts() {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(threeArtifactsFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  it("renders the tile grid by default with empty localStorage", async () => {
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Grid" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("clicking LIST writes the view-mode key and renders the table", async () => {
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    expect(window.localStorage.getItem("spur:artifact-view-mode")).toBe("list");
+    expect(screen.getByText("shot.png")).toBeInTheDocument();
+  });
+
+  it("renders the table on first paint when the stored mode is list", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("link", { name: "Download shot.png" })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/shot.png",
+    );
+  });
+
+  it("renders the tile grid when the stored mode value is garbage", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "not-a-real-mode");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("renders the tile grid when reading the stored view mode throws (F2)", async () => {
+    const realGetItem = Storage.prototype.getItem;
+    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (key === "spur:artifact-view-mode") {
+        throw new DOMException("blocked", "SecurityError");
+      }
+      return realGetItem.call(this, key);
+    });
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    getItemSpy.mockRestore();
+  });
+
+  it("still switches to list view when persisting the view mode throws (F2)", async () => {
+    const realSetItem = Storage.prototype.setItem;
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (key === "spur:artifact-view-mode") {
+        throw new DOMException("blocked", "SecurityError");
+      }
+      return realSetItem.call(this, key, value);
+    });
+    const uncaughtErrors: unknown[] = [];
+    const onWindowError = (event: ErrorEvent) => {
+      uncaughtErrors.push(event.error);
+      event.preventDefault();
+    };
+    window.addEventListener("error", onWindowError);
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    // The write-side try/catch must swallow the localStorage throw: no
+    // uncaught error should escape the click handler.
+    expect(uncaughtErrors).toEqual([]);
+
+    window.removeEventListener("error", onWindowError);
+    setItemSpy.mockRestore();
+  });
+
+  it("opens the same artifact viewer dialog from a list row as the tile click", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+    });
+  });
+
+  it("viewer next/prev follows the list's active sort, not payload order (F1)", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    mockThreeArtifacts();
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    // Payload order is shot.png, run.webm, trace.log. Sorting by Name asc
+    // reorders it to run.webm, shot.png, trace.log.
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    expect(screen.getAllByTitle(/\.(png|webm|log)$/).map((el) => el.textContent ?? "")).toEqual([
+      "run.webm",
+      "shot.png",
+      "trace.log",
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview run.webm" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview run.webm" }),
+    ).toBeInTheDocument();
+
+    // Payload-order neighbour of run.webm is trace.log; the name-sorted
+    // (rendered) neighbour is shot.png.
+    fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+    ).toBeInTheDocument();
+  });
+
+  it("resets list sort to updatedAt desc after switching category away and back", async () => {
+    window.localStorage.setItem("spur:artifact-view-mode", "list");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "agent-output.txt",
+                  name: "agent-output.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T09:00:00.000Z",
+                },
+                {
+                  id: "agent-newer.txt",
+                  name: "agent-newer.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T11:00:00.000Z",
+                },
+                {
+                  id: "agent-history.jsonl",
+                  name: "agent-history.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    const rowNamesInOrder = () =>
+      screen.getAllByTitle(/\.(txt|jsonl)$/).map((el) => el.textContent ?? "");
+
+    expect(rowNamesInOrder()).toEqual(["agent-newer.txt", "agent-output.txt"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    expect(rowNamesInOrder()).toEqual(["agent-newer.txt", "agent-output.txt"]);
+    fireEvent.click(screen.getByRole("button", { name: "Name" }));
+    expect(rowNamesInOrder()).toEqual(["agent-output.txt", "agent-newer.txt"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+    await waitFor(() => {
+      expect(screen.getByText("agent-history.jsonl")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent (2)" }));
+
+    await waitFor(() => {
+      expect(rowNamesInOrder()).toEqual(["agent-newer.txt", "agent-output.txt"]);
+    });
+  });
+
+  it("renders exactly one None. paragraph for an empty category in grid and list", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "system-only.jsonl",
+                  name: "system-only.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("None.")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("None.")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("None.")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("None.")).toHaveLength(1);
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail load state", () => {

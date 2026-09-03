@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
-import type { RuntimeInfo } from "../../src/types.js";
+import type { RuntimeInfo, TodoProjection } from "../../src/types.js";
 import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -171,6 +171,27 @@ export interface RuntimeTestContext {
   readAgentLog(sessionId: string): Promise<string>;
   writeGhState(state: FakeGhState): Promise<void>;
   cleanup(): Promise<void>;
+}
+
+// The fake agent fixture backgrounds its "add then complete" ToDo round trip
+// (record_fixture_todo, see the FAKE_AGENT_SCRIPT body below) so it never
+// blocks the session's workspace lock. That means the fixture item can still
+// be open for a window after the daemon reports the session "waiting" — a
+// caller that fires a ledger-gated manual status (e.g. `complete`) right
+// after spawn/resume can hit `todo_open_work` (PR #781 regression, see
+// GitHub Actions run 33044875236). Poll the session's ToDo projection until
+// it has no open or held items before issuing the gated call.
+export async function waitForCleanTodoLedger(
+  context: RuntimeTestContext,
+  sessionId: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const { timeoutMs = 15_000 } = opts;
+  await pollUntil(async () => context.fetchJson<TodoProjection>(`/sessions/${sessionId}/todo`), {
+    timeoutMs,
+    accept: (projection) => projection.counts.open === 0 && projection.counts.held === 0,
+    label: `clean Spur ToDo ledger for session ${sessionId}`,
+  });
 }
 
 export function fakeAgentScript(
@@ -682,22 +703,38 @@ record_fixture_todo() {
   # fixture item is a one-time "the agent touched ToDo" marker, not a per-launch
   # step. Re-adding on every relaunch races a caller polling for a clean ledger
   # right after a resume (see cli-lifecycle.runtime.test.ts pause/resume/complete).
-  local already
-  already="$("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys
+  #
+  # Status-aware, not status-blind: a pause can kill this backgrounded script
+  # between "add" and "complete", leaving the item open forever with no future
+  # relaunch able to see that and heal it (a text-only guard would just skip
+  # re-adding and never complete it). So report id+status, only skip on a
+  # terminal status, and reuse the existing id to complete an open/held one.
+  local existing_id existing_status
+  existing_id=""
+  existing_status=""
+  read -r existing_id existing_status < <("$SPUR_TODO_COMMAND" list --json 2>/dev/null | python3 -c 'import json,sys
 try:
     data = json.load(sys.stdin)
 except Exception:
-    print("")
+    print(" ")
 else:
-    found = any(item.get("text") == "Fixture step" for item in data.get("items", []))
-    print("yes" if found else "")' 2>/dev/null || true)"
-  if [[ -n "$already" ]]; then
+    item = next((i for i in data.get("items", []) if i.get("text") == "Fixture step"), None)
+    print((item.get("id", "") + " " + item.get("status", "")) if item else " ")' 2>/dev/null || printf ' ')
+  if [[ "$existing_status" == "completed" || "$existing_status" == "cancelled" ]]; then
     return
   fi
-  local todo_id
-  todo_id="$("$SPUR_TODO_COMMAND" add --text "Fixture step" --reason "Runtime agent fixture step" --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
+  local todo_id="$existing_id"
+  if [[ -z "$todo_id" ]]; then
+    todo_id="$("$SPUR_TODO_COMMAND" add --text "Fixture step" --reason "Runtime agent fixture step" --json 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((item["id"] for item in data["items"] if item["status"] == "open"), ""))' 2>/dev/null || true)"
+  fi
   if [[ -n "$todo_id" ]]; then
-    SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1 || true
+    local attempt
+    for attempt in 1 2 3; do
+      if SPUR_DISABLE_AUTOSTART=1 "$SPUR_TODO_COMMAND" complete "$todo_id" --reason "Resolved by the runtime agent fixture" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
   fi
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"

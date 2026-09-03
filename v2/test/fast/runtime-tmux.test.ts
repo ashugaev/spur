@@ -785,4 +785,71 @@ describe("runtime-tmux", () => {
     expect(options?.maxBuffer).toBeGreaterThan(1024 * 1024);
     expect(options?.timeout).toBe(5_000);
   });
+
+  it("reads a wrapper-launched agent as alive once the canonical binary name is a matcher (issue #800)", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 pts/8 4200 -zsh",
+            "2301303 pts/8 512000 /home/vershinin/.local/bin/codex --enable hooks --model gpt-5.6-sol",
+            "2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+    const { agentProcessMatchers } = await import("../../src/agents/index.js");
+
+    // Today's bug: only the wrapper's own basename as a matcher, and `exec`
+    // erased it from ps.
+    expect(await isProcessRunningInTmux("intelas-c007", ["codex-spur-wrapper.sh"])).toBe(false);
+
+    // The fix, exercised end to end: agentProcessMatchers (not a hand-written
+    // array) derives the wrapper basename plus the canonical "codex" name from
+    // the issue's real launchCommand shape, and that real output is what makes
+    // isProcessRunningInTmux see the wrapper as alive. Deleting the canonical
+    // name from defaultProcessMatchers must turn this assertion false.
+    const wrapperLaunchCommand =
+      "CODEX_HOME='/home/vershinin/.spur/session-tools/intelas-c007/codex-home' " +
+      "/home/vershinin/.local/bin/codex-spur-wrapper.sh --enable hooks --model gpt-5.6-sol";
+    expect(agentProcessMatchers("codex", wrapperLaunchCommand)).toEqual([
+      "codex-spur-wrapper.sh",
+      "codex",
+    ]);
+    expect(
+      await isProcessRunningInTmux(
+        "intelas-c007",
+        agentProcessMatchers("codex", wrapperLaunchCommand),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not let codex-code-mode-host alone satisfy the canonical codex matcher", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 pts/8 4200 -zsh",
+            "2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
+  });
 });

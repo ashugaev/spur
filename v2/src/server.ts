@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { basename } from "node:path";
 import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
@@ -1354,7 +1355,14 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
-        sendJson(response, 200, await service.getConversation(conversationSessionId));
+        const fromValue = url.searchParams.get("from");
+        const from =
+          fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        sendJson(
+          response,
+          200,
+          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+        );
         return;
       }
 
@@ -1398,12 +1406,25 @@ export async function startServer(
         return;
       }
 
-      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
+      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
-        const artifact = service.getArtifact(
-          decodeURIComponent(artifactMatch[1]),
-          decodeURIComponent(artifactMatch[2]),
-        );
+        // An invalid percent-encoding in any segment (decodeURIComponent throws URIError)
+        // is not a malformed request — it just can never match a real artifact id. Treat
+        // it as a not-found id, same as any other id the store doesn't recognize, rather
+        // than letting it fall through to the generic 500 handler.
+        let sessionId: string;
+        let artifactId: string;
+        try {
+          sessionId = decodeURIComponent(artifactMatch[1]);
+          artifactId = artifactMatch[2]
+            .split("/")
+            .map((segment) => decodeURIComponent(segment))
+            .join("/");
+        } catch {
+          sendError(response, 404, `Artifact not found: ${artifactMatch[1]}/${artifactMatch[2]}`);
+          return;
+        }
+        const artifact = service.getArtifact(sessionId, artifactId);
         // An SVG opened as a top-level document runs its own scripts on Spur's origin,
         // and browsers ignore a CSP sandbox on image documents, so hand it over as a
         // download instead. <img> previews ignore content-disposition and still render.
@@ -1411,7 +1432,7 @@ export async function startServer(
         response.writeHead(200, {
           "content-type": artifact.mimeType,
           "content-length": String(artifact.size),
-          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(artifact.name)}"`,
+          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(basename(artifact.name))}"`,
           "cache-control": "no-store",
           // Artifact HTML is agent-authored: render it in an opaque origin so it can
           // never read Spur's storage or call the API with the operator's session.

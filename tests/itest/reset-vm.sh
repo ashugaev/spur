@@ -74,6 +74,14 @@ rm -f /tmp/agent-run.jsonl /tmp/agent-run.done /tmp/prompt.txt
 rm -rf "$HOME/.cursor/projects" "$HOME/.claude/projects" "$HOME/.claude/todos"
 rm -rf "$HOME/spur-docs"
 
+# The source-install deploy mode leaves a repo clone and its bare mirror here.
+# A tested agent finds that checkout's maintainer spur.yaml — real GitHub and
+# Telegram sources, paths that do not exist on this box — and spends turns
+# deciding what to do with it. ~/projects is whatever a run's smoke project
+# created. Both read as install friction; neither is.
+log "removing source-install clone and run projects"
+rm -rf "$HOME/spur" "$HOME/spur-mirror" "$HOME/projects"
+
 # host-skills only creates these two — never `rm -rf "$HOME/.claude"`, that
 # destroys the planted credentials this harness relies on. Both dirs, once
 # created by an install, otherwise survive every reset and make run N+1
@@ -109,4 +117,5 @@ printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] 
 printf '  %-14s %s\n' "harness"       "$([ -x "$HOME/.itest-harness/bin/claude" ] && echo claude || echo MISSING)"
 printf '  %-14s %s\n' "harness-creds" "$([ -s "$HOME/.claude/.credentials.json" ] && echo present || echo MISSING)"
 printf '  %-14s %s\n' "agent-skills"  "$([ -e "$HOME/.claude/skills" ] || [ -e "$HOME/.codex" ] && echo leftover || echo clean)"
+printf '  %-14s %s\n' "source-clone"  "$([ -e "$HOME/spur" ] || [ -e "$HOME/spur-mirror" ] || [ -e "$HOME/projects" ] && echo leftover || echo clean)"
 log "done"

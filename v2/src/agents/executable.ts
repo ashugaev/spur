@@ -2,12 +2,18 @@ import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import type { AgentName } from "../types.js";
 
-const AGENT_EXECUTABLES = {
+interface AgentExecutableSpec {
+  command: string;
+  env: string;
+  processAliases?: readonly string[];
+}
+
+const AGENT_EXECUTABLES: Record<AgentName, AgentExecutableSpec> = {
   claude: { command: "claude", env: "SPUR_CLAUDE_BIN" },
   codex: { command: "codex", env: "SPUR_CODEX_BIN" },
-  cursor: { command: "agent", env: "SPUR_CURSOR_BIN" },
+  cursor: { command: "agent", env: "SPUR_CURSOR_BIN", processAliases: ["cursor-agent"] },
   opencode: { command: "opencode", env: "SPUR_OPENCODE_BIN" },
-} as const satisfies Record<AgentName, { command: string; env: string }>;
+};
 
 export interface AgentExecutableResolution {
   command: string;
@@ -27,6 +33,15 @@ function isExecutable(path: string): boolean {
 export function agentExecutableCommand(agent: AgentName): string {
   const executable = AGENT_EXECUTABLES[agent];
   return process.env[executable.env] || executable.command;
+}
+
+// The canonical binary name(s) an agent's own process is known to run as,
+// independent of any SPUR_*_BIN override — the fixed point defaultProcessMatchers
+// appends to the launchCommand-derived basename so an exec'ing wrapper does not
+// erase the agent from ps.
+export function agentProcessNames(agent: AgentName): string[] {
+  const executable = AGENT_EXECUTABLES[agent];
+  return [executable.command, ...(executable.processAliases ?? [])];
 }
 
 export function resolveAgentExecutable(agent: AgentName): AgentExecutableResolution {

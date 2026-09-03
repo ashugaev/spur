@@ -1,17 +1,35 @@
 import {
+  type Dir,
+  type Dirent,
+  type Stats,
   existsSync,
+  lstatSync,
   mkdirSync,
+  opendirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
+  rmdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, extname, join } from "node:path";
+import { basename, extname, join, sep } from "node:path";
 import type { SessionArtifact, SessionArtifactKind, SessionArtifactOrigin } from "./types.js";
 
 const ARTIFACTS_DIR = "session-artifacts";
 const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
+
+// Every entry pulled from a below-root directory costs one tick, and opening that
+// directory costs one tick too, whether the directory turns out empty, its entries become
+// files, skipped symlinks, or enqueued directories. Charging the open itself is what bounds
+// syscalls on a tree of many (possibly empty) directories, not only on a tree with many
+// entries — the nested listing is pulled incrementally (opendirSync + readSync), so one
+// oversized directory cannot exceed this budget either. The root level is never capped: see
+// listSessionArtifacts.
+export const MAX_NESTED_ARTIFACT_WALK_ENTRIES = 2000;
+// Emitted SessionArtifact objects at depth >= 2. Depth-1 rows never consume this.
+export const MAX_NESTED_ARTIFACT_ROWS = 200;
 
 const MIME_BY_EXT: Record<string, string> = {
   ".gif": "image/gif",
@@ -117,12 +135,12 @@ function artifactAddedByUser(metadata: ArtifactMetadataMap, name: string): boole
   return metadata[name]?.addedByUser === true;
 }
 
-function artifactFromFile(
+function artifactFromStat(
   path: string,
   name: string,
+  stat: Stats,
   metadata: ArtifactMetadataMap,
 ): SessionArtifactFile {
-  const stat = statSync(path);
   const mimeType = artifactMimeType(name);
   return {
     id: name,
@@ -138,15 +156,47 @@ function artifactFromFile(
   };
 }
 
-function validateArtifactId(artifactId: string): string {
+function artifactFromFile(
+  path: string,
+  name: string,
+  metadata: ArtifactMetadataMap,
+): SessionArtifactFile {
+  return artifactFromStat(path, name, statSync(path), metadata);
+}
+
+/**
+ * Parses a raw artifact id into the POSIX path relative to the artifacts root, or returns
+ * null when the id is unsafe. Pure: does not touch the filesystem. Rejects an empty id, a
+ * NUL byte, a backslash, a "." or ".." segment, an empty segment (a leading/trailing/double
+ * "/"), and the reserved metadata filename. Every accepted id resolves lexically inside the
+ * artifacts root; readSessionArtifact additionally enforces realpath containment before it
+ * reads (a lexically clean id can still be a symlink pointing outside the root).
+ */
+export function parseArtifactRelativePath(artifactId: string): string | null {
   const trimmed = artifactId.trim();
-  if (!trimmed || trimmed !== basename(trimmed) || trimmed === "." || trimmed === "..") {
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.includes("\u0000") || trimmed.includes("\\")) {
+    return null;
+  }
+  const segments = trimmed.split("/");
+  if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+    return null;
+  }
+  const relativePath = segments.join("/");
+  if (relativePath === ARTIFACT_METADATA_FILE) {
+    return null;
+  }
+  return relativePath;
+}
+
+export function validateArtifactRelativePath(artifactId: string): string {
+  const parsed = parseArtifactRelativePath(artifactId);
+  if (parsed === null) {
     throw new Error(`Invalid artifact id: ${artifactId}`);
   }
-  if (trimmed.includes("/") || trimmed.includes("\\")) {
-    throw new Error(`Invalid artifact id: ${artifactId}`);
-  }
-  return trimmed;
+  return parsed;
 }
 
 export function sessionArtifactsDir(dataDir: string, sessionId: string): string {
@@ -166,6 +216,14 @@ export function deleteSessionArtifactsDir(dataDir: string, sessionId: string): v
   });
 }
 
+/**
+ * Deletes every artifact not in `keepArtifactIds`, then prunes emptied directories.
+ * Walks with `withFileTypes` (lstat semantics): it never descends into a symlinked
+ * directory (a followed link would `rmSync` outside the artifacts root); a symlink entry
+ * is unlinked as itself. Directories are removed bottom-up with non-recursive `rmdirSync`,
+ * which is atomic with respect to a concurrent write — ENOTEMPTY (a file landed there after
+ * the file pass, or it still holds a kept file) and ENOENT are both swallowed.
+ */
 export function deleteSessionArtifactsExcept(
   dataDir: string,
   sessionId: string,
@@ -175,36 +233,413 @@ export function deleteSessionArtifactsExcept(
   if (!existsSync(dir)) {
     return;
   }
-  const keep = new Set(keepArtifactIds.map((artifactId) => validateArtifactId(artifactId)));
+  const keep = new Set(
+    keepArtifactIds.map((artifactId) => validateArtifactRelativePath(artifactId)),
+  );
   const metadata = readArtifactMetadata(dir);
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isFile() || entry.name === ARTIFACT_METADATA_FILE || keep.has(entry.name)) {
-      continue;
+
+  // Post-order: a directory is pushed only after every entry inside it (including nested
+  // subdirectories) has been visited, so the removal pass below is naturally bottom-up.
+  const directories: string[] = [];
+
+  const walk = (currentDir: string, relPrefix: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
     }
-    rmSync(join(dir, entry.name), { force: true });
+    for (const entry of entries) {
+      const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      const entryPath = join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        walk(entryPath, relPath);
+        directories.push(relPath);
+        continue;
+      }
+      if (relPath === ARTIFACT_METADATA_FILE || keep.has(relPath)) {
+        continue;
+      }
+      rmSync(entryPath, { force: true });
+    }
+  };
+  walk(dir, "");
+
+  for (const relPath of directories) {
+    try {
+      rmdirSync(join(dir, relPath));
+    } catch {
+      // ENOTEMPTY (a kept file, or one written concurrently, still lives here) or ENOENT
+      // (already removed via an ancestor) — both are fine, the directory stays or is gone.
+    }
   }
+
   writeArtifactMetadata(
     dir,
     Object.fromEntries(Object.entries(metadata).filter(([artifactId]) => keep.has(artifactId))),
   );
 }
 
-export function listSessionArtifacts(dataDir: string, sessionId: string): SessionArtifact[] {
+interface ArtifactWalkResult {
+  artifacts: SessionArtifact[];
+  truncated: boolean;
+}
+
+// A parent-pointer chain of resolved directory paths from a queued directory back up to
+// the artifacts root. Used only to detect a symlink re-entering a directory already on its
+// own path from the root — see the D4 discussion on listSessionArtifacts.
+interface DirChain {
+  readonly dir: string;
+  readonly parent: DirChain | null;
+}
+
+function chainContains(chain: DirChain, resolvedPath: string): boolean {
+  let node: DirChain | null = chain;
+  while (node) {
+    if (node.dir === resolvedPath) {
+      return true;
+    }
+    node = node.parent;
+  }
+  return false;
+}
+
+/**
+ * D1 amendment, deviation from spec.md's original D1 (see spec.md Amendments): some
+ * filesystems (XFS without ftype, some FUSE/NFS mounts) report DT_UNKNOWN for a dirent, for
+ * which Node's `isFile()`/`isDirectory()`/`isSymbolicLink()` all return false. The original
+ * D1 branch skipped such an entry, which silently drops every artifact on such a filesystem.
+ * Called ONLY when all three predicates are false, so it costs nothing on a filesystem that
+ * reports dirent types correctly — every case the benchmarks measured.
+ */
+function statUnknownDirent(entryPath: string): Stats | null {
+  try {
+    return lstatSync(entryPath);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Shared by the root and nested walk loops: resolves a DT_UNKNOWN dirent's real type via
+ * lstatSync and classifies it. The two loops still emit/enqueue the result themselves — the
+ * root loop never row-caps, the nested loop does (and breaks the labeled walk on truncation)
+ * — so only the classification (the three-way isFile/isDirectory/isSymbolicLink dispatch) is
+ * shared; folding the differing emission logic in too would need a callback per loop, which
+ * is more indirection than the ~10 duplicated lines it would save.
+ */
+function classifyUnknownDirent(
+  entryPath: string,
+): { stat: Stats; kind: "file" | "directory" | "symlink" } | null {
+  const stat = statUnknownDirent(entryPath);
+  if (stat === null) {
+    return null;
+  }
+  if (stat.isFile()) {
+    return { stat, kind: "file" };
+  }
+  if (stat.isDirectory()) {
+    return { stat, kind: "directory" };
+  }
+  if (stat.isSymbolicLink()) {
+    return { stat, kind: "symlink" };
+  }
+  return null;
+}
+
+/**
+ * Lists every artifact under the session's artifacts directory, breadth-first by depth.
+ * The root level (depth 1) is never capped — every root file is always enumerated and
+ * emitted, at zero syscall cost for a plain (non-symlink) directory. Below the root, the
+ * walk is bounded by two budgets: MAX_NESTED_ARTIFACT_WALK_ENTRIES charges one tick per
+ * directory opened AND one tick per entry pulled from it (a directory is pulled
+ * incrementally via opendirSync/readSync, so one oversized directory cannot exceed the
+ * budget by itself), and MAX_NESTED_ARTIFACT_ROWS caps emitted nested rows. Hitting either
+ * stops the walk and sets `truncated`. A plain (non-symlink) dirent is never realpath'd or
+ * stat'd — its path is provably inside the root and provably longer than any ancestor, so
+ * it can never form a cycle. Only a symlink resolving to a directory is checked against the
+ * ancestor chain of resolved paths from the root down to its parent; a match means the link
+ * re-enters a directory already on its own path and is skipped (not an error — an alias of
+ * an ancestor, not lost work). Two distinct paths reaching the same physical directory
+ * (neither on the other's chain) are both listed.
+ */
+export function listSessionArtifacts(dataDir: string, sessionId: string): ArtifactWalkResult {
   const dir = sessionArtifactsDir(dataDir, sessionId);
   if (!existsSync(dir)) {
-    return [];
+    return { artifacts: [], truncated: false };
   }
 
+  let resolvedRoot: string;
+  let rootEntries: Dirent[];
   try {
-    const metadata = readArtifactMetadata(dir);
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name !== ARTIFACT_METADATA_FILE)
-      .map((entry) => artifactFromFile(join(dir, entry.name), entry.name, metadata))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .map(({ path: _path, ...artifact }) => artifact);
+    resolvedRoot = realpathSync(dir);
+    rootEntries = readdirSync(dir, { withFileTypes: true });
   } catch {
-    return [];
+    return { artifacts: [], truncated: false };
   }
+
+  const metadata = readArtifactMetadata(dir);
+  const files: SessionArtifactFile[] = [];
+  const rootChain: DirChain = { dir: resolvedRoot, parent: null };
+
+  const isInsideRoot = (resolvedPath: string): boolean =>
+    resolvedPath === resolvedRoot || resolvedPath.startsWith(`${resolvedRoot}${sep}`);
+
+  rootEntries.sort((left, right) => left.name.localeCompare(right.name));
+
+  let nextLevel: { dir: string; relPath: string; chain: DirChain }[] = [];
+
+  for (const entry of rootEntries) {
+    if (entry.name === ARTIFACT_METADATA_FILE) {
+      continue;
+    }
+    if (entry.isFile()) {
+      // A depth-1 entry readdir reports as a plain file (not a symlink) is already
+      // inside the already-realpathed root; no realpathSync needed to contain it.
+      try {
+        files.push(artifactFromFile(join(dir, entry.name), entry.name, metadata));
+      } catch {
+        // Stat failure on one entry skips that entry; it does not abort the listing.
+      }
+      continue;
+    }
+    if (entry.isDirectory()) {
+      // A non-symlink child of the (already-realpathed) root is itself a contained
+      // realpath, strictly longer than resolvedRoot — it can never equal an ancestor, so
+      // no chain check and no syscall.
+      const entryPath = join(resolvedRoot, entry.name);
+      nextLevel.push({
+        dir: entryPath,
+        relPath: entry.name,
+        chain: { dir: entryPath, parent: rootChain },
+      });
+      continue;
+    }
+    if (!entry.isSymbolicLink()) {
+      // D1 amendment (see spec.md Amendments): a DT_UNKNOWN dirent reports isFile(),
+      // isDirectory(), and isSymbolicLink() all false. Resolve its real type with one
+      // lstatSync fallback rather than silently dropping it.
+      const classified = classifyUnknownDirent(join(dir, entry.name));
+      if (classified === null) {
+        continue;
+      }
+      if (classified.kind === "file") {
+        try {
+          files.push(
+            artifactFromStat(join(dir, entry.name), entry.name, classified.stat, metadata),
+          );
+        } catch {
+          // Stat failure on one entry skips that entry; it does not abort the listing.
+        }
+        continue;
+      }
+      if (classified.kind === "directory") {
+        const entryPath = join(resolvedRoot, entry.name);
+        nextLevel.push({
+          dir: entryPath,
+          relPath: entry.name,
+          chain: { dir: entryPath, parent: rootChain },
+        });
+        continue;
+      }
+      // classified.kind === "symlink": falls through and takes
+      // the same realpath + containment + stat path as an ordinary symlink dirent below.
+    }
+    const entryPath = join(dir, entry.name);
+    let resolvedEntry: string;
+    let entryStat: Stats;
+    try {
+      resolvedEntry = realpathSync(entryPath);
+      if (!isInsideRoot(resolvedEntry)) {
+        continue;
+      }
+      entryStat = statSync(resolvedEntry);
+    } catch {
+      continue;
+    }
+    if (entryStat.isDirectory()) {
+      // G1: a symlink resolving to a directory must be checked against rootChain before
+      // being enqueued — a `self -> <root>` link resolves to resolvedRoot itself, matches
+      // rootChain's own head, and is skipped. Without this check it would be enqueued and
+      // the nested loop would re-list every root file under `self/`.
+      if (chainContains(rootChain, resolvedEntry)) {
+        continue;
+      }
+      nextLevel.push({
+        dir: resolvedEntry,
+        relPath: entry.name,
+        chain: { dir: resolvedEntry, parent: rootChain },
+      });
+    } else if (entryStat.isFile()) {
+      try {
+        files.push(artifactFromStat(resolvedEntry, entry.name, entryStat, metadata));
+      } catch {
+        // Skip this entry only.
+      }
+    }
+  }
+
+  let walkEntriesExamined = 0;
+  let nestedRowsEmitted = 0;
+  let truncated = false;
+
+  walkLevels: while (nextLevel.length > 0) {
+    const level = nextLevel;
+    nextLevel = [];
+    for (const item of level) {
+      if (walkEntriesExamined >= MAX_NESTED_ARTIFACT_WALK_ENTRIES) {
+        truncated = true;
+        break walkLevels;
+      }
+
+      // opendirSync+readSync measures ~2.6x slower per directory than a batched
+      // readdirSync at IDENTICAL syscall counts (JS-binding cost, not kernel work) — kept
+      // anyway because it bounds allocation on one oversized directory (123k-file case);
+      // do not "optimize" this back to readdirSync.
+      let dirHandle: Dir;
+      try {
+        dirHandle = opendirSync(item.dir);
+      } catch {
+        continue;
+      }
+      // D2: charge one tick for opening the directory itself, so a tree of many (possibly
+      // empty) directories trips the budget on expansion alone.
+      walkEntriesExamined++;
+
+      const entries: Dirent[] = [];
+      try {
+        // D3: exactly two stop conditions — the directory is exhausted (readSync
+        // returns null) or the entry budget is spent. The row cap is not evaluable here:
+        // rows are only emitted after this pulled slice is sorted below. A throw from
+        // readSync (e.g. the directory vanished mid-read) skips this directory only, same
+        // as an opendirSync failure above — it does not abort the listing.
+        while (walkEntriesExamined < MAX_NESTED_ARTIFACT_WALK_ENTRIES) {
+          const entry = dirHandle.readSync();
+          if (entry === null) {
+            break;
+          }
+          entries.push(entry);
+          walkEntriesExamined++;
+        }
+      } catch {
+        continue;
+      } finally {
+        try {
+          dirHandle.closeSync();
+        } catch {
+          // closeSync on an already-broken handle does not abort the listing either.
+        }
+      }
+
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      for (const entry of entries) {
+        const relPath = `${item.relPath}/${entry.name}`;
+        if (entry.isFile()) {
+          const entryPath = join(item.dir, entry.name);
+          if (nestedRowsEmitted >= MAX_NESTED_ARTIFACT_ROWS) {
+            truncated = true;
+            break walkLevels;
+          }
+          nestedRowsEmitted++;
+          try {
+            files.push(artifactFromFile(entryPath, relPath, metadata));
+          } catch {
+            // Skip this entry only.
+          }
+          continue;
+        }
+        if (entry.isDirectory()) {
+          // Non-symlink child of a contained realpath: same D1 argument as the root loop.
+          const entryPath = join(item.dir, entry.name);
+          nextLevel.push({
+            dir: entryPath,
+            relPath,
+            chain: { dir: entryPath, parent: item.chain },
+          });
+          continue;
+        }
+        if (!entry.isSymbolicLink()) {
+          // D1 amendment (see spec.md Amendments): same DT_UNKNOWN fallback as the root
+          // loop.
+          const classified = classifyUnknownDirent(join(item.dir, entry.name));
+          if (classified === null) {
+            continue;
+          }
+          if (classified.kind === "file") {
+            if (nestedRowsEmitted >= MAX_NESTED_ARTIFACT_ROWS) {
+              truncated = true;
+              break walkLevels;
+            }
+            nestedRowsEmitted++;
+            try {
+              files.push(
+                artifactFromStat(join(item.dir, entry.name), relPath, classified.stat, metadata),
+              );
+            } catch {
+              // Skip this entry only.
+            }
+            continue;
+          }
+          if (classified.kind === "directory") {
+            const entryPath = join(item.dir, entry.name);
+            nextLevel.push({
+              dir: entryPath,
+              relPath,
+              chain: { dir: entryPath, parent: item.chain },
+            });
+            continue;
+          }
+          // classified.kind === "symlink": falls through, lstat says this DT_UNKNOWN entry
+          // is actually a symlink.
+        }
+        const entryPath = join(item.dir, entry.name);
+        let resolvedEntry: string;
+        let entryStat: Stats;
+        try {
+          resolvedEntry = realpathSync(entryPath);
+          if (!isInsideRoot(resolvedEntry)) {
+            continue;
+          }
+          entryStat = statSync(resolvedEntry);
+        } catch {
+          continue;
+        }
+        if (entryStat.isDirectory()) {
+          if (chainContains(item.chain, resolvedEntry)) {
+            continue;
+          }
+          nextLevel.push({
+            dir: resolvedEntry,
+            relPath,
+            chain: { dir: resolvedEntry, parent: item.chain },
+          });
+        } else if (entryStat.isFile()) {
+          if (nestedRowsEmitted >= MAX_NESTED_ARTIFACT_ROWS) {
+            truncated = true;
+            break walkLevels;
+          }
+          nestedRowsEmitted++;
+          try {
+            files.push(artifactFromStat(resolvedEntry, relPath, entryStat, metadata));
+          } catch {
+            // Skip this entry only.
+          }
+        }
+      }
+
+      if (walkEntriesExamined >= MAX_NESTED_ARTIFACT_WALK_ENTRIES) {
+        truncated = true;
+        break walkLevels;
+      }
+    }
+  }
+
+  return {
+    artifacts: files
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map(({ path: _path, ...artifact }) => artifact),
+    truncated,
+  };
 }
 
 export function readSessionArtifact(
@@ -212,19 +647,33 @@ export function readSessionArtifact(
   sessionId: string,
   artifactId: string,
 ): SessionArtifactFile | null {
-  const normalizedId = validateArtifactId(artifactId);
-  if (normalizedId === ARTIFACT_METADATA_FILE) {
+  const normalizedId = parseArtifactRelativePath(artifactId);
+  if (normalizedId === null) {
     return null;
   }
-  const path = join(sessionArtifactsDir(dataDir, sessionId), normalizedId);
-  if (!existsSync(path) || !statSync(path).isFile()) {
+  const dir = sessionArtifactsDir(dataDir, sessionId);
+  const path = join(dir, normalizedId);
+  let resolvedRoot: string;
+  let resolvedPath: string;
+  try {
+    resolvedRoot = realpathSync(dir);
+    resolvedPath = realpathSync(path);
+  } catch {
     return null;
   }
-  return artifactFromFile(
-    path,
-    normalizedId,
-    readArtifactMetadata(sessionArtifactsDir(dataDir, sessionId)),
-  );
+  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(`${resolvedRoot}${sep}`)) {
+    return null;
+  }
+  let stat: Stats;
+  try {
+    stat = statSync(resolvedPath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) {
+    return null;
+  }
+  return artifactFromStat(resolvedPath, normalizedId, stat, readArtifactMetadata(dir));
 }
 
 export function setSessionArtifactOrigin(
@@ -233,7 +682,7 @@ export function setSessionArtifactOrigin(
   artifactId: string,
   origin: SessionArtifactOrigin,
 ): void {
-  const normalizedId = validateArtifactId(artifactId);
+  const normalizedId = validateArtifactRelativePath(artifactId);
   const dir = ensureSessionArtifactsDir(dataDir, sessionId);
   const metadata = readArtifactMetadata(dir);
   metadata[normalizedId] = { ...metadata[normalizedId], origin };
@@ -246,7 +695,7 @@ export function setSessionArtifactUserAdded(
   artifactId: string,
   addedByUser: boolean,
 ): void {
-  const normalizedId = validateArtifactId(artifactId);
+  const normalizedId = validateArtifactRelativePath(artifactId);
   const dir = ensureSessionArtifactsDir(dataDir, sessionId);
   const metadata = readArtifactMetadata(dir);
   metadata[normalizedId] = { ...metadata[normalizedId], addedByUser };
@@ -266,5 +715,5 @@ Session artifacts:
 - Files written there are not committed from the repo workspace and are tied to this Spur session.
 - Images, videos, and text files (including .txt, .md, .json) written there appear inline in Spur UI. Other files appear as download links.
 - HTML files render as a live preview in Spur UI, with a button that opens the page standalone at its artifact URL.
-- Prefer direct child files with stable names and overwrite them when updating an artifact.`;
+- A file written in a subfolder of \`$SPUR_SESSION_ARTIFACTS_DIR\` is listed under its path relative to that directory (for example \`design/design-spec.md\`).`;
 }

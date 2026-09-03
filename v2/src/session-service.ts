@@ -102,13 +102,16 @@ import {
   detectClaudeCompacting,
   detectClaudeUsageLimitMenu,
   detectCodexMcpPermissionDialog,
+  rateLimitExpired,
   scanTmuxRateLimit,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
-  readClaudeConversation,
+  CONVERSATION_PAGE_ENTRIES,
+  readClaudeConversationTail,
   readClaudeJsonlState,
+  type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
@@ -576,6 +579,17 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
+// Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
+// still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
+// only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
+// when the parsed clock already looks past — so any genuine session-limit
+// reset is always within one day of the record that reported it. Once nowMs
+// is a full day past resetAtMs with no fresh rate-limit record to refresh it,
+// an entire reset cycle has elapsed uncorroborated: a menu still sitting on
+// the pane is a stuck render, not a live limit, so re-confirmation stops and
+// the session is left free to fall through to whatever state the structured
+// source (jsonl/status) actually reports.
+const CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS = 24 * 60 * 60 * 1000;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // Fixed tick cadence for the session GC sweep; the actual sweep frequency is
 // gated inside the tick by sessionGc.intervalMinutes (re-read from
@@ -900,6 +914,22 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
+  // Epoch ms of the parsed claude rate-limit reset instant, set on every
+  // classify call for as long as the expired detection stays in the tail
+  // (see the expired arm below) — level-triggered, not edge-triggered. Safe
+  // because the value is a fixed instant: resolveParkActivityAt's max()
+  // against agentActivityAt makes repeated writes of the same anchor inert.
+  // The anchor is always resetAtMs, the instant the limit lapsed — never
+  // nowMs, the instant Spur recognized the lapse. A nowMs anchor would
+  // advance on every classify call, so resolveParkActivityAt's max() would
+  // never let the idle window accumulate and the session would never park.
+  // Once CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS trips (see its own comment),
+  // recognition lands 24h+ after the lapse, so the same rule yields an
+  // already-stale anchor: the session parks promptly, by design, not by
+  // accident. Not a regression of the fresh-window case above: an
+  // uncorroborated limit for a full reset cycle is exactly what the sweep
+  // is for.
+  rateLimitExpiredAtMs?: number;
 }
 
 const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
@@ -955,6 +985,62 @@ function statusFallbackState(
   if (isStaleParked(session)) return "stale";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
+}
+
+// True only while a reported rate limit is both flagged AND, when it carries
+// a parsed reset instant, not yet past it. A `resetAtMs`-less detection (a
+// pane banner, or a jsonl record whose text/timestamp didn't parse) is never
+// expired — that's today's safe, time-blind fallback. This is the single
+// site classifySessionRecord's state override reads; the raw `rateLimit?.limited`
+// checks elsewhere in that method are deliberately left unexpired (see
+// classifySessionRecord's comments at the pane-banner fallback gates).
+function rateLimitActive(rateLimit: RateLimitDetection | null, nowMs: number): boolean {
+  return rateLimit?.limited === true && !rateLimitExpired(rateLimit, nowMs);
+}
+
+/** Derives `messages` from `entries` so the two can never disagree. */
+function buildConversationResponse(
+  entries: TranscriptEntry[],
+  totalEntries: number,
+  startIndex: number,
+  state: SessionState,
+  durationMs: number,
+): ConversationResponse {
+  const messages: ConversationMessage[] = entries
+    .filter(
+      (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
+    )
+    .map((entry) => ({
+      role: entry.role,
+      text: entry.text,
+      timestampMs: entry.timestampMs ?? 0,
+    }));
+  return {
+    messages,
+    entries,
+    durationMs,
+    state,
+    startIndex,
+    totalEntries,
+    hasMore: startIndex > 0,
+  };
+}
+
+/**
+ * Clamps a requested conversation page start so the response is never an
+ * empty slice while entries exist. `from` (or `floor`, the retained-window
+ * lower bound) landing at or past `totalEntries` means the pin is stale —
+ * the transcript shrank under it via rotation, truncation, or respawn — so
+ * fall back to the tail page instead of an out-of-range start that would
+ * return zero entries with no scrollable element left to trigger a
+ * recovery re-fetch.
+ */
+function clampPageStart(from: number, floor: number, totalEntries: number): number {
+  const boundedFloor = Math.max(floor, 0);
+  if (totalEntries <= 0) return boundedFloor;
+  const candidate = Math.max(from, boundedFloor);
+  if (candidate < totalEntries && boundedFloor <= totalEntries) return candidate;
+  return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -1158,6 +1244,7 @@ async function setupSessionAgentHooks(args: {
   restrictWrites: boolean;
   modelsCacheHome: string;
   mcpBindings?: SidecarMcpBinding[];
+  mcpExclude?: string[];
 }) {
   // Account-bound claude sessions read their isolated CLAUDE_CONFIG_DIR's
   // .claude.json instead of the host ~/.claude.json when merging MCP
@@ -1174,6 +1261,7 @@ async function setupSessionAgentHooks(args: {
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
+    ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
   if (args.agent === "cursor") {
@@ -1809,10 +1897,26 @@ function buildLastActivityAt(
 // unparkable forever and measure a never-attached one against a timestamp
 // that means nothing. Returns null when there is no transcript signal at
 // all; callers must treat null as "never park" (fail safe), not "park now".
-function resolveParkActivityAt(
-  classified: Pick<SessionStateResult, "agentActivityAt">,
+// A session shielded by rate_limited must get a fresh idle window measured
+// from the moment its parsed reset instant passed, not from the rate-limit
+// record's own (much older) transcript timestamp — otherwise a session
+// limited longer ago than staleAfterMinutes parks on the very first tick
+// past expiry. rateLimitExpiredAtMs is only ever later than or equal to
+// agentActivityAt (the reset instant is always after the record that carried
+// it), but the max is taken explicitly rather than assumed.
+export function resolveParkActivityAt(
+  classified: Pick<SessionStateResult, "agentActivityAt" | "rateLimitExpiredAtMs">,
 ): Date | null {
-  return classified.agentActivityAt ?? null;
+  if (classified.agentActivityAt === null) {
+    return null;
+  }
+  if (classified.rateLimitExpiredAtMs === undefined) {
+    return classified.agentActivityAt;
+  }
+  const rateLimitExpiredAt = new Date(classified.rateLimitExpiredAtMs);
+  return rateLimitExpiredAt > classified.agentActivityAt
+    ? rateLimitExpiredAt
+    : classified.agentActivityAt;
 }
 
 // A terminating record's sidecarPorts can hold BOTH desk-shared (anchor-
@@ -2316,6 +2420,24 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  // Evidence-gated override (not TTL-gated) for a live usage-limit menu that
+  // re-confirmed an expired claude rate-limit detection: keyed by session id.
+  // A sweep can take longer than any fixed TTL to reach a given session (its
+  // duration is O(live sessions) of capture-pane forks), so an entry only
+  // ends via: a live scanPane:true capture that is non-empty and finds no
+  // menu (deletes it — an empty capture is a failed fork, not evidence, and
+  // leaves the entry alone); or the session leaving liveIds
+  // (pruneSessionScopedState). Both tick kinds — scanPane:true on an empty
+  // capture, and scanPane:false on every read — re-check
+  // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against rateLimit.resetAtMs before
+  // applying the entry, so a stalled sweep can't report rate_limited off it
+  // forever with neither evidence nor a clock to end it. Residual: under
+  // sustained capture failure the entry itself is never deleted while the
+  // session stays live — it only goes inert past the ceiling — so a later
+  // genuine rate limit with a fresh resetAtMs re-arms it for up to another
+  // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS with no new menu evidence; same
+  // bound the scanPane:false reuse already accepts.
+  private readonly claudeRateLimitReconfirmOverrides = new Set<string>();
   // Dedupes session.state.classified: emit once per classify call only when
   // the raw classified state actually changed since the last classify call
   // for that session (not the message, so a detail-only churn like
@@ -2412,6 +2534,11 @@ export class SessionService {
   private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
+  private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
+  // Serializes conversation tail reads per session. getConversation is polled
+  // every 4s and a slow read can overlap the next poll; chaining keeps the one
+  // shared reader's offset monotonic instead of racing read-modify-write.
+  private readonly conversationReadChain = new Map<string, Promise<void>>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -4891,6 +5018,11 @@ export class SessionService {
         this.claudeCompactingOverrides.delete(sessionId);
       }
     }
+    for (const sessionId of this.claudeRateLimitReconfirmOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.claudeRateLimitReconfirmOverrides.delete(sessionId);
+      }
+    }
     for (const sessionId of this.lastClassifiedLogStates.keys()) {
       if (!liveIds.has(sessionId)) {
         this.lastClassifiedLogStates.delete(sessionId);
@@ -7202,43 +7334,112 @@ export class SessionService {
     return artifact;
   }
 
-  async getConversation(sessionId: string): Promise<ConversationResponse> {
+  async getConversation(
+    sessionId: string,
+    options?: { from?: number },
+  ): Promise<ConversationResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
-    const fallback: ConversationResponse = {
-      messages: [],
-      entries: [],
-      durationMs,
-      state: statusFallbackState(session),
-    };
+    const from = options?.from;
 
-    const entries =
-      (await readAgentConversation(session.agent, {
+    const readFullEntries = (): Promise<TranscriptEntry[]> =>
+      readAgentConversation(session.agent, {
         worktreePath: session.worktreePath,
         ...(session.agent === "codex"
           ? { codexSessionsDir: this.codexSessionsDir(session.id) }
           : {}),
         ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-      })) ?? [];
+      }).then((result) => result ?? []);
 
     if (session.agent === "claude") {
-      const result = await readClaudeConversation(session.worktreePath);
-      return result
-        ? { messages: result.messages, entries, durationMs, state: result.state }
-        : { ...fallback, entries };
+      // Classification always comes from the tail reader, on every request
+      // regardless of `from` — a live session's status must never fall back
+      // to statusFallbackState while a transcript exists.
+      const tail = await this.readConversationSerialized(session);
+      if (!tail) {
+        const entries = await readFullEntries();
+        const startIndex = from === undefined ? 0 : clampPageStart(from, 0, entries.length);
+        return buildConversationResponse(
+          entries.slice(startIndex),
+          entries.length,
+          startIndex,
+          statusFallbackState(session),
+          durationMs,
+        );
+      }
+
+      const { entries: tailEntries, state, totalEntries, startIndex: tailStartIndex } = tail;
+
+      if (from === undefined || from >= tailStartIndex) {
+        // Within the retained window: slice the cached tail, no full read.
+        const sliceStart =
+          from === undefined
+            ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
+            : clampPageStart(from, tailStartIndex, totalEntries);
+        const entries = tailEntries.slice(sliceStart - tailStartIndex);
+        return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
+      }
+
+      // Deep scroll-back below the retained window: fall back to a full read.
+      const fullEntries = await readFullEntries();
+      const startIndex = clampPageStart(from, 0, fullEntries.length);
+      return buildConversationResponse(
+        fullEntries.slice(startIndex),
+        fullEntries.length,
+        startIndex,
+        state,
+        durationMs,
+      );
     }
 
-    const messages: ConversationMessage[] = entries
-      .filter(
-        (entry): entry is Extract<TranscriptEntry, { kind: "message" }> => entry.kind === "message",
-      )
-      .map((entry) => ({
-        role: entry.role,
-        text: entry.text,
-        timestampMs: entry.timestampMs ?? 0,
-      }));
-    return { messages, entries, durationMs, state: statusFallbackState(session) };
+    const entries = await readFullEntries();
+    const startIndex =
+      from === undefined
+        ? Math.max(0, entries.length - CONVERSATION_PAGE_ENTRIES)
+        : clampPageStart(from, 0, entries.length);
+    return buildConversationResponse(
+      entries.slice(startIndex),
+      entries.length,
+      startIndex,
+      statusFallbackState(session),
+      durationMs,
+    );
+  }
+
+  /**
+   * Run one conversation tail read per session at a time. Overlapping polls
+   * would otherwise both snapshot the same cached reader and the later write
+   * would clobber the earlier, regressing the offset and double-counting.
+   * Chaining on the prior read serializes them so the offset advances
+   * monotonically.
+   */
+  private readConversationSerialized(session: SessionRecord): Promise<{
+    entries: TranscriptEntry[];
+    state: SessionState;
+    totalEntries: number;
+    startIndex: number;
+  } | null> {
+    const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
+    const run = prior.then(async () => {
+      const result = await readClaudeConversationTail(
+        session.worktreePath,
+        this.conversationReaders.get(session.id),
+        session.agentSessionId,
+      );
+      if (!result) return null;
+      const { reader, hasMore: _hasMore, ...conversation } = result;
+      this.conversationReaders.set(session.id, reader);
+      return conversation;
+    });
+    this.conversationReadChain.set(
+      session.id,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
   }
 
   async getProjectSuggestions(
@@ -8127,6 +8328,7 @@ export class SessionService {
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
@@ -9145,6 +9347,7 @@ export class SessionService {
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
@@ -10968,6 +11171,12 @@ export class SessionService {
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     deleteSessionUserActions(this.config.dataDir, sessionId);
+    // Evict per-session in-memory reader caches so they do not grow unbounded
+    // for the life of the daemon as sessions are created and discarded.
+    this.conversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+    this.claudeJsonlReaders.delete(sessionId);
+    this.cursorJsonlReaders.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
@@ -11675,6 +11884,7 @@ export class SessionService {
       restrictWrites: resolveRestrictWrites(session),
       modelsCacheHome: this.config.models.codexHome,
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+      ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
@@ -12042,6 +12252,9 @@ export class SessionService {
         restrictWrites: resolveRestrictWrites(current),
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
+        ...(restoreProjectConfig.mcp?.exclude.length
+          ? { mcpExclude: restoreProjectConfig.mcp.exclude }
+          : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
@@ -12412,7 +12625,7 @@ export class SessionService {
     }
     if (session.status !== "completed") {
       throw new SessionNotReopenableError(
-        `Session ${sessionId} is ${session.status}, not completed — use restore or respawn`,
+        `Session ${sessionId} is ${session.status}, not completed — \`spur restore ${sessionId}\` resumes it with its conversation; \`spur respawn ${sessionId}\` starts a fresh session (conversation not carried over)`,
       );
     }
 
@@ -14487,6 +14700,17 @@ export class SessionService {
     // today for non-running/dead-pane sessions). A later branch's assignment
     // overrides an earlier one exactly as it overrides `state`.
     let classifiedDetail: string | undefined;
+    const nowMs = Date.now();
+    // Set true only in the compaction override branches, so the expired-rate-
+    // limit arm below knows not to clobber a classifiedDetail the compaction
+    // override already claimed (THREAD 7).
+    let compactingApplied = false;
+    // Set true when a live usage-limit menu re-confirms an expired claude
+    // rate-limit detection (D2' Part B). Carried across ticks via
+    // claudeRateLimitReconfirmOverrides so the scanPane:false dashboard tick
+    // agrees with the live scan instead of flapping every cycle.
+    let paneReconfirmedLimit = false;
+    let rateLimitExpiredAtMs: number | undefined;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
@@ -14628,38 +14852,105 @@ export class SessionService {
         if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
           await this.confirmClaudeUsageLimitMenu(session);
         }
+        // Re-confirmation: the detection is flagged but its parsed reset has
+        // passed, and a live menu is on the pane. Carried via an evidence-
+        // gated override rather than by overwriting `rateLimit` itself, so
+        // resetAtMs stays observable and the scanPane:false dashboard tick
+        // agrees with this sweep until a live scan actually clears it,
+        // instead of flapping rate_limited -> waiting every time a sweep
+        // takes longer than a fixed TTL to reach this session again. Gated
+        // here on CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never
+        // clears (no fresh output, per confirmClaudeUsageLimitMenu's own
+        // caveat) can't pin the session rate_limited forever — reaching this
+        // branch guarantees resetAtMs is set (rateLimitExpired requires it).
+        if (
+          rateLimit?.limited &&
+          !rateLimitActive(rateLimit, nowMs) &&
+          menuHit?.limited &&
+          rateLimit.resetAtMs !== undefined &&
+          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+        ) {
+          paneReconfirmedLimit = true;
+          this.claudeRateLimitReconfirmOverrides.add(session.id);
+        } else if (paneText !== "") {
+          // A menu-not-found result only clears the override when it comes
+          // from an actual capture. captureTmuxPane collapses a failed
+          // capture-pane fork into "" (see its own comment), so an empty
+          // paneText here is indistinguishable from a real empty pane at
+          // this call site — clearing on it would treat a failed observation
+          // as evidence the menu is gone. Leave the override in place on an
+          // empty capture; CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS above still
+          // bounds how long it can survive with no fresh confirming scan.
+          // The real fix is upstream, in captureTmuxPane's return contract.
+          this.claudeRateLimitReconfirmOverrides.delete(session.id);
+        } else if (
+          this.claudeRateLimitReconfirmOverrides.has(session.id) &&
+          rateLimit?.resetAtMs !== undefined &&
+          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+        ) {
+          // Not clearing the override on an empty capture (above) only
+          // protects the NEXT scanPane:false read — this tick's own
+          // paneReconfirmedLimit is otherwise recomputed fresh from menuHit
+          // (null here), so it would still flip the reported state to
+          // "no menu found" off nothing and momentarily reopen the
+          // delivery-suppression window this override exists to hold shut.
+          // An empty capture is not an observation in either direction:
+          // reuse the stored override the same way the scanPane:false path
+          // below does, under the same ceiling gate, so the reported state
+          // doesn't move until a real capture or the ceiling decides it.
+          paneReconfirmedLimit = true;
+        }
         // Compaction never reaches Claude's persisted status file (it stays
         // "idle" throughout, which jsonl/hook maps to waiting) and the
         // transcript only gets a compact record after completion — so the
         // live pane spinner is the only signal while it's in progress. The
-        // rate-limit override below still wins if a banner is also present —
-        // skip recording the override in that case so the scanPane:false
-        // dashboard tick doesn't strand a stale "working" once the rate
-        // limit expires (mirrors codexMcpDialogOverrides' hard-limit delete
-        // above). Recorded into claudeCompactingOverrides (TTL) so the
-        // scanPane:false dashboard tick's own idle re-read doesn't keep
-        // refreshing stabilizeState's hold window against this working
-        // transition.
-        if (detectClaudeCompacting(paneText) && !rateLimit?.limited) {
+        // rate-limit override below still wins if a banner or a re-confirmed
+        // menu is also present — skip recording the override in that case so
+        // the scanPane:false dashboard tick doesn't strand a stale "working"
+        // once the rate limit expires (mirrors codexMcpDialogOverrides'
+        // hard-limit delete above). Recorded into claudeCompactingOverrides
+        // (TTL) so the scanPane:false dashboard tick's own idle re-read
+        // doesn't keep refreshing stabilizeState's hold window against this
+        // working transition.
+        if (
+          detectClaudeCompacting(paneText) &&
+          !rateLimitActive(rateLimit, nowMs) &&
+          !paneReconfirmedLimit
+        ) {
           state = "working";
-          this.claudeCompactingOverrides.set(
-            session.id,
-            Date.now() + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
-          );
+          compactingApplied = true;
+          this.claudeCompactingOverrides.set(session.id, nowMs + CLAUDE_COMPACTING_OVERRIDE_TTL_MS);
           classifiedDetail = "State: working (claude compacting)";
         } else {
           this.claudeCompactingOverrides.delete(session.id);
         }
       } else if (!scanPane && strategy === "claude_jsonl") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
-        // fork, but it can still reuse the last live pane-scan's compaction
-        // confirmation while it's fresh, so the dashboard doesn't keep
-        // showing waiting for a session the 5s attention monitor (or
+        // fork, but it can still reuse the last live pane-scan's re-confirm
+        // and compaction confirmation, so the dashboard doesn't flap or keep
+        // showing waiting/working for a session the 5s attention monitor (or
         // on-demand enrich of the viewed session) already knows is
-        // mid-compaction.
+        // re-confirmed rate_limited or mid-compaction. The re-confirm below
+        // is bounded by CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against the
+        // current resetAtMs, re-checked on every call; the compaction
+        // override further down is still bounded by its own fixed TTL.
+        // Narrowing: if this tick's jsonl read transiently returns null,
+        // rateLimit is null here and the reconfirm is dropped for that tick
+        // (the old fixed TTL would have held it) — two consecutive read
+        // failures 2s apart surface this, since stabilizeState's 4s hold
+        // absorbs a single one. Intended: trust current structured evidence,
+        // mirrors the write path's own resetAtMs requirement.
+        if (
+          this.claudeRateLimitReconfirmOverrides.has(session.id) &&
+          rateLimit?.resetAtMs !== undefined &&
+          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+        ) {
+          paneReconfirmedLimit = true;
+        }
         const expiresAt = this.claudeCompactingOverrides.get(session.id);
-        if (expiresAt !== undefined && expiresAt > Date.now()) {
+        if (expiresAt !== undefined && expiresAt > nowMs) {
           state = "working";
+          compactingApplied = true;
           classifiedDetail = "State: working (claude compacting)";
         }
       } else if (scanPane && strategy === "hook") {
@@ -14708,9 +14999,31 @@ export class SessionService {
           rateLimit = tmuxHit;
         }
       }
-      if (rateLimit?.limited) {
+      // Defined only when the detection is flagged and its parsed reset has
+      // passed (rateLimit?.limited && resetAtMs === undefined would make
+      // rateLimitActive true, so that case never reaches this ternary's
+      // false branch through the else-if below — it's consumed by the
+      // rate_limited arm instead). Narrows the expired-arm condition to
+      // `number` with no cast.
+      const rateLimitExpiredResetAtMs =
+        rateLimit?.limited && !rateLimitActive(rateLimit, nowMs) ? rateLimit.resetAtMs : undefined;
+      if (rateLimitActive(rateLimit, nowMs) || paneReconfirmedLimit) {
         state = "rate_limited";
-        classifiedDetail = `State: rate_limited (${rateLimit.reason})`;
+        classifiedDetail = `State: rate_limited (${rateLimit?.reason}${paneReconfirmedLimit && !rateLimitActive(rateLimit, nowMs) ? ", pane menu re-confirmed after expiry" : ""})`;
+      } else if (rateLimitExpiredResetAtMs !== undefined) {
+        // The parsed reset instant has passed and no live menu re-confirmed
+        // it: leave `state` as the source above computed it (never force it
+        // back to rate_limited), but record the expiry so
+        // session.state.classified reflects it, and carry the expiry instant
+        // into rateLimitExpiredAtMs for resolveParkActivityAt's park-clock
+        // anchor. Guarded on !compactingApplied: a compaction override
+        // already set classifiedDetail above and must not be clobbered here
+        // (THREAD 7). Past the reconfirm ceiling this is a 24h+-stale
+        // resetAtMs, not a fresh one — see rateLimitExpiredAtMs's field doc.
+        rateLimitExpiredAtMs = rateLimitExpiredResetAtMs;
+        if (!compactingApplied) {
+          classifiedDetail = `State: ${state} (rate limit expired at ${new Date(rateLimitExpiredResetAtMs).toISOString()})`;
+        }
       } else if (hasServerErrorRecord) {
         state = "error";
         stateSource = "jsonl";
@@ -14739,13 +15052,14 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
-      // Only true when the override above actually applied: a rate_limit
-      // record always wins state, so when that happens this reports false
-      // and updateStateHistory's clear branch drops any stale serverErrorAt
-      // instead of arming it — the two markers stay independently owned.
+      // Only true when the hasServerErrorRecord arm above actually applied. A
+      // live rate_limit record wins state outright, so this reports false and
+      // updateStateHistory's clear branch drops any stale serverErrorAt
+      // instead of arming it.
       serverError: state === "error" && hasServerErrorRecord,
       workspacePresent: workspace.exists,
       agentActivityAt,
+      ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
       ...(liveModel ? { liveModel } : {}),
     };
   }
@@ -14922,6 +15236,7 @@ export class SessionService {
     );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
+    const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
 
     const view: SessionView = {
       ...session,
@@ -14938,7 +15253,8 @@ export class SessionService {
       ...(history.length > 0 ? { stateHistory: history } : {}),
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
-      artifacts: listSessionArtifacts(this.config.dataDir, workspaceIdOf(session)),
+      artifacts: artifactWalk.artifacts,
+      ...(artifactWalk.truncated ? { artifactsTruncated: true } : {}),
       services,
       sidecars,
       ...(workspaceAccess ? { workspaceAccess } : {}),
