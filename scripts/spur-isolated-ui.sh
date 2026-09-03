@@ -11,8 +11,8 @@ NVMRC_FILE="$SCRIPT_DIR/../.nvmrc"
 # comparison, which `set -e` would treat as a failure anywhere else.
 node_major_at_least() {
   local want="$1"
-  local version=""
-  local major=""
+  local version
+  local major
 
   version="$(node -v 2>/dev/null || true)"
   major="${version#v}"
@@ -29,8 +29,8 @@ node_major_at_least() {
 # duty; this is that activation, pinned by .nvmrc. Runs before the node-pty
 # probe and `pnpm install` below so one node both builds and runs the tree.
 use_pinned_node() {
-  local pinned=""
-  local nvm_dir=""
+  local pinned
+  local nvm_dir
 
   if [[ ! -f "$NVMRC_FILE" ]]; then
     echo "spur-isolated-ui: missing node version pin: $NVMRC_FILE" >&2
