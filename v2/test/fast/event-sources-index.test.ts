@@ -79,6 +79,47 @@ describe("startConfiguredSources", () => {
     await controller.stop();
   });
 
+  it("adds a unique occurrence id to each emitted source event", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { nightly: { type: "cron" } },
+      },
+    });
+    const bus = new EventBus();
+    const received: Array<{ occurrenceId?: string; name: string; data?: unknown }> = [];
+    bus.subscribe((event) => received.push(event));
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus,
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+    const startDeps = cronStartMock.mock.calls[0]?.[0] as
+      | { emit(name: string, data?: unknown): void }
+      | undefined;
+    if (!startDeps) throw new Error("missing start deps");
+
+    startDeps.emit("cron:tick", { run: 1 });
+    startDeps.emit("cron:tick", { run: 2 });
+
+    expect(received).toHaveLength(2);
+    expect(received[0]?.occurrenceId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(received[1]?.occurrenceId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(received[0]?.occurrenceId).not.toBe(received[1]?.occurrenceId);
+    expect(received).toEqual([
+      expect.objectContaining({ name: "cron:tick", data: { run: 1 } }),
+      expect.objectContaining({ name: "cron:tick", data: { run: 2 } }),
+    ]);
+
+    await controller.stop();
+  });
+
   it("skips all sources when project path is missing", async () => {
     const { startConfiguredSources } = await loadStartConfiguredSources();
     const config = buildConfig(tmpDir, {

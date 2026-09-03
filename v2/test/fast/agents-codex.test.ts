@@ -43,6 +43,7 @@ import {
 } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
+import { buildAgentLaunchPlan } from "../../src/agents/index.js";
 import {
   codexCommand,
   buildCodexPlan,
@@ -78,6 +79,23 @@ const mockLstat = lstat as ReturnType<typeof vi.fn>;
 const mockRm = rm as ReturnType<typeof vi.fn>;
 const mockSymlink = symlink as ReturnType<typeof vi.fn>;
 const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+
+describe("Codex deferred controls", () => {
+  it("keeps controls out of image launch argv and ordinary initial text", () => {
+    const handle = `ap1_${"b".repeat(43)}`;
+    const plan = buildAgentLaunchPlan(
+      "codex",
+      "ordinary prompt",
+      { startupImagePaths: ["/tmp/image.png"] },
+      { text: handle, sensitive: true },
+    );
+    expect(plan.launchCommand).toContain("ordinary prompt");
+    expect(plan.launchCommand).toContain("/tmp/image.png");
+    expect(plan.launchCommand).not.toContain(handle);
+    expect(plan.initialMessage).not.toContain(handle);
+    expect(plan.deferredSensitiveInitialMessage).toEqual({ text: handle, sensitive: true });
+  });
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

@@ -11,6 +11,14 @@ Daemon HTTP route reference. Default `127.0.0.1:4310`. CLI usage: [commands.md](
 
 `GET /sessions/:id/todo` reads the ToDo projection. `POST /sessions/:id/todo` accepts `{ action: "add", text, reason }`, `{ action: "complete" | "cancel", itemId, reason }`, `{ action: "hold", itemId, reason, blocker, requiredHumanAction? }`, or `{ action: "resume", itemId }`. `blocker` is `external` or `human`; a human blocker requires `requiredHumanAction`, an external blocker rejects it. Unknown fields or an invalid body return `invalid_todo_request` (400). A zero-item ledger returns `todo_ledger_empty` (409); open/held work returns `todo_open_work` (409) with the blocking ids — both carry an actionable `error` string. Invalid transitions return `todo_transition_conflict` (409); ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy, no DELETE route. See [todo](commands.md#todo).
 
+`GET /sessions/:id/auto-ping-suppressions` returns `{ records }` for active suppressions owned by that session. Records omit raw handles and handle hashes.
+
+`POST /sessions/:id/auto-ping-suppressions/unsubscribe` takes `{ scope: "event" | "thread" | "subscription", handle }`. Response: `{ record, created }`. Repeating an active unsubscribe returns `200` with `created:false`.
+
+`POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume` takes `{}`. Response: `{ records, removed }`. Repeating resume for a known removed id returns `200` with `removed:false`.
+
+Auto-ping routes return `400` for malformed bodies or scope mismatch, `403` for a foreign actor, `404` for unknown or expired handles, and `409` for pending grants or consumed-then-resumed grants. Agent callers must send `x-spur-caller-session` matching `:id`; CLI callers outside a session can target an exact session through the local daemon trust boundary. See [auto-ping](commands.md#auto-ping).
+
 `POST /sessions/:id/queue/remove` and `POST /sessions/:id/queue/flush` take body `{"message": "<exact queued text>"}` — content-keyed, no index over the wire, matched against the trimmed queued value; `404` when that text is not queued. The web session view drives both from per-row send-now/delete icons. See [send, queue](commands.md#send-queue).
 
 `POST /shepherd/spawn` reuses the newest running or spawning Shepherd session, skipping one that holds a Telegram reply target (bound by `/watch` or `autoSpawn`) — that case spawns a fresh Shepherd. `{ reportDisposition: true }` returns `{ disposition: "spawned" | "reused", session }`; omitted, the legacy session-only response. See [shepherd, wake](commands.md#shepherd-wake).

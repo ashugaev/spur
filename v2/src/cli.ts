@@ -99,6 +99,11 @@ import {
   SESSION_STATES,
   isSessionState,
   type AppConfig,
+  type AutoPingResumeResponse,
+  type AutoPingScope,
+  type AutoPingSuppressionListResponse,
+  type AutoPingSuppressionView,
+  type AutoPingUnsubscribeResponse,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
   type RespawnSessionRequest,
@@ -651,6 +656,69 @@ function postSessionAction(
   body: object = {},
 ): Promise<SessionView> {
   return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
+}
+
+function resolveAutoPingSessionId(explicitSession: string | undefined): string {
+  const explicit = explicitSession?.trim();
+  const envSession = process.env["SPUR_SESSION"]?.trim();
+  if (envSession) {
+    if (explicit && explicit !== envSession) {
+      throw new Error("--session cannot target a different session than SPUR_SESSION");
+    }
+    return envSession;
+  }
+  if (!explicit) {
+    throw new Error("--session is required outside a Spur session");
+  }
+  return explicit;
+}
+
+function resolveAutoPingUnsubscribe(args: {
+  event?: string;
+  thread?: string;
+  subscription?: string;
+}): { scope: AutoPingScope; handle: string } {
+  const entries: Array<{ scope: AutoPingScope; handle: string }> = [];
+  if (args.event?.trim()) entries.push({ scope: "event", handle: args.event.trim() });
+  if (args.thread?.trim()) entries.push({ scope: "thread", handle: args.thread.trim() });
+  if (args.subscription?.trim()) {
+    entries.push({ scope: "subscription", handle: args.subscription.trim() });
+  }
+  if (entries.length !== 1) {
+    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  }
+  const entry = entries[0];
+  if (!entry) {
+    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  }
+  return entry;
+}
+
+function renderAutoPingSuppression(record: AutoPingSuppressionView): string {
+  const destination =
+    record.destination.kind === "session" ? record.destination.sessionId : record.destination.kind;
+  const parts = [record.suppressionId, record.scope, destination, record.createdAt].filter(
+    (part): part is string => typeof part === "string" && part.length > 0,
+  );
+  return parts.join("\t");
+}
+
+function renderAutoPingList(response: AutoPingSuppressionListResponse): string {
+  if (response.records.length === 0) {
+    return dimText("No auto-ping suppressions.");
+  }
+  return response.records.map(renderAutoPingSuppression).join("\n");
+}
+
+function renderAutoPingUnsubscribe(response: AutoPingUnsubscribeResponse): string {
+  const prefix = response.created ? "Created" : "Already active";
+  return `${prefix} auto-ping ${response.record.scope} suppression ${response.record.suppressionId}.`;
+}
+
+function renderAutoPingResume(response: AutoPingResumeResponse): string {
+  const prefix = response.removed ? "Resumed" : "Already resumed";
+  const ids = response.records.map((record) => record.suppressionId).join(", ");
+  return ids ? `${prefix} auto-ping suppression ${ids}.` : `${prefix} auto-ping suppression.`;
 }
 
 function parsePrActionOption(value: string): OpenPrAction {
@@ -2998,6 +3066,81 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         request: { action: "resume", itemId },
         configPath: prepareInstanceConfig(command.parent?.parent as Command).configPath,
+      });
+    });
+
+  const autoPingCommand = program
+    .command("auto-ping")
+    .description("Manage automatic trigger suppressions for a session.");
+  autoPingCommand
+    .command("unsubscribe")
+    .option("--event <handle>", "Event suppression handle")
+    .option("--thread <handle>", "Thread suppression handle")
+    .option("--subscription <handle>", "Subscription suppression handle")
+    .option("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      const requestOptions: { event?: string; thread?: string; subscription?: string } = {};
+      if (typeof options.event === "string") requestOptions.event = options.event;
+      if (typeof options.thread === "string") requestOptions.thread = options.thread;
+      if (typeof options.subscription === "string")
+        requestOptions.subscription = options.subscription;
+      const request = resolveAutoPingUnsubscribe(requestOptions);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "updating auto-ping suppressions",
+        action: () =>
+          postJson<AutoPingUnsubscribeResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/unsubscribe`,
+            request,
+            configPath,
+          ),
+        render: renderAutoPingUnsubscribe,
+      });
+    });
+  autoPingCommand
+    .command("list")
+    .option("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading auto-ping suppressions",
+        action: () =>
+          getJson<AutoPingSuppressionListResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions`,
+            configPath,
+          ),
+        render: renderAutoPingList,
+      });
+    });
+  autoPingCommand
+    .command("resume")
+    .argument("<suppressionId>", "Suppression id")
+    .option("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (suppressionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "resuming auto-ping suppression",
+        action: () =>
+          postJson<AutoPingResumeResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/${encodeURIComponent(
+              suppressionId,
+            )}/resume`,
+            {},
+            configPath,
+          ),
+        render: renderAutoPingResume,
       });
     });
 

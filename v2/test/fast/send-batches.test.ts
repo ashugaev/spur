@@ -434,6 +434,46 @@ describe("Service batch", () => {
   });
 });
 
+describe("automatic ping controls", () => {
+  it("filters one suppressed thread item while preserving its sibling and one subscription control", () => {
+    const parse = createSendBatchParser("github", "proj", "src-1");
+    const batch = requireBatch(
+      parse(
+        githubEventData({
+          signals: [
+            {
+              key: "review-comment:1",
+              kind: "comment",
+              text: "inline",
+              providerThreadTarget: { kind: "github-review-thread", threadId: "thread-1" },
+            },
+            { key: "ready_for_review", kind: "ready_for_review", text: "ready" },
+          ],
+        }),
+      ),
+      "expected review batch",
+    );
+    let grant = 0;
+    batch.attachAutoPing({
+      occurrenceId: "occurrence",
+      routeFingerprint: "route",
+      destination: { kind: "session", sessionId: "api-1" },
+      createGrant: () => `ap1_${String(++grant).padStart(43, "a")}`,
+    });
+    batch.filterAutoPing(
+      (_occurrenceId, threadTarget) =>
+        threadTarget?.kind === "github-review-thread" && threadTarget.threadId === "thread-1",
+    );
+
+    expect(batch.format()).toContain("ready");
+    expect(batch.format()).not.toContain("inline");
+    expect(batch.formatAutoPingControls()).toContain("--event");
+    expect(batch.formatAutoPingControls().match(/--subscription/g)).toHaveLength(1);
+    expect(batch.formatAutoPingControls()).not.toContain("--thread");
+    expect(restoreSendBatch(batch.serialize())?.format()).toContain("ready");
+  });
+});
+
 describe("restoreSendBatch", () => {
   it("round-trips a multi-signal review batch through serialize()", () => {
     const parse = createSendBatchParser("github", "proj", "src-1");

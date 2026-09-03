@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -30,6 +30,8 @@ import type { AgentName } from "./types.js";
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 let activeTmuxSocketName: string | null = null;
+const SENSITIVE_TMUX_CLOSE_WAIT_MS = 1_000;
+const SENSITIVE_TMUX_CLEANUP_ATTEMPTS = 3;
 
 // ── Shared short-TTL runtime-probe cache ──
 // With ~183 sessions, the dashboard-cache tick (every 2s in session-service.ts,
@@ -306,6 +308,52 @@ export function withTmuxSocketArgs(args: string[]): string[] {
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args));
   return stdout.trimEnd();
+}
+
+export type SensitiveTmuxOperation =
+  | "load-buffer"
+  | "paste-buffer"
+  | "scrub-buffer"
+  | "delete-buffer"
+  | "prove-buffer-absent";
+
+export class SensitiveTmuxTransportError extends Error {
+  readonly code: string;
+  readonly operation: SensitiveTmuxOperation;
+  readonly sessionName: string;
+
+  constructor(args: { code: string; operation: SensitiveTmuxOperation; sessionName: string }) {
+    super(
+      `Sensitive tmux transport failed during ${args.operation} for session "${args.sessionName}" (${args.code})`,
+    );
+    this.name = "SensitiveTmuxTransportError";
+    this.code = args.code;
+    this.operation = args.operation;
+    this.sessionName = args.sessionName;
+  }
+}
+
+export class SensitiveTmuxCleanupError extends Error {
+  readonly operation: SensitiveTmuxOperation;
+  readonly sessionName: string;
+  readonly primaryCode: string;
+  readonly cleanupCode: string;
+
+  constructor(args: {
+    operation: SensitiveTmuxOperation;
+    sessionName: string;
+    primaryCode: string;
+    cleanupCode: string;
+  }) {
+    super(
+      `Sensitive tmux cleanup failed during ${args.operation} for session "${args.sessionName}" (${args.cleanupCode}; primary ${args.primaryCode})`,
+    );
+    this.name = "SensitiveTmuxCleanupError";
+    this.operation = args.operation;
+    this.sessionName = args.sessionName;
+    this.primaryCode = args.primaryCode;
+    this.cleanupCode = args.cleanupCode;
+  }
 }
 
 function isSystemdRunUnavailable(error: unknown): boolean {
@@ -781,6 +829,192 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
 }
 
 const DEFAULT_SUBMIT_DELAY_MS = 300;
+
+function sensitiveErrorCode(error: unknown, fallback: string): string {
+  if (typeof error === "object" && error !== null) {
+    const code = "code" in error ? error.code : undefined;
+    if (typeof code === "string" && code.length > 0) {
+      return code;
+    }
+  }
+  return fallback;
+}
+
+function makeSensitiveTransportError(
+  sessionName: string,
+  operation: SensitiveTmuxOperation,
+  code: string,
+): SensitiveTmuxTransportError {
+  return new SensitiveTmuxTransportError({ sessionName, operation, code });
+}
+
+async function runTmuxWithStdin(
+  args: string[],
+  input: string,
+  context: { sessionName: string; operation: SensitiveTmuxOperation },
+): Promise<void> {
+  const child = spawn("tmux", withTmuxSocketArgs(args), { stdio: ["pipe", "ignore", "pipe"] });
+  const primaryError: { value: SensitiveTmuxTransportError | null } = { value: null };
+  child.stderr.on("data", () => {});
+  const recordError = (code: string) => {
+    primaryError.value ??= makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      code,
+    );
+  };
+  const closePromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    },
+  );
+  child.once("error", (error: unknown) => {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_child_error"));
+  });
+  child.stdin.once("error", (error: unknown) => {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_stdin_failed"));
+    child.stdin.destroy();
+  });
+
+  try {
+    child.stdin.end(input, "utf8");
+  } catch (error) {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_stdin_failed"));
+    try {
+      child.stdin.end();
+    } catch {
+      // Ignore close failures; the child close barrier is authoritative.
+    }
+    child.stdin.destroy();
+  }
+
+  const closeState = { closed: false };
+  const closeObserver = closePromise.then((closeResult) => {
+    closeState.closed = true;
+    return closeResult;
+  });
+  await Promise.race([closeObserver, sleep(SENSITIVE_TMUX_CLOSE_WAIT_MS)]);
+  const signalableChild = child as { pid: unknown; kill(signal: NodeJS.Signals): boolean };
+  if (!closeState.closed && typeof signalableChild.pid === "number") {
+    signalableChild.kill("SIGTERM");
+    await Promise.race([closeObserver, sleep(SENSITIVE_TMUX_CLOSE_WAIT_MS)]);
+  }
+  if (!closeState.closed && typeof signalableChild.pid === "number") {
+    signalableChild.kill("SIGKILL");
+  }
+  const result = await closeObserver;
+
+  if (primaryError.value !== null) {
+    throw primaryError.value;
+  }
+  if (result.signal) {
+    throw makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      `signal_${result.signal}`,
+    );
+  }
+  if (result.code !== 0) {
+    throw makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      `exit_${result.code ?? "unknown"}`,
+    );
+  }
+}
+
+async function sensitiveBufferAbsent(bufferName: string): Promise<boolean> {
+  try {
+    const output = await tmux("list-buffers", "-F", "#{buffer_name}");
+    return !output.split("\n").some((line) => line.trim() === bufferName);
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupSensitiveTmuxBuffer(
+  sessionName: string,
+  bufferName: string,
+  primaryError: SensitiveTmuxTransportError,
+): Promise<void> {
+  let lastCleanupError: SensitiveTmuxTransportError | null = null;
+  for (let attempt = 0; attempt < SENSITIVE_TMUX_CLEANUP_ATTEMPTS; attempt++) {
+    try {
+      await runTmuxWithStdin(["load-buffer", "-b", bufferName, "-"], "", {
+        sessionName,
+        operation: "scrub-buffer",
+      });
+    } catch {
+      // Delete/absence proof decides whether cleanup succeeded.
+    }
+    try {
+      await tmux("delete-buffer", "-b", bufferName);
+    } catch (error) {
+      lastCleanupError = makeSensitiveTransportError(
+        sessionName,
+        "delete-buffer",
+        sensitiveErrorCode(error, "sensitive_tmux_delete_failed"),
+      );
+    }
+    if (await sensitiveBufferAbsent(bufferName)) {
+      return;
+    }
+  }
+  const cleanupError =
+    lastCleanupError ??
+    makeSensitiveTransportError(sessionName, "scrub-buffer", "sensitive_tmux_cleanup_not_started");
+  throw new SensitiveTmuxCleanupError({
+    sessionName,
+    operation: cleanupError.operation,
+    primaryCode: primaryError.code,
+    cleanupCode: cleanupError.code,
+  });
+}
+
+export async function sendSensitiveMessageToTmux(
+  sessionName: string,
+  message: string,
+  options: { agent: AgentName },
+): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  const useBracketedPaste =
+    agentSendMode(options.agent) === "bracketed_paste" &&
+    !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+  const bufferName = `spur-sensitive-${randomUUID()}`;
+
+  await tmux("send-keys", "-t", target, "-X", "cancel").catch(() => {});
+  await tmux("send-keys", "-t", target, "C-u");
+  try {
+    await runTmuxWithStdin(["load-buffer", "-b", bufferName, "-"], message, {
+      sessionName,
+      operation: "load-buffer",
+    });
+    const args = ["paste-buffer", "-b", bufferName, "-t", target, "-d"];
+    if (useBracketedPaste) {
+      args.splice(1, 0, "-p");
+    }
+    try {
+      await tmux(...args);
+    } catch (error) {
+      const primaryError = makeSensitiveTransportError(
+        sessionName,
+        "paste-buffer",
+        sensitiveErrorCode(error, "sensitive_tmux_paste_failed"),
+      );
+      await cleanupSensitiveTmuxBuffer(sessionName, bufferName, primaryError);
+      throw primaryError;
+    }
+    if (!useBracketedPaste) {
+      await sleep(DEFAULT_SUBMIT_DELAY_MS);
+    }
+    await tmux("send-keys", "-t", target, "Enter");
+  } catch (error) {
+    if (error instanceof SensitiveTmuxTransportError && error.operation === "load-buffer") {
+      await cleanupSensitiveTmuxBuffer(sessionName, bufferName, error);
+    }
+    throw error;
+  }
+}
 
 export async function sendMessageToTmux(
   sessionName: string,

@@ -1182,6 +1182,7 @@ describe("GitHub review batching", () => {
               reviewThreads: {
                 nodes: [
                   {
+                    id: "PRRT_1",
                     isResolved: false,
                     comments: {
                       nodes: [101, 102, 103].map((databaseId) => ({
@@ -1217,6 +1218,13 @@ describe("GitHub review batching", () => {
     expect([...collected.collected.snapshot.keys()]).toEqual(
       expect.arrayContaining(["review-comment:101", "review-comment:102", "review-comment:103"]),
     );
+    for (const key of ["review-comment:101", "review-comment:102", "review-comment:103"]) {
+      expect(collected.collected.snapshot.get(key)).toEqual(
+        expect.objectContaining({
+          providerThreadTarget: { kind: "github-review-thread", threadId: "PRRT_1" },
+        }),
+      );
+    }
   });
 
   it("paginates past 100 same-thread comments to the prior high-water mark", async () => {

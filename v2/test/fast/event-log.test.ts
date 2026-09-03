@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { tryRotate } from "../../src/jsonl-log-io.js";
@@ -92,6 +93,24 @@ describe("appendEventLog", () => {
     });
     const entries = readEventLog(dataDir);
     expect(entries[0]?.timestamp).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("redacts auto-ping handles from event messages and nested details", () => {
+    const dataDir = makeTempDir();
+    const handle = `ap1_${"s".repeat(43)}`;
+    const handleHash = createHash("sha256").update(handle).digest("hex");
+
+    logSpurEvent(dataDir, {
+      event: "trigger.delivery.failed",
+      level: "error",
+      message: `delivery failed for ${handle}`,
+      details: { nested: { error: handle } },
+    });
+
+    const persisted = readFileSync(eventLogPath(dataDir), "utf8");
+    expect(persisted).not.toContain(handle);
+    expect(persisted).not.toContain(handleHash);
+    expect(persisted).toContain("[auto-ping-handle]");
   });
 });
 

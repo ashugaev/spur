@@ -426,6 +426,24 @@ Any system message wakes a parked session silently — GitHub/review event, trig
 
 Sources emit events; triggers `spawn` a new session or `send` into an existing one.
 
+Auto-ping scopes:
+
+- Event: one emitted occurrence for one trigger route and destination.
+- Thread: one supported provider thread for one trigger route and destination; future items in that thread stay suppressed until resume.
+- Subscription: one source/event/trigger/action route and destination.
+
+Source support:
+
+- `cron`: event and subscription for spawn triggers; no thread.
+- `github`: event and subscription for review send/spawn and work-item spawn; inline review comments add thread; issue comments, review bodies, lifecycle items, and work items have no thread.
+- `github-ci`: event and subscription for spawn triggers; no thread.
+- `gitlab`: event and subscription for review send/spawn; non-individual discussion notes add thread; individual notes have no thread.
+- `sentry`: event and subscription for spawn triggers; no thread.
+- `telegram`: event and subscription for send/spawn; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
+- `service`: future live parsed automatic events get event and subscription; no live source loop emits them.
+- `jira`: none. Connection only.
+- Cron, Sentry, and GitHub CI send triggers stay unsupported.
+
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
 - `github-ci`: `github-ci:run.completed`.
