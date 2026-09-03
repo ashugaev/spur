@@ -1490,17 +1490,39 @@ function writeTelegramChoices(
   });
 }
 
-export function appendTelegramChoices(
+/**
+ * Records one offer, retiring the session's previous offer in that chat: two
+ * live questions would let a click answer the wrong one, since the reply
+ * carries the value alone.
+ */
+export function writeTelegramOffer(
   dataDir: string,
   projectId: string,
   sourceId: string,
   choices: TelegramChoice[],
 ): void {
   if (choices.length === 0) return;
-  writeTelegramChoices(dataDir, projectId, sourceId, [
-    ...readTelegramChoices(dataDir, projectId, sourceId),
-    ...choices,
-  ]);
+  const offer = choices[0];
+  if (!offer) return;
+  const kept = readTelegramChoices(dataDir, projectId, sourceId).filter(
+    (choice) => choice.sessionId !== offer.sessionId || choice.chatId !== offer.chatId,
+  );
+  writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...choices]);
+}
+
+/** Looks up one pending choice without consuming it. */
+export function findTelegramChoice(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  token: string,
+  chatId: number,
+): TelegramChoice | null {
+  return (
+    readTelegramChoices(dataDir, projectId, sourceId).find(
+      (choice) => choice.token === token && choice.chatId === chatId,
+    ) ?? null
+  );
 }
 
 /**
@@ -1516,10 +1538,7 @@ export function takeTelegramChoice(
 ): TelegramChoice | null {
   const choices = readTelegramChoices(dataDir, projectId, sourceId);
   const taken = choices.find((choice) => choice.token === token && choice.chatId === chatId);
-  if (!taken) {
-    writeTelegramChoices(dataDir, projectId, sourceId, choices);
-    return null;
-  }
+  if (!taken) return null;
   writeTelegramChoices(
     dataDir,
     projectId,

@@ -922,8 +922,14 @@ function parseTelegramChatId(
   if (resolved === undefined) {
     throw new Error(`${label} could not be resolved from the environment`);
   }
-  const parsed = Number(resolved.trim());
-  if (!Number.isInteger(parsed)) {
+  const trimmed = resolved.trim();
+  // Strict digits: `Number("")` is 0, `Number("0x10")` is 16 — both would pass
+  // validation and fail later inside Telegram.
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
     throw new Error(`${label} must be an integer`);
   }
   return parsed;

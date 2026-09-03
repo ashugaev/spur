@@ -1252,6 +1252,38 @@ projects:
       "projects.backend.sources.telegram.chatId could not be resolved from the environment",
     );
 
+    const emptyEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID}"
+`);
+    await writeProjectEnv(emptyEnv, 'TELEGRAM_CHAT_ID=""\n');
+    // An empty value never resolves to chat 0.
+    expect(() => loadConfig(emptyEnv)).toThrow(
+      "projects.backend.sources.telegram.chatId could not be resolved from the environment",
+    );
+
+    const hex = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "0x10"
+`);
+    expect(() => loadConfig(hex)).toThrow(
+      "projects.backend.sources.telegram.chatId must be an integer",
+    );
+
     const fractional = await writeConfig(`
 projects:
   backend:

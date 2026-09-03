@@ -5,6 +5,7 @@ import {
   deleteTelegramReplyTarget,
   readTelegramBindings,
   readTelegramLastUpdateId,
+  findTelegramChoice,
   readTelegramReplyTarget,
   takeTelegramChoice,
   telegramBindingKey,
@@ -786,6 +787,23 @@ async function handleAgentChoiceCallback(
   from: { id: number; username?: string },
 ): Promise<void> {
   const deps = runtime.deps;
+  const pending = findTelegramChoice(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+    token,
+    message.chat.id,
+  );
+  if (!pending) {
+    await ctx.answerCallbackQuery("This choice is no longer active.");
+    return;
+  }
+  // Liveness before consumption: a dead lookup must leave the offer clickable.
+  const session = await findSession(deps, pending.sessionId);
+  if (!session) {
+    await ctx.answerCallbackQuery("Session is no longer active.");
+    return;
+  }
   const choice = takeTelegramChoice(
     deps.dataDir,
     deps.projectId,
@@ -795,11 +813,6 @@ async function handleAgentChoiceCallback(
   );
   if (!choice) {
     await ctx.answerCallbackQuery("This choice is no longer active.");
-    return;
-  }
-  const session = await findSession(deps, choice.sessionId);
-  if (!session) {
-    await ctx.answerCallbackQuery("Session is no longer active.");
     return;
   }
   await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
@@ -813,23 +826,24 @@ async function handleAgentChoiceCallback(
       );
     }
   }
+  // The clicked message is the truth about the thread: an offer sent before a
+  // forum topic existed carries none, and a stale one would strand the reply.
+  const messageThreadId = message.message_thread_id ?? choice.messageThreadId;
+  const clickMessage: TelegramTextMessage = {
+    message_id: message.message_id ?? 0,
+    ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+    chat: { id: choice.chatId },
+    from,
+  };
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId: choice.sessionId,
     projectId: deps.projectId,
     sourceId: deps.sourceId,
     chatId: choice.chatId,
-    ...(choice.messageThreadId !== undefined ? { messageThreadId: choice.messageThreadId } : {}),
+    ...(messageThreadId !== undefined ? { messageThreadId } : {}),
     lastInboundAt: new Date().toISOString(),
   });
-  deps.emit(TELEGRAM_MESSAGE_EVENT, {
-    sessionId: choice.sessionId,
-    chatId: choice.chatId,
-    ...(choice.messageThreadId !== undefined ? { messageThreadId: choice.messageThreadId } : {}),
-    userId: from.id,
-    ...(from.username ? { username: from.username } : {}),
-    messageId: message.message_id ?? 0,
-    text: choice.value,
-  });
+  deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(clickMessage, choice.sessionId, choice.value));
 }
 
 async function handleTelegramText(
@@ -920,7 +934,11 @@ async function handleTelegramText(
       message.chat.id,
       message.message_thread_id,
     );
-    await ctx.reply(deleted ? "Unbound this Telegram thread." : "No Spur session bound here.");
+    await ctx.reply(
+      deleted
+        ? "Unbound this Telegram thread. An agent send can bind it again."
+        : "No Spur session bound here.",
+    );
     return;
   }
   if (message.text.trim().startsWith("/")) {

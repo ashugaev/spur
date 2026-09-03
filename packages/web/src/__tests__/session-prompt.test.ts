@@ -127,6 +127,20 @@ describe("parseSessionPromptView", () => {
     expect(view.task).toBe("Fix payment retries");
   });
 
+  it("strips a wrapper stored before the current wording", () => {
+    // Pre-`--button` prompts live on disk; an exact-constant match would leak
+    // the wrapper into the task line forever.
+    const legacySuffix = `
+
+Source: telegram. The requester only sees messages you send with:
+spur source reply "<message>"
+Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
+
+    expect(
+      parseSessionPromptView(makeSession({ prompt: `Fix payment retries${legacySuffix}` })).task,
+    ).toBe("Fix payment retries");
+  });
+
   it("preserves Telegram reply text when it is not the trailing wrapper", () => {
     const prompt = `Keep this exact example:${TELEGRAM_REPLY_SUFFIX}
 

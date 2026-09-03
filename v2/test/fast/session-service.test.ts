@@ -321,7 +321,7 @@ function inputLogEntries(sessionId: string): unknown[] {
     .map(([, entry]) => entry)
     .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
 }
-const appendTelegramChoicesMock = vi.fn();
+const writeTelegramOfferMock = vi.fn();
 const readTelegramBindingsMock = vi.fn();
 const readTelegramReplyTargetMock = vi.fn();
 const sendTelegramReplyMock = vi.fn();
@@ -543,7 +543,7 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
-  appendTelegramChoices: appendTelegramChoicesMock,
+  writeTelegramOffer: writeTelegramOfferMock,
   telegramBindingKey: (chatId: number, messageThreadId?: number) =>
     `${chatId}:${messageThreadId ?? "main"}`,
   archiveSessions: archiveSessionsMock,
@@ -1354,7 +1354,7 @@ describe("SessionService", () => {
     readClaudeConversationTailMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
-    appendTelegramChoicesMock.mockReset();
+    writeTelegramOfferMock.mockReset();
     readTelegramBindingsMock.mockReset().mockReturnValue(new Map());
     readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
     sendTelegramReplyMock.mockReset().mockResolvedValue({});
@@ -5255,7 +5255,7 @@ describe("SessionService", () => {
     });
 
     expect(result.buttons).toBe(2);
-    const choices = appendTelegramChoicesMock.mock.calls[0];
+    const choices = writeTelegramOfferMock.mock.calls[0];
     expect(choices?.[0]).toBe(TEST_DATA_DIR);
     expect(choices?.[1]).toBe("api");
     expect(choices?.[2]).toBe("agentChat");
@@ -5335,7 +5335,7 @@ describe("SessionService", () => {
       }),
     ).rejects.toThrow("buttons must hold at most 8 entries");
     expect(sendTelegramReplyMock).not.toHaveBeenCalled();
-    expect(appendTelegramChoicesMock).not.toHaveBeenCalled();
+    expect(writeTelegramOfferMock).not.toHaveBeenCalled();
   });
 
   it("sends to the project's configured Telegram chat when the session has no reply target", async () => {

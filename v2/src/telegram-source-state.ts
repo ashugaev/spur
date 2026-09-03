@@ -197,13 +197,14 @@ export async function sendTelegramReply(
   const keyboard = inlineKeyboard(options.buttons ?? []);
   const chunkMarkup = (index: number): TelegramInlineKeyboard | undefined =>
     index === chunks.length - 1 ? keyboard : undefined;
+  const firstChunkMarkup = chunkMarkup(0);
   if (target.statusMessageId !== undefined) {
     try {
       await callTelegram(config, "editMessageText", {
         chat_id: target.chatId,
         message_id: target.statusMessageId,
         text: firstChunk,
-        ...(chunkMarkup(0) ? { reply_markup: chunkMarkup(0) } : {}),
+        ...(firstChunkMarkup ? { reply_markup: firstChunkMarkup } : {}),
       });
     } catch (error) {
       if (!isNotModifiedError(error)) {
@@ -212,7 +213,7 @@ export async function sendTelegramReply(
           target.chatId,
           firstChunk,
           target.messageThreadId,
-          chunkMarkup(0),
+          firstChunkMarkup,
         );
       }
     }

@@ -59,10 +59,14 @@ function stripTrailingSpurSections(text: string): string {
   return text.slice(0, end).trimEnd();
 }
 
+// Anchored on the wrapper's first and last line instead of the whole constant:
+// prompts stored before a wording change must keep stripping. Still requires the
+// wrapper to be trailing, so a prompt quoting it mid-text stays intact.
+const TELEGRAM_REPLY_SUFFIX_RE =
+  /\n\nSource: telegram\. The requester only sees messages you send with:\n[\s\S]*Your terminal output is invisible to them\.[^\n]*$/;
+
 function stripTelegramReplySuffix(text: string): string {
-  return text.endsWith(TELEGRAM_REPLY_SUFFIX)
-    ? text.slice(0, -TELEGRAM_REPLY_SUFFIX.length).trimEnd()
-    : text;
+  return text.replace(TELEGRAM_REPLY_SUFFIX_RE, "").trimEnd();
 }
 
 export function isGeneratedBootstrapPrompt(text: string): boolean {

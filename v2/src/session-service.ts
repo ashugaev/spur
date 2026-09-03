@@ -197,7 +197,7 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
-  appendTelegramChoices,
+  writeTelegramOffer,
   readTelegramReplyTarget,
   telegramBindingKey,
   writeTelegramBindings,
@@ -9926,7 +9926,7 @@ export class SessionService {
     const view = await this.enrich(session);
     const choices = buildTelegramChoices(sessionId, target, buttons);
     // Persisted before the send: a click can only arrive after Telegram has the keyboard.
-    appendTelegramChoices(this.config.dataDir, target.projectId, target.sourceId, choices);
+    writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, choices);
     const result = await sendTelegramReply(source, target, message, {
       topicName: telegramTopicName(view),
       ...(choices.length > 0
@@ -9945,21 +9945,8 @@ export class SessionService {
       lastReplyAt: new Date().toISOString(),
     };
     writeTelegramReplyTarget(this.config.dataDir, replyTarget);
+    // Covers a freshly created forum topic too: its key cannot already be taken.
     this.bindTelegramChatIfFree(replyTarget, sessionId);
-    if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
-      const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
-      bindings.set(`${target.chatId}:${result.messageThreadId}`, {
-        chatId: target.chatId,
-        messageThreadId: result.messageThreadId,
-        sessionId,
-      });
-      writeTelegramBindings(
-        this.config.dataDir,
-        target.projectId,
-        target.sourceId,
-        bindings.values(),
-      );
-    }
     this.logEvent("source.reply.sent", {
       level: "info",
       sessionId,
