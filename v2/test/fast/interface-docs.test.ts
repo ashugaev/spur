@@ -10,7 +10,7 @@ async function readRepoFile(path: string): Promise<string> {
 }
 
 describe("published interface contracts", () => {
-  it("documents closeout ownership in command interface", async () => {
+  it("documents closeout ownership in command docs", async () => {
     const commands = await readRepoFile("docs/commands.md");
 
     expect(commands).toContain("marks the assigned closeout owner for a writable worktree");
