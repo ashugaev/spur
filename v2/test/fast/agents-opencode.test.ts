@@ -13,6 +13,7 @@ import {
   diffOpenCodeSessionIds,
   hasNewOpenCodeUserMessage,
   isSupportedOpenCodeVersion,
+  OPENCODE_EXPORT_MAX_CONCURRENCY,
   OPENCODE_RESTRICT_WRITES_CONFIG,
   parseOpenCodeExport,
   parseOpenCodeSessionListOutput,
@@ -285,15 +286,19 @@ describe("OpenCode adapter", () => {
       const { dir, countPath } = await stubCountingOpenCode();
       try {
         vi.useFakeTimers({ shouldAdvanceTime: true });
-        vi.setSystemTime(new Date("2026-09-03T00:00:00.000Z"));
+        await readOpenCodeState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+        // Anchor on the clock the entry was actually stamped with: with
+        // shouldAdvanceTime the stub's own spawn cost moves the fake clock, so
+        // an absolute instant would shrink the margin by however long node took
+        // to start.
+        const cachedAt = Date.now();
+
+        vi.setSystemTime(cachedAt + 4_000);
         await readOpenCodeState("ses_a");
         expect(await spawnCount(countPath)).toBe(1);
 
-        vi.setSystemTime(new Date("2026-09-03T00:00:04.000Z"));
-        await readOpenCodeState("ses_a");
-        expect(await spawnCount(countPath)).toBe(1);
-
-        vi.setSystemTime(new Date("2026-09-03T00:00:06.000Z"));
+        vi.setSystemTime(cachedAt + 6_000);
         await readOpenCodeState("ses_a");
         expect(await spawnCount(countPath)).toBe(2);
       } finally {
@@ -308,6 +313,49 @@ describe("OpenCode adapter", () => {
         await readOpenCodeState("ses_b");
 
         expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("holds concurrent exports of distinct sessions under the ceiling", async () => {
+      // Distinct ids, so neither the TTL cache nor the in-flight share applies:
+      // what bounds these is the export gate alone.
+      const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      const logPath = join(dir, "spans.log");
+      try {
+        await writeFile(
+          join(dir, "opencode"),
+          [
+            "#!/usr/bin/env node",
+            'const fs = require("node:fs");',
+            `const log = ${JSON.stringify(logPath)};`,
+            'fs.appendFileSync(log, "+");',
+            "setTimeout(() => {",
+            '  fs.appendFileSync(log, "-");',
+            '  process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+            "}, 80);",
+          ].join("\n"),
+          "utf8",
+        );
+        await chmod(join(dir, "opencode"), 0o755);
+        vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+
+        const ids = Array.from(
+          { length: OPENCODE_EXPORT_MAX_CONCURRENCY * 2 },
+          (_, i) => `ses_${i}`,
+        );
+        await Promise.all(ids.map((id) => readOpenCodeState(id)));
+
+        const spans = await readFile(logPath, "utf8");
+        let live = 0;
+        let peak = 0;
+        for (const mark of spans) {
+          live += mark === "+" ? 1 : -1;
+          peak = Math.max(peak, live);
+        }
+        expect(spans.length).toBe(ids.length * 2);
+        expect(peak).toBeLessThanOrEqual(OPENCODE_EXPORT_MAX_CONCURRENCY);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

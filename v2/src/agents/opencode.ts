@@ -388,11 +388,44 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
   return { state: "working", reason: "assistant incomplete" };
 }
 
+// Every export is a subprocess that queries the one multi-gigabyte SQLite DB
+// all opencode sessions share, so its cost scales with fleet size, not with the
+// caller. Callers that cannot tolerate stale data — the launch wait and the
+// submit-ack scan both poll for a *new* message — cannot be served from a
+// cache, so the ceiling that bounds them lives here, on the single funnel every
+// call site passes through. Measured before this gate: a 15-session fleet ran a
+// mean of 4 and a peak of 17 concurrent exports, 3.7 GB resident at the peak.
+// The limit sits at that mean; over it, callers queue rather than fan out.
+export const OPENCODE_EXPORT_MAX_CONCURRENCY = 4;
+let openCodeExportActive = 0;
+const openCodeExportQueue: Array<() => void> = [];
+
+async function acquireOpenCodeExportSlot(): Promise<void> {
+  if (openCodeExportActive < OPENCODE_EXPORT_MAX_CONCURRENCY) {
+    openCodeExportActive += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => openCodeExportQueue.push(resolve));
+}
+
+function releaseOpenCodeExportSlot(): void {
+  // Hand the slot straight to the next waiter; the count only drops when the
+  // queue is empty, so a burst never opens a gap above the limit.
+  const next = openCodeExportQueue.shift();
+  if (next) next();
+  else openCodeExportActive -= 1;
+}
+
 async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
-  const stdout = await readOpenCodeJson(["export", sessionId], {
-    timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
-  });
-  return JSON.parse(stdout) as unknown;
+  await acquireOpenCodeExportSlot();
+  try {
+    const stdout = await readOpenCodeJson(["export", sessionId], {
+      timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
+    });
+    return JSON.parse(stdout) as unknown;
+  } finally {
+    releaseOpenCodeExportSlot();
+  }
 }
 
 export interface OpenCodeSubmitBaseline {
