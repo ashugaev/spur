@@ -164,8 +164,10 @@ ensure_node_ready() {
   fi
 
   local nvm_dir
+  local nvm_sourced=false
   nvm_dir="${NVM_DIR:-${SPUR_REAL_HOME:-$HOME}/.nvm}"
   if [[ -s "$nvm_dir/nvm.sh" ]]; then
+    nvm_sourced=true
     export NVM_DIR="$nvm_dir"
     # nvm reports its own refusals on stderr and `nvm use --silent` is mute on
     # both streams even when the version is missing (exit 3), so tolerate both
@@ -188,7 +190,15 @@ ensure_node_ready() {
     exit 1
   fi
 
-  echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the required range $NODE_ENGINES_RANGE. $NVMRC_FILE pins node $pinned — install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2
+  # Two distinct remedies below, chosen by whether nvm_dir/nvm.sh was ever
+  # sourced: "nvm install <pin>" and the NPM_CONFIG_PREFIX refusal hint are
+  # both unrunnable/irrelevant on a host with no nvm, which never ran a
+  # refusal to check in the first place.
+  if [[ "$nvm_sourced" == true ]]; then
+    echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the required range $NODE_ENGINES_RANGE. $NVMRC_FILE pins node $pinned — install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2
+  else
+    echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the required range $NODE_ENGINES_RANGE, and nvm was not found at $nvm_dir/nvm.sh. Install a node satisfying $NODE_ENGINES_RANGE, or install nvm to pick up the $NVMRC_FILE pin (node $pinned)." >&2
+  fi
   exit 1
 }
 

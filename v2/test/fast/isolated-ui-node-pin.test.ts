@@ -387,6 +387,12 @@ describe("spur-isolated-ui node pin", () => {
     expect(rejection.stderr).toMatch(/\^20\.19\.0/);
     expect(rejection.stderr).toMatch(/v21\.7\.3/);
     expect(rejection.stderr).toMatch(/\.nvmrc/);
+    // PR #824 review LOW 1: no nvm ever ran here, so the remedy must never
+    // tell the host to run a command it cannot act on, or to check a
+    // refusal that never happened.
+    expect(rejection.stderr).toMatch(/nvm was not found/);
+    expect(rejection.stderr).not.toMatch(/nvm install/);
+    expect(rejection.stderr).not.toMatch(/NPM_CONFIG_PREFIX/);
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
