@@ -413,7 +413,7 @@ function releaseOpenCodeExportSlot(): void {
   // queue is empty, so a burst never opens a gap above the limit.
   const next = openCodeExportQueue.shift();
   if (next) next();
-  else openCodeExportActive -= 1;
+  else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
 }
 
 async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
@@ -511,10 +511,16 @@ const OPENCODE_STATE_TTL_MS = 5_000;
 const openCodeStateCache = new Map<string, { at: number; state: OpenCodeStructuredState | null }>();
 const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredState | null>>();
 
-/** Drops every session's cached state. Test seam. */
-export function resetOpenCodeStateCache(): void {
+/** Drops every session's cached state and the export gate's counters. Test seam. */
+export function resetOpenCodeExportState(): void {
   openCodeStateCache.clear();
   openCodeStateInFlight.clear();
+  // The gate's counters are module state too. A slot still held when a test
+  // ends shifts the peak concurrency every later test observes, so clear them
+  // here as well — resuming queued waiters rather than dropping them, so a
+  // caller left mid-acquire cannot hang.
+  for (const resume of openCodeExportQueue.splice(0)) resume();
+  openCodeExportActive = 0;
 }
 
 export async function readOpenCodeState(

@@ -6,7 +6,7 @@ import {
   findOpenCodeSessionId,
   readOpenCodeJson,
   readOpenCodeState,
-  resetOpenCodeStateCache,
+  resetOpenCodeExportState,
   buildOpenCodePlan,
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
@@ -230,7 +230,7 @@ describe("OpenCode adapter", () => {
 
   describe("state reads", () => {
     afterEach(() => {
-      resetOpenCodeStateCache();
+      resetOpenCodeExportState();
       vi.useRealTimers();
       vi.unstubAllEnvs();
     });
