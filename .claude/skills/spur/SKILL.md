@@ -18,7 +18,7 @@ INTERFACES
   CLI: `spur --help`, then `spur <command> --help`.
   `$SPUR_SESSION_TOOL_DIR` holds the session-bound wrappers; `ls "$SPUR_SESSION_TOOL_DIR"` enumerates them. Call each as `"$SPUR_SESSION_TOOL_DIR/<tool>"`, never bare.
   Session variables: `env | grep '^SPUR_'`.
-  Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409), human override via `--todo-override-reason`. Contract: `docs/commands.md#todo`.
+  Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses this agent's completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409). A human operator (CLI or UI, no reason required) bypasses the gate; `--todo-override-reason` is only an optional audit note on that bypass. Contract: `docs/commands.md#todo`.
 
 SAFETY
 

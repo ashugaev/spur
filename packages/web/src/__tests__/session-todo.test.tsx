@@ -162,6 +162,37 @@ describe("SessionTodo", () => {
     expect(screen.getByLabelText("open")).toBeInTheDocument();
   });
 
+  // The literal below duplicates v2/src/todo.ts's exported HUMAN_BYPASS_REASON.
+  // packages/web has no dependency or tsconfig path onto v2/src, so it can't
+  // import the constant; kept as a literal, pinned by this test.
+  it('renders "Human action, no reason given" when a human completes with no reason', async () => {
+    const overridden: SpurTodoProjection = {
+      ...projection,
+      status: "active",
+      counts: { total: 1, open: 1, held: 0, completed: 0, cancelled: 0 },
+      items: [{ ...projection.items[0]!, status: "open", latestTransition: undefined }],
+      finishOverrides: [
+        {
+          eventId: "override-2",
+          type: "finish_override_recorded",
+          reason: "Human action, no reason given",
+          unfinishedItemIds: [projection.items[0]!.id],
+          actor: { kind: "human", origin: "ui" },
+          at: "2026-08-20T10:03:00.000Z",
+        },
+      ],
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(overridden), { status: 200 }),
+    );
+    render(<SessionTodo sessionId="api-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /Choose the public command/ }));
+
+    expect(screen.getByText(/Completion override/)).toBeInTheDocument();
+    expect(screen.getByText("Human action, no reason given")).toBeInTheDocument();
+    expect(screen.getByLabelText("open")).toBeInTheDocument();
+  });
+
   it("hard-wraps a long unbroken item text and expanded reasons so they never overflow", async () => {
     const longToken = "supercalifragilisticexpialidocious".repeat(8);
     const overflowing: SpurTodoProjection = {

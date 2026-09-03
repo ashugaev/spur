@@ -141,6 +141,19 @@ export async function resolveTodoMutationActor(args: {
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
+// Classifies a lifecycle request (complete, self-destruct, handoff) as human-initiated
+// so it can bypass the Spur ToDo completion gate. No lookup, no throw: an agent call, an
+// array-valued header, or an unknown origin all resolve to undefined, which stays gated.
+export function resolveLifecycleTodoActor(args: {
+  origin: UserActionOrigin;
+  callerHeader: string | string[] | undefined;
+}): TodoActor | undefined {
+  const { origin, callerHeader } = args;
+  if (callerHeader) return undefined;
+  if (origin === "cli" || origin === "ui") return { kind: "human", origin };
+  return undefined;
+}
+
 export type StartedServer = SessionService & {
   stop(): Promise<void>;
 };
@@ -1584,12 +1597,11 @@ export async function startServer(
           );
           return;
         }
-        const todoOptions =
-          body.todoOverrideReason &&
-          !request.headers["x-spur-caller-session"] &&
-          (origin === "cli" || origin === "ui")
-            ? { todoActor: { kind: "human" as const, origin } }
-            : undefined;
+        const lifecycleTodoActor = resolveLifecycleTodoActor({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+        });
+        const todoOptions = lifecycleTodoActor ? { todoActor: lifecycleTodoActor } : undefined;
         sendJson(
           response,
           200,
@@ -1602,7 +1614,18 @@ export async function startServer(
 
       const selfDestructSessionId = path.match(/^\/sessions\/([^/]+)\/self-destruct$/)?.[1];
       if (method === "POST" && selfDestructSessionId) {
-        sendJson(response, 200, await service.selfDestruct(selfDestructSessionId));
+        const selfDestructTodoActor = resolveLifecycleTodoActor({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+        });
+        sendJson(
+          response,
+          200,
+          await service.selfDestruct(
+            selfDestructSessionId,
+            selfDestructTodoActor ? { todoActor: selfDestructTodoActor } : undefined,
+          ),
+        );
         return;
       }
 
@@ -1630,7 +1653,19 @@ export async function startServer(
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
-        sendJson(response, 200, await service.handoff(handoffSessionId, body));
+        const handoffTodoActor = resolveLifecycleTodoActor({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+        });
+        sendJson(
+          response,
+          200,
+          await service.handoff(
+            handoffSessionId,
+            body,
+            handoffTodoActor ? { todoActor: handoffTodoActor } : undefined,
+          ),
+        );
         return;
       }
 

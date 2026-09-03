@@ -57,7 +57,7 @@ export class TodoOpenWorkError extends Error {
     readonly sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>,
   ) {
     super(
-      'Spur ToDo has open or held items. Resolve each with "$SPUR_TODO_COMMAND" complete/cancel/resume --reason <why>, or override with --todo-override-reason.',
+      'Spur ToDo has open or held items. Resolve each with "$SPUR_TODO_COMMAND" complete/cancel/resume --reason <why>.',
     );
   }
 }
@@ -319,6 +319,8 @@ export function ensureTodoLedger(dataDir: string, session: SessionRecord): TodoP
   writeSession(dataDir, { ...session, todoLedgerVersion: 1 });
   return projection;
 }
+
+export const HUMAN_BYPASS_REASON = "Human action, no reason given";
 
 export function todoLedgerBlock(projection: TodoProjection): "empty" | "unfinished" | null {
   if (projection.counts.total === 0) return "empty";
