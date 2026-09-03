@@ -38,6 +38,28 @@ describe("jsonResponse", () => {
     expect(response.headers.get("content-encoding")).toBeNull();
   });
 
+  it("treats an explicit gzip;q=0 as a refusal", async () => {
+    const response = await jsonResponse(requestWith("gzip;q=0, deflate"), bigPayload);
+
+    expect(response.headers.get("content-encoding")).toBeNull();
+    await expect(response.json()).resolves.toEqual(bigPayload);
+  });
+
+  it("still compresses for a weighted but non-zero gzip preference", async () => {
+    const response = await jsonResponse(requestWith("br;q=1.0, gzip; q=0.5"), bigPayload);
+
+    expect(response.headers.get("content-encoding")).toBe("gzip");
+  });
+
+  it("does not copy the body it hands to the response", async () => {
+    // Buffer is not a valid BodyInit, so the body goes out as a view over the
+    // same memory; a copy would be a second multi-megabyte allocation.
+    const response = await jsonResponse(requestWith(), bigPayload);
+    const raw = JSON.stringify(bigPayload);
+
+    expect((await bodyOf(response)).toString("utf8")).toBe(raw);
+  });
+
   it("leaves a short body uncompressed", async () => {
     const response = await jsonResponse(requestWith("gzip"), { ok: true });
 
