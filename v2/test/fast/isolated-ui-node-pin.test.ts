@@ -338,6 +338,45 @@ describe("spur-isolated-ui node pin", () => {
     ]);
   });
 
+  // PR #824 review: a suite that only ever exercises the real `>=24` clause
+  // cannot tell "reads engines.node" apart from a `major >= pin` floor —
+  // node 21 fails both, so a regression back to the floor would stay green.
+  // Override engines.node in the fake worktree with a BOUNDED range (no
+  // `>=24` clause) so node 25 satisfies a floor check but fails a real
+  // engines check. copyFileSync below runs after createFakeWorktree(), so it
+  // only overrides this test's own worktree — no other case is affected.
+  it("fails fast with no nvm at all on node 25 against a bounded engines range without >=24 (#824 review)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    writeFileSync(
+      join(worktree.repoDir, "package.json"),
+      JSON.stringify({ engines: { node: "^20.19.0 || ^22.13.0" } }),
+      "utf8",
+    );
+
+    const rejection = await runIsolatedUiExpectFailure(worktree, { SPUR_TEST_SYS_NODE: "v25.2.0" });
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0/);
+    expect(rejection.stderr).toMatch(/v25\.2\.0/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
+  it("proceeds with no nvm at all on node 22 against a bounded engines range without >=24 (#824 review)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    writeFileSync(
+      join(worktree.repoDir, "package.json"),
+      JSON.stringify({ engines: { node: "^20.19.0 || ^22.13.0" } }),
+      "utf8",
+    );
+
+    await expect(runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v22.23.2" })).resolves.toEqual([
+      "install node=v22.23.2",
+      "dev node=v22.23.2",
+    ]);
+  });
+
   it("fails fast with no nvm at all when the system node does not satisfy engines", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
