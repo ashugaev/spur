@@ -39,3 +39,9 @@ CREATE OPEN PR
 Closes #<issue-number>
 EOF
 )"
+
+ISSUE REPORTING, for a problem outside the current request
+
+  1  `gh issue list --state open --search "<keywords>"` — look for a match first.
+  2  Match found: `gh issue comment` the new evidence onto it. Never open a duplicate.
+  3  No match: `gh issue create`. Body states what breaks, where (`file:line`), how to reproduce, and the PR or task that surfaced it.
