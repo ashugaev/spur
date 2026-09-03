@@ -325,6 +325,9 @@ describe("OpenCode adapter", () => {
       // workload from the constant it asserts against passes at any value of
       // that constant, including one high enough to bring the storm back.
       const CONCURRENT_READS = 8;
+      // Pinned, not merely bounded: the limit is what holds the storm down, so
+      // raising it has to fail here and be changed on purpose.
+      expect(OPENCODE_EXPORT_MAX_CONCURRENCY).toBe(4);
       expect(OPENCODE_EXPORT_MAX_CONCURRENCY).toBeLessThan(CONCURRENT_READS);
 
       const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
@@ -407,7 +410,9 @@ describe("OpenCode adapter", () => {
         await rm(failDir, { recursive: true, force: true });
         await rm(okDir, { recursive: true, force: true });
       }
-    });
+      // Explicit, well under the runner default: a leaked slot hangs here, and
+      // the point is a fast attributable timeout rather than a 30s stall.
+    }, 10_000);
   });
 
   it("picks the newest session from a top-level updated timestamp", async () => {
