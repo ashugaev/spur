@@ -615,6 +615,54 @@ describe("gh usage accounting", () => {
     }
   });
 
+  it("counts a first-cycle failure and still emits one aggregate for an errors-only window", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      // First cycle for a brand-new key fails outright: emits immediately
+      // (unchanged single-cycle shape, no errors field), but the failure
+      // must not vanish from the run it opens.
+      await expect(
+        runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "dead" }, async () => {
+          throw new Error("gh unavailable");
+        }),
+      ).rejects.toThrow("gh unavailable");
+      expect(cycleEvents()).toHaveLength(1);
+      expect(cycleEvents()[0]).not.toHaveProperty("errors");
+
+      // Three more failing, zero-cost cycles fold silently into the window.
+      for (let index = 0; index < 3; index += 1) {
+        await expect(
+          runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "dead" }, async () => {
+            throw new Error("gh unavailable");
+          }),
+        ).rejects.toThrow("gh unavailable");
+      }
+      expect(cycleEvents()).toHaveLength(1);
+
+      // A non-failing, still zero-cost cycle past the window closes it. The
+      // window spent nothing in calls/graphqlCost, but it must still emit
+      // because it counted 4 errors (1 seeded from the first cycle, 3 from
+      // the fold) — a dead source may never pay, but it must still surface.
+      vi.setSystemTime(T0 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "dead" },
+        async () => {},
+      );
+
+      expect(cycleEvents()).toHaveLength(2);
+      expect(cycleEvents()[1]).toMatchObject({
+        cycles: 4,
+        zeroCycles: 4,
+        calls: 0,
+        graphqlCost: 0,
+        errors: 4,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("accounts GraphQL cost from an error envelope", async () => {
     await runGhPollCycle({ kind: "github_source" }, async () => {
       noteGhInvocation(["api", "graphql"], T0);

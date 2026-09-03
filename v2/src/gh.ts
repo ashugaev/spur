@@ -217,14 +217,18 @@ function emptyPollCycleRun(
 
 /**
  * Closes a run's current window: emits an aggregate only if the window spent
- * something (calls > 0 or graphqlCost > 0), then resets the accumulators and
- * stamps a fresh windowStartedAtMs. A zero-cost window emits nothing and
- * leaves the run's counters untouched, so they carry into the next window —
- * this is what keeps PR 729's idle-host suppression intact under rollup:
- * window expiry alone must never produce an event.
+ * something (calls > 0, graphqlCost > 0, or a cycle in it threw) then resets
+ * the accumulators and stamps a fresh windowStartedAtMs. A window that spent
+ * nothing AND threw nothing emits nothing and leaves the run's counters
+ * untouched, so they carry into the next window — this is what keeps PR
+ * 729's idle-host suppression intact under rollup: window expiry alone must
+ * never produce an event. Errors are in the gate, not just the payload — a
+ * source that only ever fails (zero calls, zero cost) must still surface at
+ * most one aggregate per window instead of accumulating errors forever
+ * behind a gate keyed on cost alone.
  */
 function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number): void {
-  const spentSomething = run.calls > 0 || run.graphqlCost > 0;
+  const spentSomething = run.calls > 0 || run.graphqlCost > 0 || run.errors > 0;
   if (!spentSomething) {
     return;
   }
@@ -262,7 +266,7 @@ function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number):
  */
 function prunePollCycleRuns(nowMs: number): void {
   const dataDir = ghEventSinkDataDir;
-  for (const [key, run] of [...pollCycleRuns]) {
+  for (const [key, run] of pollCycleRuns) {
     if (nowMs - run.touchedAtMs > ZERO_CYCLE_RUN_MAX_IDLE_MS) {
       if (dataDir) flushPollCycleRun(dataDir, run, nowMs);
       pollCycleRuns.delete(key);
@@ -279,7 +283,7 @@ function prunePollCycleRuns(nowMs: number): void {
 export function flushGhPollCycles(): void {
   const dataDir = ghEventSinkDataDir;
   const nowMs = Date.now();
-  for (const [key, run] of [...pollCycleRuns]) {
+  for (const [key, run] of pollCycleRuns) {
     if (dataDir) flushPollCycleRun(dataDir, run, nowMs);
     pollCycleRuns.delete(key);
   }
@@ -475,10 +479,9 @@ export async function runGhPollCycle<T>(
           },
         });
       }
-      pollCycleRuns.set(
-        key,
-        emptyPollCycleRun(cycle.kind, cycle.projectId, cycle.sourceId, endedAtMs),
-      );
+      const newRun = emptyPollCycleRun(cycle.kind, cycle.projectId, cycle.sourceId, endedAtMs);
+      if (cycleFailed) newRun.errors = 1;
+      pollCycleRuns.set(key, newRun);
     } else {
       existingRun.touchedAtMs = endedAtMs;
       existingRun.cycles += 1;

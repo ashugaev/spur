@@ -447,7 +447,7 @@ GitHub poll-cost events: `gh.poll_cycle` (`gh` cost of a poll cycle or of a wind
 
 - First cycle on a key, even at zero cost: one cycle — `cycle`, `durationMs`, `calls`, `graphqlCost`, `bySubcommand`.
 - Later cycles emit nothing and accumulate into a 15-minute window, fixed, no config key. The first cycle at or past the boundary emits the window — `cycle`, `windowMs`, `cycles`, `zeroCycles`, `calls`, `graphqlCost`, `bySubcommand` summed over the window, plus `errors` when a cycle in it threw.
-- Window with `calls` and `graphqlCost` both 0 emits nothing on close; its counts and window start carry forward, so an idle key stays silent until it spends again.
+- Window with `calls` and `graphqlCost` both 0 and no `errors` emits nothing on close; its counts and window start carry forward, so an idle key stays silent until it spends again. A window with `errors` but no calls or cost still emits — a source that only ever fails stays visible instead of accumulating silently.
 - Key untouched for 60 minutes is dropped, its window closed under the same zero-cost gate; the next cycle on that key emits a single cycle again. Daemon shutdown closes every open window the same way.
 
 Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
