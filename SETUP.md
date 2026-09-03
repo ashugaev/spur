@@ -6,9 +6,8 @@ For package install use [docs/install-from-npm.md](docs/install-from-npm.md); fo
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 20+; the `isolated-ui` sidecar needs the node pinned in [`.nvmrc`](.nvmrc)
 - Git 2.25+
-- The `isolated-ui` sidecar requires the node in [`.nvmrc`](.nvmrc)
 - tmux
 - `gh` is recommended for GitHub-backed workflows
 - `claude` and/or `codex` are required only for real agent runs
