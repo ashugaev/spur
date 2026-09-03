@@ -462,14 +462,64 @@ export async function waitForOpenCodeLaunchMessage(
   return false;
 }
 
+// Every other agent classifies from an incremental file read; opencode has no
+// per-session file to stat — all sessions share one multi-gigabyte SQLite DB —
+// so its only state source is `opencode export`, a subprocess that queries that
+// DB and serializes the whole transcript. Left ungated, the 2s dashboard tick
+// spawned one per live opencode session faster than they finished: a
+// 15-session fleet sampled at mean 4 and peak 17 concurrent exports, 3.7 GB
+// resident at the peak, with 40% of the daemon's own CPU in system time.
+//
+// So the derived state is cached — the two-field result, never the transcript
+// that produced it — and concurrent callers share one in-flight export. A
+// session's state is at most OPENCODE_STATE_TTL_MS staler than the export it
+// came from, which was already seconds old by the time it returned.
+const OPENCODE_STATE_TTL_MS = 5_000;
+const openCodeStateCache = new Map<string, { at: number; state: OpenCodeStructuredState | null }>();
+const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredState | null>>();
+
+/** Drops every session's cached state. Test seam. */
+export function resetOpenCodeStateCache(): void {
+  openCodeStateCache.clear();
+  openCodeStateInFlight.clear();
+}
+
 export async function readOpenCodeState(
   sessionId?: string,
 ): Promise<OpenCodeStructuredState | null> {
   if (!sessionId) return null;
+
+  const now = Date.now();
+  const cached = openCodeStateCache.get(sessionId);
+  if (cached && now - cached.at < OPENCODE_STATE_TTL_MS) {
+    return cached.state;
+  }
+  const inFlight = openCodeStateInFlight.get(sessionId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const pending = (async (): Promise<OpenCodeStructuredState | null> => {
+    try {
+      return parseOpenCodeState(await exportOpenCodeSession(sessionId));
+    } catch {
+      return null;
+    }
+  })();
+  openCodeStateInFlight.set(sessionId, pending);
   try {
-    return parseOpenCodeState(await exportOpenCodeSession(sessionId));
-  } catch {
-    return null;
+    const state = await pending;
+    openCodeStateCache.set(sessionId, { at: Date.now(), state });
+    // Expired entries are evicted here rather than on a timer: the map only
+    // grows when a session is classified, so this is the one place it can.
+    for (const [id, entry] of openCodeStateCache) {
+      if (Date.now() - entry.at >= OPENCODE_STATE_TTL_MS) {
+        openCodeStateCache.delete(id);
+      }
+    }
+    return state;
+  } finally {
+    openCodeStateInFlight.delete(sessionId);
   }
 }
 

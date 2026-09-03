@@ -1,10 +1,12 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findOpenCodeSessionId,
   readOpenCodeJson,
+  readOpenCodeState,
+  resetOpenCodeStateCache,
   buildOpenCodePlan,
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
@@ -223,6 +225,93 @@ describe("OpenCode adapter", () => {
       vi.unstubAllEnvs();
       await rm(binDir, { recursive: true, force: true });
     }
+  });
+
+  describe("state reads", () => {
+    afterEach(() => {
+      resetOpenCodeStateCache();
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    // Writes one line per invocation, so the test counts spawns rather than
+    // trusting the cache's own bookkeeping.
+    async function stubCountingOpenCode(): Promise<{ dir: string; countPath: string }> {
+      const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      const countPath = join(dir, "calls.log");
+      await writeFile(
+        join(dir, "opencode"),
+        [
+          "#!/usr/bin/env node",
+          `require("node:fs").appendFileSync(${JSON.stringify(countPath)}, "x");`,
+          'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+        ].join("\n"),
+        "utf8",
+      );
+      await chmod(join(dir, "opencode"), 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+      return { dir, countPath };
+    }
+
+    async function spawnCount(countPath: string): Promise<number> {
+      try {
+        return (await readFile(countPath, "utf8")).length;
+      } catch {
+        return 0;
+      }
+    }
+
+    it("shares one export across concurrent reads of the same session", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        const results = await Promise.all([
+          readOpenCodeState("ses_a"),
+          readOpenCodeState("ses_a"),
+          readOpenCodeState("ses_a"),
+        ]);
+
+        expect(results).toEqual([
+          { state: "waiting", reason: "assistant completed" },
+          { state: "waiting", reason: "assistant completed" },
+          { state: "waiting", reason: "assistant completed" },
+        ]);
+        expect(await spawnCount(countPath)).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("serves a repeat read from cache and re-exports once the TTL passes", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        vi.setSystemTime(new Date("2026-09-03T00:00:00.000Z"));
+        await readOpenCodeState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+
+        vi.setSystemTime(new Date("2026-09-03T00:00:04.000Z"));
+        await readOpenCodeState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+
+        vi.setSystemTime(new Date("2026-09-03T00:00:06.000Z"));
+        await readOpenCodeState("ses_a");
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keys the cache per session", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        await readOpenCodeState("ses_a");
+        await readOpenCodeState("ses_b");
+
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("picks the newest session from a top-level updated timestamp", async () => {
