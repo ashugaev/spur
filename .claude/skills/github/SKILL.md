@@ -14,7 +14,8 @@ CLOSE-OUT GATE, mandatory after any code change
   3  Implementation diff from branch base empty -> SKIPPED.
   4  git push -u origin "$(git branch --show-current)"
   5  gh pr view succeeds -> comment new HEAD SHA. Fails -> CREATE OPEN PR below.
-  6  Return PR url.
+  6  Problem parked out of scope during the task -> file it per ISSUE REPORTING below.
+  7  Return the PR url, plus any issue url filed at step 6.
 
 PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
