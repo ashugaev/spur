@@ -149,9 +149,10 @@ export function classifyClaudeJsonlState(
       const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
       if (nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS) return "working";
       // An interrupt ends the turn at an idle prompt: nothing is in flight and
-      // no tool call is stalled. Claude renders it as a tool_result, which
-      // would otherwise read as "needs_input" (agent stalled) once the
-      // activity window passes and raise a false attention alert.
+      // no tool call is stalled. Most interrupt records are a text block, which
+      // already lands on "waiting" below; this covers the tool_result-shaped
+      // one, which would otherwise read as "needs_input" (agent stalled) once
+      // the activity window passes and raise a false attention alert.
       if (record.interrupted) {
         return "waiting";
       }
@@ -227,12 +228,15 @@ function hasBlockType(blocks: unknown[], type: string): boolean {
   );
 }
 
-// Claude Code writes this synthetic user turn when the human interrupts —
-// either bare ("[Request interrupted by user]", a text block) or mid-tool
-// ("[Request interrupted by user for tool use]", a tool_result block). Both
-// mean the prompt is idle awaiting the human, not a working turn and not a
-// stalled tool call.
-const CLAUDE_INTERRUPT_MARKER = "[request interrupted by user";
+// The synthetic user turn Claude Code writes when the human interrupts. The
+// whole content is the marker and nothing else, so this matches exactly rather
+// than by prefix: a Bash tool_result whose stdout merely starts with the
+// marker is a genuine stalled tool call, and flagging it would suppress the
+// needs_input alert it should raise — the inverse of the case this fixes.
+const CLAUDE_INTERRUPT_TEXTS: ReadonlySet<string> = new Set([
+  "[request interrupted by user]",
+  "[request interrupted by user for tool use]",
+]);
 
 function blockInterruptText(block: unknown): string | undefined {
   if (typeof block !== "object" || block === null) {
@@ -243,14 +247,16 @@ function blockInterruptText(block: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function isInterruptText(text: string | undefined): boolean {
+  return CLAUDE_INTERRUPT_TEXTS.has((text ?? "").trim().toLowerCase());
+}
+
 function hasInterruptMarker(message: Record<string, unknown>, blocks: unknown[]): boolean {
   const raw = message["content"];
   if (typeof raw === "string") {
-    return raw.trimStart().toLowerCase().startsWith(CLAUDE_INTERRUPT_MARKER);
+    return isInterruptText(raw);
   }
-  return blocks.some((block) =>
-    (blockInterruptText(block) ?? "").trimStart().toLowerCase().startsWith(CLAUDE_INTERRUPT_MARKER),
-  );
+  return blocks.some((block) => isInterruptText(blockInterruptText(block)));
 }
 
 /** Detect tool_use blocks and whether any explicitly asks the human a question. */

@@ -668,6 +668,23 @@ describe("scanTmuxRateLimit", () => {
     expect(scanTmuxRateLimit('\u26a0 the pane renders "usage limit reached" here')).toBeNull();
   });
 
+  it("ignores a mid-line marker on claude's own \u23fa output line", () => {
+    // Claude prefixes its own assistant/tool-call lines with these glyphs, so
+    // stripping one must not also buy the marker a marker-anywhere allowance.
+    expect(scanTmuxRateLimit("\u23fa Updated the usage limit reached marker handling")).toBeNull();
+  });
+
+  it("ignores a mid-line marker on a \u2717 test-runner line", () => {
+    expect(scanTmuxRateLimit("\u2717 flags the real codex out of credits pane")).toBeNull();
+  });
+
+  it("keeps the marker-anywhere allowance for codex's \u25a0 banner only", () => {
+    expect(scanTmuxRateLimit("\u25a0 Your workspace is out of credits. Ask your owner.")).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
+  });
+
   it("still ignores a marker on a > gutter line", () => {
     expect(scanTmuxRateLimit("> Usage limit reached")).toBeNull();
   });
