@@ -15070,6 +15070,11 @@ export class SessionService {
       pipeline: _pipeline,
       sidecarNames: _sidecarNames,
       sidecarPorts: _sidecarPorts,
+      launchCommand: _launchCommand,
+      stateSubscriptions: _stateSubscriptions,
+      allowedTriggers: _allowedTriggers,
+      agentSessionId: _agentSessionId,
+      branchSource: _branchSource,
       ...dashboardSession
     } = session;
     const workspacePresent = classified.workspacePresent;

@@ -9,6 +9,8 @@ Daemon HTTP route reference. Default `127.0.0.1:4310`. CLI usage: [commands.md](
 
 ## Session routes
 
+`GET /sessions` lists sessions. `includeCompleted=1` adds completed ones. `view=dashboard` returns the listing shape the dashboard renders: no `queuedMessages`, `pipeline`, `sidecarNames`, `sidecarPorts`, `launchCommand`, `stateSubscriptions`, `allowedTriggers`, `agentSessionId` or `branchSource` — read those from `GET /sessions/:id`. Every JSON response body is compact, not indented.
+
 `GET /sessions/:id/todo` reads the ToDo projection. `POST /sessions/:id/todo` accepts `{ action: "add", text, reason }`, `{ action: "complete" | "cancel", itemId, reason }`, `{ action: "hold", itemId, reason, blocker, requiredHumanAction? }`, or `{ action: "resume", itemId }`. `blocker` is `external` or `human`; a human blocker requires `requiredHumanAction`, an external blocker rejects it. Unknown fields or an invalid body return `invalid_todo_request` (400). A zero-item ledger returns `todo_ledger_empty` (409); open/held work returns `todo_open_work` (409) with the blocking ids — both carry an actionable `error` string. Invalid transitions return `todo_transition_conflict` (409); ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy, no DELETE route. See [todo](commands.md#todo).
 
 `POST /sessions/:id/queue/remove` and `POST /sessions/:id/queue/flush` take body `{"message": "<exact queued text>"}` — content-keyed, no index over the wire, matched against the trimmed queued value; `404` when that text is not queued. The web session view drives both from per-row send-now/delete icons. See [send, queue](commands.md#send-queue).
