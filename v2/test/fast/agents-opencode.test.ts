@@ -318,9 +318,15 @@ describe("OpenCode adapter", () => {
       }
     });
 
-    it("holds concurrent exports of distinct sessions under the ceiling", async () => {
+    it("saturates the export ceiling and never exceeds it", async () => {
       // Distinct ids, so neither the TTL cache nor the in-flight share applies:
-      // what bounds these is the export gate alone.
+      // what bounds these is the export gate alone. The fan-out is a literal
+      // rather than a multiple of the limit — a test that sizes its own
+      // workload from the constant it asserts against passes at any value of
+      // that constant, including one high enough to bring the storm back.
+      const CONCURRENT_READS = 8;
+      expect(OPENCODE_EXPORT_MAX_CONCURRENCY).toBeLessThan(CONCURRENT_READS);
+
       const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
       const logPath = join(dir, "spans.log");
       try {
@@ -341,10 +347,7 @@ describe("OpenCode adapter", () => {
         await chmod(join(dir, "opencode"), 0o755);
         vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
 
-        const ids = Array.from(
-          { length: OPENCODE_EXPORT_MAX_CONCURRENCY * 2 },
-          (_, i) => `ses_${i}`,
-        );
+        const ids = Array.from({ length: CONCURRENT_READS }, (_, i) => `ses_${i}`);
         await Promise.all(ids.map((id) => readOpenCodeState(id)));
 
         const spans = await readFile(logPath, "utf8");
@@ -355,9 +358,54 @@ describe("OpenCode adapter", () => {
           peak = Math.max(peak, live);
         }
         expect(spans.length).toBe(ids.length * 2);
-        expect(peak).toBeLessThanOrEqual(OPENCODE_EXPORT_MAX_CONCURRENCY);
+        // Equality, not an upper bound: demand exceeds the gate here, so a
+        // correct gate runs exactly the limit at once. An upper bound alone
+        // also passes when the gate never opens far enough to be useful.
+        expect(peak).toBe(OPENCODE_EXPORT_MAX_CONCURRENCY);
       } finally {
         await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("releases the export slot when the export fails", async () => {
+      // A slot leaked on the throw path is invisible until the limit is used
+      // up, and then every export in the process blocks forever. Fail more
+      // times than the gate is wide, then read successfully: with a leak, the
+      // last read never resolves and this test times out instead of failing an
+      // assertion.
+      const failDir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      const okDir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      try {
+        await writeFile(
+          join(failDir, "opencode"),
+          ["#!/usr/bin/env node", "process.exit(1);"].join("\n"),
+          "utf8",
+        );
+        await chmod(join(failDir, "opencode"), 0o755);
+        vi.stubEnv("SPUR_OPENCODE_BIN", join(failDir, "opencode"));
+
+        for (let i = 0; i <= OPENCODE_EXPORT_MAX_CONCURRENCY; i += 1) {
+          expect(await readOpenCodeState(`ses_fail_${i}`)).toBeNull();
+        }
+
+        await writeFile(
+          join(okDir, "opencode"),
+          [
+            "#!/usr/bin/env node",
+            'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+          ].join("\n"),
+          "utf8",
+        );
+        await chmod(join(okDir, "opencode"), 0o755);
+        vi.stubEnv("SPUR_OPENCODE_BIN", join(okDir, "opencode"));
+
+        expect(await readOpenCodeState("ses_ok")).toEqual({
+          state: "waiting",
+          reason: "assistant completed",
+        });
+      } finally {
+        await rm(failDir, { recursive: true, force: true });
+        await rm(okDir, { recursive: true, force: true });
       }
     });
   });
