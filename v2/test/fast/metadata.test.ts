@@ -258,12 +258,24 @@ describe("telegram source state", () => {
       dataDir,
       "api",
       "tg",
-      Array.from({ length: 250 }, (_unused, index) => choice({ token: `t${index}` })),
+      Array.from({ length: 199 }, (_unused, index) =>
+        choice({ token: `t${index}`, offerId: `offer-${index}` }),
+      ),
+    );
+    // 199 singles + a 3-button offer crosses the 200 cap; the young offer must
+    // survive intact, so whole old offers go instead of a partial slice.
+    appendTelegramChoices(
+      dataDir,
+      "api",
+      "tg",
+      ["a", "b", "c"].map((suffix) => choice({ token: `last-${suffix}`, offerId: "offer-last" })),
     );
     const stored = readTelegramChoices(dataDir, "api", "tg");
-    expect(stored).toHaveLength(200);
-    expect(stored.at(-1)?.token).toBe("t249");
+    expect(stored.length).toBeLessThanOrEqual(200);
+    expect(stored.filter((entry) => entry.offerId === "offer-last")).toHaveLength(3);
     expect(stored.some((entry) => entry.token === "fresh")).toBe(false);
+    expect(stored.some((entry) => entry.token === "t0")).toBe(false);
+    expect(stored.some((entry) => entry.token === "t198")).toBe(true);
   });
 
   it("removes a session's pending choices with the rest of its telegram state", async () => {

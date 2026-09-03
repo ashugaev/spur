@@ -128,7 +128,7 @@ Scopes resolve server-side from the caller's session, never from client input: `
 
 `spur source reply <message...> [--button <label[=value]>] [--session <id>] [--json]`. Sends a Telegram message from the session to the user; session defaults to `SPUR_SESSION`. Destination: the session's latest inbound Telegram chat, else the source's `chatId`. No destination, no send — the call fails.
 
-`--button` is repeatable, at most 8, and renders one inline button per row. `<label>` alone sends the label as the value; `<label>=<value>` splits at the first `=`. Label 1-64 chars, value 1-200, labels unique per message. A click arrives in the session as an ordinary user message carrying the value, and retires every button on that message. Unanswered choices expire after 24h. Wire: [daemon-api.md](daemon-api.md#session-routes). Chat binding and delivery requirements: [configuration.md](configuration.md#telegram-binding).
+`--button` is repeatable, at most 8, and renders one inline button per row. `<label>` alone sends the label as the value; `<label>=<value>` splits at the first `=`, so a label cannot contain one — `a=b=c` is label `a`, value `b=c`. Label 1-64 chars, value 1-200, labels unique per message. A click arrives in the session as an ordinary user message carrying the value, and retires every button on that message. Unanswered choices expire after 24h. Wire: [daemon-api.md](daemon-api.md#session-routes). Chat binding and delivery requirements: [configuration.md](configuration.md#telegram-binding).
 
 ## subscribe
 

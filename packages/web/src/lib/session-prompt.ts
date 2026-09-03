@@ -5,7 +5,7 @@ const HANDOFF_HEADER_RE = /^Task handoff from session (\S+) \((\w+)\)\./m;
 const HANDOFF_NOTES_RE = /Additional handoff notes:\n([\s\S]*)$/;
 const SHEPHERD_HEADER = "You are Spur Shepherd:";
 const OPERATOR_REQUEST_MARKER = "Operator request:\n";
-const TELEGRAM_REPLY_SUFFIX = [
+export const TELEGRAM_REPLY_SUFFIX = [
   "",
   "",
   "Source: telegram. The requester only sees messages you send with:",

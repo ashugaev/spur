@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const postJsonMock = vi.fn();
 const writeStdoutMock = vi.fn();
@@ -58,6 +58,12 @@ function replyResponse(buttons?: number) {
 }
 
 describe("source reply CLI", () => {
+  // The first `import("../../src/cli.js")` pays a multi-second cold start that
+  // otherwise lands inside one case's timeout and flakes under runner load.
+  beforeAll(async () => {
+    await import("../../src/cli.js");
+  });
+
   beforeEach(() => {
     vi.resetModules();
     postJsonMock.mockReset().mockResolvedValue(replyResponse());

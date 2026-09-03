@@ -410,14 +410,17 @@ function renderSourceReplyResponse(response: SourceReplyResponse): string {
 }
 
 /** `<label>` or `<label>=<value>`; the value defaults to the label. */
-function parseButtonOption(raw: string, previous: SourceReplyButton[]): SourceReplyButton[] {
+function parseButtonOption(
+  raw: string,
+  previous: SourceReplyButton[] | undefined,
+): SourceReplyButton[] {
   const separator = raw.indexOf("=");
   const text = (separator === -1 ? raw : raw.slice(0, separator)).trim();
   const value = (separator === -1 ? raw : raw.slice(separator + 1)).trim();
   if (!text || !value) {
     throw new Error("--button takes <label> or <label>=<value>");
   }
-  return [...previous, { text, value }];
+  return [...(previous ?? []), { text, value }];
 }
 
 function renderStateSubscription(record: SessionStateSubscription): string {
@@ -3845,7 +3848,6 @@ export function createProgram(cliEntrypoint: string): Command {
       "--button <label[=value]>",
       "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
       parseButtonOption,
-      [] as SourceReplyButton[],
     )
     .option("--json", "Print raw JSON")
     .action(

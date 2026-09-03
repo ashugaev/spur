@@ -1456,6 +1456,29 @@ export function readTelegramChoices(
   );
 }
 
+/**
+ * Evicts whole offers, oldest first: half an offer would leave live buttons
+ * beside dead ones in the same Telegram message.
+ */
+function capTelegramChoices(choices: TelegramChoice[]): TelegramChoice[] {
+  if (choices.length <= MAX_TELEGRAM_CHOICES) return choices;
+  const sizes = new Map<string, number>();
+  for (const choice of choices) {
+    sizes.set(choice.offerId, (sizes.get(choice.offerId) ?? 0) + 1);
+  }
+  const evicted = new Set<string>();
+  let remaining = choices.length;
+  for (const choice of choices) {
+    if (remaining <= MAX_TELEGRAM_CHOICES) break;
+    if (evicted.has(choice.offerId)) continue;
+    // Never evict the newest offer: it is the one the user is looking at.
+    if (sizes.size - evicted.size === 1) break;
+    evicted.add(choice.offerId);
+    remaining -= sizes.get(choice.offerId) ?? 0;
+  }
+  return choices.filter((choice) => !evicted.has(choice.offerId));
+}
+
 function writeTelegramChoices(
   dataDir: string,
   projectId: string,
@@ -1463,7 +1486,7 @@ function writeTelegramChoices(
   choices: TelegramChoice[],
 ): void {
   writeJsonFile(telegramChoiceFilePath(dataDir, projectId, sourceId), {
-    choices: choices.slice(-MAX_TELEGRAM_CHOICES),
+    choices: capTelegramChoices(choices),
   });
 }
 
