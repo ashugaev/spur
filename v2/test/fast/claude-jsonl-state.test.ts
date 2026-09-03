@@ -296,6 +296,26 @@ describe("parseJsonlRecord interrupt detection", () => {
     expect(parseJsonlRecord(line, TS)).toMatchObject({ type: "user", interrupted: true });
   });
 
+  it("leaves a tool_result whose stdout merely starts with the marker unflagged", () => {
+    // A genuine stalled Bash call whose output quotes the marker: flagging it
+    // would suppress the needs_input alert it must raise.
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_2",
+            content: `${toolMarker}\n${marker}\nmatches in 3 files`,
+          },
+        ],
+      },
+    });
+    const record = parseJsonlRecord(line, TS);
+    expect(record?.interrupted).toBeUndefined();
+  });
+
   it("leaves an ordinary user message unflagged", () => {
     const line = JSON.stringify({
       type: "user",

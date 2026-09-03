@@ -413,9 +413,8 @@ export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
       continue;
     }
     // A leading status glyph is part of the banner chrome, not of its text:
-    // strip it so the marker still counts as line-leading underneath.
-    const glyphBody = stripBannerGlyph(content);
-    const body = glyphBody ?? content;
+    // strip it so the marker is judged against the line's real start.
+    const body = stripBannerGlyph(content) ?? content;
     const lower = body.toLowerCase();
     const marker = TMUX_BANNER_MARKERS.find((phrase) => lower.includes(phrase));
     if (marker === undefined) {
@@ -430,7 +429,13 @@ export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
     ) {
       continue;
     }
-    if (glyphBody !== null || lower.startsWith(marker)) {
+    // Only codex's "■" keeps the marker-anywhere allowance: its banner reads
+    // "■ Your workspace is out of credits …", marker mid-line. Every other
+    // status glyph buys nothing but the strip — the marker must still lead the
+    // line underneath, because claude prefixes its OWN assistant and tool-call
+    // lines with "⏺"/"●"/"✻"/"✢", so a line like "⏺ Updated the usage limit
+    // reached marker handling" would otherwise flag a healthy session.
+    if (content.startsWith("■") || lower.startsWith(marker)) {
       return { limited: true, reason: `tmux ${marker}` };
     }
   }
