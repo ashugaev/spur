@@ -290,21 +290,30 @@ wait "$first_pid" "$second_pid"
 # and records install_failed so a record-less retry can never happen (a lock
 # give-up now runs under the armed trap; A1). No daemon writes the "running"
 # record here, so the :64-78 wait loop spins its full ~2s before the lock is
-# even attempted — acceptable, noted in the spec's test plan. Held long enough
-# (12s) to outlast that 2s wait plus the 1s lock-wait timeout below.
-flock "$LOCK_FILE" -c "sleep 12" &
+# even attempted — acceptable, noted in the spec's test plan. The hold is not
+# a tuned duration: the case kills the holder below, so a hold far longer than
+# any runner can spend in the barrier plus the helper's wait costs nothing and
+# makes the guarantee unconditional.
+flock "$LOCK_FILE" -c "sleep 600" &
 holder_pid=$!
 # Barrier, not a sleep: wait until the holder actually owns the lock. A fixed
 # delay is a guess about how long a backgrounded flock takes to acquire, and
 # under load it can still be starting — the helper then wins the lock and the
 # case asserts nothing, failing with rc=0. Probe non-blockingly instead: while
-# the probe can take the lock, the holder does not have it yet.
+# the probe can take the lock, the holder does not have it yet. rc 1 is the
+# only "held" answer flock gives; any other non-zero rc (66 on an unopenable
+# lock file) is a broken probe, not a held lock, so fail on it with the rc.
 lock_held=""
 for _ in $(seq 1 200); do
-  if ! flock -n "$LOCK_FILE" -c true 2>/dev/null; then
+  set +e
+  flock -n "$LOCK_FILE" -c true
+  probe_rc=$?
+  set -e
+  if [ "$probe_rc" -eq 1 ]; then
     lock_held="yes"
     break
   fi
+  [ "$probe_rc" -eq 0 ] || fail "lock probe failed (rc=$probe_rc)"
   sleep 0.05
 done
 [ -n "$lock_held" ] || fail "lock holder never acquired the lock"
@@ -325,7 +334,7 @@ if [ -e "$LEDGER_FILE14" ]; then
   fail "a lock give-up must never write a ledger line: $(cat "$LEDGER_FILE14")"
 fi
 # The hold outlasts the helper's wait by a wide margin so a slow runner cannot
-# release it early; release it now rather than sitting out the remainder.
+# release it early; the case ends it here rather than sitting out the remainder.
 # Kill both the backgrounded flock wrapper and any child sleep holding the fd.
 pkill -P "$holder_pid" 2>/dev/null || true
 kill "$holder_pid" 2>/dev/null || true
