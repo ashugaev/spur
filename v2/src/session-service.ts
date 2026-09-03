@@ -416,6 +416,7 @@ import {
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
+  type SessionListItemView,
   type SessionStateTransition,
   type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
@@ -4710,11 +4711,11 @@ export class SessionService {
   // attention-monitor sweep, off a `view` that can be up to
   // ATTENTION_POLL_INTERVAL_MS stale, so the record is re-read and
   // re-asserted "running" before anything is torn down.
-  private async parkStaleSession(view: SessionView): Promise<void> {
+  private async parkStaleSession(view: Pick<SessionView, "id">): Promise<void> {
     return this.withWorkspaceLifecycleLocks(view.id, () => this.parkStaleSessionLocked(view));
   }
 
-  private async parkStaleSessionLocked(view: SessionView): Promise<void> {
+  private async parkStaleSessionLocked(view: Pick<SessionView, "id">): Promise<void> {
     const candidate = readSession(this.config.dataDir, view.id);
     if (!candidate) {
       return;
@@ -5871,7 +5872,9 @@ export class SessionService {
     return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
   }
 
-  private async maybeNudgeForgottenReply(view: SessionView): Promise<void> {
+  private async maybeNudgeForgottenReply(
+    view: Pick<SessionView, "id" | "agent" | "state" | "slots">,
+  ): Promise<void> {
     try {
       const resolved = this.resolveTelegramNotice(view.id);
       if (!resolved) return;
@@ -7035,7 +7038,7 @@ export class SessionService {
       : undefined;
     const views = await Promise.all(
       sessions.map((session) =>
-        this.enrich(session, claudeAccounts, allSessions, sidecarProcSnapshot),
+        this.enrichListItem(session, claudeAccounts, allSessions, sidecarProcSnapshot),
       ),
     );
     return views;
@@ -15134,12 +15137,59 @@ export class SessionService {
     }));
   }
 
+  // Full single-session detail: the projected list view plus the six fields
+  // the list drops (artifact manifest, state history, launch command, and
+  // the two prompt bodies). Used by `get()` and every mutation route — all
+  // 30 existing `enrich()` callers keep getting a full SessionView.
   private async enrich(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<SessionView> {
+    const { view, classified } = await this.enrichWithClassified(
+      session,
+      claudeAccounts,
+      sessionBatch,
+      sidecarProcSnapshot,
+    );
+    return this.withSessionDetail(view, classified.session);
+  }
+
+  // Re-attaches the six fields the list projection drops. The artifact walk
+  // MUST key on workspaceIdOf(session), not session.id — a desk sibling
+  // shares its anchor's artifacts (v2/test/fast/session-service.test.ts
+  // "lists and reads an artifact written by one desk sibling from another
+  // sibling"). Kept as the single detail-assembly path so `enrich()` and
+  // any future single-session reader never duplicate this walk elsewhere.
+  private async withSessionDetail(
+    view: SessionListItemView,
+    session: SessionRecord,
+  ): Promise<SessionView> {
+    const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
+    const history = this.stateHistory.get(session.id) ?? [];
+    return {
+      ...view,
+      launchCommand: session.launchCommand,
+      prompt: session.prompt,
+      ...(session.originalTaskPrompt !== undefined
+        ? { originalTaskPrompt: session.originalTaskPrompt }
+        : {}),
+      artifacts: artifactWalk.artifacts,
+      ...(artifactWalk.truncated ? { artifactsTruncated: true } : {}),
+      ...(history.length > 0 ? { stateHistory: history } : {}),
+    };
+  }
+
+  // List-only projection: the same as enrichWithClassified().view, kept
+  // separate so the list path never gets the detail re-attach (and so it
+  // never pays for the artifact walk `withSessionDetail` does).
+  private async enrichListItem(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
+    sidecarProcSnapshot?: ProcSnapshot,
+  ): Promise<SessionListItemView> {
     return (
       await this.enrichWithClassified(session, claudeAccounts, sessionBatch, sidecarProcSnapshot)
     ).view;
@@ -15152,18 +15202,28 @@ export class SessionService {
   // agent activity AND every routine record write). A second call would
   // mean a second classifySessionRecord pass (JSONL read) per session per
   // sweep tick; this split keeps it to exactly one.
+  //
+  // Returns the PROJECTED list view (SessionListItemView), not the full
+  // SessionView: this is also the builder the list path and the attention
+  // sweep use, and neither needs the artifact walk or the prompt bodies.
+  // `enrich()` re-attaches those six fields itself via withSessionDetail.
   private async enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
-  ): Promise<{ view: SessionView; classified: SessionStateResult }> {
+  ): Promise<{ view: SessionListItemView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
-    const history = await this.updateStateHistory(
+    // Still runs on every enrich — it drives the state machine (the
+    // rateLimitedAt write, the serverErrorAt marker), not just a view field.
+    // The list projection drops the `stateHistory` VIEW FIELD only;
+    // `withSessionDetail` re-reads the same in-memory history for the
+    // single-session view.
+    await this.updateStateHistory(
       session,
       state,
       classified.source,
@@ -15230,10 +15290,15 @@ export class SessionService {
     );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
-    const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
+    const {
+      launchCommand: _launchCommand,
+      prompt: _prompt,
+      originalTaskPrompt: _originalTaskPrompt,
+      ...sessionWithoutDetailFields
+    } = session;
 
-    const view: SessionView = {
-      ...session,
+    const view: SessionListItemView = {
+      ...sessionWithoutDetailFields,
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
       workspaceId: workspaceIdOf(session),
@@ -15244,11 +15309,8 @@ export class SessionService {
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
       state,
-      ...(history.length > 0 ? { stateHistory: history } : {}),
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
-      artifacts: artifactWalk.artifacts,
-      ...(artifactWalk.truncated ? { artifactsTruncated: true } : {}),
       services,
       sidecars,
       ...(workspaceAccess ? { workspaceAccess } : {}),
