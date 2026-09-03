@@ -766,16 +766,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     return leaseId;
   };
 
+  // Clears the work `batch` owns. Another controller's replacement generation
+  // can already hold this queue key on disk, so the persisted record is deleted
+  // by `workId`, never by queue key.
   const clearBatch = (
     queueKey: string,
+    batch: PendingBatch,
     options?: {
       keepInterrupted?: boolean;
       keepRetryState?: boolean;
       deletePersisted?: boolean;
     },
   ): void => {
-    const references = occurrenceReferencesByQueue.get(queueKey);
     const current = pendingBatches.get(queueKey);
+    const references = occurrenceReferencesByQueue.get(queueKey);
     if (references && current) {
       for (const occurrenceId of references) {
         autoPing.releaseOccurrenceReference(current.routeFingerprint, occurrenceId);
@@ -785,7 +789,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     pendingBatches.delete(queueKey);
     deliveryFailures.delete(queueKey);
     if (options?.deletePersisted !== false) {
-      deletePendingSendBatch(deps.config.dataDir, queueKey);
+      deletePendingSendBatchConditional(deps.config.dataDir, { workId: batch.workId });
     }
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
@@ -877,7 +881,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           revision: claimedRevision,
           claimId,
         });
-        if (deleted) clearBatch(queueKey, { deletePersisted: false });
+        if (deleted) clearBatch(queueKey, batch, { deletePersisted: false });
         return { status: "suppressed" };
       }
       try {
@@ -922,7 +926,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           if (options?.keepRetryState !== undefined) {
             clearOptions.keepRetryState = options.keepRetryState;
           }
-          if (deleted) clearBatch(queueKey, { ...clearOptions, deletePersisted: false });
+          if (deleted) clearBatch(queueKey, batch, { ...clearOptions, deletePersisted: false });
         }
         return { status: "delivered" };
       } catch (error) {
@@ -1019,7 +1023,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     try {
       return await deps.sessionService.get(batch.batch.sessionId);
     } catch (error) {
-      clearBatch(queueKey);
+      clearBatch(queueKey, batch);
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -1059,7 +1063,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   ): void => {
     const attempts = (deliveryFailures.get(queueKey)?.attempts ?? 0) + 1;
     if (attempts >= DELIVERY_MAX_ATTEMPTS) {
-      clearBatch(queueKey);
+      clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
         sessionId: batch.batch.sessionId,
@@ -1127,7 +1131,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (!session) return;
 
     if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
-      clearBatch(queueKey);
+      clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
         sessionId: batch.batch.sessionId,
@@ -1151,7 +1155,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
-      clearBatch(queueKey);
+      clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
         sessionId: batch.batch.sessionId,
@@ -1171,7 +1175,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     batch.batch.prune(deps.config.dataDir);
     if (batch.batch.isEmpty()) {
-      clearBatch(queueKey);
+      clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "info",
         sessionId: batch.batch.sessionId,
@@ -1190,7 +1194,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const retry = retryStates.get(queueKey);
     if (retry) {
       if (retry.attempts >= CI_FAILED_MAX_ATTEMPTS) {
-        clearBatch(queueKey);
+        clearBatch(queueKey, batch);
         logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
           level: "warn",
           sessionId: batch.batch.sessionId,
@@ -1270,7 +1274,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       const cached = pendingBatches.get(queueKey);
       const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
       if (cached && !persisted) {
-        clearBatch(queueKey, { deletePersisted: false });
+        clearBatch(queueKey, cached, { deletePersisted: false });
       } else if (persisted && (!cached || persisted.workId !== cached.workId)) {
         return;
       } else if (cached && persisted && persisted.workId === cached.workId) {
@@ -1346,7 +1350,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (!session) return;
 
     if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
-      clearBatch(queueKey);
+      clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
         sessionId: sendBatch.sessionId,
@@ -1370,7 +1374,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     if (!isSendTriggerAllowed(session, triggerId)) {
-      clearBatch(queueKey);
+      clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
         sessionId: sendBatch.sessionId,

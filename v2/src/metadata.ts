@@ -1353,16 +1353,20 @@ export function updatePendingSendBatchConditional(
   return true;
 }
 
+// Deletes the record owning `workId`, never the record sitting at a queue key.
+// A stale controller that deleted by queue key would drop a newer generation's
+// work. `revision`/`claimId` narrow the delete further when the caller holds a
+// claim.
 export function deletePendingSendBatchConditional(
   dataDir: string,
-  expected: { workId: string; revision: number; claimId: string },
+  expected: { workId: string; revision?: number; claimId?: string },
 ): boolean {
   const records = readPendingSendBatches(dataDir);
   const current = [...records.values()].find((record) => record.workId === expected.workId);
   if (
     !current ||
-    current.revision !== expected.revision ||
-    current.claim?.claimId !== expected.claimId
+    (expected.revision !== undefined && current.revision !== expected.revision) ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
   ) {
     return false;
   }

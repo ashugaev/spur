@@ -796,15 +796,15 @@ describe("startConfiguredTriggers", () => {
     deletePendingSendBatchConditionalMock
       .mockReset()
       .mockImplementation(
-        (_dataDir: string, expected: { workId: string; revision: number; claimId: string }) => {
+        (_dataDir: string, expected: { workId: string; revision?: number; claimId?: string }) => {
           const records = readPendingSendBatchesMock();
           const current = [...records.values()].find(
             (record: PersistedPendingBatch) => record.workId === expected.workId,
           );
           if (
             !current ||
-            current.revision !== expected.revision ||
-            current.claim?.claimId !== expected.claimId
+            (expected.revision !== undefined && current.revision !== expected.revision) ||
+            (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
           ) {
             return false;
           }
@@ -1157,6 +1157,88 @@ describe("startConfiguredTriggers", () => {
       await oldController.stop();
       await replacement?.stop();
       await deliveryController?.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps replacement work when a stale controller drops its own batch", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-stale-drop-"));
+    const autoPing = new AutoPingService(dataDir);
+    let staleLookupFails = false;
+    const staleGetMock = vi.fn().mockImplementation(async () => {
+      if (staleLookupFails) throw new Error("session lookup failed");
+      return {
+        id: "api-1",
+        status: "running",
+        state: "working",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      };
+    });
+    const replacementGetMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "rate_limited",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      storedSnapshot([
+        { key: "comment:1", kind: "comment", text: "A new comment arrived." },
+        { key: "comment:2", kind: "comment", text: "Replacement work survives." },
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const staleBus = new EventBus();
+    const deps = {
+      config: { ...config(), dataDir } as never,
+      bus: staleBus,
+      sessionService: { get: staleGetMock, deliver: deliverMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    };
+    const staleController = startConfiguredTriggers(deps);
+    let replacement: ReturnType<typeof startConfiguredTriggers> | undefined;
+    try {
+      staleBus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      const records = readPendingSendBatchesMock();
+      const staleWorkId = records.values().next().value?.workId;
+      expect(staleWorkId).toBeDefined();
+
+      // A replacement controller only claims the queue key once it is free.
+      records.clear();
+      const replacementBus = new EventBus();
+      replacement = startConfiguredTriggers({
+        ...deps,
+        bus: replacementBus,
+        sessionService: { get: replacementGetMock, deliver: deliverMock } as never,
+      });
+      replacementBus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [{ key: "comment:2", kind: "comment", text: "Replacement work survives." }],
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      const replacementWorkId = records.values().next().value?.workId;
+      expect(replacementWorkId).toBeDefined();
+      expect(replacementWorkId).not.toBe(staleWorkId);
+
+      // The stale controller now drops its own batch. Deleting by queue key
+      // would take the replacement's persisted record with it.
+      staleLookupFails = true;
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(records.size).toBe(1);
+      expect(records.values().next().value?.workId).toBe(replacementWorkId);
+      expect(deliverMock).not.toHaveBeenCalled();
+    } finally {
+      await staleController.stop();
+      await replacement?.stop();
       autoPing.dispose();
       rmSync(dataDir, { recursive: true, force: true });
     }
