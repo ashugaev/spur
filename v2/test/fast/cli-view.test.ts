@@ -267,6 +267,8 @@ describe("cli-view.renderInteractiveSessionList", () => {
       info: runtimeInfo(),
       sessions: [session({})],
       selectedSessionId: "api-1",
+      selectedDetail: session({}),
+      detailLoading: false,
       totalSessions: 1,
       windowStart: 0,
       maxDetailLines: 2,
@@ -312,6 +314,8 @@ describe("cli-view.renderInteractiveSessionList", () => {
       info: runtimeInfo(),
       sessions: [session({}), session({ id: "api-2", tmuxSession: "api-2", branch: "api-2" })],
       selectedSessionId: null,
+      selectedDetail: null,
+      detailLoading: false,
       totalSessions: 2,
       windowStart: 0,
       maxDetailLines: 2,
@@ -321,16 +325,17 @@ describe("cli-view.renderInteractiveSessionList", () => {
   });
 
   it("shows compact link ids in selected session details", () => {
+    const detail = session({
+      slots: {
+        links: [{ label: "jira", url: "https://jira.example.com/browse/OPS-9" }],
+      },
+    });
     const output = renderInteractiveSessionList({
       info: runtimeInfo(),
-      sessions: [
-        session({
-          slots: {
-            links: [{ label: "jira", url: "https://jira.example.com/browse/OPS-9" }],
-          },
-        }),
-      ],
+      sessions: [detail],
       selectedSessionId: "api-1",
+      selectedDetail: detail,
+      detailLoading: false,
       totalSessions: 1,
       windowStart: 0,
       maxDetailLines: 3,
@@ -341,10 +346,13 @@ describe("cli-view.renderInteractiveSessionList", () => {
   });
 
   it("shows a queued detail field for the selected session with 2 real queued messages at maxDetailLines 3 (A5/A1.1)", () => {
+    const detail = session({ queuedMessages: { messages: ["a", "b"], awaitingPrompt: false } });
     const output = renderInteractiveSessionList({
       info: runtimeInfo(),
-      sessions: [session({ queuedMessages: { messages: ["a", "b"], awaitingPrompt: false } })],
+      sessions: [detail],
       selectedSessionId: "api-1",
+      selectedDetail: detail,
+      detailLoading: false,
       totalSessions: 1,
       windowStart: 0,
       maxDetailLines: 3,
@@ -354,10 +362,13 @@ describe("cli-view.renderInteractiveSessionList", () => {
   });
 
   it("shows no queued detail field for a selected session with no queuedMessages", () => {
+    const detail = session({});
     const output = renderInteractiveSessionList({
       info: runtimeInfo(),
-      sessions: [session({})],
+      sessions: [detail],
       selectedSessionId: "api-1",
+      selectedDetail: detail,
+      detailLoading: false,
       totalSessions: 1,
       windowStart: 0,
       maxDetailLines: 3,
@@ -367,15 +378,72 @@ describe("cli-view.renderInteractiveSessionList", () => {
   });
 
   it("shows no queued detail field for the real post-delivery shape {messages: [], awaitingPrompt: true} (A11)", () => {
+    const detail = session({ queuedMessages: { messages: [], awaitingPrompt: true } });
     const output = renderInteractiveSessionList({
       info: runtimeInfo(),
-      sessions: [session({ queuedMessages: { messages: [], awaitingPrompt: true } })],
+      sessions: [detail],
       selectedSessionId: "api-1",
+      selectedDetail: detail,
+      detailLoading: false,
       totalSessions: 1,
       windowStart: 0,
       maxDetailLines: 3,
     });
 
     expect(output).not.toContain("queued");
+  });
+
+  // Regression pin for the sessions-payload-projection change: the list row
+  // no longer carries `prompt`/`launchCommand`, so the detail pane MUST read
+  // them off a separately fetched `selectedDetail`, never off the row found
+  // in `sessions`. cli-view.test.ts's own `session()` fixture supplies both
+  // fields on every object it builds, so a case that passes a PROJECTED row
+  // (no prompt/launchCommand) as the list entry, with the full detail
+  // supplied only via `selectedDetail`, is the one case that actually
+  // exercises the split — anything using `session()` for both would stay
+  // green even if the pane read the wrong argument.
+  it("detail pane renders prompt and launch from the fetched detail, not the list row", () => {
+    const { prompt: _prompt, launchCommand: _launchCommand, ...projectedRow } = session({});
+    const detail = session({ prompt: "Ship the feature", launchCommand: "claude --resume" });
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [projectedRow],
+      selectedSessionId: "api-1",
+      selectedDetail: detail,
+      detailLoading: false,
+      totalSessions: 1,
+      windowStart: 0,
+      maxDetailLines: 8,
+    });
+
+    expect(output).toContain("Ship the feature");
+    expect(output).toContain("claude --resume");
+  });
+
+  it("renders a loading line and does not throw while the detail fetch is in flight", () => {
+    expect(() =>
+      renderInteractiveSessionList({
+        info: runtimeInfo(),
+        sessions: [session({})],
+        selectedSessionId: "api-1",
+        selectedDetail: null,
+        detailLoading: true,
+        totalSessions: 1,
+        windowStart: 0,
+        maxDetailLines: 3,
+      }),
+    ).not.toThrow();
+
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [session({})],
+      selectedSessionId: "api-1",
+      selectedDetail: null,
+      detailLoading: true,
+      totalSessions: 1,
+      windowStart: 0,
+      maxDetailLines: 3,
+    });
+    expect(output).toContain("Loading");
   });
 });

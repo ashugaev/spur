@@ -117,6 +117,7 @@ import {
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
+  type SessionListItemView,
   type SessionView,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
@@ -142,6 +143,9 @@ import {
 } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
+// Debounces the detail-pane refetch behind arrow-key repeats: holding an
+// arrow key issues one GET /sessions/:id, not one per keypress.
+const DETAIL_FETCH_DEBOUNCE_MS = 150;
 const LIST_FIXED_ROWS = 9;
 const LIST_MIN_SESSION_ROWS = 4;
 const LIST_MAX_DETAIL_ROWS = 6;
@@ -184,7 +188,7 @@ function captureTmuxTarget(sessionName: string, lines = 200): string {
   ).trimEnd();
 }
 
-function sessionLogAgentPane(session: SessionView): string {
+function sessionLogAgentPane(session: SessionListItemView): string {
   return session.runtimeAlive ? dimText(RUNTIME_LOGS_UNAVAILABLE) : dimText("(agent is not live)");
 }
 
@@ -535,7 +539,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function findSelectedIndex(
-  sessions: SessionView[],
+  sessions: SessionListItemView[],
   selectedSessionId: string | null,
 ): number | null {
   if (!selectedSessionId) return null;
@@ -544,7 +548,7 @@ function findSelectedIndex(
 }
 
 function moveSelection(
-  sessions: SessionView[],
+  sessions: SessionListItemView[],
   selectedSessionId: string | null,
   delta: number,
 ): string | null {
@@ -558,11 +562,14 @@ function moveSelection(
   return next ? next.id : null;
 }
 
-async function loadRawSessions(cliEntrypoint: string, configPath?: string): Promise<SessionView[]> {
-  return getJson<SessionView[]>(cliEntrypoint, "/sessions", configPath);
+async function loadRawSessions(
+  cliEntrypoint: string,
+  configPath?: string,
+): Promise<SessionListItemView[]> {
+  return getJson<SessionListItemView[]>(cliEntrypoint, "/sessions", configPath);
 }
 
-function visibleSessionsForHumanList(sessions: SessionView[]): SessionView[] {
+function visibleSessionsForHumanList(sessions: SessionListItemView[]): SessionListItemView[] {
   return sessions.filter(
     (session) => session.status !== "completed" && session.status !== "killed",
   );
@@ -631,7 +638,7 @@ async function loadUserActions(
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
-): Promise<{ info: RuntimeInfo; sessions: SessionView[] }> {
+): Promise<{ info: RuntimeInfo; sessions: SessionListItemView[] }> {
   const [info, sessions] = await Promise.all([
     getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath),
     loadRawSessions(cliEntrypoint, configPath),
@@ -639,7 +646,10 @@ async function loadHumanListData(
   return { info, sessions: sortSessionsForList(visibleSessionsForHumanList(sessions)) };
 }
 
-function replaceListedSession(sessions: SessionView[], updated: SessionView): SessionView[] {
+function replaceListedSession(
+  sessions: SessionListItemView[],
+  updated: SessionView,
+): SessionListItemView[] {
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
@@ -700,8 +710,10 @@ function appendOptionValue(value: string, previous?: string[]): string[] {
 
 function renderLiveSessionList(args: {
   info: RuntimeInfo;
-  sessions: SessionView[];
+  sessions: SessionListItemView[];
   selectedSessionId: string | null;
+  selectedDetail: SessionView | null;
+  detailLoading: boolean;
   statusMessage?: string;
 }): string {
   const rows = process.stdout.rows > 0 ? process.stdout.rows : 24;
@@ -726,6 +738,8 @@ function renderLiveSessionList(args: {
     info: args.info,
     sessions: visibleSessions,
     selectedSessionId: args.selectedSessionId,
+    selectedDetail: args.selectedDetail,
+    detailLoading: args.detailLoading,
     totalSessions: args.sessions.length,
     windowStart,
     maxDetailLines,
@@ -746,7 +760,7 @@ function renderAttachedPaneView(args: { title: string; content: string }): strin
 }
 
 interface SessionLogViewState {
-  session: SessionView;
+  session: SessionListItemView;
   agentPane: string;
   eventLines: string[];
   localLines: string[];
@@ -826,7 +840,10 @@ function readDisplaySessionEventLines(dataDir: string, sessionId: string): strin
     .map(formatEventLine);
 }
 
-function buildStateChangeLine(previous: SessionView, next: SessionView): string | null {
+function buildStateChangeLine(
+  previous: SessionListItemView,
+  next: SessionListItemView,
+): string | null {
   const changes: string[] = [];
   if (previous.status !== next.status) {
     changes.push(`status ${previous.status} -> ${next.status}`);
@@ -1533,6 +1550,15 @@ async function runInteractiveSessionList(
   let attachedPaneContent = "";
   let terminalActive = false;
   let refreshTimer: NodeJS.Timeout | undefined;
+  // The selector's detail pane is fetched from GET /sessions/:id, never
+  // sliced off the projected list row — the list no longer carries `prompt`
+  // or `launchCommand`. selectedDetailToken guards a stale fetch response
+  // (an abandoned row's answer arriving after a newer selection) from ever
+  // being rendered.
+  let selectedDetail: SessionView | null = null;
+  let selectedDetailToken = 0;
+  let detailLoading = false;
+  let detailDebounceTimer: NodeJS.Timeout | undefined;
 
   const render = (): void => {
     if (closed) return;
@@ -1553,9 +1579,68 @@ async function runInteractiveSessionList(
       info,
       sessions,
       selectedSessionId,
+      selectedDetail,
+      detailLoading,
       ...(statusMessage ? { statusMessage } : {}),
     };
     process.stdout.write(`\u001b[2J\u001b[H${renderLiveSessionList(listArgs)}\n`);
+  };
+
+  // Refetches the selected session's detail off GET /sessions/:id. Guarded
+  // by the token so a resolve for an abandoned selection is dropped, never
+  // rendered — and a stale resolve never clears `detailLoading`, or the pane
+  // would flash to the reselect line while the newest fetch is still
+  // in flight.
+  const loadSelectedDetail = async (): Promise<void> => {
+    if (selectedSessionId === null) {
+      selectedDetail = null;
+      detailLoading = false;
+      return;
+    }
+    selectedDetailToken += 1;
+    const token = selectedDetailToken;
+    const id = selectedSessionId;
+    try {
+      const detail = await getJson<SessionView>(cliEntrypoint, `/sessions/${id}`, configPath);
+      if (token !== selectedDetailToken || id !== selectedSessionId) return;
+      selectedDetail = detail;
+      detailLoading = false;
+      render();
+    } catch (error) {
+      if (token !== selectedDetailToken || id !== selectedSessionId) return;
+      detailLoading = false;
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+      render();
+    }
+  };
+
+  // The single path every selection change routes through — arrow keys, a
+  // mutation response (restore/pause/respawn already return a full
+  // SessionView, so no refetch is needed there), a vanished selection, and
+  // a terminal action clearing the selection. Without this, the pane would
+  // show the previous row's detail under a new id until the next tick, or
+  // stay populated after a kill/complete cleared the selection.
+  const setSelectedSession = (id: string | null, detail?: SessionView): void => {
+    selectedSessionId = id;
+    if (detailDebounceTimer) {
+      clearTimeout(detailDebounceTimer);
+      detailDebounceTimer = undefined;
+    }
+    if (detail) {
+      selectedDetail = detail;
+      detailLoading = false;
+      return;
+    }
+    selectedDetail = null;
+    if (id === null) {
+      detailLoading = false;
+      return;
+    }
+    detailLoading = true;
+    detailDebounceTimer = setTimeout(() => {
+      void loadSelectedDetail();
+    }, DETAIL_FETCH_DEBOUNCE_MS);
   };
 
   const enableTerminal = (): void => {
@@ -1607,9 +1692,11 @@ async function runInteractiveSessionList(
       sessions = nextSessions;
       if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
         const vanishedId = selectedSessionId;
-        selectedSessionId = null;
+        setSelectedSession(null);
         clearPendingConfirmations();
         statusMessage = brandLine(`${vanishedId} disappeared. Use ↑↓ to reselect before acting.`);
+      } else {
+        await loadSelectedDetail();
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1620,10 +1707,10 @@ async function runInteractiveSessionList(
     }
   };
 
-  const getSelectedSession = (): SessionView | null =>
+  const getSelectedSession = (): SessionListItemView | null =>
     sessions.find((session) => session.id === selectedSessionId) ?? null;
 
-  const getSelectedSessionOrWarn = (): SessionView | null => {
+  const getSelectedSessionOrWarn = (): SessionListItemView | null => {
     const session = getSelectedSession();
     if (session) return session;
     statusMessage = brandLine(RESELECT_MESSAGE);
@@ -1686,7 +1773,7 @@ async function runInteractiveSessionList(
         configPath,
       );
       sessions = replaceListedSession(sessions, restored);
-      selectedSessionId = restored.id;
+      setSelectedSession(restored.id, restored);
       clearPendingConfirmations();
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
@@ -1813,7 +1900,7 @@ async function runInteractiveSessionList(
     try {
       const paused = await postSessionAction(cliEntrypoint, session.id, "pause", configPath);
       sessions = replaceListedSession(sessions, paused);
-      selectedSessionId = paused.id;
+      setSelectedSession(paused.id, paused);
       clearPendingConfirmations();
       statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
@@ -1837,7 +1924,7 @@ async function runInteractiveSessionList(
     try {
       const completed = await postSessionAction(cliEntrypoint, session.id, "complete", configPath);
       sessions = sessions.filter((entry) => entry.id !== completed.id);
-      selectedSessionId = null;
+      setSelectedSession(null);
       clearPendingConfirmations();
       statusMessage = brandLine(`Completed ${completed.id}.`);
     } catch (error) {
@@ -1870,7 +1957,7 @@ async function runInteractiveSessionList(
         force ? { force: true } : {},
       );
       sessions = sessions.filter((entry) => entry.id !== killed.id);
-      selectedSessionId = null;
+      setSelectedSession(null);
       clearPendingConfirmations();
       statusMessage = brandLine(`Killed ${killed.id}.`);
     } catch (error) {
@@ -1920,7 +2007,7 @@ async function runInteractiveSessionList(
         configPath,
       );
       sessions = sortSessionsForList([...sessions, respawned]);
-      selectedSessionId = respawned.id;
+      setSelectedSession(respawned.id, respawned);
       clearPendingConfirmations();
       statusMessage = brandLine(`Respawned as ${respawned.id}.`);
       return;
@@ -1981,13 +2068,13 @@ async function runInteractiveSessionList(
       }
       if (key.name === "up") {
         clearPendingConfirmations();
-        selectedSessionId = moveSelection(sessions, selectedSessionId, -1);
+        setSelectedSession(moveSelection(sessions, selectedSessionId, -1));
         render();
         return;
       }
       if (key.name === "down") {
         clearPendingConfirmations();
-        selectedSessionId = moveSelection(sessions, selectedSessionId, 1);
+        setSelectedSession(moveSelection(sessions, selectedSessionId, 1));
         render();
         return;
       }
@@ -2036,12 +2123,16 @@ async function runInteractiveSessionList(
       if (refreshTimer) {
         clearInterval(refreshTimer);
       }
+      if (detailDebounceTimer) {
+        clearTimeout(detailDebounceTimer);
+      }
       process.stdin.off("keypress", onKeypress);
       process.stdout.off("resize", onResize);
       disableTerminal();
     };
 
     enableTerminal();
+    setSelectedSession(selectedSessionId);
     render();
     refreshTimer = setInterval(() => {
       void refresh();
