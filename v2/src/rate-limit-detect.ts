@@ -53,22 +53,13 @@ const TMUX_BANNER_MARKERS: readonly string[] = [
 const TMUX_GUTTER_GLYPHS: ReadonlySet<string> = new Set(["▎", "│", "┃", "|", ">", "+"]);
 const TMUX_QUOTE_CHARS: ReadonlySet<string> = new Set(['"', "'", "`"]);
 
-// Status glyphs an agent TUI renders in front of its own banner line (claude's
-// "⚠ Usage limit reached · continuing automatically at Sep 2, 8am", codex's
-// "■ ..."). A marker after one of these is a genuine banner, not agent-rendered
-// content — the gutter glyphs above stay rejected. Narrow allowlist on purpose:
-// accepting any leading non-alphanumeric would re-admit quoted and boxed prose.
-const TMUX_BANNER_GLYPHS: ReadonlySet<string> = new Set([
-  "■",
-  "⚠",
-  "✗",
-  "✘",
-  "●",
-  "▲",
-  "✻",
-  "⏺",
-  "✢",
-]);
+// The two observed banner-chrome glyphs: claude's "⚠ Usage limit reached ·
+// continuing automatically at Sep 2, 8am" and codex's "■ Your workspace is out
+// of credits". Deliberately excludes claude's own content bullets and spinner
+// frames ("⏺", "●", "✻", "✢") — those prefix ordinary assistant and tool-call
+// lines, so admitting them would strip the chrome off agent output that merely
+// mentions rate-limit vocabulary.
+const TMUX_BANNER_GLYPHS: ReadonlySet<string> = new Set(["■", "⚠"]);
 
 // Emoji presentation selector: "⚠️" is "⚠" + U+FE0F, so the glyph check above
 // must consume it or the banner body would start with an invisible codepoint.
