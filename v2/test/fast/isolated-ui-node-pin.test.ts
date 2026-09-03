@@ -312,6 +312,12 @@ describe("spur-isolated-ui node pin", () => {
 
     expect(rejection).toMatchObject({ code: 1 });
     expect(rejection.stderr).toMatch(/\^20\.19\.0/);
+    // Full range, not a prefix of it: NODE_ENGINES_RANGE here is exactly
+    // what node_satisfies_engines's `node -e` wrote to stdout and the shell
+    // captured via command substitution — pins that the whole 28-byte
+    // engines.node string (including the trailing `>=24` clause) arrived
+    // intact, not truncated mid-write.
+    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0 \|\| >=24/);
     expect(rejection.stderr).toMatch(/v21\.7\.3/);
     expect(rejection.stderr).toMatch(/\.nvmrc/);
     expect(rejection.stderr).toMatch(/nvm install 24/);
@@ -584,5 +590,24 @@ fi
 
       expect({ version, actual }).toEqual({ version, actual: expected });
     }
+  });
+
+  // PR #824 review LOW 2: process.stdout.write(range) immediately followed
+  // by process.exit() is the documented Node truncation shape (the write to
+  // a pipe is async; exit() can abandon it mid-flight), and command
+  // substitution makes stdout a pipe here. Regression guard, not a
+  // reproduction of the truncation itself (not deterministically
+  // reproducible) — pins that the range write is followed by
+  // process.exitCode, never an explicit process.exit(satisfied ...) call,
+  // so the hazard cannot be silently reintroduced.
+  it("regression guard: the engines-range write is never immediately followed by process.exit (finding: #824 LOW 2)", () => {
+    const scriptSource = readFileSync(join(SOURCE_SCRIPT_DIR, "spur-isolated-ui.sh"), "utf8");
+    const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
+    if (!functionMatch) {
+      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+    }
+
+    expect(functionMatch[0]).not.toMatch(/process\.exit\(satisfied/);
+    expect(functionMatch[0]).toMatch(/process\.exitCode = satisfied \? 0 : 1/);
   });
 });

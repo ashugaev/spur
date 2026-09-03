@@ -116,7 +116,7 @@ node_satisfies_engines() {
     const current = parseVersionTuple(process.argv[2]);
     const satisfied = range.split("||").some((clause) => satisfiesClause(clause, current));
     process.stdout.write(range);
-    process.exit(satisfied ? 0 : 1);
+    process.exitCode = satisfied ? 0 : 1;
   ' "$ROOT_PACKAGE_JSON" "$current_version")" || status=$?
 
   if (( status == 2 )); then
