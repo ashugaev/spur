@@ -5,6 +5,68 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=./spur-sidecar-common.sh
 source "$SCRIPT_DIR/spur-sidecar-common.sh"
 
+NVMRC_FILE="$SCRIPT_DIR/../.nvmrc"
+
+# Only valid as an `if` condition: the trailing (( )) returns 1 on a false
+# comparison, which `set -e` would treat as a failure anywhere else.
+node_major_at_least() {
+  local want="$1"
+  local version=""
+  local major=""
+
+  version="$(node -v 2>/dev/null || true)"
+  major="${version#v}"
+  major="${major%%.*}"
+  [[ "$major" =~ ^[0-9]+$ ]] || return 1
+  (( major >= want ))
+}
+
+# The pane runs under a non-interactive login shell (env -u ... sh -lc, see
+# buildCommandSessionShellCommand in v2/src/runtime-tmux.ts), which sources no
+# nvm, so the sidecar otherwise lands on the system node — outside the root
+# engines range, where next/font throws under tsx and every request 500s.
+# docs/commands.md already makes nvm activation the sidecar command's own
+# duty; this is that activation, pinned by .nvmrc. Runs before the node-pty
+# probe and `pnpm install` below so one node both builds and runs the tree.
+use_pinned_node() {
+  local pinned=""
+  local nvm_dir=""
+
+  if [[ ! -f "$NVMRC_FILE" ]]; then
+    echo "spur-isolated-ui: missing node version pin: $NVMRC_FILE" >&2
+    exit 1
+  fi
+  pinned="$(tr -d '[:space:]' < "$NVMRC_FILE")"
+  if [[ ! "$pinned" =~ ^[0-9]+$ ]]; then
+    echo "spur-isolated-ui: $NVMRC_FILE must hold a bare node major, found: '$pinned'" >&2
+    exit 1
+  fi
+
+  if node_major_at_least "$pinned"; then
+    return 0
+  fi
+
+  nvm_dir="${NVM_DIR:-${SPUR_REAL_HOME:-$HOME}/.nvm}"
+  if [[ -s "$nvm_dir/nvm.sh" ]]; then
+    export NVM_DIR="$nvm_dir"
+    # nvm reports its own refusals on stderr and `nvm use --silent` is mute on
+    # both streams even when the version is missing (exit 3), so tolerate both
+    # statuses here and let the single check below own the diagnostic.
+    # shellcheck source=/dev/null
+    source "$NVM_DIR/nvm.sh" || true
+    nvm use --silent "$pinned" || true
+  fi
+
+  if node_major_at_least "$pinned"; then
+    return 0
+  fi
+
+  echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the $NVMRC_FILE pin (node $pinned). Install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2
+  exit 1
+}
+
+use_pinned_node
+
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 UI_PORT_START=${SPUR_SIDECAR_UI_PORT_START:-5600}
