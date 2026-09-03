@@ -32,7 +32,7 @@ import {
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
-import { initializeGhPath, setGhEventSink } from "./gh.js";
+import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
@@ -2060,6 +2060,7 @@ export async function startServer(
           Math.min(BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS, remainingBudgetMs()),
         );
         await awaitBounded("daemon.shutdown.server_close_timeout", "server.close", closePromise);
+        flushGhPollCycles();
         flushEventLogCollapse(service.config.dataDir);
         logEvent("daemon.stopped", {
           level: "info",

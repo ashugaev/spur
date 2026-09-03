@@ -11,6 +11,7 @@ vi.mock("../../src/event-log.js", () => ({
 const {
   GH_POLL_MIN_GRAPHQL_REMAINING,
   _resetGhUsageForTests,
+  flushGhPollCycles,
   noteGhInvocation,
   noteGitHubRateLimitHit,
   noteGraphqlCost,
@@ -25,6 +26,9 @@ const {
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const T0 = 1_800_000_000_000;
+// Mirrors gh.ts's GH_POLL_CYCLE_ROLLUP_MS. Not exported: the rollup window is
+// a source constant, not a public knob, so tests pin the value instead.
+const GH_POLL_CYCLE_ROLLUP_MS = 900_000;
 
 function usageEvents(window: "minute" | "hour"): Array<Record<string, unknown>> {
   return logSpurEventMock.mock.calls
@@ -330,22 +334,35 @@ describe("gh usage accounting", () => {
   });
 
   it("reports the swallowed zero cycles on the next paying cycle and reopens the run", async () => {
-    await runGhPollCycle({ kind: "attention" }, async () => {});
-    await runGhPollCycle({ kind: "attention" }, async () => {});
-    await runGhPollCycle({ kind: "attention" }, async () => {});
-    await runGhPollCycle({ kind: "attention" }, async () => {
-      noteGhInvocation(["pr", "view", "42"], T0);
-    });
-    await runGhPollCycle({ kind: "attention" }, async () => {});
-    await runGhPollCycle({ kind: "attention" }, async () => {});
+    // Rollup: the paying 4th cycle now lands inside the window opened by the
+    // first (zero-cost) cycle, so it accumulates instead of emitting on the
+    // spot. Only the window's own close, past GH_POLL_CYCLE_ROLLUP_MS, emits
+    // the aggregate — with cycles/zeroCycles, not suppressedZeroCycles.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle({ kind: "attention" }, async () => {});
+      await runGhPollCycle({ kind: "attention" }, async () => {});
+      await runGhPollCycle({ kind: "attention" }, async () => {});
+      await runGhPollCycle({ kind: "attention" }, async () => {
+        noteGhInvocation(["pr", "view", "42"], Date.now());
+      });
+      await runGhPollCycle({ kind: "attention" }, async () => {});
+      await runGhPollCycle({ kind: "attention" }, async () => {});
 
-    expect(cycleEvents()).toEqual([
-      expect.objectContaining({ calls: 0, bySubcommand: {} }),
-      expect.objectContaining({ calls: 1, suppressedZeroCycles: 2 }),
-      expect.objectContaining({ calls: 0, bySubcommand: {} }),
-    ]);
-    expect(cycleEvents()[0]).not.toHaveProperty("suppressedZeroCycles");
-    expect(cycleEvents()[2]).not.toHaveProperty("suppressedZeroCycles");
+      expect(cycleEvents()).toEqual([expect.objectContaining({ calls: 0, bySubcommand: {} })]);
+
+      vi.setSystemTime(T0 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle({ kind: "attention" }, async () => {});
+
+      expect(cycleEvents()).toEqual([
+        expect.objectContaining({ calls: 0, bySubcommand: {} }),
+        expect.objectContaining({ calls: 1, cycles: 6, zeroCycles: 5 }),
+      ]);
+      expect(cycleEvents()[1]).not.toHaveProperty("suppressedZeroCycles");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ages out a zero-cycle run whose source stopped polling", async () => {
@@ -408,6 +425,194 @@ describe("gh usage accounting", () => {
         expect.objectContaining({ cycle: "github_source", calls: 1 }),
       ]),
     );
+  });
+
+  // AC1 regression pin: emission stays one event per completed cycle no
+  // matter how many sessions it polled. Already true pre-rollup (session
+  // count only moves cycle.calls), so this passes on a full revert by
+  // design — excluded from the mutation check.
+  it("emits exactly one event per cycle regardless of session count", async () => {
+    await runGhPollCycle({ kind: "attention" }, async () => {
+      for (let index = 0; index < 90; index += 1) {
+        noteGhInvocation(["pr", "view", String(index)], T0);
+      }
+    });
+
+    expect(cycleEvents()).toHaveLength(1);
+    expect(cycleEvents()[0]).toMatchObject({ calls: 90 });
+  });
+
+  it("AC2: rolls up M paying cycles inside the window into one aggregate at the next boundary", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "1"], Date.now());
+      });
+      for (let index = 0; index < 4; index += 1) {
+        await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+          noteGhInvocation(["pr", "view", "2"], Date.now());
+        });
+      }
+      expect(cycleEvents()).toHaveLength(1);
+
+      vi.setSystemTime(T0 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "3"], Date.now());
+      });
+
+      expect(cycleEvents()).toHaveLength(2);
+      expect(cycleEvents()[1]).toMatchObject({
+        cycles: 5,
+        calls: 5,
+        bySubcommand: { "pr view": 5 },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC3: keeps per-key rollups isolated under M paying cycles on two keys", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "1"], Date.now());
+      });
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "b" }, async () => {
+        noteGhInvocation(["pr", "view", "1"], Date.now());
+      });
+      expect(cycleEvents()).toHaveLength(2);
+
+      for (let index = 0; index < 3; index += 1) {
+        await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+          noteGhInvocation(["pr", "view", "2"], Date.now());
+        });
+        await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "b" }, async () => {
+          noteGhInvocation(["pr", "list"], Date.now());
+          noteGhInvocation(["pr", "list"], Date.now());
+        });
+      }
+      expect(cycleEvents()).toHaveLength(2);
+
+      vi.setSystemTime(T0 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "3"], Date.now());
+      });
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "b" }, async () => {
+        noteGhInvocation(["pr", "list"], Date.now());
+      });
+
+      expect(cycleEvents()).toHaveLength(4);
+      expect(cycleEvents()[2]).toMatchObject({ cycles: 4, calls: 4 });
+      expect(cycleEvents()[3]).toMatchObject({ cycles: 4, calls: 7 });
+      const emittedKeys = logSpurEventMock.mock.calls
+        .map((call) => call[1] as { event: string; sourceId?: string })
+        .filter((entry) => entry.event === "gh.poll_cycle")
+        .map((entry) => entry.sourceId);
+      expect(emittedKeys).toEqual(["a", "b", "a", "b"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC7: flushes an open paying window at the idle prune instead of dropping it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "stale" },
+        async () => {
+          noteGhInvocation(["pr", "view", "1"], Date.now());
+        },
+      );
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "stale" },
+        async () => {
+          noteGhInvocation(["pr", "view", "2"], Date.now());
+        },
+      );
+      expect(cycleEvents()).toHaveLength(1);
+
+      // The stale source's config entry is gone: nothing polls it again.
+      // A different key's cycle, run more than the idle ceiling later,
+      // is what drives the prune scan that discovers it.
+      vi.setSystemTime(T0 + HOUR + MINUTE);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "other" },
+        async () => {},
+      );
+
+      const emitted = logSpurEventMock.mock.calls
+        .map((call) => call[1] as { event: string; sourceId?: string; details?: unknown })
+        .filter((entry) => entry.event === "gh.poll_cycle" && entry.sourceId === "stale");
+      expect(emitted).toHaveLength(2);
+      expect(emitted[1]?.details).toMatchObject({ cycles: 1, calls: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC8: caps gh.poll_cycle volume at the measured host shape over one hour of virtual time", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      const sourceIds = ["gh", "diary-bot", "int", "assistant", "int-review"];
+      for (let tick = 0; tick < 60; tick += 1) {
+        for (const sourceId of sourceIds) {
+          await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId }, async () => {
+            noteGhInvocation(["pr", "list"], Date.now());
+          });
+        }
+        vi.setSystemTime(T0 + (tick + 1) * MINUTE);
+      }
+
+      expect(cycleEvents().length).toBeLessThanOrEqual(30);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC10: an idle host stays at one event per key across 2h of zero-cost cycles", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      const sourceIds = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"];
+      for (let tick = 0; tick < 60; tick += 1) {
+        for (const sourceId of sourceIds) {
+          await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId }, async () => {});
+        }
+        vi.setSystemTime(T0 + (tick + 1) * 2 * MINUTE);
+      }
+
+      expect(cycleEvents()).toHaveLength(sourceIds.length);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC11: a paying window already flushed by expiry is never re-emitted at shutdown", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "1"], Date.now());
+      });
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "2"], Date.now());
+      });
+
+      vi.setSystemTime(T0 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "3"], Date.now());
+      });
+      expect(cycleEvents()).toHaveLength(2);
+
+      flushGhPollCycles();
+      expect(cycleEvents()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("accounts GraphQL cost from an error envelope", async () => {
