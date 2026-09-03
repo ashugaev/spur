@@ -229,6 +229,8 @@ Respawn, handoff, and restore carry the persisted mode forward. A mode renamed o
 
 Chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with an inline picker: sessions from all connected projects grouped by project, each labeled with its session title, plus a back button. `/watch <sessionId>` binds directly. A message from an allowed user in a chat with no live bound session auto-spawns an ephemeral session and binds the chat to it, one per chat; see `autoSpawn` below. One bot token serves all projects; access stays controlled by that source's `allowedUsers` / `allowedChats`. `/watch@otherbot` is ignored in group chats. Bound messages, and messages that spawn a session, reach the agent with a contract: the requester sees only replies sent with `spur source reply "<message>"`, terminal output is invisible.
 
+Agent-initiated sends go the other way: `spur source reply` reaches the session's latest inbound chat, or `chatId` when it has none. That first send claims the chat for the session unless another session already holds it, so the user's typed reply routes back. `--button` renders inline choice buttons; a click arrives in the session as an ordinary user message carrying the button value, and consumes every button of that message. A choice lives 24h, 200 pending per source, and dies with the session. Delivery still needs a `telegram:message` send trigger on that source — without one, and without `chatId`, the launch prompt stays silent about Telegram. See [source reply](commands.md#source-reply).
+
 Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` always send a farewell and drop the binding — the forum topic closes too, unless the session was spawned with `selfDestruct` enabled. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
 
 ## Event log retention
@@ -295,6 +297,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.token`: required for `telegram`; supports `${ENV_VAR}` from the project `.env` or process env.
 - `projects.<id>.sources.<sourceId>.allowedUsers`: required non-empty Telegram user id allowlist.
 - `projects.<id>.sources.<sourceId>.allowedChats`: optional Telegram chat id allowlist; when omitted, any `allowedUsers` member can reach the bot from any shared chat.
+- `projects.<id>.sources.<sourceId>.chatId`: optional Telegram chat id an agent sends to when its session never received a Telegram message. Integer, or a `${VAR}` string resolving to one. Must be listed in `allowedChats` when that allowlist is set. Unset, `spur source reply` from such a session fails.
 - `projects.<id>.sources.<sourceId>.autoSpawn.enabled`: optional boolean, default `true`. `false` replies `No Spur session bound here. Use /watch or /spawn.` in an unbound chat.
 - `projects.<id>.sources.<sourceId>.autoSpawn.project`: optional, default `spur-shepherd`.
 - `projects.<id>.sources.<sourceId>.autoSpawn.agent`: optional `claude|codex|cursor|opencode`, default `opencode`.

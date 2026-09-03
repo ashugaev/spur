@@ -25,6 +25,7 @@ import {
   type SessionStateSubscription,
   type SidecarProcessIdentity,
   type TelegramBinding,
+  type TelegramChoice,
   type TelegramReplyTarget,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
@@ -112,6 +113,10 @@ function serviceSourceStateDir(dataDir: string, projectId: string, sourceId: str
 
 function telegramBindingFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "telegram", projectId, `${sourceId}.json`);
+}
+
+function telegramChoiceFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, "choices", `${sourceId}.json`);
 }
 
 function telegramReplyTargetFilePath(dataDir: string, sessionId: string): string {
@@ -264,6 +269,9 @@ interface CachedSessionFile extends FileFingerprint {
 
 const sessionFileCache = new Map<string, CachedSessionFile>();
 
+/** Cap on pending inline-button choices kept per Telegram source. */
+const MAX_TELEGRAM_CHOICES = 200;
+
 function statFingerprint(path: string): FileFingerprint | null {
   try {
     return statSync(path);
@@ -315,7 +323,7 @@ function readServiceSourceStateFile(path: string): ServiceSourceState {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
 }
 
-function readTelegramBindingKey(chatId: number, messageThreadId?: number): string {
+export function telegramBindingKey(chatId: number, messageThreadId?: number): string {
   return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
@@ -336,6 +344,27 @@ function isTelegramBinding(value: unknown): value is TelegramBinding {
       (typeof binding.messageThreadId === "number" && Number.isInteger(binding.messageThreadId))) &&
     typeof binding.sessionId === "string" &&
     binding.sessionId.trim().length > 0
+  );
+}
+
+function isTelegramChoice(value: unknown): value is TelegramChoice {
+  if (!value || typeof value !== "object") return false;
+  const choice = value as Partial<TelegramChoice>;
+  return (
+    typeof choice.token === "string" &&
+    choice.token.length > 0 &&
+    typeof choice.offerId === "string" &&
+    choice.offerId.length > 0 &&
+    typeof choice.sessionId === "string" &&
+    choice.sessionId.length > 0 &&
+    typeof choice.chatId === "number" &&
+    Number.isInteger(choice.chatId) &&
+    (choice.messageThreadId === undefined ||
+      (typeof choice.messageThreadId === "number" && Number.isInteger(choice.messageThreadId))) &&
+    typeof choice.text === "string" &&
+    typeof choice.value === "string" &&
+    typeof choice.expiresAt === "string" &&
+    !Number.isNaN(Date.parse(choice.expiresAt))
   );
 }
 
@@ -1343,10 +1372,7 @@ export function readTelegramBindings(
     return new Map(
       values
         .filter(isTelegramBinding)
-        .map((binding) => [
-          readTelegramBindingKey(binding.chatId, binding.messageThreadId),
-          binding,
-        ]),
+        .map((binding) => [telegramBindingKey(binding.chatId, binding.messageThreadId), binding]),
     );
   } catch {
     return new Map();
@@ -1389,7 +1415,7 @@ export function writeTelegramBindings(
     existing.delete(key);
   }
   for (const binding of bindings) {
-    existing.set(readTelegramBindingKey(binding.chatId, binding.messageThreadId), binding);
+    existing.set(telegramBindingKey(binding.chatId, binding.messageThreadId), binding);
   }
   const existingLastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
   writeJsonFile(telegramBindingFilePath(dataDir, projectId, sourceId), {
@@ -1404,6 +1430,80 @@ export function writeTelegramBindings(
         ? { lastUpdateId: existingLastUpdateId }
         : {}),
   });
+}
+
+/** Newest-last, expired entries dropped. */
+export function readTelegramChoices(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): TelegramChoice[] {
+  const path = telegramChoiceFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const choices = (parsed as { choices?: unknown }).choices;
+  if (!Array.isArray(choices)) return [];
+  const now = Date.now();
+  return choices.filter(
+    (choice): choice is TelegramChoice =>
+      isTelegramChoice(choice) && Date.parse(choice.expiresAt) > now,
+  );
+}
+
+function writeTelegramChoices(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  choices: TelegramChoice[],
+): void {
+  writeJsonFile(telegramChoiceFilePath(dataDir, projectId, sourceId), {
+    choices: choices.slice(-MAX_TELEGRAM_CHOICES),
+  });
+}
+
+export function appendTelegramChoices(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  choices: TelegramChoice[],
+): void {
+  if (choices.length === 0) return;
+  writeTelegramChoices(dataDir, projectId, sourceId, [
+    ...readTelegramChoices(dataDir, projectId, sourceId),
+    ...choices,
+  ]);
+}
+
+/**
+ * Consumes the whole offer the token belongs to, so sibling buttons go dead.
+ * A token clicked from a chat it was not offered in consumes nothing.
+ */
+export function takeTelegramChoice(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  token: string,
+  chatId: number,
+): TelegramChoice | null {
+  const choices = readTelegramChoices(dataDir, projectId, sourceId);
+  const taken = choices.find((choice) => choice.token === token && choice.chatId === chatId);
+  if (!taken) {
+    writeTelegramChoices(dataDir, projectId, sourceId, choices);
+    return null;
+  }
+  writeTelegramChoices(
+    dataDir,
+    projectId,
+    sourceId,
+    choices.filter((choice) => choice.offerId !== taken.offerId),
+  );
+  return taken;
 }
 
 export function readTelegramReplyTarget(
@@ -1443,6 +1543,19 @@ export function deleteTelegramSourceStateForSession(
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
     return;
+  }
+
+  const choiceDir = join(dir, "choices");
+  if (existsSync(choiceDir)) {
+    for (const entry of readdirSync(choiceDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const sourceId = entry.name.slice(0, -".json".length);
+      const choices = readTelegramChoices(dataDir, projectId, sourceId);
+      const remaining = choices.filter((choice) => choice.sessionId !== sessionId);
+      if (remaining.length !== choices.length) {
+        writeTelegramChoices(dataDir, projectId, sourceId, remaining);
+      }
+    }
   }
 
   for (const entry of readdirSync(dir, { withFileTypes: true })) {

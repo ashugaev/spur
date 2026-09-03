@@ -12,6 +12,7 @@ import {
   readPendingSendBatches,
   readTelegramBindings,
   readTelegramLastUpdateId,
+  readTelegramChoices,
   readTelegramReplyTarget,
   readWorkItemLifecycles,
   readSession,
@@ -20,12 +21,14 @@ import {
   recordPendingSendBatch,
   recordWorkItem,
   recordWorkItemLifecycle,
+  takeTelegramChoice,
+  appendTelegramChoices,
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
-import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
+import type { PersistedPendingBatch, SessionRecord, TelegramChoice } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -220,7 +223,77 @@ describe("telegram source state", () => {
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
   });
+
+  it("consumes the whole offer on the first taken choice", async () => {
+    const dataDir = await newDataDir();
+    appendTelegramChoices(dataDir, "api", "tg", [
+      choice({ token: "t1", offerId: "offer-1", value: "yes" }),
+      choice({ token: "t2", offerId: "offer-1", value: "no" }),
+      choice({ token: "t3", offerId: "offer-2", value: "later" }),
+    ]);
+
+    // A click from a chat the offer was not sent to consumes nothing.
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t1", 999)).toBeNull();
+    expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(3);
+
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t1", -1001)).toMatchObject({ value: "yes" });
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual(["t3"]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t2", -1001)).toBeNull();
+  });
+
+  it("drops expired choices and caps the store", async () => {
+    const dataDir = await newDataDir();
+    appendTelegramChoices(dataDir, "api", "tg", [
+      choice({ token: "stale", expiresAt: new Date(Date.now() - 1_000).toISOString() }),
+      choice({ token: "fresh" }),
+    ]);
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "fresh",
+    ]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "stale", -1001)).toBeNull();
+
+    appendTelegramChoices(
+      dataDir,
+      "api",
+      "tg",
+      Array.from({ length: 250 }, (_unused, index) => choice({ token: `t${index}` })),
+    );
+    const stored = readTelegramChoices(dataDir, "api", "tg");
+    expect(stored).toHaveLength(200);
+    expect(stored.at(-1)?.token).toBe("t249");
+    expect(stored.some((entry) => entry.token === "fresh")).toBe(false);
+  });
+
+  it("removes a session's pending choices with the rest of its telegram state", async () => {
+    const dataDir = await newDataDir();
+    appendTelegramChoices(dataDir, "api", "tg", [
+      choice({ token: "mine", sessionId: "api-1" }),
+      choice({ token: "theirs", sessionId: "api-2" }),
+    ]);
+
+    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "theirs",
+    ]);
+  });
 });
+
+function choice(
+  overrides: Partial<TelegramChoice> & Pick<TelegramChoice, "token">,
+): TelegramChoice {
+  return {
+    offerId: "offer-1",
+    sessionId: "api-1",
+    chatId: -1001,
+    text: "Yes",
+    value: "yes",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    ...overrides,
+  };
+}
 
 function reviewPendingBatch(overrides: Partial<PersistedPendingBatch> = {}): PersistedPendingBatch {
   return {

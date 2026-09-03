@@ -122,6 +122,7 @@ import {
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
   type SharedMemoryScope,
+  type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
@@ -404,7 +405,19 @@ function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
-  return `Sent ${response.source} reply for ${response.sessionId}.`;
+  const buttons = response.buttons ? ` with ${response.buttons} button(s)` : "";
+  return `Sent ${response.source} reply for ${response.sessionId}${buttons}.`;
+}
+
+/** `<label>` or `<label>=<value>`; the value defaults to the label. */
+function parseButtonOption(raw: string, previous: SourceReplyButton[]): SourceReplyButton[] {
+  const separator = raw.indexOf("=");
+  const text = (separator === -1 ? raw : raw.slice(0, separator)).trim();
+  const value = (separator === -1 ? raw : raw.slice(separator + 1)).trim();
+  if (!text || !value) {
+    throw new Error("--button takes <label> or <label>=<value>");
+  }
+  return [...previous, { text, value }];
 }
 
 function renderStateSubscription(record: SessionStateSubscription): string {
@@ -3828,11 +3841,17 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Reply to the latest source message for a session.")
     .argument("<message...>", "Message to send")
     .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option(
+      "--button <label[=value]>",
+      "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
+      parseButtonOption,
+      [] as SourceReplyButton[],
+    )
     .option("--json", "Print raw JSON")
     .action(
       async (
         messageParts: string[],
-        options: { session?: string; json?: boolean },
+        options: { session?: string; json?: boolean; button?: SourceReplyButton[] },
         command: Command,
       ) => {
         const configPath = prepareInstanceConfig(
@@ -3842,7 +3861,11 @@ export function createProgram(cliEntrypoint: string): Command {
         if (!sessionId) {
           throw new Error("source reply requires --session or SPUR_SESSION");
         }
-        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        const buttons = options.button ?? [];
+        const payload: SourceReplyRequest = {
+          message: messageParts.join(" "),
+          ...(buttons.length > 0 ? { buttons } : {}),
+        };
         await outputResult({
           json: Boolean(options.json),
           label: "sending source reply",

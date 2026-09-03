@@ -104,6 +104,69 @@ describe("sendTelegramReply", () => {
     );
   });
 
+  it("puts the inline keyboard on the last chunk only", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 56 } })),
+      );
+
+    await sendTelegramReply({ token: "token-123" }, { chatId: 123 }, `${"a".repeat(4096)}b`, {
+      buttons: [
+        { text: "Yes", callbackData: "spur_choice:t0" },
+        { text: "No", callbackData: "spur_choice:t1" },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "https://api.telegram.org/bottoken-123/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({ chat_id: 123, text: "a".repeat(4096) }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.telegram.org/bottoken-123/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: 123,
+          text: "b",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Yes", callback_data: "spur_choice:t0" }],
+              [{ text: "No", callback_data: "spur_choice:t1" }],
+            ],
+          },
+        }),
+      }),
+    );
+  });
+
+  it("keeps the keyboard when the reply edits a pending status message", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+
+    await sendTelegramReply({ token: "token-123" }, { chatId: 123, statusMessageId: 77 }, "Pick", {
+      buttons: [{ text: "Yes", callbackData: "spur_choice:t0" }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/bottoken-123/editMessageText",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: 123,
+          message_id: 77,
+          text: "Pick",
+          reply_markup: {
+            inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:t0" }]],
+          },
+        }),
+      }),
+    );
+  });
+
   it("honors Telegram retry_after before retrying a rate limit", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock

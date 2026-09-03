@@ -18,6 +18,26 @@ export interface TelegramReplySendResult {
   statusMessageIdConsumed?: boolean;
 }
 
+/** One inline button: `text` is what the user sees, `callbackData` what the click carries back. */
+export interface TelegramInlineButton {
+  text: string;
+  callbackData: string;
+}
+
+interface TelegramInlineKeyboard {
+  inline_keyboard: { text: string; callback_data: string }[][];
+}
+
+/** One button per row: labels are agent-authored and can be long. */
+function inlineKeyboard(buttons: TelegramInlineButton[]): TelegramInlineKeyboard | undefined {
+  if (buttons.length === 0) return undefined;
+  return {
+    inline_keyboard: buttons.map((button) => [
+      { text: button.text, callback_data: button.callbackData },
+    ]),
+  };
+}
+
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 const TELEGRAM_RETRY_DELAYS_MS = [250, 1_000] as const;
 
@@ -155,11 +175,13 @@ async function sendTelegramMessage(
   chatId: number,
   text: string,
   messageThreadId?: number,
+  replyMarkup?: TelegramInlineKeyboard,
 ): Promise<void> {
   await callTelegram(config, "sendMessage", {
     chat_id: chatId,
     text,
     ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
   });
 }
 
@@ -167,24 +189,41 @@ export async function sendTelegramReply(
   config: Pick<TelegramSourceConfig, "token">,
   target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId" | "statusMessageId">,
   text: string,
-  options: { topicName?: string } = {},
+  options: { topicName?: string; buttons?: TelegramInlineButton[] } = {},
 ): Promise<TelegramReplySendResult> {
   const chunks = splitTelegramText(text);
   const firstChunk = chunks[0] ?? "";
+  // The keyboard rides the last chunk, so the buttons sit under the full message.
+  const keyboard = inlineKeyboard(options.buttons ?? []);
+  const chunkMarkup = (index: number): TelegramInlineKeyboard | undefined =>
+    index === chunks.length - 1 ? keyboard : undefined;
   if (target.statusMessageId !== undefined) {
     try {
       await callTelegram(config, "editMessageText", {
         chat_id: target.chatId,
         message_id: target.statusMessageId,
         text: firstChunk,
+        ...(chunkMarkup(0) ? { reply_markup: chunkMarkup(0) } : {}),
       });
     } catch (error) {
       if (!isNotModifiedError(error)) {
-        await sendTelegramMessage(config, target.chatId, firstChunk, target.messageThreadId);
+        await sendTelegramMessage(
+          config,
+          target.chatId,
+          firstChunk,
+          target.messageThreadId,
+          chunkMarkup(0),
+        );
       }
     }
-    for (const chunk of chunks.slice(1)) {
-      await sendTelegramMessage(config, target.chatId, chunk, target.messageThreadId);
+    for (const [index, chunk] of chunks.slice(1).entries()) {
+      await sendTelegramMessage(
+        config,
+        target.chatId,
+        chunk,
+        target.messageThreadId,
+        chunkMarkup(index + 1),
+      );
     }
     return { statusMessageIdConsumed: true };
   }
@@ -194,8 +233,8 @@ export async function sendTelegramReply(
       ? await createTelegramTopic(config, target.chatId, options.topicName)
       : null;
   const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
-  for (const chunk of chunks) {
-    await sendTelegramMessage(config, target.chatId, chunk, messageThreadId);
+  for (const [index, chunk] of chunks.entries()) {
+    await sendTelegramMessage(config, target.chatId, chunk, messageThreadId, chunkMarkup(index));
   }
   return messageThreadId !== undefined ? { messageThreadId } : {};
 }

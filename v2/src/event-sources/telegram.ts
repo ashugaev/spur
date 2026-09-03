@@ -6,10 +6,13 @@ import {
   readTelegramBindings,
   readTelegramLastUpdateId,
   readTelegramReplyTarget,
+  takeTelegramChoice,
+  telegramBindingKey,
   writeTelegramBindings,
   writeTelegramReplyTarget,
 } from "../metadata.js";
 import {
+  TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type TelegramAutoSpawnConfig,
   type TelegramBinding,
@@ -84,7 +87,9 @@ interface TelegramCallbackContext {
   callbackQuery?: {
     data?: string;
     message?: {
+      message_id?: number;
       message_thread_id?: number;
+      text?: string;
       chat: {
         id: number;
       };
@@ -184,10 +189,6 @@ export function parseTelegramCommand(text: string, botUsername?: string): Telegr
     default:
       return null;
   }
-}
-
-function telegramBindingKey(chatId: number, messageThreadId?: number): string {
-  return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
 function mergePersistedBindings(
@@ -487,6 +488,7 @@ export function wrapTelegramSpawnPrompt(taskText: string): string {
     "",
     "Source: telegram. The requester only sees messages you send with:",
     'spur source reply "<message>"',
+    'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value.',
     "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
   ].join("\n");
 }
@@ -653,6 +655,17 @@ async function handleTelegramCallback(
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
+  if (data.startsWith(TELEGRAM_CHOICE_CALLBACK_PREFIX)) {
+    await handleAgentChoiceCallback(
+      ctx,
+      runtime,
+      data.slice(TELEGRAM_CHOICE_CALLBACK_PREFIX.length),
+      message,
+      from,
+    );
+    return;
+  }
+
   if (data.startsWith(SPAWN_CALLBACK_PREFIX)) {
     const agent = data.slice(SPAWN_CALLBACK_PREFIX.length);
     if (!isTelegramAgentName(agent)) return;
@@ -758,6 +771,65 @@ async function handleTelegramCallback(
   } else {
     await ctx.reply?.(reply);
   }
+}
+
+/**
+ * Delivers a click on an agent-offered button as an ordinary user message to
+ * the session that offered it. The token is single-use and carries the whole
+ * offer with it, so sibling buttons go dead on the first click.
+ */
+async function handleAgentChoiceCallback(
+  ctx: TelegramCallbackContext,
+  runtime: TelegramRuntime,
+  token: string,
+  message: NonNullable<NonNullable<TelegramCallbackContext["callbackQuery"]>["message"]>,
+  from: { id: number; username?: string },
+): Promise<void> {
+  const deps = runtime.deps;
+  const choice = takeTelegramChoice(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+    token,
+    message.chat.id,
+  );
+  if (!choice) {
+    await ctx.answerCallbackQuery("This choice is no longer active.");
+    return;
+  }
+  const session = await findSession(deps, choice.sessionId);
+  if (!session) {
+    await ctx.answerCallbackQuery("Session is no longer active.");
+    return;
+  }
+  await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
+  // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
+  if (ctx.editMessageText && message.text) {
+    try {
+      await ctx.editMessageText(`${message.text}\n\nSelected: ${choice.text}`);
+    } catch (error) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram choice edit failed: ${errorText(error)}`,
+      );
+    }
+  }
+  writeTelegramReplyTarget(deps.dataDir, {
+    sessionId: choice.sessionId,
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
+    chatId: choice.chatId,
+    ...(choice.messageThreadId !== undefined ? { messageThreadId: choice.messageThreadId } : {}),
+    lastInboundAt: new Date().toISOString(),
+  });
+  deps.emit(TELEGRAM_MESSAGE_EVENT, {
+    sessionId: choice.sessionId,
+    chatId: choice.chatId,
+    ...(choice.messageThreadId !== undefined ? { messageThreadId: choice.messageThreadId } : {}),
+    userId: from.id,
+    ...(from.username ? { username: from.username } : {}),
+    messageId: message.message_id ?? 0,
+    text: choice.value,
+  });
 }
 
 async function handleTelegramText(

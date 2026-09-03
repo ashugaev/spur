@@ -217,6 +217,14 @@ function asOptionalPositiveInteger(value: unknown, label: string): number | unde
   return value;
 }
 
+function asOptionalInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return value;
+}
+
 function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
   const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
     if (typeof entry !== "number" || !Number.isInteger(entry)) {
@@ -901,6 +909,26 @@ function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnC
   };
 }
 
+/** Integer, or a `${VAR}` string resolving to one, so a chat id can stay out of a shared config. */
+function parseTelegramChatId(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalInteger(raw, label);
+  }
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  const parsed = Number(resolved.trim());
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return parsed;
+}
+
 function parseTelegramSource(
   projectId: string,
   sourceId: string,
@@ -915,6 +943,10 @@ function parseTelegramSource(
   }
   const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
   const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  const chatId = parseTelegramChatId(raw["chatId"], `${label}.chatId`, projectEnv);
+  if (chatId !== undefined && allowedChats !== undefined && !allowedChats.includes(chatId)) {
+    throw new Error(`${label}.chatId must be listed in ${label}.allowedChats`);
+  }
   if ((allowedUsers?.length ?? 0) === 0) {
     throw new Error(`${label} must define allowedUsers`);
   }
@@ -925,6 +957,7 @@ function parseTelegramSource(
     token,
     ...(allowedUsers !== undefined ? { allowedUsers } : {}),
     ...(allowedChats !== undefined ? { allowedChats } : {}),
+    ...(chatId !== undefined ? { chatId } : {}),
     autoSpawn,
   };
 }

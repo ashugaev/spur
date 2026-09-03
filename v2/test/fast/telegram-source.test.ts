@@ -3,7 +3,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
-import { writeTelegramBindings } from "../../src/metadata.js";
+import {
+  appendTelegramChoices,
+  readTelegramReplyTarget,
+  writeTelegramBindings,
+} from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
 
 const botInstances: FakeBot[] = [];
@@ -216,6 +220,7 @@ describe("wrapTelegramSpawnPrompt", () => {
       "",
       "Source: telegram. The requester only sees messages you send with:",
       'spur source reply "<message>"',
+      'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value.',
       "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
     ].join("\n");
     expect(wrapTelegramSpawnPrompt("fix the sidecar")).toBe(`fix the sidecar${suffix}`);
@@ -297,6 +302,140 @@ describe("telegramSourceModule", () => {
         ],
       },
     });
+  });
+
+  it("delivers an agent button click to the offering session and kills the offer", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    appendTelegramChoices(dataDir, "api", "telegram", [
+      {
+        token: "tok0",
+        offerId: "offer-1",
+        sessionId: "api-1",
+        chatId: -1001,
+        messageThreadId: 22,
+        text: "Yes",
+        value: "yes, deploy",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      {
+        token: "tok1",
+        offerId: "offer-1",
+        sessionId: "api-1",
+        chatId: -1001,
+        messageThreadId: 22,
+        text: "Later",
+        value: "wait",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ]);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          text: "Deploy now?",
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Sent: Yes");
+    expect(editMessageText).toHaveBeenCalledWith("Deploy now?\n\nSelected: Yes");
+    expect(emit).toHaveBeenCalledWith("telegram:message", {
+      sessionId: "api-1",
+      chatId: -1001,
+      messageThreadId: 22,
+      userId: 123,
+      username: "alek",
+      messageId: 90,
+      text: "yes, deploy",
+    });
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: -1001,
+      messageThreadId: 22,
+    });
+
+    // The sibling button is dead: the click consumed the whole offer.
+    emit.mockClear();
+    answerCallbackQuery.mockClear();
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok1",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("drops an agent button click for an unknown token, a foreign chat, or a dead session", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi.fn().mockResolvedValue([]);
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    appendTelegramChoices(dataDir, "api", "telegram", [
+      {
+        token: "tok0",
+        offerId: "offer-1",
+        sessionId: "api-1",
+        chatId: -1001,
+        text: "Yes",
+        value: "yes",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ]);
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:missing",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+
+    // A token from another chat must not fire, and stays unconsumed.
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 91, chat: { id: 123 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+
+    // Right chat, but the offering session is gone.
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 92, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith("Session is no longer active.");
+    expect(emit).not.toHaveBeenCalled();
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
   });
 
   it("navigates project sessions with status emojis and back button", async () => {

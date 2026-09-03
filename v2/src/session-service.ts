@@ -197,7 +197,9 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
+  appendTelegramChoices,
   readTelegramReplyTarget,
+  telegramBindingKey,
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeServiceInstance,
@@ -393,6 +395,7 @@ import {
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarProcessIdentity,
+  type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SidecarPortView,
@@ -400,6 +403,10 @@ import {
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
   type SessionModeConfig,
+  type TelegramChoice,
+  type TelegramReplyTarget,
+  TELEGRAM_CHOICE_CALLBACK_PREFIX,
+  TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
@@ -1426,12 +1433,103 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
+const MAX_SOURCE_REPLY_BUTTONS = 8;
+const MAX_SOURCE_REPLY_BUTTON_TEXT = 64;
+const MAX_SOURCE_REPLY_BUTTON_VALUE = 200;
+const TELEGRAM_CHOICE_TTL_MS = 24 * 60 * 60_000;
+
+// Reached straight from the HTTP body, so every field is validated here.
+function parseSourceReplyButtons(raw: unknown): SourceReplyButton[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    throw new InvalidSourceReplyInputError("buttons must be an array");
+  }
+  if (raw.length > MAX_SOURCE_REPLY_BUTTONS) {
+    throw new InvalidSourceReplyInputError(
+      `buttons must hold at most ${MAX_SOURCE_REPLY_BUTTONS} entries`,
+    );
+  }
+  const buttons: SourceReplyButton[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const text = typeof record["text"] === "string" ? record["text"].trim() : "";
+    if (!text || text.length > MAX_SOURCE_REPLY_BUTTON_TEXT) {
+      throw new InvalidSourceReplyInputError(
+        `button text must be 1-${MAX_SOURCE_REPLY_BUTTON_TEXT} characters`,
+      );
+    }
+    const value = typeof record["value"] === "string" ? record["value"].trim() : "";
+    if (!value || value.length > MAX_SOURCE_REPLY_BUTTON_VALUE) {
+      throw new InvalidSourceReplyInputError(
+        `button value must be 1-${MAX_SOURCE_REPLY_BUTTON_VALUE} characters`,
+      );
+    }
+    if (seen.has(text)) {
+      throw new InvalidSourceReplyInputError(`button text must be unique: ${text}`);
+    }
+    seen.add(text);
+    buttons.push({ text, value });
+  }
+  return buttons;
+}
+
+function buildTelegramChoices(
+  sessionId: string,
+  target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId">,
+  buttons: SourceReplyButton[],
+): TelegramChoice[] {
+  if (buttons.length === 0) return [];
+  const offerId = randomUUID();
+  // One random base per offer plus the button index: unique by construction,
+  // and short enough for Telegram's 64-byte callback_data with the prefix.
+  const tokenBase = offerId.replaceAll("-", "").slice(0, 15);
+  const expiresAt = new Date(Date.now() + TELEGRAM_CHOICE_TTL_MS).toISOString();
+  return buttons.map((button, index) => ({
+    token: `${tokenBase}${index}`,
+    offerId,
+    sessionId,
+    chatId: target.chatId,
+    ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+    text: button.text,
+    value: button.value,
+    expiresAt,
+  }));
+}
+
+/**
+ * Telegram capability block for the launch prompt. Present only when the
+ * project can both send (a `chatId` destination) and deliver back (a
+ * `telegram:message` send trigger on that same source) — otherwise an agent
+ * would offer buttons whose clicks reach nobody.
+ */
+function telegramAgentInstructions(project: ProjectConfig | undefined): string | undefined {
+  if (!project) return undefined;
+  const sourceId = Object.entries(project.sources).find(
+    ([, source]) => source.type === "telegram" && source.chatId !== undefined,
+  )?.[0];
+  if (!sourceId) return undefined;
+  const delivers = Object.values(project.triggers).some(
+    (trigger) =>
+      trigger.source === sourceId && trigger.event === TELEGRAM_MESSAGE_EVENT && "send" in trigger,
+  );
+  if (!delivers) return undefined;
+  return [
+    "Telegram: the user reads this session in Telegram. Your terminal output is invisible to them.",
+    '- Send them a message: `spur source reply "<message>"`.',
+    '- Offer choices: `spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me"`. Each `--button <label>` or `--button <label>=<value>` renders one inline button.',
+    "- A click and a typed reply both arrive as an ordinary user message in this session — a click carries the button value.",
+    "- Ask this way when you need a decision from the user; do not wait silently.",
+  ].join("\n");
+}
+
 function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
   tags: TagDefinition[],
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
+  telegramInstructions?: string,
 ): string {
   let base = initialMessage.trim()
     ? withSelfDestructInstructions(
@@ -1446,6 +1544,9 @@ function buildInitialMessage(
   }
   const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
+  if (telegramInstructions) {
+    base = `${base}\n\n${telegramInstructions}`;
+  }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
@@ -8313,6 +8414,7 @@ export class SessionService {
             this.config.tags,
             project.branchNaming?.regex,
             selfDestruct,
+            telegramAgentInstructions(project),
           );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...placeholder, worktreePath: workspacePath },
@@ -9332,6 +9434,7 @@ export class SessionService {
         this.config.tags,
         project.branchNaming?.regex,
         selfDestruct,
+        telegramAgentInstructions(project),
       );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...spawnPlaceholder, worktreePath: workspacePath },
@@ -9805,8 +9908,11 @@ export class SessionService {
     if (!message) {
       throw new InvalidSourceReplyInputError("message must be a non-empty string");
     }
+    const buttons = parseSourceReplyButtons(request.buttons);
 
-    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    const target =
+      readTelegramReplyTarget(this.config.dataDir, sessionId) ??
+      this.configuredTelegramReplyTarget(session);
     if (!target) {
       throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
     }
@@ -9818,8 +9924,19 @@ export class SessionService {
     }
 
     const view = await this.enrich(session);
+    const choices = buildTelegramChoices(sessionId, target, buttons);
+    // Persisted before the send: a click can only arrive after Telegram has the keyboard.
+    appendTelegramChoices(this.config.dataDir, target.projectId, target.sourceId, choices);
     const result = await sendTelegramReply(source, target, message, {
       topicName: telegramTopicName(view),
+      ...(choices.length > 0
+        ? {
+            buttons: choices.map((choice) => ({
+              text: choice.text,
+              callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
+            })),
+          }
+        : {}),
     });
     const { statusMessageId: _statusMessageId, ...targetWithoutStatus } = target;
     const replyTarget = {
@@ -9828,6 +9945,7 @@ export class SessionService {
       lastReplyAt: new Date().toISOString(),
     };
     writeTelegramReplyTarget(this.config.dataDir, replyTarget);
+    this.bindTelegramChatIfFree(replyTarget, sessionId);
     if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
       const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
       bindings.set(`${target.chatId}:${result.messageThreadId}`, {
@@ -9866,7 +9984,52 @@ export class SessionService {
       ...(replyTarget.messageThreadId !== undefined
         ? { messageThreadId: replyTarget.messageThreadId }
         : {}),
+      ...(choices.length > 0 ? { buttons: choices.length } : {}),
     };
+  }
+
+  /**
+   * Destination for a session that never received a Telegram message: the
+   * project's own Telegram source with a configured `chatId`.
+   */
+  private configuredTelegramReplyTarget(session: SessionRecord): TelegramReplyTarget | null {
+    const project = this.config.projects[session.project];
+    if (!project) return null;
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "telegram" || source.chatId === undefined) continue;
+      return {
+        sessionId: session.id,
+        projectId: session.project,
+        sourceId,
+        chatId: source.chatId,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Routes the user's typed reply back into this session by claiming the chat
+   * thread, but never steals one another session already owns.
+   */
+  private bindTelegramChatIfFree(
+    target: Pick<TelegramReplyTarget, "projectId" | "sourceId" | "chatId" | "messageThreadId">,
+    sessionId: string,
+  ): void {
+    const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
+    const key = telegramBindingKey(target.chatId, target.messageThreadId);
+    if (bindings.has(key)) return;
+    bindings.set(key, {
+      chatId: target.chatId,
+      ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+      sessionId,
+    });
+    writeTelegramBindings(
+      this.config.dataDir,
+      target.projectId,
+      target.sourceId,
+      bindings.values(),
+    );
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
@@ -12071,6 +12234,7 @@ export class SessionService {
         this.config.tags,
         project.branchNaming?.regex,
         session.selfDestruct,
+        telegramAgentInstructions(project),
       );
       const recoveryPaneTarget = {
         id: session.id,
@@ -12443,6 +12607,7 @@ export class SessionService {
           this.config.tags,
           restoreProject?.branchNaming?.regex,
           current.selfDestruct,
+          telegramAgentInstructions(restoreProject),
         );
         if (current.agent === "codex") {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
