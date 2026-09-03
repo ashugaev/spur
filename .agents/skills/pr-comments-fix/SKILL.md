@@ -25,6 +25,7 @@ WORKFLOW
        Wrong/incorrect            skip with reasoning
        Stylistic nitpick          skip unless matches project rules
        Already fixed              skip, note it
+       Valid, PR already merged   never fix here; file an issue per the `github` skill, reply with its link
 
   3  Apply fixes. Minimal change, verify no regressions.
 
@@ -52,4 +53,3 @@ RULES
   - Reply only inside the originating thread, never as a new top-level PR comment.
   - No follow-up, status, or summary comments on the main PR thread, no self-narration on own PRs.
   - One reply per thread; multi-item bot reviews get one reply on the originating comment covering each item.
-  - PR already merged: never fix the comment here. Reply in the thread with the filed issue link; open it per the `github` skill ISSUE REPORTING.
