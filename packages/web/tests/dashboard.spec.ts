@@ -430,6 +430,7 @@ test.describe("D1: Header renders correctly", () => {
 
 Source: telegram. The requester only sees messages you send with:
 spur source reply "<message>"
+Offer choices with \`--button <label>\` or \`--button <label>=<value>\`, repeatable: spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value.
 Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
     const root = makeWorkingSession({
       id: "search-desk-root",

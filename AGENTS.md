@@ -11,7 +11,7 @@ MIRROR
   `.codex/agents/*.toml` are the Codex-side agent prompts, parallel to `.claude/agents/*.md`. Update them when behavior or rules change.
   `.cursor/BUGBOT.md` configures Cursor BugBot review focus. Keep aligned with ALWAYS-ON RULES below.
   Hook scripts mirror per runtime: `.claude/hooks/`, `.codex/hooks/`, `.cursor/hooks/`. Sync runtime-specific scripts across all three. Cross-runtime scripts, for example `auto-push.sh`, live only in `.claude/hooks/`, referenced from each runtime's `hooks.json`.
-  The Telegram spawn-prompt suffix is mirrored in four places: `wrapTelegramSpawnPrompt` (v2/src/event-sources/telegram.ts), `TELEGRAM_REPLY_SUFFIX` (packages/web/src/lib/session-prompt.ts), and the pinning test in each package. Change all four together, or the web UI shows the raw suffix.
+  The Telegram spawn-prompt suffix is mirrored in six places: `wrapTelegramSpawnPrompt` (v2/src/event-sources/telegram.ts), `TelegramSendBatch.format` (v2/src/send-batches.ts), `TELEGRAM_REPLY_SUFFIX` (packages/web/src/lib/session-prompt.ts), and three web tests that rebuild it inline (`src/__tests__/session-prompt.test.ts`, `src/__tests__/session-search.test.ts`, `tests/dashboard.spec.ts` — escape the backticks in those template literals). Change all six together, or the web UI indexes and shows the raw suffix.
 
 
 AGENTS
