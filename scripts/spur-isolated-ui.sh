@@ -6,96 +6,157 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/spur-sidecar-common.sh"
 
 NVMRC_FILE="$SCRIPT_DIR/../.nvmrc"
+ROOT_PACKAGE_JSON="$SCRIPT_DIR/../package.json"
+NODE_ENGINES_RANGE=""
 
-# Echoes the running `node -v` major on stdout, or fails if node is missing
-# or its version string doesn't parse as vNN.NN.NN. Shared by both major
-# comparators below so the parsing lives in one place.
-current_node_major() {
-  local version
-  local major
+# True when the `node` on PATH right now satisfies the root package.json's
+# engines.node range; sets NODE_ENGINES_RANGE as a side effect so callers can
+# name the range in a failure message. Mirrors satisfiesClause in
+# v2/src/host-install.ts:460-483 — same two clause forms (`^X.Y.Z` and
+# `>=X[.Y[.Z]]`), anything else is false — so minor/patch precision is real;
+# bash arithmetic can't tell 22.13.0 from 22.5.0. The fast test pins this
+# check's verdicts against the exported satisfiesNodeEngineRange so the two
+# implementations cannot drift apart.
+# The version compared is `node -v`'s own output, passed as an argv string,
+# rather than that same process's `process.versions.node` — the two are
+# always identical for a real node binary, and going through argv is what
+# lets the fast test swap in a fake `node -v` without needing a real install
+# of every version under test.
+node_satisfies_engines() {
+  if ! command -v node >/dev/null 2>&1; then
+    NODE_ENGINES_RANGE="(node not found on PATH)"
+    return 1
+  fi
 
-  version="$(node -v 2>/dev/null || true)"
-  major="${version#v}"
-  major="${major%%.*}"
-  [[ "$major" =~ ^[0-9]+$ ]] || return 1
-  printf '%s\n' "$major"
-}
+  local current_version
+  current_version="$(node -v 2>/dev/null || true)"
+  if [[ ! "$current_version" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
+    NODE_ENGINES_RANGE="(could not parse node -v output: '$current_version')"
+    return 1
+  fi
 
-# Only valid as an `if` condition: the trailing (( )) returns 1 on a false
-# comparison, which `set -e` would treat as a failure anywhere else.
-# A floor, not exact-major equality: reached only on the no-nvm path, where
-# nothing can activate the pin, so a host is accepted if its node already
-# satisfies the root engines range's unbounded `>=` clause (see the
-# isolated-ui-node-pin.test.ts pin/engines tests).
-node_major_at_least() {
-  local want="$1"
-  local major
+  local status=0
+  NODE_ENGINES_RANGE="$(node -e '
+    const fs = require("fs");
+    let pkg;
+    try {
+      pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    } catch (error) {
+      console.error("spur-isolated-ui: cannot read " + process.argv[1] + ": " + error.message);
+      process.exit(2);
+    }
+    const range = pkg.engines && pkg.engines.node;
+    if (typeof range !== "string") {
+      console.error("spur-isolated-ui: " + process.argv[1] + " is missing engines.node");
+      process.exit(2);
+    }
 
-  major="$(current_node_major)" || return 1
-  (( major >= want ))
-}
+    function parseVersionTuple(value) {
+      const parts = String(value).replace(/^v/, "").split(".");
+      const major = Number.parseInt(parts[0] || "0", 10);
+      const minor = Number.parseInt(parts[1] || "0", 10);
+      const patch = Number.parseInt(parts[2] || "0", 10);
+      return [
+        Number.isNaN(major) ? 0 : major,
+        Number.isNaN(minor) ? 0 : minor,
+        Number.isNaN(patch) ? 0 : patch,
+      ];
+    }
 
-# Only valid as an `if` condition: same (( ))/`set -e` hazard as above.
-# Exact-major equality: whenever nvm is available to honor the pin, honor it
-# exactly, so a node newer than the pin doesn't silently skip `nvm use`.
-node_major_equals() {
-  local want="$1"
-  local major
+    function compareTuples(a, b) {
+      for (let index = 0; index < 3; index += 1) {
+        const diff = a[index] - b[index];
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    }
 
-  major="$(current_node_major)" || return 1
-  (( major == want ))
+    function satisfiesClause(clause, current) {
+      const trimmed = clause.trim();
+      const caret = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(trimmed);
+      if (caret) {
+        const major = Number.parseInt(caret[1], 10);
+        const min = [major, Number.parseInt(caret[2], 10), Number.parseInt(caret[3], 10)];
+        const max = [major + 1, 0, 0];
+        return compareTuples(current, min) >= 0 && compareTuples(current, max) < 0;
+      }
+      const gte = /^>=(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(trimmed);
+      if (gte) {
+        const min = [
+          Number.parseInt(gte[1], 10),
+          Number.parseInt(gte[2] || "0", 10),
+          Number.parseInt(gte[3] || "0", 10),
+        ];
+        return compareTuples(current, min) >= 0;
+      }
+      return false;
+    }
+
+    const current = parseVersionTuple(process.argv[2]);
+    const satisfied = range.split("||").some((clause) => satisfiesClause(clause, current));
+    process.stdout.write(range);
+    process.exit(satisfied ? 0 : 1);
+  ' "$ROOT_PACKAGE_JSON" "$current_version")" || status=$?
+
+  if (( status == 2 )); then
+    echo "spur-isolated-ui: broken checkout — cannot read engines.node from $ROOT_PACKAGE_JSON" >&2
+    exit 1
+  fi
+
+  if [[ -z "$NODE_ENGINES_RANGE" ]]; then
+    NODE_ENGINES_RANGE="the required Node range"
+  fi
+
+  return "$status"
 }
 
 # The pane runs under a non-interactive login shell (env -u ... sh -lc, see
 # buildCommandSessionShellCommand in v2/src/runtime-tmux.ts), which sources no
-# nvm, so the sidecar otherwise lands on the system node — outside the root
-# engines range, where next/font throws under tsx and every request 500s.
-# docs/commands.md already makes nvm activation the sidecar command's own
-# duty; this is that activation, pinned by .nvmrc. Runs before the node-pty
-# probe and `pnpm install` below so one node both builds and runs the tree.
-use_pinned_node() {
-  local pinned
-  local nvm_dir
+# nvm, so the sidecar otherwise lands on whatever node is already on PATH.
+# The node in hand decides everything: when it already satisfies
+# engines.node this is a no-op — no nvm sourced, no pin activated. That is
+# the common path, and it is what fixes the #824 QA blocker (a conformant
+# node 20/22 host with no node 24 under nvm). Only a host whose node cannot
+# run the tree falls through to .nvmrc, which is a remedy, not the
+# predicate. Runs before the node-pty probe and `pnpm install` below so one
+# node both builds and runs the tree.
+ensure_node_ready() {
+  if node_satisfies_engines; then
+    return 0
+  fi
 
   if [[ ! -f "$NVMRC_FILE" ]]; then
     echo "spur-isolated-ui: missing node version pin: $NVMRC_FILE" >&2
     exit 1
   fi
+  local pinned
   pinned="$(tr -d '[:space:]' < "$NVMRC_FILE")"
   if [[ ! "$pinned" =~ ^[0-9]+$ ]]; then
     echo "spur-isolated-ui: $NVMRC_FILE must hold a bare node major, found: '$pinned'" >&2
     exit 1
   fi
 
+  local nvm_dir
   nvm_dir="${NVM_DIR:-${SPUR_REAL_HOME:-$HOME}/.nvm}"
   if [[ -s "$nvm_dir/nvm.sh" ]]; then
     export NVM_DIR="$nvm_dir"
     # nvm reports its own refusals on stderr and `nvm use --silent` is mute on
     # both streams even when the version is missing (exit 3), so tolerate both
-    # statuses here and let the single check below own the diagnostic.
+    # statuses here and let the re-check below own the diagnostic.
     # shellcheck source=/dev/null
     source "$NVM_DIR/nvm.sh" || true
     nvm use --silent "$pinned" || true
-
-    if node_major_equals "$pinned"; then
-      return 0
-    fi
-
-    echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the $NVMRC_FILE pin (node $pinned). Install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2
-    exit 1
   fi
 
-  # No nvm on this host: nothing can activate the pin exactly, so fall back
-  # to the engines floor, which a node this new already satisfies.
-  if node_major_at_least "$pinned"; then
+  if node_satisfies_engines; then
     return 0
   fi
 
-  echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the $NVMRC_FILE pin (node $pinned) and nvm is not available to activate it. Install node $pinned or newer." >&2
+  echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the required range $NODE_ENGINES_RANGE. $NVMRC_FILE pins node $pinned — install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2
   exit 1
 }
 
-use_pinned_node
+ensure_node_ready
 
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"

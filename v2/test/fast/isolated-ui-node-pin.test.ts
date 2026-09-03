@@ -1,15 +1,16 @@
-// Regression test for #798: the isolated-ui sidecar pane launches through a
-// non-interactive login shell (env -u ... sh -lc, see
+// Regression test for #798/#824: the isolated-ui sidecar pane launches
+// through a non-interactive login shell (env -u ... sh -lc, see
 // buildCommandSessionShellCommand in v2/src/runtime-tmux.ts) that sources no
 // nvm, so it otherwise runs on whatever node happens to be on PATH. Outside
 // the root engines range, next/font throws under tsx and every request
 // 500s until wait_for_http exhausts its budget. scripts/spur-isolated-ui.sh
-// now pins node via .nvmrc before any node consumer runs. Whenever nvm can
-// activate the pin, it must match the pin's major exactly — a newer system
-// node must not silently skip `nvm use` (PR #824 review thread). Only when
-// no nvm exists at all, with no mechanism to activate the pin, does the
-// script fall back to accepting anything that already clears the engines
-// floor.
+// now decides purely on whether the node in hand satisfies the root
+// engines.node range (v2/src/host-install.ts satisfiesNodeEngineRange
+// semantics, reimplemented in node inside the script) — never on whether
+// nvm happens to be present. .nvmrc is only the remedy once engines rejects
+// the node in hand, never the predicate: PR #824's QA blocker was a
+// conformant node 22 host with a stale nvm that had no node 24 installed,
+// which the old "pin exactly" predicate rejected outright.
 import { execFile } from "node:child_process";
 import {
   chmodSync,
@@ -122,6 +123,11 @@ function createFakeWorktree(): FakeWorktree {
   );
   chmodSync(join(scriptDir, "spur-isolated-ui.sh"), 0o755);
 
+  // The script reads $SCRIPT_DIR/../package.json for engines.node — copy the
+  // real repo root package.json so the fake worktree checks the same range
+  // production does.
+  copyFileSync(join(REPO_ROOT, "package.json"), join(repoDir, "package.json"));
+
   writeFileSync(join(webDir, "next-env.d.ts"), "// next-env\n", "utf8");
   writeFileSync(join(webDir, "tsconfig.json"), "{}\n", "utf8");
 
@@ -133,6 +139,12 @@ function createFakeWorktree(): FakeWorktree {
 
   const logPath = join(repoDir, "calls.log");
 
+  // The script shells out to a bare `node -e '<script>'` for the engines
+  // check, so the stub must be real node (it runs the actual JS), not a
+  // fake that only understands `-v`. Only `node -v` (used for messages and
+  // by the fake pnpm below) is faked to report the version under test;
+  // every other invocation — in particular `node -e` — delegates to the
+  // real node binary that ran vitest itself.
   makeExecutable(
     join(pathDir, "node"),
     `#!/usr/bin/env bash
@@ -141,7 +153,7 @@ if [[ "\${1:-}" == "-v" ]]; then
   printf '%s\\n' "$SPUR_TEST_SYS_NODE"
   exit 0
 fi
-exit 0
+exec "$SPUR_TEST_REAL_NODE" "$@"
 `,
   );
 
@@ -168,12 +180,22 @@ exit 80
   return { logPath, pathDir, repoDir, toolDir, nvmDir };
 }
 
+// Writes an nvm-managed node install whose `node -v` and `node -e` (via
+// $SPUR_TEST_REAL_NODE passthrough) both report `version`, so activation
+// through `nvm use` changes what the engines re-check actually sees.
 function writeNvmVersion(nvmDir: string, version: string): void {
   const binDir = join(nvmDir, "versions", "node", `v${version}`, "bin");
   mkdirSync(binDir, { recursive: true });
   makeExecutable(
     join(binDir, "node"),
-    `#!/usr/bin/env bash\nif [[ "\${1:-}" == "-v" ]]; then printf 'v%s\\n' "${version}"; fi\nexit 0\n`,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-v" ]]; then
+  printf 'v%s\\n' "${version}"
+  exit 0
+fi
+exec "$SPUR_TEST_REAL_NODE" "$@"
+`,
   );
 }
 
@@ -190,6 +212,7 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_SIDECAR_NAME: "isolated-ui-pin-test",
     SPUR_TEST_LOG: worktree.logPath,
+    SPUR_TEST_REAL_NODE: process.execPath,
     SPUR_TEST_SYS_NODE: "v21.7.3",
     ...extraEnv,
   };
@@ -228,45 +251,40 @@ afterEach(() => {
 });
 
 describe("spur-isolated-ui node pin", () => {
-  it("runs pnpm install and pnpm dev on the pinned node when the PATH node is unsupported (below the pin)", async () => {
+  it("QA blocker (#824): engines-conformant system node proceeds even when nvm only holds an unrelated major", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
-    writeNvmVersion(worktree.nvmDir, "24.15.0");
+    writeNvmVersion(worktree.nvmDir, "20.12.2");
 
-    await expect(runIsolatedUi(worktree, { NVM_DIR: worktree.nvmDir })).resolves.toEqual([
-      "install node=v24.15.0",
-      "dev node=v24.15.0",
-    ]);
+    await expect(
+      runIsolatedUi(worktree, { NVM_DIR: worktree.nvmDir, SPUR_TEST_SYS_NODE: "v22.23.2" }),
+    ).resolves.toEqual(["install node=v22.23.2", "dev node=v22.23.2"]);
   });
 
-  it("runs `nvm use` and executes under the pinned major even when the system node is newer than the pin", async () => {
+  it("#798: engines-invalid system node activates the .nvmrc pin via nvm", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
     writeNvmVersion(worktree.nvmDir, "24.15.0");
 
     await expect(
-      runIsolatedUi(worktree, { NVM_DIR: worktree.nvmDir, SPUR_TEST_SYS_NODE: "v25.2.0" }),
+      runIsolatedUi(worktree, { NVM_DIR: worktree.nvmDir, SPUR_TEST_SYS_NODE: "v21.7.3" }),
     ).resolves.toEqual(["install node=v24.15.0", "dev node=v24.15.0"]);
   });
 
-  it("fails fast with a self-describing message when the pinned node is not installed (system node below the pin)", async () => {
+  it("engines-invalid system node (below the ^20.19.0 floor) activates the pin via nvm", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
-    writeNvmVersion(worktree.nvmDir, "20.12.2");
+    writeNvmVersion(worktree.nvmDir, "24.15.0");
 
-    const rejection = await runIsolatedUiExpectFailure(worktree, { NVM_DIR: worktree.nvmDir });
-
-    expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\.nvmrc/);
-    expect(rejection.stderr).toMatch(/v21\.7\.3/);
-    expect(rejection.stderr).toMatch(/nvm install 24/);
-    expect(existsSync(worktree.logPath)).toBe(false);
+    await expect(
+      runIsolatedUi(worktree, { NVM_DIR: worktree.nvmDir, SPUR_TEST_SYS_NODE: "v20.12.2" }),
+    ).resolves.toEqual(["install node=v24.15.0", "dev node=v24.15.0"]);
   });
 
-  it("fails fast when the pinned node is not installed even though the system node is newer than the pin", async () => {
+  it("fails fast, naming the range/found version/.nvmrc/nvm install, when nvm exists but the pin isn't installed", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
@@ -274,36 +292,47 @@ describe("spur-isolated-ui node pin", () => {
 
     const rejection = await runIsolatedUiExpectFailure(worktree, {
       NVM_DIR: worktree.nvmDir,
-      SPUR_TEST_SYS_NODE: "v25.2.0",
+      SPUR_TEST_SYS_NODE: "v21.7.3",
     });
 
     expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/\^20\.19\.0/);
+    expect(rejection.stderr).toMatch(/v21\.7\.3/);
     expect(rejection.stderr).toMatch(/\.nvmrc/);
-    expect(rejection.stderr).toMatch(/v25\.2\.0/);
     expect(rejection.stderr).toMatch(/nvm install 24/);
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
-  it("has no nvm to activate the pin, so it proceeds on a system node already at or above the pin (deliberate no-mechanism path)", async () => {
+  it("proceeds with no nvm at all when the system node already satisfies engines", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
 
-    await expect(runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v24.15.0" })).resolves.toEqual([
-      "install node=v24.15.0",
-      "dev node=v24.15.0",
+    await expect(runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v25.2.0" })).resolves.toEqual([
+      "install node=v25.2.0",
+      "dev node=v25.2.0",
     ]);
   });
 
-  it("has no nvm to activate the pin and fails fast when the system node is below the pin", async () => {
+  it("proceeds with no nvm at all on an engines-conformant node 22 host", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+
+    await expect(runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v22.23.2" })).resolves.toEqual([
+      "install node=v22.23.2",
+      "dev node=v22.23.2",
+    ]);
+  });
+
+  it("fails fast with no nvm at all when the system node does not satisfy engines", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
 
     const rejection = await runIsolatedUiExpectFailure(worktree);
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\.nvmrc/);
+    expect(rejection.stderr).toMatch(/\^20\.19\.0/);
     expect(rejection.stderr).toMatch(/v21\.7\.3/);
-    expect(rejection.stderr).toMatch(/nvm is not available/);
+    expect(rejection.stderr).toMatch(/\.nvmrc/);
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
@@ -318,23 +347,81 @@ describe("spur-isolated-ui node pin", () => {
     expect(satisfiesNodeEngineRange(rootPackage.engines.node, pin)).toBe(true);
   });
 
-  // node_major_at_least (spur-isolated-ui.sh) is the no-nvm fallback floor,
-  // reached only when nothing can activate the pin: any major >= the pin
-  // passes. That is sound only because the pin sits on engines' unbounded
-  // `>=` clause — if .nvmrc ever moved to a major covered by a bounded `^`
-  // clause instead (e.g. 22 or 20), a major above the pin could still fail
-  // engines, and the floor check would wrongly let it through. Prove the
-  // pin is on the unbounded clause by checking majors arbitrarily far above
-  // it, not just the pin itself.
-  it("sits on engines' unbounded >= clause, so every major at or above the pin also satisfies engines", () => {
-    const pin = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim();
+  // Anti-drift guard: the script reimplements satisfiesClause's semantics in
+  // a `node -e` one-liner (see node_satisfies_engines in
+  // scripts/spur-isolated-ui.sh) because bash arithmetic can't compare
+  // minor/patch versions. Run the same version table through both
+  // implementations and assert identical verdicts so they cannot silently
+  // diverge.
+  it("agrees with satisfiesNodeEngineRange on every version in the equivalence table", async () => {
     const rootPackage = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
       engines: { node: string };
     };
-    const pinMajor = Number.parseInt(pin, 10);
+    const range = rootPackage.engines.node;
+    const versions = [
+      "18.20.0",
+      "20.0.0",
+      "20.12.2",
+      "20.19.0",
+      "20.19.5",
+      "21.7.3",
+      "22.0.0",
+      "22.12.0",
+      "22.13.0",
+      "22.23.2",
+      "24.0.0",
+      "24.15.0",
+      "25.2.0",
+    ];
 
-    for (const major of [pinMajor, pinMajor + 1, pinMajor + 50]) {
-      expect(satisfiesNodeEngineRange(rootPackage.engines.node, String(major))).toBe(true);
+    const worktree = createFakeWorktree();
+    const scriptSource = readFileSync(
+      join(worktree.repoDir, "scripts", "spur-isolated-ui.sh"),
+      "utf8",
+    );
+    const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
+    if (!functionMatch) {
+      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+    }
+
+    for (const version of versions) {
+      const expected = satisfiesNodeEngineRange(range, version);
+
+      const nodeStubPath = join(worktree.pathDir, "node");
+      makeExecutable(
+        nodeStubPath,
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-v" ]]; then
+  printf 'v%s\\n' "${version}"
+  exit 0
+fi
+exec "$SPUR_TEST_REAL_NODE" "$@"
+`,
+      );
+
+      const script = `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="${worktree.repoDir}/scripts"
+ROOT_PACKAGE_JSON="${worktree.repoDir}/package.json"
+NODE_ENGINES_RANGE=""
+${functionMatch[0]}
+if node_satisfies_engines; then
+  exit 0
+else
+  exit 1
+fi
+`;
+      const checkScriptPath = join(worktree.repoDir, "check.sh");
+      writeFileSync(checkScriptPath, script, "utf8");
+
+      const actual = await execFileAsync("bash", [checkScriptPath], {
+        env: testEnv(worktree),
+      })
+        .then(() => true)
+        .catch(() => false);
+
+      expect({ version, actual }).toEqual({ version, actual: expected });
     }
   });
 });

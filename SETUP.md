@@ -6,7 +6,7 @@ For package install use [docs/install-from-npm.md](docs/install-from-npm.md); fo
 
 ## Prerequisites
 
-- Node.js — range in [`package.json`](package.json) `engines.node`; the `isolated-ui` sidecar needs the major pinned in [`.nvmrc`](.nvmrc)
+- Node.js — range in [`package.json`](package.json) `engines.node`; only if your host node falls outside that range, nvm with the major pinned in [`.nvmrc`](.nvmrc) covers the `isolated-ui` sidecar
 - Git 2.25+
 - tmux
 - `gh` is recommended for GitHub-backed workflows
