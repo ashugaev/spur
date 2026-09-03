@@ -4,9 +4,12 @@
 // nvm, so it otherwise runs on whatever node happens to be on PATH. Outside
 // the root engines range, next/font throws under tsx and every request
 // 500s until wait_for_http exhausts its budget. scripts/spur-isolated-ui.sh
-// now pins node via .nvmrc before any node consumer runs; these tests prove
-// that pin activates, fails fast when the pin is unmet, and is a no-op when
-// the host node already satisfies it.
+// now pins node via .nvmrc before any node consumer runs. Whenever nvm can
+// activate the pin, it must match the pin's major exactly — a newer system
+// node must not silently skip `nvm use` (PR #824 review thread). Only when
+// no nvm exists at all, with no mechanism to activate the pin, does the
+// script fall back to accepting anything that already clears the engines
+// floor.
 import { execFile } from "node:child_process";
 import {
   chmodSync,
@@ -225,7 +228,7 @@ afterEach(() => {
 });
 
 describe("spur-isolated-ui node pin", () => {
-  it("runs pnpm install and pnpm dev on the pinned node when the PATH node is unsupported", async () => {
+  it("runs pnpm install and pnpm dev on the pinned node when the PATH node is unsupported (below the pin)", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
@@ -237,7 +240,18 @@ describe("spur-isolated-ui node pin", () => {
     ]);
   });
 
-  it("fails fast with a self-describing message when the pinned node is not installed", async () => {
+  it("runs `nvm use` and executes under the pinned major even when the system node is newer than the pin", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    writeStubNvm(worktree.nvmDir);
+    writeNvmVersion(worktree.nvmDir, "24.15.0");
+
+    await expect(
+      runIsolatedUi(worktree, { NVM_DIR: worktree.nvmDir, SPUR_TEST_SYS_NODE: "v25.2.0" }),
+    ).resolves.toEqual(["install node=v24.15.0", "dev node=v24.15.0"]);
+  });
+
+  it("fails fast with a self-describing message when the pinned node is not installed (system node below the pin)", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
@@ -252,7 +266,25 @@ describe("spur-isolated-ui node pin", () => {
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
-  it("is a no-op when the system node already satisfies the pin", async () => {
+  it("fails fast when the pinned node is not installed even though the system node is newer than the pin", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    writeStubNvm(worktree.nvmDir);
+    writeNvmVersion(worktree.nvmDir, "20.12.2");
+
+    const rejection = await runIsolatedUiExpectFailure(worktree, {
+      NVM_DIR: worktree.nvmDir,
+      SPUR_TEST_SYS_NODE: "v25.2.0",
+    });
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/\.nvmrc/);
+    expect(rejection.stderr).toMatch(/v25\.2\.0/);
+    expect(rejection.stderr).toMatch(/nvm install 24/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
+  it("has no nvm to activate the pin, so it proceeds on a system node already at or above the pin (deliberate no-mechanism path)", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
 
@@ -260,6 +292,19 @@ describe("spur-isolated-ui node pin", () => {
       "install node=v24.15.0",
       "dev node=v24.15.0",
     ]);
+  });
+
+  it("has no nvm to activate the pin and fails fast when the system node is below the pin", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+
+    const rejection = await runIsolatedUiExpectFailure(worktree);
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/\.nvmrc/);
+    expect(rejection.stderr).toMatch(/v21\.7\.3/);
+    expect(rejection.stderr).toMatch(/nvm is not available/);
+    expect(existsSync(worktree.logPath)).toBe(false);
   });
 
   it("pins a bare major that satisfies the root engines range", () => {
@@ -290,15 +335,5 @@ describe("spur-isolated-ui node pin", () => {
     for (const major of [pinMajor, pinMajor + 1, pinMajor + 50]) {
       expect(satisfiesNodeEngineRange(rootPackage.engines.node, String(major))).toBe(true);
     }
-  });
-
-  it("is a no-op when the system node is newer than the pin", async () => {
-    const worktree = createFakeWorktree();
-    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
-
-    await expect(runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v25.2.0" })).resolves.toEqual([
-      "install node=v25.2.0",
-      "dev node=v25.2.0",
-    ]);
   });
 });

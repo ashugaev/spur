@@ -7,13 +7,10 @@ source "$SCRIPT_DIR/spur-sidecar-common.sh"
 
 NVMRC_FILE="$SCRIPT_DIR/../.nvmrc"
 
-# Only valid as an `if` condition: the trailing (( )) returns 1 on a false
-# comparison, which `set -e` would treat as a failure anywhere else.
-# Deliberately a floor, not exact-major equality: the pin sits on the root
-# engines range's unbounded `>=` clause, so every major at or above it also
-# satisfies engines (see the isolated-ui-node-pin.test.ts pin/engines tests).
-node_major_at_least() {
-  local want="$1"
+# Echoes the running `node -v` major on stdout, or fails if node is missing
+# or its version string doesn't parse as vNN.NN.NN. Shared by both major
+# comparators below so the parsing lives in one place.
+current_node_major() {
   local version
   local major
 
@@ -21,7 +18,32 @@ node_major_at_least() {
   major="${version#v}"
   major="${major%%.*}"
   [[ "$major" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$major"
+}
+
+# Only valid as an `if` condition: the trailing (( )) returns 1 on a false
+# comparison, which `set -e` would treat as a failure anywhere else.
+# A floor, not exact-major equality: reached only on the no-nvm path, where
+# nothing can activate the pin, so a host is accepted if its node already
+# satisfies the root engines range's unbounded `>=` clause (see the
+# isolated-ui-node-pin.test.ts pin/engines tests).
+node_major_at_least() {
+  local want="$1"
+  local major
+
+  major="$(current_node_major)" || return 1
   (( major >= want ))
+}
+
+# Only valid as an `if` condition: same (( ))/`set -e` hazard as above.
+# Exact-major equality: whenever nvm is available to honor the pin, honor it
+# exactly, so a node newer than the pin doesn't silently skip `nvm use`.
+node_major_equals() {
+  local want="$1"
+  local major
+
+  major="$(current_node_major)" || return 1
+  (( major == want ))
 }
 
 # The pane runs under a non-interactive login shell (env -u ... sh -lc, see
@@ -45,10 +67,6 @@ use_pinned_node() {
     exit 1
   fi
 
-  if node_major_at_least "$pinned"; then
-    return 0
-  fi
-
   nvm_dir="${NVM_DIR:-${SPUR_REAL_HOME:-$HOME}/.nvm}"
   if [[ -s "$nvm_dir/nvm.sh" ]]; then
     export NVM_DIR="$nvm_dir"
@@ -58,13 +76,22 @@ use_pinned_node() {
     # shellcheck source=/dev/null
     source "$NVM_DIR/nvm.sh" || true
     nvm use --silent "$pinned" || true
+
+    if node_major_equals "$pinned"; then
+      return 0
+    fi
+
+    echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the $NVMRC_FILE pin (node $pinned). Install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2
+    exit 1
   fi
 
+  # No nvm on this host: nothing can activate the pin exactly, so fall back
+  # to the engines floor, which a node this new already satisfies.
   if node_major_at_least "$pinned"; then
     return 0
   fi
 
-  echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the $NVMRC_FILE pin (node $pinned). Install it with: nvm install $pinned. If node $pinned is already installed, nvm refused to load — check NPM_CONFIG_PREFIX/PREFIX in this shell." >&2
+  echo "spur-isolated-ui: node $(node -v 2>/dev/null || echo 'not found') does not satisfy the $NVMRC_FILE pin (node $pinned) and nvm is not available to activate it. Install node $pinned or newer." >&2
   exit 1
 }
 
