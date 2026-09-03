@@ -60,6 +60,26 @@ describe("jsonResponse", () => {
     expect((await bodyOf(response)).toString("utf8")).toBe(raw);
   });
 
+  it("falls back to identity for a malformed qvalue", async () => {
+    // Number.parseFloat("abc") is NaN, and NaN > 0 is false, so an
+    // unparseable qvalue declines compression rather than assuming it.
+    for (const header of ["gzip;q=abc", "gzip;q="]) {
+      const response = await jsonResponse(requestWith(header), bigPayload);
+      expect(response.headers.get("content-encoding")).toBeNull();
+    }
+  });
+
+  it("matches the encoding token case-insensitively, qvalue included", async () => {
+    await expect(
+      jsonResponse(requestWith("GZIP;Q=0"), bigPayload).then((r) =>
+        r.headers.get("content-encoding"),
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      jsonResponse(requestWith("GZIP"), bigPayload).then((r) => r.headers.get("content-encoding")),
+    ).resolves.toBe("gzip");
+  });
+
   it("leaves a short body uncompressed", async () => {
     const response = await jsonResponse(requestWith("gzip"), { ok: true });
 
