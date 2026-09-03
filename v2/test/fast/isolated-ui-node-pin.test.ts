@@ -447,6 +447,36 @@ exit 9
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
+  // Finding 3 (PR #824 review, mirror of finding 1 fixed in acf7ae7e): a
+  // node that prints a valid, engines-CONFORMANT version on `-v` while
+  // EXITING NONZERO must never be trusted — the string came from a failed
+  // invocation, not a verdict. Reproduced against 6a02447a's script: the old
+  // `current_version="$(node -v 2>/dev/null || true)"` discarded the exit
+  // status, the regex matched the printed v25.2.0, and the gate proceeded
+  // straight to `pnpm install`/`pnpm dev` — the inverse fail-open of finding 1.
+  it("fails closed when node -v exits nonzero despite printing a conformant version (finding 3)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    makeExecutable(
+      join(worktree.pathDir, "node"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-v" ]]; then
+  printf 'v25.2.0\\n'
+  exit 9
+fi
+exec "$SPUR_TEST_REAL_NODE" "$@"
+`,
+    );
+
+    const rejection = await runIsolatedUiExpectFailure(worktree);
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/node -v exited 9 instead of reporting a version/);
+    expect(rejection.stderr).not.toMatch(/nvm install/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
   // Finding 2: node missing from PATH entirely names that fact and never
   // claims to know an engines range it never got to read.
   it("names node as missing, not an engines range, when node is absent from PATH", async () => {

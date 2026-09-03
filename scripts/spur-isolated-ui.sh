@@ -31,8 +31,8 @@ NODE_CHECK_ERROR=""
 #   NODE_CHECK_ERROR — empty on a clean verdict (satisfied, or a genuine
 #     engines mismatch the check evaluated and rejected); a short reason
 #     when the check could not be run at all (node missing, `node -v`
-#     unparseable, or `node -e` produced no output regardless of its exit
-#     status) so the caller can withhold the "nvm install <pin>" remedy —
+#     failing or unparseable, or `node -e` produced no output regardless of
+#     its exit status) so the caller can withhold the "nvm install <pin>" remedy —
 #     picking a different node version does not fix a node install that
 #     cannot execute the check in the first place.
 node_satisfies_engines() {
@@ -44,7 +44,12 @@ node_satisfies_engines() {
   fi
 
   local current_version
-  current_version="$(node -v 2>/dev/null || true)"
+  local version_status=0
+  current_version="$(node -v 2>/dev/null)" || version_status=$?
+  if (( version_status != 0 )); then
+    NODE_CHECK_ERROR="node -v exited $version_status instead of reporting a version"
+    return 1
+  fi
   if [[ ! "$current_version" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
     NODE_CHECK_ERROR="node -v produced unparseable output: '$current_version'"
     return 1
