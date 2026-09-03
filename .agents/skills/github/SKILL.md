@@ -42,6 +42,7 @@ EOF
 
 ISSUE REPORTING, for a problem outside the current request
 
-  1  `gh issue list --state open --search "<keywords>"` — look for a match first.
-  2  Match found: `gh issue comment` the new evidence onto it. Never open a duplicate.
-  3  No match: `gh issue create`. Body states what breaks, where (`file:line`), how to reproduce, and the PR or task that surfaced it.
+  1  `gh issue list --state all --search "<keywords>"` — search open and closed, never open only.
+  2  Open match: `gh issue comment` the new evidence onto it. Never open a duplicate.
+  3  Closed match: `gh issue reopen`, then comment the new evidence. Keeps the fix history on the regression.
+  4  No match: `gh issue create`. Body states what breaks, where (`file:line`), how to reproduce, and the PR or task that surfaced it.
