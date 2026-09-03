@@ -2688,8 +2688,22 @@ describe("github source", () => {
     });
 
     it("stops letting a persistently erroring session latch the CI-active hysteresis flag after a bounded number of consecutive failures", async () => {
+      // A second, healthy session on a different repo is the actual
+      // discriminator below: api-a1b2's own transient poll backoff empties it
+      // out of every cycle it's ever observed in, regardless of the hysteresis
+      // flag, so its own gh calls can't tell a buggy (unbounded) hysteresis
+      // implementation from the fix. other-sess never backs off, so it only
+      // gets (re-)polled when a full poll cycle actually runs.
+      const otherSession = makeSession({
+        id: "other-sess",
+        workspaceId: "other-sess",
+        pr: { number: 77, repo: "acme/other", url: "https://github.com/acme/other/pull/77" },
+      });
+      listSessionsMock.mockReturnValue([makeSession(), otherSession]);
+
       // Seed lastCycleCiActive = true via the ungated startup poll.
-      queuePollResponse("IN_PROGRESS");
+      queuePollResponse("IN_PROGRESS"); // api-a1b2
+      queuePollResponse("SUCCESS"); // other-sess
       const logger = { info: vi.fn(), warn: vi.fn() };
 
       const handle = await githubSourceModule.start({
@@ -2709,38 +2723,52 @@ describe("github source", () => {
         resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
-      expect(ghMock).toHaveBeenCalledTimes(5);
+      expect(ghMock).toHaveBeenCalledTimes(10);
 
-      // The same session errors on every subsequent cycle (e.g. a persistent
+      // api-a1b2 errors on every subsequent cycle (e.g. a persistent
       // 404/permission issue) — never producing a clean observation. The first
       // CI_HYSTERESIS_ERROR_TOLERANCE (3) consecutive failures still preserve the
       // flag, each one bypassing the deadline gate for the next tick in turn. Each
       // failure also arms this session's own transient poll backoff (doubling from
       // 120_000ms), so Date must advance past it before the session is eligible
-      // for the next attempt.
+      // for the next attempt. other-sess is polled again in the same cycle each
+      // time, adding 5 fresh gh calls of its own.
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
-      await waitForGhCallCount(6);
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(16);
       vi.setSystemTime(new Date(Date.now() + 120_001));
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
-      await waitForGhCallCount(7);
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(22);
       vi.setSystemTime(new Date(Date.now() + 240_001));
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
-      await waitForGhCallCount(8);
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(28);
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("failed to poll"));
 
-      // The 4th consecutive failure for this session exceeds the tolerance: it no
-      // longer counts toward the hysteresis flag, so with no other session reporting
-      // active CI this cycle, lastCycleCiActive finally drops to false.
+      // The 4th consecutive failure for api-a1b2 exceeds the tolerance: it no
+      // longer counts toward the hysteresis flag, so with other-sess reporting a
+      // clean, inactive poll this same cycle, lastCycleCiActive drops to false.
       vi.setSystemTime(new Date(Date.now() + 480_001));
       ghMock.mockRejectedValueOnce(new Error("gh: permission denied"));
-      await waitForGhCallCount(9);
+      queuePollResponse("SUCCESS");
+      await waitForGhCallCount(34);
 
-      // A buggy (unbounded) implementation would still have lastCycleCiActive=true
-      // here, so the deadline gate would keep forcing ticks — and each one would
-      // issue another (rejected) gh call, growing the call count. The fix must
-      // instead let the deadline gate suppress further ticks well inside the slow
-      // window (deadline stays at 00:10:00), so the call count stays flat.
-      await assertGhCallCountStable(9);
+      // api-a1b2's own transient backoff (armed for 960_000ms after the 4th
+      // failure) now empties it out of every cycle regardless of the hysteresis
+      // flag. other-sess is the discriminator: a buggy (unbounded)
+      // implementation leaves lastCycleCiActive stuck true, which bypasses the
+      // deadline gate (github.ts:352) and forces one more full poll cycle —
+      // issuing one more ghTransportMock call and 5 more gh calls for
+      // other-sess, before the clean observation itself (unrelated to the fix)
+      // finally drops the flag. The fix instead lets the deadline gate suppress
+      // the tick immediately, so other-sess is never touched again.
+      queuePollResponse("SUCCESS");
+      const seededTransport = ghTransportMock.mock.calls.length;
+      const seededGh = ghMock.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, REAL_INTERVAL_MS * 8));
+      expect(ghTransportMock.mock.calls.length - seededTransport).toBe(0);
+      expect(ghMock.mock.calls.length - seededGh).toBe(0);
 
       handle.stop();
     });
