@@ -441,7 +441,14 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`slowIntervalMs` since the last real poll) passed, the last cycle saw a non-terminal CI check, a tracked session is unpolled, or a session had a `send`/source-reply within `activeGraceMs`. Rate-limit cooldown backoff overrides all of it, here and on plain sources. With `query` also set, discovery runs on the same gated tick; every gate reads already-tracked sessions, so an undiscovered PR cannot re-arm the tick early.
 
-GitHub poll-cost events: `gh.poll_cycle` (one event per poll-cycle key — `kind` plus `projectId`/`sourceId`. The first cycle after an idle key opens a run emits immediately: `cycle`, `durationMs`, `calls`, `graphqlCost`, `bySubcommand` for that single cycle. Later cycles roll up into a 15-minute window, source constant, not configurable; the first cycle at or past the window emits the window's aggregate instead: `cycle`, `windowMs`, `cycles`, `zeroCycles`, `calls`, `graphqlCost`, `bySubcommand` summed over the window, plus `errors` when a cycle in the window threw. A window that spent nothing — `calls` and `graphqlCost` both 0 — emits nothing on close; its counts carry into the next window instead of resetting, so an idle key still emits exactly one event per idle run. A key idle past 60 minutes is flushed and dropped at the next poll cycle on any key, or at daemon shutdown), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known).
+GitHub poll-cost events: `gh.poll_cycle` (`gh` cost of a poll cycle or of a window of them, fields below), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known).
+
+`gh.poll_cycle` is keyed by cycle `kind` plus `projectId`/`sourceId`, and emits two shapes in `details`:
+
+- First cycle on a key, even at zero cost: one cycle — `cycle`, `durationMs`, `calls`, `graphqlCost`, `bySubcommand`.
+- Later cycles emit nothing and accumulate into a 15-minute window, fixed, no config key. The first cycle at or past the boundary emits the window — `cycle`, `windowMs`, `cycles`, `zeroCycles`, `calls`, `graphqlCost`, `bySubcommand` summed over the window, plus `errors` when a cycle in it threw.
+- Window with `calls` and `graphqlCost` both 0 emits nothing on close; its counts and window start carry forward, so an idle key stays silent until it spends again.
+- Key untouched for 60 minutes is dropped, its window closed under the same zero-cost gate; the next cycle on that key emits a single cycle again. Daemon shutdown closes every open window the same way.
 
 Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
 
