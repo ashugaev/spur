@@ -294,7 +294,9 @@ wait "$first_pid" "$second_pid"
 # a tuned duration: the case kills the holder below, so a hold far longer than
 # any runner can spend in the barrier plus the helper's wait costs nothing and
 # makes the guarantee unconditional.
-flock "$LOCK_FILE" -c "sleep 600" &
+# stdout/stderr detached: a failing run leaves the holder alive, and an
+# inherited stdout would hold the caller's pipe open for the rest of the hold.
+flock "$LOCK_FILE" -c "sleep 600" >/dev/null 2>&1 &
 holder_pid=$!
 # Barrier, not a sleep: wait until the holder actually owns the lock. A fixed
 # delay is a guess about how long a backgrounded flock takes to acquire, and
@@ -338,6 +340,25 @@ fi
 # Kill both the backgrounded flock wrapper and any child sleep holding the fd.
 pkill -P "$holder_pid" 2>/dev/null || true
 kill "$holder_pid" 2>/dev/null || true
+# Both kills swallow their rc, and the hold outlives the whole suite, so a kill
+# that failed would surface as the `wait` below, and then Case 15, sitting out
+# the remaining hold. Probe the lock back before waiting on the holder:
+# signal delivery is asynchronous, so allow a short window, then fail here by
+# name instead of stalling later.
+lock_released=""
+for _ in $(seq 1 40); do
+  set +e
+  flock -n "$LOCK_FILE" -c true
+  probe_rc=$?
+  set -e
+  if [ "$probe_rc" -eq 0 ]; then
+    lock_released="yes"
+    break
+  fi
+  [ "$probe_rc" -eq 1 ] || fail "lock probe failed (rc=$probe_rc)"
+  sleep 0.05
+done
+[ -n "$lock_released" ] || fail "lock holder survived the kill and still holds the lock"
 wait "$holder_pid" 2>/dev/null || true
 
 # Case 15: detached deploy runs replace the durable running record with terminal status.
