@@ -999,7 +999,9 @@ export interface DashboardSessionView extends SessionRecord {
 // per-session recursive readdir+stat walk, `stateHistory` and the prompt
 // bodies dominate the pretty-printed payload at production scale. Full
 // detail for all six stays on GET /sessions/:id (SessionView via `get`).
-export type SessionListOmittedField =
+// Not exported — no consumer outside this file needs the field-name union
+// itself, only the resulting `SessionListItemView` shape.
+type SessionListOmittedField =
   | "artifacts"
   | "artifactsTruncated"
   | "stateHistory"

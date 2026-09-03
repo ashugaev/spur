@@ -7037,8 +7037,16 @@ export class SessionService {
       ? await snapshotProcesses()
       : undefined;
     const views = await Promise.all(
-      sessions.map((session) =>
-        this.enrichListItem(session, claudeAccounts, allSessions, sidecarProcSnapshot),
+      sessions.map(
+        async (session) =>
+          (
+            await this.enrichWithClassified(
+              session,
+              claudeAccounts,
+              allSessions,
+              sidecarProcSnapshot,
+            )
+          ).view,
       ),
     );
     return views;
@@ -15162,10 +15170,7 @@ export class SessionService {
   // "lists and reads an artifact written by one desk sibling from another
   // sibling"). Kept as the single detail-assembly path so `enrich()` and
   // any future single-session reader never duplicate this walk elsewhere.
-  private async withSessionDetail(
-    view: SessionListItemView,
-    session: SessionRecord,
-  ): Promise<SessionView> {
+  private withSessionDetail(view: SessionListItemView, session: SessionRecord): SessionView {
     const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
     const history = this.stateHistory.get(session.id) ?? [];
     return {
@@ -15179,20 +15184,6 @@ export class SessionService {
       ...(artifactWalk.truncated ? { artifactsTruncated: true } : {}),
       ...(history.length > 0 ? { stateHistory: history } : {}),
     };
-  }
-
-  // List-only projection: the same as enrichWithClassified().view, kept
-  // separate so the list path never gets the detail re-attach (and so it
-  // never pays for the artifact walk `withSessionDetail` does).
-  private async enrichListItem(
-    session: SessionRecord,
-    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
-    sessionBatch?: SessionRecord[],
-    sidecarProcSnapshot?: ProcSnapshot,
-  ): Promise<SessionListItemView> {
-    return (
-      await this.enrichWithClassified(session, claudeAccounts, sessionBatch, sidecarProcSnapshot)
-    ).view;
   }
 
   // Same work as enrich(), plus the raw classified result — needed by the

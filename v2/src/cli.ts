@@ -1622,6 +1622,12 @@ async function runInteractiveSessionList(
   // show the previous row's detail under a new id until the next tick, or
   // stay populated after a kill/complete cleared the selection.
   const setSelectedSession = (id: string | null, detail?: SessionView): void => {
+    // Bumped first: an in-flight tick-issued fetch for the OLD selection
+    // (same id, same pre-bump token) must read as stale once this call
+    // supplies a fresh detail or re-arms its own fetch — otherwise a
+    // pre-mutation response landing after `detail` is assigned here would
+    // overwrite it.
+    selectedDetailToken += 1;
     selectedSessionId = id;
     if (detailDebounceTimer) {
       clearTimeout(detailDebounceTimer);
