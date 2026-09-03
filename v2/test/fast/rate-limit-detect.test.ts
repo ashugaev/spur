@@ -347,6 +347,72 @@ describe("detectClaudeUsageLimitMenu", () => {
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
   });
 
+  // Claude Code's newer three-option layout: the admin option moved to "3."
+  // and a "wait here" option took slot 2. Same menu, same confirm footer.
+  const THREE_OPTION_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Stop and wait for limit to reset",
+    "  2. Wait here, then continue automatically at Sep 2, 8am",
+    "  3. Ask your admin for more usage",
+    "",
+    "Enter to confirm \u00b7 Esc to cancel",
+  ].join("\n");
+
+  it("flags the three-option menu whose admin option is numbered 3", () => {
+    expect(detectClaudeUsageLimitMenu(THREE_OPTION_MENU_TEXT)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the three-option menu when the cursor sits on the wait-here option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "\u276f 2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("returns null for a three-option menu with no confirm footer", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when the three-option menu has scrolled out of the live tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    expect(detectClaudeUsageLimitMenu(`${THREE_OPTION_MENU_TEXT}\n${subsequentOutput}`)).toBeNull();
+  });
+
+  it("returns null when the wait-here option is present but the admin option is not", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
   it("returns null for unrelated normal Claude Code output", () => {
     const paneText = ["Working on the task...", "Editing src/index.ts"].join("\n");
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
@@ -411,6 +477,32 @@ describe("claudeUsageMenuOptionOneSelected", () => {
       "> 2. Ask your admin for more usage",
       "",
       "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns true when the \u276f cursor glyph marks option 1 on the three-option menu", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
+  });
+
+  it("returns false when the \u276f cursor glyph sits on another option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "\u276f 2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
     ].join("\n");
     expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
   });
@@ -544,6 +636,40 @@ describe("scanTmuxRateLimit", () => {
   it("ignores a quoted marker on a diff-gutter line in the real cursor scrollback", () => {
     // spur-7443: a ▎-gutter diff line quoting `reason: "cursor out of usage"`.
     expect(scanTmuxRateLimit(readPane("cursor-false-match.scrollback.txt"))).toBeNull();
+  });
+
+  it("flags a claude usage-limit banner behind a \u26a0 status glyph", () => {
+    const pane = [
+      "  editing src/index.ts",
+      "\u26a0 Usage limit reached \u00b7 continuing automatically at Sep 2, 8am \u00b7 esc to cancel",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("flags the same banner when the glyph carries an emoji variation selector", () => {
+    const pane = "\u26a0\ufe0f Usage limit reached \u00b7 continuing automatically at Sep 2, 8am";
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("flags an indented glyph banner", () => {
+    expect(scanTmuxRateLimit("   \u26a0  Out of credits")).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
+  });
+
+  it("still ignores a marker quoted right after a status glyph", () => {
+    expect(scanTmuxRateLimit('\u26a0 the pane renders "usage limit reached" here')).toBeNull();
+  });
+
+  it("still ignores a marker on a > gutter line", () => {
+    expect(scanTmuxRateLimit("> Usage limit reached")).toBeNull();
   });
 
   it("returns null when no banner is rendered", () => {

@@ -14558,9 +14558,13 @@ export class SessionService {
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
   ): SessionRecord {
+    // Shepherd is not exempt: its own terminal exits are "completed" (self
+    // destruct) or "killed", and it is never stale-parked, so a stopped or
+    // errored shepherd whose tmux, pane, and agent process are all alive is
+    // the same drift as any other session's — leaving it alone kept the one
+    // session that heals the fleet stuck under a status the runtime refutes.
     if (
       session.status !== "stopped" ||
-      session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
       isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
@@ -14616,9 +14620,10 @@ export class SessionService {
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
   ): SessionRecord {
+    // Shepherd included, for the reason spelled out in
+    // reconcileStaleStoppedSession above.
     if (
       session.status !== "errored" ||
-      session.project === SHEPHERD_PROJECT_ID ||
       workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||

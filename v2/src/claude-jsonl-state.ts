@@ -16,6 +16,8 @@ export interface ParsedRecord {
   hasToolUse?: boolean;
   /** True when a tool_use payload is explicitly asking the human a question. */
   requestsUserInput?: boolean;
+  /** True when the record is Claude's synthetic "[Request interrupted by user…]" turn. */
+  interrupted?: boolean;
   /** True when the record is a synthetic `error: "rate_limit"` API error. */
   rateLimited?: boolean;
   /**
@@ -146,6 +148,13 @@ export function classifyClaudeJsonlState(
     if (record.type === "user") {
       const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
       if (nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS) return "working";
+      // An interrupt ends the turn at an idle prompt: nothing is in flight and
+      // no tool call is stalled. Claude renders it as a tool_result, which
+      // would otherwise read as "needs_input" (agent stalled) once the
+      // activity window passes and raise a false attention alert.
+      if (record.interrupted) {
+        return "waiting";
+      }
       return record.role === "tool_result" ? "needs_input" : "waiting";
     }
   }
@@ -215,6 +224,32 @@ function extractTimestampMs(
 function hasBlockType(blocks: unknown[], type: string): boolean {
   return blocks.some(
     (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>)["type"] === type,
+  );
+}
+
+// Claude Code writes this synthetic user turn when the human interrupts —
+// either bare ("[Request interrupted by user]", a text block) or mid-tool
+// ("[Request interrupted by user for tool use]", a tool_result block). Both
+// mean the prompt is idle awaiting the human, not a working turn and not a
+// stalled tool call.
+const CLAUDE_INTERRUPT_MARKER = "[request interrupted by user";
+
+function blockInterruptText(block: unknown): string | undefined {
+  if (typeof block !== "object" || block === null) {
+    return undefined;
+  }
+  const record = block as Record<string, unknown>;
+  const value = record["type"] === "tool_result" ? record["content"] : record["text"];
+  return typeof value === "string" ? value : undefined;
+}
+
+function hasInterruptMarker(message: Record<string, unknown>, blocks: unknown[]): boolean {
+  const raw = message["content"];
+  if (typeof raw === "string") {
+    return raw.trimStart().toLowerCase().startsWith(CLAUDE_INTERRUPT_MARKER);
+  }
+  return blocks.some((block) =>
+    (blockInterruptText(block) ?? "").trimStart().toLowerCase().startsWith(CLAUDE_INTERRUPT_MARKER),
   );
 }
 
@@ -316,9 +351,11 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
   }
 
   if (role === "user") {
+    const blocks = contentBlocks(message);
     return {
       type: "user",
-      role: hasBlockType(contentBlocks(message), "tool_result") ? "tool_result" : "user",
+      role: hasBlockType(blocks, "tool_result") ? "tool_result" : "user",
+      ...(hasInterruptMarker(message, blocks) ? { interrupted: true } : {}),
       timestampMs: recordTimestampMs,
     };
   }
