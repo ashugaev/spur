@@ -75,6 +75,7 @@ describe("agent history delta size", () => {
     expect(result.afterFiles).toBe(1);
     expect(result.afterBytes).toBeLessThanOrEqual(Math.round(FLAP_SOURCE_BYTES * 1.1));
     expect(result.beforeBytes / result.afterBytes).toBeGreaterThanOrEqual(150);
+    // eslint-disable-next-line no-console
     console.log("FLAP", JSON.stringify(result));
   });
 
@@ -98,6 +99,7 @@ describe("agent history delta size", () => {
     expect(result.afterFiles).toBe(GROW_CAPTURES);
     expect(result.afterBytes).toBeLessThanOrEqual(Math.round(finalBytes * 1.05));
     expect(result.beforeBytes / result.afterBytes).toBeGreaterThanOrEqual(50);
+    // eslint-disable-next-line no-console
     console.log("GROW", JSON.stringify(result));
   });
 });
