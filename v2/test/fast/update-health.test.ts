@@ -143,18 +143,18 @@ describe("parseWebUnitOptions", () => {
 describe("makeTargets", () => {
   it("builds daemon and web probe URLs from the resolved ports", () => {
     const targets = makeTargets({ daemon: 4310, web: 6200 });
-    expect(targets.daemon.url).toBe("http://127.0.0.1:4310/sessions");
+    expect(targets.daemon.url).toBe("http://127.0.0.1:4310/info");
     expect(targets.web.url).toBe("http://127.0.0.1:6200/");
   });
 
   it("honors a non-default daemon port so a custom server.port host is probed correctly", () => {
     const targets = makeTargets({ daemon: 5310, web: 4311 });
-    expect(targets.daemon.url).toBe("http://127.0.0.1:5310/sessions");
+    expect(targets.daemon.url).toBe("http://127.0.0.1:5310/info");
   });
 });
 
 describe("probeWith", () => {
-  const target = { id: "daemon" as const, url: "http://127.0.0.1:4310/sessions" };
+  const target = { id: "daemon" as const, url: "http://127.0.0.1:4310/info" };
 
   it("maps a 2xx response to ok", async () => {
     const fetchLike: FetchLike = async () => ({ ok: true });

@@ -125,7 +125,7 @@ export interface ProbePorts {
 
 export function makeTargets(ports: ProbePorts): Record<ServiceId, ProbeTarget> {
   return {
-    daemon: { id: "daemon", url: `http://127.0.0.1:${ports.daemon}/sessions` },
+    daemon: { id: "daemon", url: `http://127.0.0.1:${ports.daemon}/info` },
     web: { id: "web", url: `http://127.0.0.1:${ports.web}/` },
   };
 }

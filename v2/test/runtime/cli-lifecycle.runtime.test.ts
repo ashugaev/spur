@@ -12,6 +12,7 @@ import type {
   RuntimeInfo,
   ServiceInstanceView,
   SidecarPortConflictPayload,
+  SessionListItemView,
   SessionRecord,
   SessionView,
   TodoProjection,
@@ -3334,11 +3335,10 @@ projects:
       },
     });
 
-    const attachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("l logs"),
+      accept: (value) => value.includes("l logs") && value.includes("service web:3000:running"),
     });
-    expect(attachedPane).toContain("service web:3000:running");
 
     await sendKeysToTmux(controllerSessionName, "l");
 
@@ -3801,15 +3801,17 @@ projects:
       timeoutMs: 15_000,
       accept: (value) => value.includes("startup:launch::"),
     });
-    const listed = await context.fetchJson<SessionView[]>("/sessions");
+    const listed = await context.fetchJson<SessionListItemView[]>("/sessions");
+    const listedDetail = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
 
     expect(log).toContain("startup:launch::");
     expect(log).not.toContain("research");
     expect(log).not.toContain("[Spur step");
     expect(pane).not.toContain("[Spur step");
     expect(listed[0]?.id).toBe(spawned.id);
-    expect(listed[0]?.prompt).toBe("");
+    expect(listed[0]).not.toHaveProperty("prompt");
     expect(listed[0]?.pipeline).toBeUndefined();
+    expect(listedDetail.prompt).toBe("");
   });
 
   it.each([

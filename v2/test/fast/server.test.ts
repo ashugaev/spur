@@ -693,12 +693,10 @@ describe("startServer", () => {
           id: "demo-done",
           project: "demo",
           agent: "claude",
-          prompt: "ship it",
           branch: "demo-done",
           worktree: true,
           worktreePath: join(worktreeDir, "demo", "demo-done"),
           tmuxSession: "demo-done",
-          launchCommand: "",
           status: "completed",
           state: "stopped",
           runtimeAlive: false,
@@ -706,7 +704,6 @@ describe("startServer", () => {
           createdAt: "2026-04-15T00:00:00.000Z",
           updatedAt: "2026-04-15T00:00:00.000Z",
           lastActivityAt: "2026-04-15T00:00:00.000Z",
-          artifacts: [],
           services: [],
           sidecars: [],
         },
@@ -742,6 +739,69 @@ describe("startServer", () => {
       { includeCompleted: true, view: "full" },
       { includeCompleted: false, view: "dashboard" },
     ]);
+  });
+
+  it("GET /sessions/:id still carries the artifact manifest while GET /sessions does not", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-artifact",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-artifact",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-artifact"),
+      tmuxSession: "demo-artifact",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+    const artifactsDir = sessionArtifactsDir(dataDir, session.id);
+    await mkdir(artifactsDir, { recursive: true });
+    await writeFile(join(artifactsDir, "shot.png"), "fake-png", "utf8");
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const listResponse = await fetch(`http://127.0.0.1:${port}/sessions`);
+      const listed = (await listResponse.json()) as Array<Record<string, unknown>>;
+      const listedSession = listed.find((entry) => entry["id"] === "demo-artifact");
+      expect(listedSession).not.toHaveProperty("artifacts");
+      expect(listedSession).not.toHaveProperty("prompt");
+      expect(listedSession).not.toHaveProperty("launchCommand");
+
+      const detailResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-artifact`);
+      const detail = (await detailResponse.json()) as { artifacts: Array<{ name: string }> };
+      expect(detail.artifacts.map((artifact) => artifact.name)).toContain("shot.png");
+    } finally {
+      await server.stop();
+    }
   });
 
   it("forwards clearPort to sidecar start", async () => {

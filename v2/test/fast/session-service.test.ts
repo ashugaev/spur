@@ -14900,6 +14900,45 @@ describe("SessionService", () => {
     expect(listedWithCompleted[2]?.state).toBe("stopped");
   });
 
+  // Pins the payload-projection change: the list must not carry the six
+  // byte-heavy/walk-backed fields, and — the assertion a bytes-only check
+  // would miss — must never call the artifact walk to compute them. A
+  // single-session `get()` still gets the full detail, walk included, keyed
+  // on the same session id (no desk sibling here, so workspaceIdOf === id).
+  it("full session list omits artifacts, stateHistory, launchCommand and prompt bodies, and never walks the filesystem for them", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({ id: "api-1", prompt: "Ship the feature", originalTaskPrompt: "Ship it" }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const listed = await service.list();
+
+    expect(listed).toHaveLength(1);
+    for (const field of [
+      "artifacts",
+      "artifactsTruncated",
+      "stateHistory",
+      "launchCommand",
+      "prompt",
+      "originalTaskPrompt",
+    ]) {
+      expect(listed[0]).not.toHaveProperty(field);
+    }
+    expect(listSessionArtifactsMock).not.toHaveBeenCalled();
+
+    const detail = await service.get("api-1");
+    expect(detail.artifacts).toEqual([]);
+    expect(detail.launchCommand).toBe("claude --dangerously-skip-permissions");
+    expect(detail.prompt).toBe("Ship the feature");
+    expect(detail.originalTaskPrompt).toBe("Ship it");
+    expect(listSessionArtifactsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+  });
+
   it("splits queued manual messages from future pipeline steps in session views (G4 view split)", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {

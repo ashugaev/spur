@@ -994,7 +994,24 @@ export interface DashboardSessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
 }
 
-export type SessionListView = SessionView | DashboardSessionView;
+// Dropped from the list projection because they are the byte-heavy or
+// filesystem-walk-backed fields: `artifacts`/`artifactsTruncated` require a
+// per-session recursive readdir+stat walk, `stateHistory` and the prompt
+// bodies dominate the pretty-printed payload at production scale. Full
+// detail for all six stays on GET /sessions/:id (SessionView via `get`).
+// Not exported — no consumer outside this file needs the field-name union
+// itself, only the resulting `SessionListItemView` shape.
+type SessionListOmittedField =
+  | "artifacts"
+  | "artifactsTruncated"
+  | "stateHistory"
+  | "launchCommand"
+  | "prompt"
+  | "originalTaskPrompt";
+
+export type SessionListItemView = Omit<SessionView, SessionListOmittedField>;
+
+export type SessionListView = SessionListItemView | DashboardSessionView;
 
 export interface SessionWorkspaceAccessItem {
   label: string;
