@@ -432,13 +432,13 @@ export async function readClaudeJsonlState(
     };
   }
 
-  // Read only new bytes since last offset, and never more than the cold-read
-  // ceiling. Classification only ever consults the newest records, so the
-  // window may start mid-file; the partial line that opens it is handled by
-  // the parser below.
+  // Incremental reads always consume the full delta from lastOffset. The
+  // cold-read ceiling applies only when unreadFrom is 0 — a reader with no
+  // prior offset would otherwise Buffer.alloc the whole transcript. The window
+  // may start mid-file; the partial line that opens it is handled below.
   const unreadFrom = Math.min(currentReader.lastOffset, fileStat.size);
   const readOffset =
-    fileStat.size - unreadFrom > MAX_COLD_READ_BYTES
+    unreadFrom === 0 && fileStat.size > MAX_COLD_READ_BYTES
       ? fileStat.size - MAX_COLD_READ_BYTES
       : unreadFrom;
   const nowMs = Date.now();

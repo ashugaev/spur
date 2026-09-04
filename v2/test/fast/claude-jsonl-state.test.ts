@@ -613,6 +613,69 @@ describe("parseConversationBatch", () => {
     }
   });
 
+  it("reads the full incremental delta when lastOffset > 0 even if the gap exceeds the cold-read ceiling", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "warm-incremental-gap-"));
+    const tempFile = join(tempDir, "gap.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
+
+    try {
+      const firstRecord = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T00:00:00.000Z",
+        message: { role: "user", content: "start" },
+      });
+      const gapPrefix = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T01:00:00.000Z",
+        message: { role: "user", content: "p".repeat(500_000) },
+      });
+      const markerRecord = JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-05-04T08:00:00.000Z",
+        message: {
+          role: "assistant",
+          model: "claude-in-skipped-gap",
+          content: [{ type: "text", text: "marker" }],
+        },
+      });
+      const gapSuffix = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T08:20:00.000Z",
+        message: { role: "user", content: "q".repeat(1_100_000) },
+      });
+      await writeFile(
+        tempFile,
+        [firstRecord, gapPrefix, markerRecord, gapSuffix, ""].join("\n"),
+        "utf8",
+      );
+      const fileSize = (await stat(tempFile)).size;
+      const lastOffset = firstRecord.length + 1;
+      expect(fileSize - lastOffset).toBeGreaterThan(1 << 20);
+      expect(lastOffset).toBeLessThan(fileSize - (1 << 20));
+
+      const lastActivity = new Date("2026-05-04T08:26:00.000Z");
+      await utimes(tempFile, lastActivity, lastActivity);
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result).not.toBeNull();
+      if (!result) throw new Error("expected a result");
+      expect(result.reader.tailRecords.some((record) => record.model === "claude-in-skipped-gap")).toBe(
+        true,
+      );
+      expect(result.reader.lastOffset).toBe(fileSize);
+    } finally {
+      vi.useRealTimers();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps a whole record when the capped window opens exactly on a line boundary", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "cold-read-boundary-"));
     const tempFile = join(tempDir, "boundary.jsonl");
