@@ -5,11 +5,12 @@ const HANDOFF_HEADER_RE = /^Task handoff from session (\S+) \((\w+)\)\./m;
 const HANDOFF_NOTES_RE = /Additional handoff notes:\n([\s\S]*)$/;
 const SHEPHERD_HEADER = "You are Spur Shepherd:";
 const OPERATOR_REQUEST_MARKER = "Operator request:\n";
-const TELEGRAM_REPLY_SUFFIX = [
+export const TELEGRAM_REPLY_SUFFIX = [
   "",
   "",
   "Source: telegram. The requester only sees messages you send with:",
   'spur source reply "<message>"',
+  'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value.',
   "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
 ].join("\n");
 const BOOTSTRAP_GOAL =
@@ -58,10 +59,22 @@ function stripTrailingSpurSections(text: string): string {
   return text.slice(0, end).trimEnd();
 }
 
+// Anchored on the wrapper's own first and last line, taken from the constant:
+// a prompt stored before a change to the churn-prone middle still strips. Both
+// anchors stay byte-exact, so rewording either end orphans stored prompts.
+// Only the LAST occurrence goes, and only when the wrapper is trailing, so a
+// prompt quoting it keeps its own text.
+const TELEGRAM_REPLY_SUFFIX_LINES = TELEGRAM_REPLY_SUFFIX.split("\n");
+const TELEGRAM_REPLY_SUFFIX_HEAD = TELEGRAM_REPLY_SUFFIX_LINES.slice(0, 3).join("\n");
+const TELEGRAM_REPLY_SUFFIX_TAIL =
+  TELEGRAM_REPLY_SUFFIX_LINES[TELEGRAM_REPLY_SUFFIX_LINES.length - 1] ?? "";
+
 function stripTelegramReplySuffix(text: string): string {
-  return text.endsWith(TELEGRAM_REPLY_SUFFIX)
-    ? text.slice(0, -TELEGRAM_REPLY_SUFFIX.length).trimEnd()
-    : text;
+  if (!text.endsWith(TELEGRAM_REPLY_SUFFIX_TAIL)) {
+    return text;
+  }
+  const start = text.lastIndexOf(TELEGRAM_REPLY_SUFFIX_HEAD);
+  return start === -1 ? text : text.slice(0, start).trimEnd();
 }
 
 export function isGeneratedBootstrapPrompt(text: string): boolean {

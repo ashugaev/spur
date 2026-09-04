@@ -84,6 +84,7 @@ projects:
           - 12345678
         allowedChats:
           - -1000000000000
+        chatId: -1000000000000
     triggers:
       nightly-sweep:
         source: nightly

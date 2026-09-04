@@ -124,6 +124,12 @@ Each live session gets a `spur` wrapper on `PATH`, bound to that session's confi
 
 Scopes resolve server-side from the caller's session, never from client input: `task` (`<dataDir>/memory/task/<workspaceId>/<key>.md`, per workspace), `project` (`<dataDir>/memory/project/<projectId>/<key>.md`, per project), `global` (`<dataDir>/memory/global/<key>.md`, one per instance). Spawn prompt tells agents to read `task`/`project` on start, write durable, high-value facts only.
 
+## source reply
+
+`spur source reply <message...> [--button <label[=value]>] [--session <id>] [--json]`. Sends a Telegram message from the session to the user; session defaults to `SPUR_SESSION`. Destination: the session's latest inbound Telegram chat, else the source's `chatId`. No destination, no send — the call fails.
+
+`--button` is repeatable, at most 8, and renders one inline button per row. `<label>` alone sends the label as the value; `<label>=<value>` splits at the first `=`, so a label cannot contain one — `a=b=c` is label `a`, value `b=c`. Label 1-64 chars, value 1-200, labels unique per message. A click arrives in the session as an ordinary user message carrying the value, and retires every button on that message. One live offer per session per chat: a new one retires the session's previous buttons. Unanswered choices expire after 24h. Wire: [daemon-api.md](daemon-api.md#session-routes). Chat binding and delivery requirements: [configuration.md](configuration.md#telegram-binding).
+
 ## subscribe
 
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`.

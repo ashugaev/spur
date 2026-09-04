@@ -5,11 +5,15 @@ import {
   deleteTelegramReplyTarget,
   readTelegramBindings,
   readTelegramLastUpdateId,
+  findTelegramChoice,
   readTelegramReplyTarget,
+  takeTelegramChoice,
+  telegramBindingKey,
   writeTelegramBindings,
   writeTelegramReplyTarget,
 } from "../metadata.js";
 import {
+  TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type TelegramAutoSpawnConfig,
   type TelegramBinding,
@@ -84,7 +88,9 @@ interface TelegramCallbackContext {
   callbackQuery?: {
     data?: string;
     message?: {
+      message_id?: number;
       message_thread_id?: number;
+      text?: string;
       chat: {
         id: number;
       };
@@ -184,10 +190,6 @@ export function parseTelegramCommand(text: string, botUsername?: string): Telegr
     default:
       return null;
   }
-}
-
-function telegramBindingKey(chatId: number, messageThreadId?: number): string {
-  return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
 function mergePersistedBindings(
@@ -487,6 +489,7 @@ export function wrapTelegramSpawnPrompt(taskText: string): string {
     "",
     "Source: telegram. The requester only sees messages you send with:",
     'spur source reply "<message>"',
+    'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value.',
     "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
   ].join("\n");
 }
@@ -653,6 +656,17 @@ async function handleTelegramCallback(
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
+  if (data.startsWith(TELEGRAM_CHOICE_CALLBACK_PREFIX)) {
+    await handleAgentChoiceCallback(
+      ctx,
+      runtime,
+      data.slice(TELEGRAM_CHOICE_CALLBACK_PREFIX.length),
+      message,
+      from,
+    );
+    return;
+  }
+
   if (data.startsWith(SPAWN_CALLBACK_PREFIX)) {
     const agent = data.slice(SPAWN_CALLBACK_PREFIX.length);
     if (!isTelegramAgentName(agent)) return;
@@ -760,6 +774,94 @@ async function handleTelegramCallback(
   }
 }
 
+/**
+ * Delivers a click on an agent-offered button as an ordinary user message to
+ * the session that offered it. The token is single-use and carries the whole
+ * offer with it, so sibling buttons go dead on the first click.
+ */
+async function handleAgentChoiceCallback(
+  ctx: TelegramCallbackContext,
+  runtime: TelegramRuntime,
+  token: string,
+  message: NonNullable<NonNullable<TelegramCallbackContext["callbackQuery"]>["message"]>,
+  from: { id: number; username?: string },
+): Promise<void> {
+  const deps = runtime.deps;
+  const pending = findTelegramChoice(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+    token,
+    message.chat.id,
+  );
+  if (!pending) {
+    await ctx.answerCallbackQuery("This choice is no longer active.");
+    return;
+  }
+  // Liveness before consumption: a dead lookup must leave the offer clickable.
+  const session = await findSession(deps, pending.sessionId);
+  if (!session) {
+    await ctx.answerCallbackQuery("Session is no longer active.");
+    return;
+  }
+  const choice = takeTelegramChoice(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+    token,
+    message.chat.id,
+  );
+  // Lost the race with a sibling click or a superseding reply.
+  if (!choice) {
+    await ctx.answerCallbackQuery("This choice is no longer active.");
+    return;
+  }
+  // Best-effort: Telegram expires callback queries, and a rejected answer must
+  // not swallow a click that was already consumed.
+  try {
+    await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
+    );
+  }
+  // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
+  if (ctx.editMessageText && message.text) {
+    try {
+      await ctx.editMessageText(`${message.text}\n\nSelected: ${choice.text}`);
+    } catch (error) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram choice edit failed: ${errorText(error)}`,
+      );
+    }
+  }
+  // The clicked message is the truth about the thread: an offer sent before a
+  // forum topic existed carries none, and a stale one would strand the reply.
+  const messageThreadId = message.message_thread_id ?? choice.messageThreadId;
+  const clickMessage: TelegramTextMessage = {
+    message_id: message.message_id ?? 0,
+    ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+    chat: { id: choice.chatId },
+    from,
+  };
+  // Whole-file replace: carry the unconsumed status message and the last reply
+  // stamp over, a click posts neither.
+  const previous = readTelegramReplyTarget(deps.dataDir, choice.sessionId);
+  writeTelegramReplyTarget(deps.dataDir, {
+    ...(previous?.statusMessageId !== undefined
+      ? { statusMessageId: previous.statusMessageId }
+      : {}),
+    ...(previous?.lastReplyAt !== undefined ? { lastReplyAt: previous.lastReplyAt } : {}),
+    sessionId: choice.sessionId,
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
+    chatId: choice.chatId,
+    ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+    lastInboundAt: new Date().toISOString(),
+  });
+  deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(clickMessage, choice.sessionId, choice.value));
+}
+
 async function handleTelegramText(
   ctx: TelegramTextContext,
   runtime: TelegramRuntime,
@@ -848,7 +950,11 @@ async function handleTelegramText(
       message.chat.id,
       message.message_thread_id,
     );
-    await ctx.reply(deleted ? "Unbound this Telegram thread." : "No Spur session bound here.");
+    await ctx.reply(
+      deleted
+        ? "Unbound this Telegram thread. An agent send can bind it again."
+        : "No Spur session bound here.",
+    );
     return;
   }
   if (message.text.trim().startsWith("/")) {
@@ -960,12 +1066,22 @@ async function routeTelegramPrompt(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
     );
   }
+  // A failed ack posts no new status message, so keep the unconsumed one rather
+  // than dropping it in the whole-file replace.
+  const carried =
+    statusMessageId === undefined
+      ? readTelegramReplyTarget(deps.dataDir, binding.sessionId)?.statusMessageId
+      : undefined;
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId: binding.sessionId,
     projectId: deps.projectId,
     sourceId: deps.sourceId,
     chatId: message.chat.id,
-    ...(statusMessageId !== undefined && message.chat.id > 0 ? { statusMessageId } : {}),
+    ...(statusMessageId !== undefined && message.chat.id > 0
+      ? { statusMessageId }
+      : carried !== undefined
+        ? { statusMessageId: carried }
+        : {}),
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),

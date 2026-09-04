@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderBootstrapPrompt } from "../../../../v2/src/bootstrap-prompt.js";
 import { matchesSessionSearch } from "@/lib/session-search.js";
+import { TELEGRAM_REPLY_SUFFIX } from "@/lib/session-prompt.js";
 import type { DashboardSession } from "@/lib/types.js";
 
 function makeSession(overrides: Partial<DashboardSession> = {}): DashboardSession {
@@ -61,14 +62,9 @@ describe("matchesSessionSearch", () => {
   });
 
   it("matches the canonical Telegram task without indexing its wrapper", () => {
-    const telegramSuffix = `
-
-Source: telegram. The requester only sees messages you send with:
-spur source reply "<message>"
-Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
     const session = makeSession({
-      prompt: `Repair settlement export${telegramSuffix}`,
-      originalTaskPrompt: `Repair settlement export${telegramSuffix}`,
+      prompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
+      originalTaskPrompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
     });
 
     expect(matchesSessionSearch(session, "settlement export")).toBe(true);

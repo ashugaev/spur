@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "playwright/test";
+import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
 import {
   makeWorkingSession,
   makeSpawningSession,
@@ -426,15 +427,10 @@ test.describe("D1: Header renders correctly", () => {
   test("dashboard search matches canonical tasks and work items while preserving desks", async ({
     page,
   }) => {
-    const telegramSuffix = `
-
-Source: telegram. The requester only sees messages you send with:
-spur source reply "<message>"
-Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
     const root = makeWorkingSession({
       id: "search-desk-root",
-      prompt: `Repair settlement export${telegramSuffix}`,
-      originalTaskPrompt: `Repair settlement export${telegramSuffix}`,
+      prompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
+      originalTaskPrompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
       slots: {
         title: "Settlement repair",
         links: [{ label: "github-pr", url: "https://github.com/acme/payments/pull/742" }],

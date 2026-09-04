@@ -189,6 +189,7 @@ describe("Telegram batch", () => {
       "Source: telegram. The requester only sees messages you send with:",
     );
     expect(formatted).toContain('spur source reply "<message>"');
+    expect(formatted).toContain("Offer choices with `--button <label>`");
     expect(formatted).toContain(
       "Your terminal output is invisible to them. Reply to the same Telegram thread when you need input and when the task completes, with a short result summary.",
     );

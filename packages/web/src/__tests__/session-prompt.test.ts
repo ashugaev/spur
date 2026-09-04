@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  TELEGRAM_REPLY_SUFFIX,
   getDisplayTaskLine,
   isGeneratedBootstrapPrompt,
   parseSessionPromptView,
@@ -56,6 +57,7 @@ const TELEGRAM_REPLY_SUFFIX = `
 
 Source: telegram. The requester only sees messages you send with:
 spur source reply "<message>"
+Offer choices with \`--button <label>\` or \`--button <label>=<value>\`, repeatable: spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value.
 Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
 const BOOTSTRAP_PROMPT = `You are configuring a new Spur project named "Demo App".
 
@@ -124,6 +126,28 @@ describe("parseSessionPromptView", () => {
     );
 
     expect(view.task).toBe("Fix payment retries");
+  });
+
+  it("strips a wrapper stored before the current wording", () => {
+    // Pre-`--button` prompts live on disk; an exact-constant match would leak
+    // the wrapper into the task line forever.
+    const legacySuffix = `
+
+Source: telegram. The requester only sees messages you send with:
+spur source reply "<message>"
+Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
+
+    expect(
+      parseSessionPromptView(makeSession({ prompt: `Fix payment retries${legacySuffix}` })).task,
+    ).toBe("Fix payment retries");
+  });
+
+  it("removes only the trailing wrapper when the prompt carries two", () => {
+    const prompt = `Task A${TELEGRAM_REPLY_SUFFIX}\n\nThen update the docs.${TELEGRAM_REPLY_SUFFIX}`;
+
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(
+      `Task A${TELEGRAM_REPLY_SUFFIX}\n\nThen update the docs.`.trimEnd(),
+    );
   });
 
   it("preserves Telegram reply text when it is not the trailing wrapper", () => {

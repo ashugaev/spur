@@ -63,6 +63,13 @@ const TODO_PROMPT = `Spur ToDo:
 - One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.
 - Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.
 - Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
+const TELEGRAM_PROMPT = [
+  "Telegram: the user reads this session in Telegram. Your terminal output is invisible to them.",
+  '- Send them a message: `spur source reply "<message>"`.',
+  '- Offer choices: `spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me"`. Each `--button <label>` or `--button <label>=<value>` renders one inline button.',
+  "- A click and a typed reply both arrive as an ordinary user message in this session — a click carries the button value.",
+  "- Ask this way when you need a decision from the user; do not wait silently.",
+].join("\n");
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 type HasEstablishedConnections = (port: number) => Promise<"established" | "none" | "unknown">;
@@ -314,6 +321,7 @@ function inputLogEntries(sessionId: string): unknown[] {
     .map(([, entry]) => entry)
     .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
 }
+const writeTelegramOfferMock = vi.fn();
 const readTelegramBindingsMock = vi.fn();
 const readTelegramReplyTargetMock = vi.fn();
 const sendTelegramReplyMock = vi.fn();
@@ -535,6 +543,9 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  writeTelegramOffer: writeTelegramOfferMock,
+  telegramBindingKey: (chatId: number, messageThreadId?: number) =>
+    `${chatId}:${messageThreadId ?? "main"}`,
   archiveSessions: archiveSessionsMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
@@ -1343,6 +1354,7 @@ describe("SessionService", () => {
     readClaudeConversationTailMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
+    writeTelegramOfferMock.mockReset();
     readTelegramBindingsMock.mockReset().mockReturnValue(new Map());
     readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
     sendTelegramReplyMock.mockReset().mockResolvedValue({});
@@ -3074,6 +3086,61 @@ describe("SessionService", () => {
       },
     };
   }
+
+  function configWithTelegram(
+    source: Record<string, unknown>,
+    triggers: Record<string, unknown> = {
+      tg: { source: "chat", event: "telegram:message", send: { interrupt: false } },
+    },
+  ) {
+    const config = baseConfig();
+    config.projects.api.sources = { chat: source } as typeof config.projects.api.sources;
+    config.projects.api.triggers = triggers as typeof config.projects.api.triggers;
+    return config;
+  }
+
+  it("advertises Telegram in the launch prompt when the project can send and deliver back", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(
+      configWithTelegram({
+        type: "telegram",
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+        chatId: 4242,
+      }),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello" });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+      `slot-instructions\nhello\n\n${TODO_PROMPT}\n\n${TELEGRAM_PROMPT}`,
+    );
+  });
+
+  it("omits the Telegram block without an outbound chat or without inbound delivery", async () => {
+    mockClaudeJsonlState("waiting");
+    const noChat = {
+      type: "telegram",
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    };
+    loadConfigMock.mockReturnValue(configWithTelegram(noChat));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.spawn({ project: "api", prompt: "hello" });
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).not.toContain("Telegram:");
+
+    buildAgentLaunchPlanMock.mockClear();
+    loadConfigMock.mockReturnValue(configWithTelegram({ ...noChat, chatId: 4242 }, {}));
+    const { SessionService: WithoutTrigger } = await loadSessionServiceModule();
+    const withoutTrigger = new WithoutTrigger("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await withoutTrigger.spawn({ project: "api", prompt: "hello" });
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).not.toContain("Telegram:");
+  });
 
   it("emits the project default mode line in the launch prompt", async () => {
     mockClaudeJsonlState("waiting");
@@ -5154,6 +5221,224 @@ describe("SessionService", () => {
       "No Telegram reply target for api-1",
     );
     expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+  });
+
+  it("renders agent choice buttons and persists one offer per reply", async () => {
+    const config = baseConfig();
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    };
+    config.projects.api.sources = { agentChat: telegramSource };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1", status: "running" }));
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.replyToSource("api-1", {
+      message: "Deploy now?",
+      buttons: [
+        { text: "Yes", value: "yes" },
+        { text: "Later", value: "wait for me" },
+      ],
+    });
+
+    expect(result.buttons).toBe(2);
+    const choices = writeTelegramOfferMock.mock.calls[0];
+    expect(choices?.[0]).toBe(TEST_DATA_DIR);
+    expect(choices?.[1]).toBe("api");
+    expect(choices?.[2]).toBe("agentChat");
+    const offer = choices?.[3] as {
+      sessionId: string;
+      chatId: number;
+      choices: {
+        token: string;
+        offerId: string;
+        sessionId: string;
+        chatId: number;
+        messageThreadId?: number;
+        value: string;
+      }[];
+    };
+    expect(offer.sessionId).toBe("api-1");
+    expect(offer.chatId).toBe(-1001);
+    const stored = offer.choices;
+    expect(stored).toHaveLength(2);
+    expect(new Set(stored.map((choice) => choice.offerId)).size).toBe(1);
+    expect(new Set(stored.map((choice) => choice.token)).size).toBe(2);
+    expect(stored.map((choice) => choice.value)).toEqual(["yes", "wait for me"]);
+    expect(stored.every((choice) => choice.sessionId === "api-1")).toBe(true);
+    expect(stored.every((choice) => choice.chatId === -1001)).toBe(true);
+    expect(stored.every((choice) => choice.messageThreadId === 22)).toBe(true);
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.anything(),
+      "Deploy now?",
+      expect.objectContaining({
+        buttons: [
+          { text: "Yes", callbackData: `spur_choice:${stored[0]?.token}` },
+          { text: "Later", callbackData: `spur_choice:${stored[1]?.token}` },
+        ],
+      }),
+    );
+  });
+
+  it("retires the pending offer when a reply carries no buttons", async () => {
+    const config = baseConfig();
+    config.projects.api.sources = {
+      agentChat: {
+        type: "telegram" as const,
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      },
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1", status: "running" }));
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.replyToSource("api-1", { message: "never mind" });
+
+    expect(writeTelegramOfferMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api", "agentChat", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [],
+    });
+    // Retired only once the send landed: a throw would leave the keyboard up.
+    expect(sendTelegramReplyMock.mock.invocationCallOrder[0]).toBeLessThan(
+      writeTelegramOfferMock.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it("rejects malformed choice buttons before sending", async () => {
+    const config = baseConfig();
+    config.projects.api.sources = {
+      agentChat: {
+        type: "telegram" as const,
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      },
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1", status: "running" }));
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.replyToSource("api-1", { message: "pick", buttons: [{ text: " ", value: "yes" }] }),
+    ).rejects.toThrow("button text must be 1-64 characters");
+    await expect(
+      service.replyToSource("api-1", { message: "pick", buttons: [{ text: "Yes", value: "" }] }),
+    ).rejects.toThrow("button value must be 1-200 characters");
+    await expect(
+      service.replyToSource("api-1", {
+        message: "pick",
+        buttons: [
+          { text: "Yes", value: "a" },
+          { text: "Yes", value: "b" },
+        ],
+      }),
+    ).rejects.toThrow("button text must be unique: Yes");
+    await expect(
+      service.replyToSource("api-1", {
+        message: "pick",
+        buttons: Array.from({ length: 9 }, (_unused, index) => ({
+          text: `option-${index}`,
+          value: `${index}`,
+        })),
+      }),
+    ).rejects.toThrow("buttons must hold at most 8 entries");
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    expect(writeTelegramOfferMock).not.toHaveBeenCalled();
+  });
+
+  it("sends to the project's configured Telegram chat when the session has no reply target", async () => {
+    const config = baseConfig();
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+      chatId: 4242,
+    };
+    config.projects.api.sources = { agentChat: telegramSource };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1", status: "running" }));
+    readTelegramReplyTargetMock.mockReturnValue(null);
+    const bindings = new Map();
+    readTelegramBindingsMock.mockReturnValue(bindings);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.replyToSource("api-1", { message: "heads up" });
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: 4242 }),
+      "heads up",
+      expect.anything(),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({ sessionId: "api-1", sourceId: "agentChat", chatId: 4242 }),
+    );
+    // The chat is claimed so the user's typed reply routes back to this session.
+    expect([...bindings.values()]).toEqual([{ chatId: 4242, sessionId: "api-1" }]);
+  });
+
+  it("never claims a Telegram chat another session already owns", async () => {
+    const config = baseConfig();
+    config.projects.api.sources = {
+      agentChat: {
+        type: "telegram" as const,
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+        chatId: 4242,
+      },
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1", status: "running" }));
+    readTelegramReplyTargetMock.mockReturnValue(null);
+    const bindings = new Map([["4242:main", { chatId: 4242, sessionId: "api-2" }]]);
+    readTelegramBindingsMock.mockReturnValue(bindings);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.replyToSource("api-1", { message: "heads up" });
+
+    expect([...bindings.values()]).toEqual([{ chatId: 4242, sessionId: "api-2" }]);
+    expect(writeTelegramBindingsMock).not.toHaveBeenCalled();
   });
 
   it("logs message delivery after updating tmux and metadata", async () => {
