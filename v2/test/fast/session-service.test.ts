@@ -1757,6 +1757,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "1",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -1795,6 +1796,7 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
     expect(result.id).toBe("api-1");
+    expect(result.closeoutOwner).toBe(true);
     expect(result.state).toBe("waiting");
     expect(result.runtimeAlive).toBe(true);
     expect(result.workspaceExists).toBe(true);
@@ -2227,6 +2229,7 @@ describe("SessionService", () => {
     });
 
     expect(result.id).toBe("api-2");
+    expect(result.closeoutOwner).toBe(false);
     expect(sessions.get("api-2")?.workspaceId).toBe("api-1");
     // deskId is legacy-read-only now: a freshly spawned session must not get one.
     expect(sessions.get("api-2")?.deskId).toBeUndefined();
@@ -2235,6 +2238,7 @@ describe("SessionService", () => {
         sessionName: "api-2",
         env: expect.objectContaining({
           SPUR_SESSION: "api-2",
+          SPUR_CLOSEOUT_OWNER: "0",
           SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         }),
       }),
@@ -4325,6 +4329,7 @@ describe("SessionService", () => {
       "Restricted writes mode: do not modify, create, or delete files in the workspace.",
     );
     expect(result.restrictWrites).toBe(true);
+    expect(result.closeoutOwner).toBe(false);
     expect(result.pipeline).toMatchObject({
       steps: ["review"],
       nextStepIndex: 1,
@@ -4847,6 +4852,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -17750,6 +17756,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -22264,6 +22271,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -22573,6 +22581,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -23435,6 +23444,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "codex",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -26579,6 +26589,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         launchCommand: "claude --dangerously-skip-permissions",
         status: "completed",
+        closeoutOwner: true,
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:05:00.000Z",
       });
@@ -26590,6 +26601,7 @@ describe("SessionService", () => {
 
       expect(result.id).toBe("api-1");
       expect(result.status).toBe("running");
+      expect(result.closeoutOwner).toBe(true);
       expect(createWorktreeMock).toHaveBeenCalled();
       expect(createTmuxSessionMock).toHaveBeenCalled();
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
@@ -26618,6 +26630,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         launchCommand: "claude --dangerously-skip-permissions",
         status: "completed",
+        closeoutOwner: false,
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:05:00.000Z",
         pipeline: {
@@ -26670,6 +26683,7 @@ describe("SessionService", () => {
 
       expect(result.status).toBe("running");
       expect(result.worktree).toBe(false);
+      expect(result.closeoutOwner).toBe(false);
       expect(createWorktreeMock).not.toHaveBeenCalled();
     });
 
@@ -27236,6 +27250,7 @@ describe("SessionService", () => {
           worktree: true,
           worktreePath: "/tmp/spur-worktrees/api/api-1",
           launchCommand: "codex",
+          closeoutOwner: true,
           slots: {
             title: "Handoff task",
             links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
@@ -27256,6 +27271,7 @@ describe("SessionService", () => {
 
       expect(result.agent).toBe("cursor");
       expect(result.id).toBe("api-2");
+      expect(result.closeoutOwner).toBe(true);
       const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
       expect(typeof launchPrompt).toBe("string");
       expect(launchPrompt).toContain("Task handoff from session api-1 (codex).");
@@ -27266,6 +27282,37 @@ describe("SessionService", () => {
       );
       expect(withSessionSlotInstructionsMock).toHaveBeenCalled();
       expect(launchPrompt).toContain("slot-instructions\n");
+    });
+
+    it.each([
+      { name: "non-owner", closeoutOwner: false, restrictWrites: false },
+      { name: "restricted owner", closeoutOwner: true, restrictWrites: true },
+    ])("keeps a $name handoff successor from owning closeout", async (source) => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          closeoutOwner: source.closeoutOwner,
+          ...(source.restrictWrites ? { restrictWrites: true } : {}),
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(result.closeoutOwner).toBe(false);
+      expect(createTmuxSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ SPUR_CLOSEOUT_OWNER: "0" }),
+        }),
+      );
     });
 
     it("forwards selfDestruct config from the source session across a handoff", async () => {
