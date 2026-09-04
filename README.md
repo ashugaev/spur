@@ -13,9 +13,9 @@ Local daemon + CLI orchestrator for AI coding agents.
 Coding-agent installs must use npm. Hand this to your coding agent:
 
 ```text
-Read https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md and install and run
-Spur on this machine end to end, following the guide. Do the steps yourself; don't ask me to run
-what you can run.
+Fetch https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md with curl — read the
+raw file, never a summary of it — then install and run Spur on this machine end to end, following the
+guide. Do the steps yourself; don't ask me to run what you can run.
 ```
 
 Everything — ports, Tailscale, verification — is in that guide. Tested on Ubuntu; elsewhere, expect to sort out host differences yourself.
