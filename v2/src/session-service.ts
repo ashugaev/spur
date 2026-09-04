@@ -118,6 +118,7 @@ import {
 import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   type HistoryCaptureStamp,
+  AGENT_HISTORY_ARTIFACT_PREFIX,
   captureHistoryDelta,
   historyStampKey,
   historyStampSessionId,
@@ -1195,7 +1196,7 @@ function stateTransitionArtifactId(
   toState: SessionState,
 ): string {
   const safeTimestamp = at.replaceAll(":", "-").replaceAll(".", "-");
-  return `agent-history-${sessionId}-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
+  return `${AGENT_HISTORY_ARTIFACT_PREFIX}${sessionId}-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
 }
 
 function tryRealpath(path: string): string {
