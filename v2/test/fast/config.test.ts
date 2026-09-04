@@ -4623,6 +4623,75 @@ projects:
   });
 });
 
+describe("artifactRetention", () => {
+  const DEFAULTS = {
+    enabled: false,
+    olderThanDays: 30,
+    intervalMinutes: 360,
+    maxAnchorsPerSweep: 20,
+    maxBytesPerSession: 2147483648,
+    maxFilesPerSession: 500,
+  };
+
+  it("defaults to disabled with the documented values when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadConfig(configPath).artifactRetention).toEqual(DEFAULTS);
+  });
+
+  it("parses artifactRetention in instance mode", async () => {
+    const configPath = await writeConfig(`
+artifactRetention:
+  enabled: true
+  olderThanDays: 14
+  intervalMinutes: 120
+  maxAnchorsPerSweep: 5
+  maxBytesPerSession: 1073741824
+  maxFilesPerSession: 200
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadConfig(configPath).artifactRetention).toEqual({
+      enabled: true,
+      olderThanDays: 14,
+      intervalMinutes: 120,
+      maxAnchorsPerSweep: 5,
+      maxBytesPerSession: 1073741824,
+      maxFilesPerSession: 200,
+    });
+  });
+
+  it("rejects a non-positive cap", async () => {
+    const configPath = await writeConfig(`
+artifactRetention:
+  maxFilesPerSession: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/artifactRetention\.maxFilesPerSession/);
+  });
+
+  it("ignores artifactRetention in project mode", async () => {
+    const configPath = await writeConfig(`
+artifactRetention:
+  enabled: true
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadProjectConfig(configPath).artifactRetention).toEqual(DEFAULTS);
+  });
+});
+
 describe("sidecarGc", () => {
   it("defaults to enabled true / 120 / 360 when absent (AC10)", async () => {
     const configPath = await writeConfig(`

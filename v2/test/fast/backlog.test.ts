@@ -62,6 +62,14 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     },
+    artifactRetention: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxAnchorsPerSweep: 20,
+      maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+      maxFilesPerSession: 500,
+    },
     sidecarGc: {
       enabled: true,
       idleTtlMinutes: 120,

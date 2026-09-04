@@ -40,6 +40,14 @@ Actions: `reclaim` removes worktree, archives; `archive` moves records only; `bl
 
 Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with their log shard; `mv` back into `sessions/<projectId>/` to un-archive (a collected `stopped` session can't restore — `gc` lists those ids first). `--no-sizes` skips freed-byte measurement; exits `1` on any group error. Defaults: `sessionGc.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
 
+## artifacts-gc
+
+`spur artifacts-gc [--execute]` prunes `agent-history-*.jsonl` session artifacts. Dry run unless `--execute`, daemon-free. Unit: the artifacts dir of a workspace (desk members share one). Prints per-workspace files and bytes plus the total it would free.
+
+Selection, eviction order, and what always survives: [Artifact retention](configuration.md#artifact-retention). A blocked workspace prints `listing_truncated`; exits `1` on any deletion error.
+
+Flags: `--older-than <days>`, `--max-bytes <bytes>`, `--max-files <n>`, `--project <id>`, `--limit <n>`, `--json`. Defaults: `artifactRetention.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
+
 ## cache
 
 `spur cache [--prune --yes]` reports host caches outside `~/.spur` — size, path, age (days), protection reason per entry, size-ranked. Dry-run by default; `--prune --yes` deletes `prunable` entries, no daemon needed. Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, rest of `~/.cache`, `/tmp`, never `~/.spur`.

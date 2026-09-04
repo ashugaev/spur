@@ -93,6 +93,13 @@ import {
   readConfigRegistryFile,
 } from "./registry.js";
 import { listSessions } from "./metadata.js";
+import {
+  createArtifactRetentionDeps,
+  executeArtifactRetention,
+  listAnchorArtifacts,
+  planArtifactRetention,
+  type ArtifactRetentionReport,
+} from "./artifact-retention.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
 import {
@@ -1226,6 +1233,37 @@ export function renderSessionGcResult(report: GcReport): string {
   }
   if (report.dryRun) {
     lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+export function renderArtifactRetentionResult(report: ArtifactRetentionReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.files} artifact(s) across ${report.scanned.anchors} anchor(s); planned ${report.anchors.length} (limit ${report.limit}, older than ${report.olderThanDays}d, max ${formatBytes(report.maxBytesPerSession)}, max ${report.maxFilesPerSession} file(s) per anchor).`,
+    ),
+    "",
+  ];
+  if (report.anchors.length === 0) {
+    lines.push(dimText("Nothing to prune."));
+    return lines.join("\n");
+  }
+  for (const anchor of report.anchors) {
+    const detail = anchor.error
+      ? `error: ${anchor.error}`
+      : anchor.blockReasons.length > 0
+        ? anchor.blockReasons.join(",")
+        : `${anchor.totalFiles} file(s), ${formatBytes(anchor.totalBytes)} on disk`;
+    lines.push(
+      `  ${accent(anchor.anchorId.padEnd(20))}  ${`${anchor.evictFiles} file(s)`.padEnd(14)}  ${formatBytes(anchor.evictBytes).padEnd(9)}  ${detail}`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.evictFiles} artifact(s) selected, ${formatBytes(report.totals.freedBytes)} ${report.dryRun ? "would be freed" : "freed"}, ${report.totals.errors} error(s).`,
+  );
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing deleted. Re-run with --execute to apply."));
   }
   return lines.join("\n");
 }
@@ -2425,6 +2463,70 @@ export function createProgram(cliEntrypoint: string): Command {
           return executeSessionGc(plan, createGcDeps(config), { dryRun, sizes });
         },
         render: renderSessionGcResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("artifacts-gc")
+    .description(
+      "Prune oversized agent-history artifacts per session workspace (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is deleted")
+    .option("--older-than <days>", "Age prune cutoff; applies only to completed/killed/stopped")
+    .option("--max-bytes <bytes>", "Agent-history bytes kept per workspace")
+    .option("--max-files <number>", "Agent-history files kept per workspace")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum workspaces to act on in one run")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const retention = config.artifactRetention;
+      const olderThanDays =
+        options.olderThan === undefined
+          ? retention.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const maxBytesPerSession =
+        options.maxBytes === undefined
+          ? retention.maxBytesPerSession
+          : parsePositiveIntegerOption(String(options.maxBytes), "--max-bytes");
+      const maxFilesPerSession =
+        options.maxFiles === undefined
+          ? retention.maxFilesPerSession
+          : parsePositiveIntegerOption(String(options.maxFiles), "--max-files");
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning artifact retention" : "running artifact retention",
+        action: () => {
+          const plan = planArtifactRetention({
+            sessions: listSessions(config.dataDir),
+            now: new Date(),
+            olderThanDays,
+            maxBytesPerSession,
+            maxFilesPerSession,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            listArtifacts: listAnchorArtifacts(config.dataDir),
+          });
+          return Promise.resolve(
+            executeArtifactRetention(plan, createArtifactRetentionDeps(config), { dryRun }),
+          );
+        },
+        render: renderArtifactRetentionResult,
         exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
       });
     });

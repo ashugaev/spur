@@ -4,11 +4,14 @@ import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -225,6 +228,7 @@ const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
 const deleteSessionArtifactsExceptMock = vi.fn();
+const deleteSessionArtifactByIdMock = vi.fn();
 const listSessionArtifactsMock = vi.fn();
 const readSessionArtifactMock = vi.fn();
 const setSessionArtifactOriginMock = vi.fn();
@@ -709,6 +713,7 @@ vi.mock("../../src/session-artifacts.js", () => ({
     mkdirSync(dir, { recursive: true });
     return dir;
   }),
+  deleteSessionArtifactById: deleteSessionArtifactByIdMock,
   deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
   deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
     rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
@@ -795,6 +800,14 @@ function baseConfig() {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    artifactRetention: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxAnchorsPerSweep: 20,
+      maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+      maxFilesPerSession: 500,
     },
     sidecarGc: {
       enabled: true,
@@ -1458,6 +1471,7 @@ describe("SessionService", () => {
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     deleteSessionArtifactsExceptMock.mockReset();
+    deleteSessionArtifactByIdMock.mockReset().mockReturnValue(true);
     listSessionArtifactsMock.mockReset().mockReturnValue({ artifacts: [], truncated: false });
     readSessionArtifactMock.mockReset().mockReturnValue(null);
     setSessionArtifactOriginMock.mockReset();
@@ -13567,6 +13581,138 @@ describe("SessionService", () => {
     );
   });
 
+  it("writes an agent history delta per transition instead of a full copy", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-delta-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    const line = (index: number) =>
+      `{"type":"assistant","i":${index},"pad":"${"x".repeat(200)}"}\n`;
+    writeFileSync(sourceHistoryPath, line(0), "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    for (let index = 1; index <= 20; index += 1) {
+      appendFileSync(sourceHistoryPath, line(index), "utf8");
+      vi.advanceTimersByTime(5_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: index % 2 === 1 ? "needs_input" : "waiting",
+        reader: jsonlReader,
+      });
+      await service.get("api-1");
+    }
+
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    expect(artifactIds).toHaveLength(20);
+    expect(new Set(artifactIds).size).toBe(20);
+
+    const artifactDir = artifactDirForSession("api-1");
+    const files = readdirSync(artifactDir);
+    expect(files).toHaveLength(20);
+    // The first capture is a full copy; every later one holds only the lines
+    // appended since the previous transition.
+    expect(readFileSync(join(artifactDir, String(artifactIds[0])), "utf8")).toBe(line(0) + line(1));
+    for (let index = 2; index <= 20; index += 1) {
+      expect(readFileSync(join(artifactDir, String(artifactIds[index - 1])), "utf8")).toBe(
+        line(index),
+      );
+    }
+    const writtenBytes = files.reduce(
+      (total, file) => total + statSync(join(artifactDir, file)).size,
+      0,
+    );
+    expect(writtenBytes).toBe(statSync(sourceHistoryPath).size);
+  });
+
+  it("re-emits a partial trailing line whole once it ends on a newline", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-partial-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","i":0}\n{"type":"assi', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "needs_input", reader: jsonlReader });
+    await service.get("api-1");
+
+    appendFileSync(sourceHistoryPath, 'stant","i":1}\n', "utf8");
+    vi.advanceTimersByTime(5_000);
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+    await service.get("api-1");
+
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    const artifactDir = artifactDirForSession("api-1");
+    expect(readFileSync(join(artifactDir, String(artifactIds[0])), "utf8")).toBe(
+      '{"type":"assistant","i":0}\n',
+    );
+    expect(readFileSync(join(artifactDir, String(artifactIds[1])), "utf8")).toBe(
+      '{"type":"assistant","i":1}\n',
+    );
+  });
+
+  it("writes no file and logs no artifact id for an empty delta", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-flap-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"idle"}\n', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    // The source is never touched again, so every flap after the first
+    // transition captures nothing at all.
+    for (let index = 1; index <= 6; index += 1) {
+      vi.advanceTimersByTime(5_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: index % 2 === 1 ? "rate_limited" : "waiting",
+        reader: jsonlReader,
+      });
+      await service.get("api-1");
+    }
+
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    expect(artifactIds).toHaveLength(6);
+    expect(artifactIds.filter((id) => id !== undefined)).toHaveLength(1);
+    expect(readdirSync(artifactDirForSession("api-1"))).toHaveLength(1);
+  });
+
   it("creates, updates, lists, and removes state subscriptions", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ id: "api-1" }));
@@ -20693,6 +20839,118 @@ describe("SessionService", () => {
     expect(
       logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
     ).toBe(false);
+    service.dispose();
+  });
+
+  function seedOverCapArtifactAnchor() {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      workspaceId: "api-1",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "completed",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    // 600 files against the shipped 500-file cap: 100 over.
+    const artifacts = Array.from({ length: 600 }, (_unused, index) => ({
+      id: `agent-history-api-1-${String(index).padStart(4, "0")}.jsonl`,
+      name: `agent-history-api-1-${String(index).padStart(4, "0")}.jsonl`,
+      size: 1024,
+      mimeType: "text/plain",
+      kind: "text" as const,
+      origin: "automatic" as const,
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: new Date(Date.parse("2026-03-01T00:00:00.000Z") + index * 60_000).toISOString(),
+    }));
+    listSessionArtifactsMock.mockReturnValue({ artifacts, truncated: false });
+    readSessionArtifactMock.mockImplementation(
+      (_dataDir: string, _anchorId: string, artifactId: string) =>
+        artifacts.find((artifact) => artifact.id === artifactId) ?? null,
+    );
+    return artifacts;
+  }
+
+  it("never prunes artifacts while artifactRetention.enabled is false", async () => {
+    seedOverCapArtifactAnchor();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runArtifactRetentionSweep(): void;
+      lastArtifactRetentionSweepAt: number;
+      dispose(): void;
+    };
+    service.lastArtifactRetentionSweepAt = 0;
+
+    service.runArtifactRetentionSweep();
+
+    // Shipped defaults must delete nothing, even with an anchor far over both caps.
+    expect(deleteSessionArtifactByIdMock).not.toHaveBeenCalled();
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.artifact_retention.completed",
+      ),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("runs the artifact retention sweep off the session GC tick", async () => {
+    seedOverCapArtifactAnchor();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      artifactRetention: { ...baseConfig().artifactRetention, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    vi.useFakeTimers();
+    try {
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { lastArtifactRetentionSweepAt: number; dispose(): void };
+      service.lastArtifactRetentionSweepAt = 0;
+
+      // The retention sweep owns no timer of its own — it rides the 5-minute
+      // session-GC tick, so the wiring, not just the method, has to be pinned.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+      expect(deleteSessionArtifactByIdMock).toHaveBeenCalledTimes(100);
+      service.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prunes over-cap agent-history artifacts once artifactRetention.enabled is true", async () => {
+    const artifacts = seedOverCapArtifactAnchor();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      artifactRetention: { ...baseConfig().artifactRetention, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runArtifactRetentionSweep(): void;
+      lastArtifactRetentionSweepAt: number;
+      dispose(): void;
+    };
+    service.lastArtifactRetentionSweepAt = 0;
+
+    service.runArtifactRetentionSweep();
+
+    // 600 files against the 500-file cap: the 100 oldest go, the 500 newest stay.
+    expect(deleteSessionArtifactByIdMock).toHaveBeenCalledTimes(100);
+    const deletedIds = deleteSessionArtifactByIdMock.mock.calls.map((call) => call[2]);
+    expect(deletedIds[0]).toBe(artifacts[0]?.id);
+    expect(deletedIds).not.toContain(artifacts[599]?.id);
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.artifact_retention.completed",
+    );
+    expect(completed?.[1].message).toContain(`${100 * 1024} byte(s) freed`);
     service.dispose();
   });
 

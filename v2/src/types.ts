@@ -738,6 +738,16 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  // Prunes agent-history artifacts only. Disjoint from sessionGc, which owns
+  // worktrees and session records.
+  artifactRetention: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxAnchorsPerSweep: number;
+    maxBytesPerSession: number;
+    maxFilesPerSession: number;
+  };
   sidecarGc: {
     enabled: boolean;
     idleTtlMinutes: number;
