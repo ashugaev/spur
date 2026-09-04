@@ -1,5 +1,4 @@
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -115,6 +114,12 @@ import {
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
+import {
+  type HistoryCaptureStamp,
+  captureHistoryDelta,
+  historyStampKey,
+  historyStampSessionId,
+} from "./agent-history-delta.js";
 import {
   addAccount,
   ensureDefaultAccount,
@@ -2541,6 +2546,9 @@ export class SessionService {
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
+  // Keyed by historyStampKey(sessionId, sourcePath). In-memory like
+  // stateHistory: a restart costs one extra full copy per active source.
+  private readonly historyCaptureStamps = new Map<string, HistoryCaptureStamp>();
   private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
   private stateSubscriptionIndexReady = false;
   private stateSubscriptionDispatchDepth = 0;
@@ -5126,6 +5134,11 @@ export class SessionService {
       for (const id of this.stateCache.keys()) {
         if (!includedIds.has(id)) {
           this.stateCache.delete(id);
+        }
+      }
+      for (const stampKey of this.historyCaptureStamps.keys()) {
+        if (!includedIds.has(historyStampSessionId(stampKey))) {
+          this.historyCaptureStamps.delete(stampKey);
         }
       }
 
@@ -10345,6 +10358,7 @@ export class SessionService {
     if (!sourcePath) {
       return null;
     }
+    const stampKey = historyStampKey(session.id, sourcePath);
     try {
       const artifactId = stateTransitionArtifactId(
         session.id,
@@ -10353,9 +10367,20 @@ export class SessionService {
         transition.toState,
       );
       const anchorId = workspaceIdOf(session);
-      const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, anchorId);
-      copyFileSync(sourcePath, join(artifactDir, artifactId));
+      const stamp = captureHistoryDelta(
+        sourcePath,
+        this.historyCaptureStamps.get(stampKey),
+        (payload) => {
+          const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, anchorId);
+          writeFileSync(join(artifactDir, artifactId), payload);
+        },
+      );
+      // Nothing new in the source: no file, no metadata entry, no artifact id.
+      if (!stamp) {
+        return null;
+      }
       setSessionArtifactOrigin(this.config.dataDir, anchorId, artifactId, "automatic");
+      this.historyCaptureStamps.set(stampKey, stamp);
       return artifactId;
     } catch {
       return null;

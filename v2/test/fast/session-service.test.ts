@@ -4,11 +4,14 @@ import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -13565,6 +13568,138 @@ describe("SessionService", () => {
     expect(readFileSync(artifactDirForSession("api-1") + `/${artifactId}`, "utf8")).toBe(
       '{"type":"assistant","message":"needs input"}\n',
     );
+  });
+
+  it("writes an agent history delta per transition instead of a full copy", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-delta-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    const line = (index: number) =>
+      `{"type":"assistant","i":${index},"pad":"${"x".repeat(200)}"}\n`;
+    writeFileSync(sourceHistoryPath, line(0), "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    for (let index = 1; index <= 20; index += 1) {
+      appendFileSync(sourceHistoryPath, line(index), "utf8");
+      vi.advanceTimersByTime(5_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: index % 2 === 1 ? "needs_input" : "waiting",
+        reader: jsonlReader,
+      });
+      await service.get("api-1");
+    }
+
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    expect(artifactIds).toHaveLength(20);
+    expect(new Set(artifactIds).size).toBe(20);
+
+    const artifactDir = artifactDirForSession("api-1");
+    const files = readdirSync(artifactDir);
+    expect(files).toHaveLength(20);
+    // The first capture is a full copy; every later one holds only the lines
+    // appended since the previous transition.
+    expect(readFileSync(join(artifactDir, String(artifactIds[0])), "utf8")).toBe(line(0) + line(1));
+    for (let index = 2; index <= 20; index += 1) {
+      expect(readFileSync(join(artifactDir, String(artifactIds[index - 1])), "utf8")).toBe(
+        line(index),
+      );
+    }
+    const writtenBytes = files.reduce(
+      (total, file) => total + statSync(join(artifactDir, file)).size,
+      0,
+    );
+    expect(writtenBytes).toBe(statSync(sourceHistoryPath).size);
+  });
+
+  it("re-emits a partial trailing line whole once it ends on a newline", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-partial-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","i":0}\n{"type":"assi', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "needs_input", reader: jsonlReader });
+    await service.get("api-1");
+
+    appendFileSync(sourceHistoryPath, 'stant","i":1}\n', "utf8");
+    vi.advanceTimersByTime(5_000);
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+    await service.get("api-1");
+
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    const artifactDir = artifactDirForSession("api-1");
+    expect(readFileSync(join(artifactDir, String(artifactIds[0])), "utf8")).toBe(
+      '{"type":"assistant","i":0}\n',
+    );
+    expect(readFileSync(join(artifactDir, String(artifactIds[1])), "utf8")).toBe(
+      '{"type":"assistant","i":1}\n',
+    );
+  });
+
+  it("writes no file and logs no artifact id for an empty delta", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-flap-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"idle"}\n', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    // The source is never touched again, so every flap after the first
+    // transition captures nothing at all.
+    for (let index = 1; index <= 6; index += 1) {
+      vi.advanceTimersByTime(5_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: index % 2 === 1 ? "rate_limited" : "waiting",
+        reader: jsonlReader,
+      });
+      await service.get("api-1");
+    }
+
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    expect(artifactIds).toHaveLength(6);
+    expect(artifactIds.filter((id) => id !== undefined)).toHaveLength(1);
+    expect(readdirSync(artifactDirForSession("api-1"))).toHaveLength(1);
   });
 
   it("creates, updates, lists, and removes state subscriptions", async () => {
