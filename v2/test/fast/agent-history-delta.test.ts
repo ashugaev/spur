@@ -18,7 +18,6 @@ const TAIL = hashHistoryTail(Buffer.from('{"type":"assistant"}\n', "utf8"));
 function stamp(overrides: Partial<HistoryCaptureStamp> = {}): HistoryCaptureStamp {
   return {
     sourcePath: SOURCE,
-    size: 2_004_249,
     mtimeMs: 1_770_000_000_000,
     offset: 2_004_249,
     tailHash: TAIL,
@@ -35,7 +34,7 @@ describe("planHistoryCapture", () => {
   });
 
   it("captures the full source on a source path change", () => {
-    const previous = stamp({ sourcePath: "/data/status/api-1.json", size: 1_024, offset: 1_024 });
+    const previous = stamp({ sourcePath: "/data/status/api-1.json", offset: 1_024 });
     expect(planHistoryCapture(previous, SOURCE, { size: 2_004_249, mtimeMs: 2 }, TAIL)).toEqual({
       kind: "full",
       readFrom: 0,
@@ -56,7 +55,7 @@ describe("planHistoryCapture", () => {
       planHistoryCapture(
         previous,
         SOURCE,
-        { size: previous.size, mtimeMs: previous.mtimeMs },
+        { size: previous.offset, mtimeMs: previous.mtimeMs },
         rewritten,
       ),
     ).toEqual({ kind: "full", readFrom: 0 });
@@ -68,7 +67,7 @@ describe("planHistoryCapture", () => {
       planHistoryCapture(
         previous,
         SOURCE,
-        { size: previous.size, mtimeMs: previous.mtimeMs },
+        { size: previous.offset, mtimeMs: previous.mtimeMs },
         TAIL,
       ),
     ).toEqual({ kind: "empty" });
@@ -77,14 +76,14 @@ describe("planHistoryCapture", () => {
   it("captures a delta from the previous offset when the source grew", () => {
     const previous = stamp();
     expect(
-      planHistoryCapture(previous, SOURCE, { size: previous.size + 900, mtimeMs: 9 }, TAIL),
+      planHistoryCapture(previous, SOURCE, { size: previous.offset + 900, mtimeMs: 9 }, TAIL),
     ).toEqual({ kind: "delta", readFrom: previous.offset });
   });
 
   it("captures a delta when only the mtime moved at an unchanged size", () => {
     const previous = stamp();
     expect(
-      planHistoryCapture(previous, SOURCE, { size: previous.size, mtimeMs: 12 }, TAIL),
+      planHistoryCapture(previous, SOURCE, { size: previous.offset, mtimeMs: 12 }, TAIL),
     ).toEqual({ kind: "delta", readFrom: previous.offset });
   });
 });
@@ -180,6 +179,24 @@ describe("captureHistoryDelta", () => {
     writeFileSync(source, '{"i":0}\n{"i":1}\n', "utf8");
     const second = capture(source, first.stamp ?? undefined);
     expect(second.emitted).toEqual(['{"i":1}\n']);
+  });
+
+  it("emits nothing when a delta is a partial line only", () => {
+    const source = join(dir, "transcript.jsonl");
+    writeFileSync(source, '{"i":0}\n', "utf8");
+    const first = capture(source, undefined);
+    expect(first.emitted).toEqual(['{"i":0}\n']);
+    // Appended without a trailing newline after a completed capture: the whole
+    // delta is a fragment. Emitting it would ship an artifact that is not valid
+    // JSONL, and the fragment would then be written twice.
+    writeFileSync(source, '{"i":0}\n{"i":1', "utf8");
+    const second = capture(source, first.stamp ?? undefined);
+    expect(second.emitted).toEqual([]);
+    expect(second.stamp).toBeNull();
+
+    writeFileSync(source, '{"i":0}\n{"i":1}\n', "utf8");
+    const third = capture(source, first.stamp ?? undefined);
+    expect(third.emitted).toEqual(['{"i":1}\n']);
   });
 
   it("emits a source that carries no newline at all", () => {

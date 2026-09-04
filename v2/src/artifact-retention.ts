@@ -234,13 +234,27 @@ export function planArtifactRetention(input: PlanArtifactRetentionInput): Artifa
 // Execution (IO via injected deps)
 // ---------------------------------------------------------------------------
 
+export interface ArtifactRetentionDeleteResult {
+  /** Ids this run removed. */
+  deleted: string[];
+  /**
+   * Ids that were still present and still eligible, yet could not be removed. An id that
+   * vanished or stopped being eligible between plan and delete belongs in neither list:
+   * a concurrent cleanup or a second operator run is benign and must not exit `1`.
+   */
+  failed: string[];
+}
+
 export interface ArtifactRetentionDeps {
   /**
-   * Deletes the named ids and returns the ids actually removed. Must re-check eligibility
-   * at the deletion boundary and must never delete an id it was not handed — deleting the
-   * complement of a keep set is what makes a lossy listing a user-data-deletion path.
+   * Deletes the named ids. Must re-check eligibility at the deletion boundary and must
+   * never delete an id it was not handed — deleting the complement of a keep set is what
+   * makes a lossy listing a user-data-deletion path.
    */
-  deleteArtifacts: (anchorId: string, evictArtifactIds: readonly string[]) => string[];
+  deleteArtifacts: (
+    anchorId: string,
+    evictArtifactIds: readonly string[],
+  ) => ArtifactRetentionDeleteResult;
 }
 
 export interface ArtifactRetentionAnchorReport {
@@ -308,16 +322,16 @@ export function executeArtifactRetention(
       anchor.evict.map((candidate) => [candidate.artifactId, candidate.sizeBytes]),
     );
     try {
-      const deleted = deps.deleteArtifacts(
+      const result = deps.deleteArtifacts(
         anchor.anchorId,
         anchor.evict.map((candidate) => candidate.artifactId),
       );
-      row.deletedFiles = deleted.length;
-      row.freedBytes = deleted.reduce((sum, id) => sum + (sizeById.get(id) ?? 0), 0);
+      row.deletedFiles = result.deleted.length;
+      row.freedBytes = result.deleted.reduce((sum, id) => sum + (sizeById.get(id) ?? 0), 0);
       freedTotal += row.freedBytes;
-      // A skipped id means the boundary re-check rejected it; that is a real anomaly, not
-      // a silent no-op.
-      errors += anchor.evict.length - deleted.length;
+      // Only a refused delete of a file that is still there and still eligible counts.
+      // An id another cleanup already removed is a benign race, not an exit-1 condition.
+      errors += result.failed.length;
     } catch (error) {
       row.error = error instanceof Error ? error.message : String(error);
       errors += 1;
@@ -347,19 +361,23 @@ export function createArtifactRetentionDeps(config: AppConfig): ArtifactRetentio
   return {
     deleteArtifacts: (anchorId, evictArtifactIds) => {
       const deleted: string[] = [];
+      const failed: string[] = [];
       for (const artifactId of evictArtifactIds) {
         // Re-checked here, at the deletion boundary, against what is on disk right now:
         // the plan was built from a listing that may be seconds old, and a file that
         // stopped being an eligible automatic in the meantime must not be deleted.
+        // Already gone, or no longer eligible: benign, neither deleted nor failed.
         const artifact = readSessionArtifact(config.dataDir, anchorId, artifactId);
         if (!artifact || !isEvictableArtifact(artifact)) {
           continue;
         }
         if (deleteSessionArtifactById(config.dataDir, anchorId, artifactId)) {
           deleted.push(artifactId);
+        } else {
+          failed.push(artifactId);
         }
       }
-      return deleted;
+      return { deleted, failed };
     },
   };
 }
