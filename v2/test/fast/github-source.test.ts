@@ -3193,6 +3193,47 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("re-polls a session after rebinding back to a previously disabled PR number", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(notFoundEnvelope(42, { withPath: true }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(disabledEvents()).toHaveLength(1);
+
+      listSessionsMock.mockReturnValue([
+        makeSession({
+          pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+        }),
+      ]);
+      mockLifecyclePoll(prView({ number: 43, url: "https://github.com/acme/api/pull/43" }));
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(prView());
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(ghTransportMock).toHaveBeenCalledTimes(3);
+      expect(disabledEvents()).toHaveLength(1);
+
+      handle.stop();
+    });
+
     it("never disables an unbound session on a not-found error", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       readReviewSourceSnapshotsMock.mockReturnValue(new Map());
