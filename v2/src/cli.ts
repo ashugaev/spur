@@ -129,6 +129,7 @@ import {
   type SetSessionMemoryRequest,
   type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
@@ -1275,6 +1276,21 @@ function parseSlotLink(value: string): SessionLink {
     label: value.slice(0, index),
     url: value.slice(index + 1),
   };
+}
+
+// Guards against an older daemon replying with a plain SessionView (no
+// slotUpdate) despite the compile-time UpdateSessionSlotsResponse type —
+// this narrows the actual runtime value instead of trusting the cast.
+function slotUpdateMessage(session: unknown): string | undefined {
+  if (!session || typeof session !== "object" || !("slotUpdate" in session)) {
+    return undefined;
+  }
+  const slotUpdate = (session as { slotUpdate?: unknown }).slotUpdate;
+  if (!slotUpdate || typeof slotUpdate !== "object" || !("message" in slotUpdate)) {
+    return undefined;
+  }
+  const message = (slotUpdate as { message?: unknown }).message;
+  return typeof message === "string" ? message : undefined;
 }
 
 function currentSessionId(): string {
@@ -3627,8 +3643,13 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
-        success: (session) => `Updated slots for ${session.id}.`,
+          postJson<UpdateSessionSlotsResponse>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/slots`,
+            payload,
+            configPath,
+          ),
+        success: (session) => slotUpdateMessage(session) ?? `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
     });

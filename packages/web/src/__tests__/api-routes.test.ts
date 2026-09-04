@@ -79,6 +79,7 @@ import { POST as removeQueuedMessage } from "@/app/api/sessions/[id]/queue/remov
 import { POST as flushQueuedMessage } from "@/app/api/sessions/[id]/queue/flush/route";
 import { POST as answerQuestion } from "@/app/api/sessions/[id]/answer/route";
 import { POST as markOpened } from "@/app/api/sessions/[id]/opened/route";
+import { POST as updateSessionTitle } from "@/app/api/sessions/[id]/title/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
@@ -919,6 +920,127 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(400);
+  });
+
+  // ── POST /api/sessions/:id/title ───────────────────────────────────────
+
+  it("POST /api/sessions/:id/title sends manual title updates", async () => {
+    mockedSpurRequestJson.mockResolvedValue(
+      sessionFixture({ slotUpdate: { titleResult: "updated" } }),
+    );
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "  Manual title  " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        body: JSON.stringify({ title: "Manual title", source: "manual" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/title sends manual title clears", async () => {
+    mockedSpurRequestJson.mockResolvedValue(
+      sessionFixture({ slotUpdate: { titleResult: "cleared" } }),
+    );
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: null }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        body: JSON.stringify({ clearTitle: true, source: "manual" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/title rejects invalid title bodies", async () => {
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: 42 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/title rejects a whitespace-only title without calling the daemon (T3)", async () => {
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("title must not be empty");
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/title rejects a non-JSON body with 400, not 502", async () => {
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: "not json",
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/title surfaces a daemon not-found as 404, not 502", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Session not found: api-a1", 404));
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "New title" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("POST /api/sessions/:id/title returns 409 when the daemon reports a blocked title result", async () => {
+    mockedSpurRequestJson.mockResolvedValue(
+      sessionFixture({
+        slotUpdate: { titleResult: "blocked", message: "title editing unavailable" },
+      }),
+    );
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "New title" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("title editing unavailable");
   });
 
   // ── Lifecycle actions ──────────────────────────────────────────────────
