@@ -14930,7 +14930,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const [listed] = await service.list();
+    const [listed] = (await service.list()) as SessionView[];
 
     expect(listed?.queuedMessages).toEqual({
       messages: ["Manual queued follow-up"],
@@ -14976,6 +14976,18 @@ describe("SessionService", () => {
         awaitingPrompt: true,
       },
       sidecarNames: ["dev"],
+      agentSessionId: "agent-uuid",
+      allowedTriggers: ["github-comment"],
+      branchSource: "explicit",
+      stateSubscriptions: [
+        {
+          id: "sub-1",
+          targetSessionId: "api-2",
+          states: ["stopped"],
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:00:00.000Z",
+        },
+      ],
     });
     sessions.set("api-2", {
       id: "api-2",
@@ -15027,6 +15039,14 @@ describe("SessionService", () => {
     expect(listed[0]).not.toHaveProperty("sidecars");
     expect(listed[0]).not.toHaveProperty("workspaceAccess");
     expect(listed[0]).not.toHaveProperty("stateHistory");
+    // Read only from the single-session views, and ~14% of the listing payload.
+    expect(listed[0]).not.toHaveProperty("launchCommand");
+    expect(listed[0]).not.toHaveProperty("stateSubscriptions");
+    expect(listed[0]).not.toHaveProperty("allowedTriggers");
+    expect(listed[0]).not.toHaveProperty("agentSessionId");
+    expect(listed[0]).not.toHaveProperty("branchSource");
+    // The strip must not overreach into what the listing renders.
+    expect(listed[0]).toMatchObject({ project: "api", prompt: "Ship the feature" });
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1");
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("svc-api-1");
     expect(tmuxSessionExistsMock).not.toHaveBeenCalledWith("api-2");

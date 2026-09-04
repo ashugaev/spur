@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { jsonResponse } from "@/lib/json-response";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import { spurErrorResponse } from "@/lib/spur-error-response";
 import type {
@@ -8,14 +8,14 @@ import type {
   SpurSessionsResponse,
 } from "@/lib/types";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const [sessions, projects, backlog] = await Promise.all([
       spurRequestJson<SpurSessionView[]>("/sessions?includeCompleted=1&view=dashboard"),
       spurRequestJson<ProjectInfo[]>("/projects"),
       spurRequestJson<AvailableBacklogItem[]>("/backlog/available"),
     ]);
-    return NextResponse.json({
+    return await jsonResponse(request, {
       sessions,
       projects,
       backlog,

@@ -225,8 +225,14 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
-  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-  response.end(JSON.stringify(payload, null, 2) + "\n");
+  // Compact, not pretty-printed: the listing payloads run to megabytes and the
+  // 2-space indent was ~10% of every one of them, re-serialized on each poll.
+  const body = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(body.byteLength),
+  });
+  response.end(body);
 }
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {

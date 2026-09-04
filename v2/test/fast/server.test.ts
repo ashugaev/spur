@@ -744,6 +744,45 @@ describe("startServer", () => {
     ]);
   });
 
+  it("serves compact JSON with a content-length instead of a pretty-printed body", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/info`);
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      // The listing payloads run to megabytes; the 2-space indent was ~10% of
+      // every one of them, re-serialized on each poll.
+      expect(body).not.toMatch(/\n\s+"/);
+      expect(JSON.parse(body)).toMatchObject({ version: expect.any(String) });
+      expect(response.headers.get("content-length")).toBe(String(Buffer.byteLength(body)));
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("forwards clearPort to sidecar start", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
