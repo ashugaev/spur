@@ -115,7 +115,7 @@ else
     echo "[ok] pnpm $(pnpm --version)"
   else
     echo "  corepack failed (likely permissions), falling back to npm install..."
-    npm install -g "pnpm@$(node -p "require('./package.json').packageManager.split('@')[1]")"
+    npm install -g "pnpm@$(node -p "require('$REPO_ROOT/package.json').packageManager.split('@')[1]")"
     echo "[ok] pnpm $(pnpm --version)"
   fi
 fi

@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
 # `npm install -g pnpm` pulls latest, whose native binary ships as an optional
 # dependency npm can skip, leaving pnpm installed but unrunnable.
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
