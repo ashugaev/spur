@@ -14,7 +14,8 @@ CLOSE-OUT GATE, mandatory after any code change
   3  Implementation diff from branch base empty -> SKIPPED.
   4  git push -u origin "$(git branch --show-current)"
   5  gh pr view succeeds -> comment new HEAD SHA. Fails -> CREATE OPEN PR below.
-  6  Return PR url.
+  6  Problem parked out of scope during the task -> file it per ISSUE REPORTING below.
+  7  Return the PR url, plus any issue url filed at step 6.
 
 PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
@@ -39,3 +40,10 @@ CREATE OPEN PR
 Closes #<issue-number>
 EOF
 )"
+
+ISSUE REPORTING, for a problem outside the current request
+
+  1  `gh issue list --state all --search "<keywords>"` — search open and closed, never open only.
+  2  Open match wins over a closed one: `gh issue comment` the new evidence onto it. Never open a duplicate.
+  3  Closed match, none open: `gh issue reopen`, then comment the new evidence. Keeps the fix history on the regression.
+  4  No match: `gh issue create`. Body states what breaks, where (`file:line`), how to reproduce, and the PR or task that surfaced it.

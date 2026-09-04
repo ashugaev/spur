@@ -2,10 +2,10 @@
 set -euo pipefail
 
 BRANCH=$(git branch --show-current)
-PR_NUMBER=$(gh pr list --head "$BRANCH" --limit 1 --json number -q '.[0].number')
+PR_NUMBER=$(gh pr list --head "$BRANCH" --state all --limit 1 --json number -q '.[0].number')
 
 if [ -z "$PR_NUMBER" ]; then
-    echo "No open PR found for branch: $BRANCH" >&2
+    echo "No PR found for branch: $BRANCH" >&2
     exit 1
 fi
 
