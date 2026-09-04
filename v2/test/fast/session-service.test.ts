@@ -228,6 +228,7 @@ const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
 const deleteSessionArtifactsExceptMock = vi.fn();
+const deleteSessionArtifactByIdMock = vi.fn();
 const listSessionArtifactsMock = vi.fn();
 const readSessionArtifactMock = vi.fn();
 const setSessionArtifactOriginMock = vi.fn();
@@ -712,6 +713,7 @@ vi.mock("../../src/session-artifacts.js", () => ({
     mkdirSync(dir, { recursive: true });
     return dir;
   }),
+  deleteSessionArtifactById: deleteSessionArtifactByIdMock,
   deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
   deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
     rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
@@ -798,6 +800,14 @@ function baseConfig() {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    artifactRetention: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxAnchorsPerSweep: 20,
+      maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+      maxFilesPerSession: 500,
     },
     sidecarGc: {
       enabled: true,
@@ -1461,6 +1471,7 @@ describe("SessionService", () => {
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     deleteSessionArtifactsExceptMock.mockReset();
+    deleteSessionArtifactByIdMock.mockReset().mockReturnValue(true);
     listSessionArtifactsMock.mockReset().mockReturnValue({ artifacts: [], truncated: false });
     readSessionArtifactMock.mockReset().mockReturnValue(null);
     setSessionArtifactOriginMock.mockReset();
@@ -20828,6 +20839,118 @@ describe("SessionService", () => {
     expect(
       logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
     ).toBe(false);
+    service.dispose();
+  });
+
+  function seedOverCapArtifactAnchor() {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      workspaceId: "api-1",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "completed",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    // 600 files against the shipped 500-file cap: 100 over.
+    const artifacts = Array.from({ length: 600 }, (_unused, index) => ({
+      id: `agent-history-api-1-${String(index).padStart(4, "0")}.jsonl`,
+      name: `agent-history-api-1-${String(index).padStart(4, "0")}.jsonl`,
+      size: 1024,
+      mimeType: "text/plain",
+      kind: "text" as const,
+      origin: "automatic" as const,
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: new Date(Date.parse("2026-03-01T00:00:00.000Z") + index * 60_000).toISOString(),
+    }));
+    listSessionArtifactsMock.mockReturnValue({ artifacts, truncated: false });
+    readSessionArtifactMock.mockImplementation(
+      (_dataDir: string, _anchorId: string, artifactId: string) =>
+        artifacts.find((artifact) => artifact.id === artifactId) ?? null,
+    );
+    return artifacts;
+  }
+
+  it("never prunes artifacts while artifactRetention.enabled is false", async () => {
+    seedOverCapArtifactAnchor();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runArtifactRetentionSweep(): void;
+      lastArtifactRetentionSweepAt: number;
+      dispose(): void;
+    };
+    service.lastArtifactRetentionSweepAt = 0;
+
+    service.runArtifactRetentionSweep();
+
+    // Shipped defaults must delete nothing, even with an anchor far over both caps.
+    expect(deleteSessionArtifactByIdMock).not.toHaveBeenCalled();
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.artifact_retention.completed",
+      ),
+    ).toBe(false);
+    service.dispose();
+  });
+
+  it("runs the artifact retention sweep off the session GC tick", async () => {
+    seedOverCapArtifactAnchor();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      artifactRetention: { ...baseConfig().artifactRetention, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    vi.useFakeTimers();
+    try {
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { lastArtifactRetentionSweepAt: number; dispose(): void };
+      service.lastArtifactRetentionSweepAt = 0;
+
+      // The retention sweep owns no timer of its own — it rides the 5-minute
+      // session-GC tick, so the wiring, not just the method, has to be pinned.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+      expect(deleteSessionArtifactByIdMock).toHaveBeenCalledTimes(100);
+      service.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prunes over-cap agent-history artifacts once artifactRetention.enabled is true", async () => {
+    const artifacts = seedOverCapArtifactAnchor();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      artifactRetention: { ...baseConfig().artifactRetention, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runArtifactRetentionSweep(): void;
+      lastArtifactRetentionSweepAt: number;
+      dispose(): void;
+    };
+    service.lastArtifactRetentionSweepAt = 0;
+
+    service.runArtifactRetentionSweep();
+
+    // 600 files against the 500-file cap: the 100 oldest go, the 500 newest stay.
+    expect(deleteSessionArtifactByIdMock).toHaveBeenCalledTimes(100);
+    const deletedIds = deleteSessionArtifactByIdMock.mock.calls.map((call) => call[2]);
+    expect(deletedIds[0]).toBe(artifacts[0]?.id);
+    expect(deletedIds).not.toContain(artifacts[599]?.id);
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.artifact_retention.completed",
+    );
+    expect(completed?.[1].message).toContain(`${100 * 1024} byte(s) freed`);
     service.dispose();
   });
 

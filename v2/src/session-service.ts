@@ -276,6 +276,12 @@ import {
 } from "./session-artifacts.js";
 import { sidecarOwnerId, workspaceIdOf } from "./session-desk.js";
 import {
+  createArtifactRetentionDeps,
+  executeArtifactRetention,
+  listAnchorArtifacts,
+  planArtifactRetention,
+} from "./artifact-retention.js";
+import {
   createGcDeps,
   executeSessionGc,
   planSessionGc,
@@ -2495,6 +2501,8 @@ export class SessionService {
   // swept before" as "due immediately" — the first tick after a restart
   // waits out a full intervalMinutes like every other tick.
   private lastSessionGcSweepAt = Date.now();
+  // Same construction-time seed and same reason as lastSessionGcSweepAt.
+  private lastArtifactRetentionSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -5448,6 +5456,7 @@ export class SessionService {
     }
     this.sessionGcTimer = setInterval(() => {
       void this.runSessionGcSweep();
+      this.runArtifactRetentionSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
   }
@@ -5520,6 +5529,48 @@ export class SessionService {
       });
     } finally {
       this.sessionGcRunning = false;
+    }
+  }
+
+  // Rides the session-gc tick rather than adding a second timer, but keeps its
+  // own enable flag, interval, and last-sweep clock: artifact pruning and
+  // worktree reclaim are independently switchable. Off unless
+  // artifactRetention.enabled is true, so shipped defaults delete nothing.
+  private runArtifactRetentionSweep(): void {
+    const retention = this.config.artifactRetention;
+    if (!retention.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastArtifactRetentionSweepAt < retention.intervalMinutes * 60_000) {
+      return;
+    }
+    this.lastArtifactRetentionSweepAt = Date.now();
+    try {
+      const plan = planArtifactRetention({
+        sessions: listSessions(this.config.dataDir),
+        now: new Date(),
+        olderThanDays: retention.olderThanDays,
+        maxBytesPerSession: retention.maxBytesPerSession,
+        maxFilesPerSession: retention.maxFilesPerSession,
+        limit: retention.maxAnchorsPerSweep,
+        listArtifacts: listAnchorArtifacts(this.config.dataDir),
+      });
+      const report = executeArtifactRetention(plan, createArtifactRetentionDeps(this.config), {
+        dryRun: false,
+      });
+      if (report.totals.evictFiles > 0 || report.totals.errors > 0) {
+        this.logEvent("session.artifact_retention.completed", {
+          level: "info",
+          message: `Artifact retention sweep: ${report.totals.freedBytes} byte(s) freed across ${report.anchors.length} workspace(s), ${report.totals.errors} error(s).`,
+          details: { totals: report.totals },
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.artifact_retention.failed", {
+        level: "warn",
+        message: `Artifact retention sweep failed: ${message}`,
+      });
     }
   }
 

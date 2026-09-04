@@ -31,7 +31,7 @@ function artifact(overrides: Partial<SessionArtifact> & { id: string }): Session
     name: overrides.id,
     size: 1024,
     mimeType: "application/jsonl",
-    kind: "file",
+    kind: "text",
     origin: "automatic",
     createdAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:00:00.000Z",
@@ -86,12 +86,26 @@ describe("planArtifactRetention", () => {
       artifact({ id: "startup-attachment.png", origin: "intentional", addedByUser: true }),
       artifact({ id: "screenshot.png", origin: "automatic", addedByUser: true }),
       artifact({ id: "agent-history-s1-user.jsonl", origin: "automatic", addedByUser: true }),
+      // Agent-written but not history: the prefix is what scopes retention to transcripts,
+      // and it is old enough that a dropped prefix clause selects it first.
+      artifact({
+        id: "auto-capture.png",
+        origin: "automatic",
+        updatedAt: "2020-01-01T00:00:00.000Z",
+      }),
+      // Prefix-shaped but not agent-written: an untracked file defaults to "intentional",
+      // and it is the oldest here, so a dropped origin clause selects it first.
+      artifact({
+        id: "agent-history-s1-untracked.jsonl",
+        origin: "intentional",
+        updatedAt: "2020-01-01T00:00:00.000Z",
+      }),
     ];
     const result = plan([session({ id: "s1" })], {
       s1: { artifacts, truncated: false },
     });
     const anchor = result.anchors[0];
-    expect(anchor?.totalFiles).toBe(604);
+    expect(anchor?.totalFiles).toBe(606);
     expect(anchor?.automaticFiles).toBe(600);
     expect(anchor?.evict).toHaveLength(100);
     for (const candidate of anchor?.evict ?? []) {
@@ -102,6 +116,8 @@ describe("planArtifactRetention", () => {
     expect(evicted.has("startup-attachment.png")).toBe(false);
     expect(evicted.has("screenshot.png")).toBe(false);
     expect(evicted.has("agent-history-s1-user.jsonl")).toBe(false);
+    expect(evicted.has("agent-history-s1-untracked.jsonl")).toBe(false);
+    expect(evicted.has("auto-capture.png")).toBe(false);
   });
 
   it("count cap evicts the oldest and keeps the newest", () => {
