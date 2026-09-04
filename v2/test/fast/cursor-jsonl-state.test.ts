@@ -309,6 +309,48 @@ describe("parseCursorJsonlRecord text retention", () => {
     // missing text field must not change the classified state.
     expect(classifyCursorJsonlState([ordinary, error], NOW)).toBe("error");
   });
+
+  it("classifies historical turn error followed by user message as working when recent", () => {
+    const errorLine = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error: "Rate limited: out of usage",
+    });
+    const error = parseCursorJsonlRecord(errorLine, NOW - 10_000);
+    const userTurn = parseCursorJsonlRecord(
+      JSON.stringify({
+        role: "user",
+        message: { content: [{ type: "text", text: "retry now" }] },
+      }),
+      NOW - 5_000,
+    );
+    expect(error).toBeDefined();
+    expect(userTurn).toBeDefined();
+    if (!error || !userTurn) return;
+
+    expect(classifyCursorJsonlState([error, userTurn], NOW)).toBe("working");
+  });
+
+  it("classifies historical turn error followed by assistant final text as waiting", () => {
+    const errorLine = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error: "transport failure",
+    });
+    const error = parseCursorJsonlRecord(errorLine, NOW - 20_000);
+    const assistantTurn = parseCursorJsonlRecord(
+      JSON.stringify({
+        role: "assistant",
+        message: { content: [{ type: "text", text: "Task completed successfully." }] },
+      }),
+      NOW - 5_000,
+    );
+    expect(error).toBeDefined();
+    expect(assistantTurn).toBeDefined();
+    if (!error || !assistantTurn) return;
+
+    expect(classifyCursorJsonlState([error, assistantTurn], NOW)).toBe("waiting");
+  });
 });
 
 describe("Cursor JSONL fixtures", () => {
@@ -531,6 +573,120 @@ describe("findLatestCursorTranscriptFile", () => {
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("error");
     expect(state?.rateLimit).toEqual({ limited: true, reason: "cursor out of usage" });
+  });
+
+  it("returns null for rateLimit when historical terminalError is followed by user turn", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-historical-err-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    await mkdir(join(transcriptsDir, "chat-session"), { recursive: true });
+    await writeFile(
+      join(transcriptsDir, "chat-session", "chat-session.jsonl"),
+      `${JSON.stringify({
+        type: "turn_ended",
+        status: "error",
+        error: "Rate limited: out of usage",
+      })}\n${JSON.stringify({
+        role: "user",
+        message: { content: [{ type: "text", text: "continue work" }] },
+      })}\n`,
+    );
+
+    const state = await readCursorJsonlState(worktreePath);
+    expect(state?.state).toBe("working");
+    expect(state?.rateLimit).toBeNull();
+  });
+
+  it("findLatestCursorTranscriptFile with minMtimeMs ignores transcripts modified before minMtimeMs", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-min-mtime-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    await mkdir(join(transcriptsDir, "old-session"), { recursive: true });
+    const oldPath = join(transcriptsDir, "old-session", "old-session.jsonl");
+    await writeFile(
+      oldPath,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n',
+    );
+    const oldTime = new Date(1_000_000);
+    await utimes(oldPath, oldTime, oldTime);
+
+    const threshold = 2_000_000;
+    const ignored = await findLatestCursorTranscriptFile(worktreePath, undefined, {
+      minMtimeMs: threshold,
+    });
+    expect(ignored).toBeNull();
+
+    await mkdir(join(transcriptsDir, "new-session"), { recursive: true });
+    const newPath = join(transcriptsDir, "new-session", "new-session.jsonl");
+    await writeFile(
+      newPath,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"new"}]}}\n',
+    );
+    const newTime = new Date(3_000_000);
+    await utimes(newPath, newTime, newTime);
+
+    const found = await findLatestCursorTranscriptFile(worktreePath, undefined, {
+      minMtimeMs: threshold,
+    });
+    expect(found).toBe(newPath);
+  });
+
+  it("isolates transcript lookup in shared directory when agentSessionId is pinned", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-pinned-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    const id1 = "11111111-1111-1111-1111-111111111111";
+    const id2 = "22222222-2222-2222-2222-222222222222";
+
+    await mkdir(join(transcriptsDir, id1), { recursive: true });
+    const file1 = join(transcriptsDir, id1, `${id1}.jsonl`);
+    await writeFile(
+      file1,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"session 1"}]}}\n',
+    );
+    const time1 = new Date(10_000_000);
+    await utimes(file1, time1, time1);
+
+    await mkdir(join(transcriptsDir, id2), { recursive: true });
+    const file2 = join(transcriptsDir, id2, `${id2}.jsonl`);
+    await writeFile(
+      file2,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"session 2"}]}}\n',
+    );
+    const time2 = new Date(20_000_000);
+    await utimes(file2, time2, time2);
+
+    // Default lookup without pinned id picks newest (file2)
+    const latestUnpinned = await findLatestCursorTranscriptFile(worktreePath);
+    expect(latestUnpinned).toBe(file2);
+
+    // Pinned lookup for id1 returns file1 despite file2 being newer
+    const pinned1 = await findLatestCursorTranscriptFile(worktreePath, id1);
+    expect(pinned1).toBe(file1);
   });
 });
 
