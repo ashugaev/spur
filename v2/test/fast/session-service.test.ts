@@ -15217,6 +15217,93 @@ describe("SessionService", () => {
     expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
+  it("promotes a stale stopped shepherd session when runtime and agent process are live", async () => {
+    const dataDir = resolve(TEST_ARTIFACTS_ROOT, "shepherd-reconcile-stopped-data");
+    mkdirSync(resolve(dataDir, "shepherd"), { recursive: true });
+    loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+    const sessions = createSessionStore();
+    sessions.set("shp-1", {
+      id: "shp-1",
+      project: "spur-shepherd",
+      agent: "claude",
+      prompt: "Watch project health",
+      branch: "main",
+      worktree: false,
+      worktreePath: `${dataDir}/shepherd`,
+      tmuxSession: "shp-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("working");
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.get("shp-1");
+    const persisted = sessions.get("shp-1");
+
+    expect(result.status).toBe("running");
+    expect(result.state).toBe("working");
+    expect(persisted?.status).toBe("running");
+    expect(persisted).not.toHaveProperty("stopReason");
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      dataDir,
+      expect.objectContaining({
+        event: "session.reconcile.running",
+        level: "warn",
+        sessionId: "shp-1",
+        projectId: "spur-shepherd",
+      }),
+    );
+  });
+
+  it("promotes a stale errored shepherd session when runtime and agent process are live", async () => {
+    const dataDir = resolve(TEST_ARTIFACTS_ROOT, "shepherd-reconcile-errored-data");
+    mkdirSync(resolve(dataDir, "shepherd"), { recursive: true });
+    loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+    const sessions = createSessionStore();
+    sessions.set("shp-1", {
+      id: "shp-1",
+      project: "spur-shepherd",
+      agent: "claude",
+      prompt: "Watch project health",
+      branch: "main",
+      worktree: false,
+      worktreePath: `${dataDir}/shepherd`,
+      tmuxSession: "shp-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("working");
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.get("shp-1");
+    const persisted = sessions.get("shp-1");
+
+    expect(result.status).toBe("running");
+    expect(result.state).toBe("working");
+    expect(persisted?.status).toBe("running");
+    expect(persisted).not.toHaveProperty("error");
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      dataDir,
+      expect.objectContaining({
+        event: "session.reconcile.running",
+        level: "warn",
+        sessionId: "shp-1",
+        projectId: "spur-shepherd",
+      }),
+    );
+  });
+
   it("does not promote manual pause or terminal stopped-like records", async () => {
     const records: SessionRecord[] = [
       {
@@ -30807,6 +30894,8 @@ describe("SessionService", () => {
     });
 
     it("keeps a daily wake armed on an errored session without sending", async () => {
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
       const sessions = seedShepherdSession({
         status: "errored",
         dailyWake: {
@@ -30906,6 +30995,8 @@ describe("SessionService", () => {
     });
 
     it("keeps an interval wake armed on an errored session without sending", async () => {
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
       const sessions = seedShepherdSession({
         status: "errored",
         intervalWake: {
