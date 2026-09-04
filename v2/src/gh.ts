@@ -222,10 +222,14 @@ function emptyPollCycleRun(
  * nothing AND threw nothing emits nothing and leaves the run's counters
  * untouched, so they carry into the next window — this is what keeps PR
  * 729's idle-host suppression intact under rollup: window expiry alone must
- * never produce an event. Errors are in the gate, not just the payload — a
- * source that only ever fails (zero calls, zero cost) must still surface at
- * most one aggregate per window instead of accumulating errors forever
- * behind a gate keyed on cost alone.
+ * never produce an event. Errors are in the gate, not just the payload —
+ * NOT for a failing `gh` call itself: `noteGhInvocation` runs before the
+ * call executes, so any `gh()` failure already sets calls > 0 and is
+ * already covered by that leg. The `errors` leg covers a cycle whose task
+ * throws before ever invoking `gh` (e.g. a local read failing while
+ * building the poll's session list) — rare, but such a cycle would
+ * otherwise be invisible: zero calls, zero cost, yet it did something that
+ * failed and is worth surfacing once per window instead of silently.
  */
 function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number): void {
   const spentSomething = run.calls > 0 || run.graphqlCost > 0 || run.errors > 0;
@@ -463,6 +467,13 @@ export async function runGhPollCycle<T>(
     prunePollCycleRuns(endedAtMs);
     const existingRun = pollCycleRuns.get(key);
     if (!existingRun) {
+      // Without a sink there is nowhere to ever flush a run to, so no run is
+      // opened: registering one anyway would start its windowStartedAtMs
+      // clock on a cycle nobody logged (a phantom span once a sink is later
+      // set) and, in a process that never sets one at all (e.g. the CLI),
+      // would accumulate an entry per key for the life of the process. The
+      // failing cycle itself is not lost — it already propagates as a thrown
+      // error to the caller, which is its own signal without a sink.
       if (dataDir) {
         logSpurEvent(dataDir, {
           event: "gh.poll_cycle",
@@ -478,10 +489,15 @@ export async function runGhPollCycle<T>(
             bySubcommand: Object.fromEntries(cycle.bySubcommand),
           },
         });
+        // The run's own cycles/errors counters start clean: this first cycle
+        // was just emitted standalone above (with no errors field, by
+        // design), so seeding its failure into the run would attribute it to
+        // a window that never actually counted this cycle as one of its own.
+        pollCycleRuns.set(
+          key,
+          emptyPollCycleRun(cycle.kind, cycle.projectId, cycle.sourceId, endedAtMs),
+        );
       }
-      const newRun = emptyPollCycleRun(cycle.kind, cycle.projectId, cycle.sourceId, endedAtMs);
-      if (cycleFailed) newRun.errors = 1;
-      pollCycleRuns.set(key, newRun);
     } else {
       existingRun.touchedAtMs = endedAtMs;
       existingRun.cycles += 1;

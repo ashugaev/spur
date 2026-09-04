@@ -615,13 +615,16 @@ describe("gh usage accounting", () => {
     }
   });
 
-  it("counts a first-cycle failure and still emits one aggregate for an errors-only window", async () => {
+  it("counts folded failures and still emits one aggregate for an errors-only window", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       vi.setSystemTime(T0);
       // First cycle for a brand-new key fails outright: emits immediately
-      // (unchanged single-cycle shape, no errors field), but the failure
-      // must not vanish from the run it opens.
+      // (unchanged single-cycle shape, no errors field) and opens a run with
+      // clean counters. This cycle was never counted as one of the run's
+      // cycles, so its own failure must not be seeded into the run — that
+      // would attribute a failure to a window that never actually folded
+      // this cycle into it.
       await expect(
         runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "dead" }, async () => {
           throw new Error("gh unavailable");
@@ -642,8 +645,8 @@ describe("gh usage accounting", () => {
 
       // A non-failing, still zero-cost cycle past the window closes it. The
       // window spent nothing in calls/graphqlCost, but it must still emit
-      // because it counted 4 errors (1 seeded from the first cycle, 3 from
-      // the fold) — a dead source may never pay, but it must still surface.
+      // because it counted 3 errors from the 3 folded failing cycles — a
+      // dead source may never pay, but it must still surface.
       vi.setSystemTime(T0 + GH_POLL_CYCLE_ROLLUP_MS);
       await runGhPollCycle(
         { kind: "github_source", projectId: "p", sourceId: "dead" },
@@ -656,11 +659,38 @@ describe("gh usage accounting", () => {
         zeroCycles: 4,
         calls: 0,
         graphqlCost: 0,
-        errors: 4,
+        errors: 3,
       });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("opens no run and never emits an aggregate for a key polled before any sink is set", async () => {
+    // Mirrors a CLI process, which never calls setGhEventSink: the first
+    // cycle for a key still runs (and a failure still propagates to the
+    // caller), but nothing is tracked, so the pollCycleRuns map never grows
+    // and no run's windowStartedAtMs clock starts ticking on a cycle nobody
+    // could ever log.
+    setGhEventSink(null);
+    await expect(
+      runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "cli" }, async () => {
+        throw new Error("gh unavailable");
+      }),
+    ).rejects.toThrow("gh unavailable");
+    await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "cli" }, async () => {
+      noteGhInvocation(["pr", "view", "1"], Date.now());
+    });
+    expect(cycleEvents()).toHaveLength(0);
+
+    // Setting a sink afterward opens a clean run on the next cycle for that
+    // key rather than resuming a phantom window that started ticking earlier.
+    setGhEventSink("/tmp/spur-data");
+    await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "cli" }, async () => {
+      noteGhInvocation(["pr", "view", "2"], Date.now());
+    });
+    expect(cycleEvents()).toHaveLength(1);
+    expect(cycleEvents()[0]).toMatchObject({ calls: 1 });
   });
 
   it("accounts GraphQL cost from an error envelope", async () => {
