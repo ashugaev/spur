@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ghModule from "../../src/gh.js";
 import type * as prLookupModule from "../../src/pr-lookup.js";
-import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
+import type {
+  AppConfig,
+  ProjectConfig,
+  ReviewSnapshot,
+  SessionRecord,
+  SessionSlots,
+} from "../../src/types.js";
 
 const { existsSyncMock } = vi.hoisted(() => ({
   existsSyncMock: vi.fn(() => true),
@@ -29,6 +35,7 @@ const writeConfigRegistryMock = vi.fn();
 const agentProcessMatchersMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
 const agentWaitsForSubmitAckMock = vi.fn();
+const readReviewSourceSnapshotMock = vi.fn((): ReviewSnapshot | null => null);
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
@@ -84,6 +91,7 @@ vi.mock("../../src/metadata.js", () => ({
   listActiveServiceProblems: vi.fn().mockReturnValue([]),
   listServiceInstancesForSession: vi.fn().mockReturnValue([]),
   listSessions: listSessionsMock,
+  readReviewSourceSnapshot: readReviewSourceSnapshotMock,
   readServiceInstance: vi.fn(),
   readSession: readSessionMock,
   writeServiceInstance: vi.fn(),
@@ -674,6 +682,168 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
+  it("rebinds a terminal-bound session once its branch resolves to a different open PR", async () => {
+    const session = makeSession({
+      pr: {
+        number: 384,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/384",
+      },
+    });
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    readReviewSourceSnapshotMock.mockReturnValue({
+      prNumber: 384,
+      signals: new Map([["merged:384", { key: "merged:384", kind: "merged", text: "" }]]),
+    });
+    mockGraphql({
+      [session.branch]: {
+        number: 387,
+        title: "Follow-up PR",
+        url: "https://github.com/acme/api/pull/387",
+        state: "OPEN",
+      },
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(writeWorkspaceStateMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      session.id,
+      expect.objectContaining({
+        pr: {
+          number: 387,
+          repo: "acme/api",
+          url: "https://github.com/acme/api/pull/387",
+        },
+      }),
+    );
+
+    service.dispose();
+  });
+
+  it("does not call gh for a rebind check whose cadence cap is not due yet", async () => {
+    const session = makeSession({
+      pr: {
+        number: 384,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/384",
+      },
+    });
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    readReviewSourceSnapshotMock.mockReturnValue({
+      prNumber: 384,
+      signals: new Map([["merged:384", { key: "merged:384", kind: "merged", text: "" }]]),
+    });
+    mockGraphql({
+      [session.branch]: {
+        number: 387,
+        title: "Follow-up PR",
+        url: "https://github.com/acme/api/pull/387",
+        state: "OPEN",
+      },
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    ghMock.mockClear();
+    writeWorkspaceStateMock.mockClear();
+
+    // A running session's rebind check sits on the same 30s throttle
+    // `checkPrForSession` uses; well within that window, the next sweep
+    // must not spend git or gh at all.
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(writeWorkspaceStateMock).not.toHaveBeenCalled();
+
+    service.dispose();
+  });
+
+  it("does not rebind when the branch still resolves to the same bound PR", async () => {
+    const session = makeSession({
+      pr: {
+        number: 384,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/384",
+      },
+    });
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    readReviewSourceSnapshotMock.mockReturnValue({
+      prNumber: 384,
+      signals: new Map([["merged:384", { key: "merged:384", kind: "merged", text: "" }]]),
+    });
+    // The graphql lookup resolves the same PR that is already bound (e.g. it
+    // was reopened on the same number) — a no-op, not a rebind.
+    mockGraphql({
+      [session.branch]: {
+        number: 384,
+        title: "Reopened",
+        url: "https://github.com/acme/api/pull/384",
+        state: "OPEN",
+      },
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalled();
+    expect(writeWorkspaceStateMock).not.toHaveBeenCalled();
+
+    service.dispose();
+  });
+
+  it("bails a rebind write when the workspace's bound PR changed underneath the async lookup", async () => {
+    const session = makeSession({
+      pr: {
+        number: 384,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/384",
+      },
+    });
+    listSessionsMock.mockReturnValue([session]);
+    setupEnrich();
+    readReviewSourceSnapshotMock.mockReturnValue({
+      prNumber: 384,
+      signals: new Map([["merged:384", { key: "merged:384", kind: "merged", text: "" }]]),
+    });
+    mockGraphql({
+      [session.branch]: {
+        number: 387,
+        title: "Follow-up PR",
+        url: "https://github.com/acme/api/pull/387",
+        state: "OPEN",
+      },
+    });
+    // The re-read that runRebindCheck does right before writing sees a
+    // different bound PR than the one this check started against — another
+    // rebind (or the session's own discovery) already landed a binding, so
+    // this stale-race write must bail instead of overwriting it.
+    readSessionMock.mockReturnValue({
+      ...session,
+      pr: { number: 999, repo: "acme/api", url: "https://github.com/acme/api/pull/999" },
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalled();
+    expect(writeWorkspaceStateMock).not.toHaveBeenCalled();
+
+    service.dispose();
+  });
+
   it("skips check when session has no worktree", async () => {
     const session = makeSession({ worktree: false, worktreePath: "" });
     listSessionsMock.mockReturnValue([session]);
@@ -817,7 +987,6 @@ describe("PR auto-detect", () => {
           string,
           { waitingChecks: number; lastState: string | null; lastCheckAt: number; found: boolean }
         >;
-        checkPrForSession(session: SessionRecord, state: string): void;
       }
     ).prCheckTrackers.set(session.id, {
       waitingChecks: PR_WAITING_LIMIT,
@@ -828,9 +997,13 @@ describe("PR auto-detect", () => {
 
     (
       service as unknown as {
-        checkPrForSession(session: SessionRecord, state: string): void;
+        checkPrForSession(
+          session: SessionRecord,
+          state: string,
+          workspace: Record<string, never>,
+        ): void;
       }
-    ).checkPrForSession(session, "working");
+    ).checkPrForSession(session, "working", {});
     // The queued lookup rides the next sweep's flush.
     await vi.advanceTimersByTimeAsync(5_100);
     expect(ghMock).toHaveBeenCalledTimes(1);
