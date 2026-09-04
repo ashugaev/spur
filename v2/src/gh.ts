@@ -171,7 +171,7 @@ let lastPausedEventKey: string | null = null;
 // otherwise sit in pollCycleRuns for the daemon's lifetime, so an entry
 // untouched for this long is flushed and dropped; the next cycle on that key
 // simply opens a fresh run.
-const ZERO_CYCLE_RUN_MAX_IDLE_MS = 60 * 60_000;
+const POLL_CYCLE_RUN_MAX_IDLE_MS = 60 * 60_000;
 // Rollup window for gh.poll_cycle. Deliberately not a config key and
 // deliberately not equal to any configured poll interval (60_000 or 600_000
 // on the live host) — an interval-sized window makes emission cadence
@@ -271,7 +271,7 @@ function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number):
 function prunePollCycleRuns(nowMs: number): void {
   const dataDir = ghEventSinkDataDir;
   for (const [key, run] of pollCycleRuns) {
-    if (nowMs - run.touchedAtMs > ZERO_CYCLE_RUN_MAX_IDLE_MS) {
+    if (nowMs - run.touchedAtMs > POLL_CYCLE_RUN_MAX_IDLE_MS) {
       if (dataDir) flushPollCycleRun(dataDir, run, nowMs);
       pollCycleRuns.delete(key);
     }
