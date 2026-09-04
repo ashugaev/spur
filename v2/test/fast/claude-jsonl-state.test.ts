@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -549,6 +549,116 @@ describe("parseConversationBatch", () => {
       }
       expect(result.state).toBe("working");
     } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caps a cold read to the transcript tail instead of allocating the whole file", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "cold-read-cap-"));
+    const tempFile = join(tempDir, "huge.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
+
+    try {
+      // Layout: many small head records, then one record larger than the
+      // cold-read ceiling, then three tail records. The ceiling puts the
+      // window inside the oversized record, so only the three tail records
+      // can be reached. Without the cap the read reaches the head and the
+      // retained tail fills to TAIL_RECORD_LIMIT instead.
+      const headRecord = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T00:00:00.000Z",
+        message: { role: "user", content: "head" },
+      });
+      const oversized = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T08:00:00.000Z",
+        message: { role: "user", content: "x".repeat(1_400_000) },
+      });
+      const tailRecords = [0, 1, 2].map((index) =>
+        JSON.stringify({
+          type: "assistant",
+          timestamp: `2026-05-04T08:26:5${index}.000Z`,
+          message: {
+            role: "assistant",
+            model: "claude-tail",
+            content: [{ type: "text", text: `tail-${index}` }],
+          },
+        }),
+      );
+      const lines = [...new Array(200).fill(headRecord), oversized, ...tailRecords, ""];
+      await writeFile(tempFile, lines.join("\n"), "utf8");
+      const lastActivity = new Date("2026-05-04T08:26:52.000Z");
+      await utimes(tempFile, lastActivity, lastActivity);
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result).not.toBeNull();
+      if (!result) throw new Error("expected a result");
+      // Only the records after the oversized one are reachable through the
+      // capped window; the head is never allocated.
+      expect(result.reader.tailRecords).toHaveLength(3);
+      expect(result.liveModel).toBe("claude-tail");
+      // The reader still ends aligned with the file, so the next incremental
+      // read continues from the right place.
+      expect(result.reader.lastOffset).toBe((await stat(tempFile)).size);
+    } finally {
+      vi.useRealTimers();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a whole record when the capped window opens exactly on a line boundary", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "cold-read-boundary-"));
+    const tempFile = join(tempDir, "boundary.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
+
+    try {
+      // The window starts at size - 1 MiB. Sizing the final record to exactly
+      // one byte under 1 MiB, with its trailing newline, puts that start on
+      // the record's first byte — so the line opening the window is whole, and
+      // dropping it unconditionally would lose it.
+      const build = (padding: string) =>
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-05-04T08:26:40.000Z",
+          message: {
+            role: "assistant",
+            model: "claude-boundary",
+            content: [{ type: "text", text: padding }],
+          },
+        });
+      const target = 1_048_576 - 1;
+      const boundaryRecord = build("b".repeat(target - build("").length));
+      expect(boundaryRecord).toHaveLength(target);
+
+      const filler = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T08:00:00.000Z",
+        message: { role: "user", content: "y".repeat(2048) },
+      });
+      await writeFile(tempFile, [filler, boundaryRecord, ""].join("\n"), "utf8");
+      const lastActivity = new Date("2026-05-04T08:26:40.000Z");
+      await utimes(tempFile, lastActivity, lastActivity);
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result).not.toBeNull();
+      if (!result) throw new Error("expected a result");
+      expect(result.liveModel).toBe("claude-boundary");
+    } finally {
+      vi.useRealTimers();
       await rm(tempDir, { recursive: true, force: true });
     }
   });
