@@ -1491,23 +1491,21 @@ function writeTelegramChoices(
 }
 
 /**
- * Records one offer, retiring the session's previous offer in that chat: two
- * live questions would let a click answer the wrong one, since the reply
- * carries the value alone.
+ * Records one offer for a session in a chat, retiring that session's previous
+ * offer there. Empty `choices` retires without recording: two live questions
+ * would let a click answer the wrong one, since the reply carries the value
+ * alone.
  */
 export function writeTelegramOffer(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  choices: TelegramChoice[],
+  offer: { sessionId: string; chatId: number; choices: TelegramChoice[] },
 ): void {
-  if (choices.length === 0) return;
-  const offer = choices[0];
-  if (!offer) return;
   const kept = readTelegramChoices(dataDir, projectId, sourceId).filter(
     (choice) => choice.sessionId !== offer.sessionId || choice.chatId !== offer.chatId,
   );
-  writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...choices]);
+  writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...offer.choices]);
 }
 
 /** Looks up one pending choice without consuming it. */

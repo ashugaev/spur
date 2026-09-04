@@ -804,6 +804,15 @@ async function handleAgentChoiceCallback(
     await ctx.answerCallbackQuery("Session is no longer active.");
     return;
   }
+  // Acknowledge first: Telegram expires callback queries, and a rejected
+  // answer must not swallow the click that was already made.
+  try {
+    await ctx.answerCallbackQuery(`Sent: ${pending.text}`);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
+    );
+  }
   const choice = takeTelegramChoice(
     deps.dataDir,
     deps.projectId,
@@ -811,11 +820,7 @@ async function handleAgentChoiceCallback(
     token,
     message.chat.id,
   );
-  if (!choice) {
-    await ctx.answerCallbackQuery("This choice is no longer active.");
-    return;
-  }
-  await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
+  if (!choice) return;
   // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
   if (ctx.editMessageText && message.text) {
     try {
@@ -835,7 +840,14 @@ async function handleAgentChoiceCallback(
     chat: { id: choice.chatId },
     from,
   };
+  // Whole-file replace: carry the unconsumed status message and the last reply
+  // stamp over, a click posts neither.
+  const previous = readTelegramReplyTarget(deps.dataDir, choice.sessionId);
   writeTelegramReplyTarget(deps.dataDir, {
+    ...(previous?.statusMessageId !== undefined
+      ? { statusMessageId: previous.statusMessageId }
+      : {}),
+    ...(previous?.lastReplyAt !== undefined ? { lastReplyAt: previous.lastReplyAt } : {}),
     sessionId: choice.sessionId,
     projectId: deps.projectId,
     sourceId: deps.sourceId,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  TELEGRAM_REPLY_SUFFIX,
   getDisplayTaskLine,
   isGeneratedBootstrapPrompt,
   parseSessionPromptView,
@@ -139,6 +140,14 @@ Your terminal output is invisible to them. Reply when you need input and when th
     expect(
       parseSessionPromptView(makeSession({ prompt: `Fix payment retries${legacySuffix}` })).task,
     ).toBe("Fix payment retries");
+  });
+
+  it("removes only the trailing wrapper when the prompt carries two", () => {
+    const prompt = `Task A${TELEGRAM_REPLY_SUFFIX}\n\nThen update the docs.${TELEGRAM_REPLY_SUFFIX}`;
+
+    expect(parseSessionPromptView(makeSession({ prompt })).task).toBe(
+      `Task A${TELEGRAM_REPLY_SUFFIX}\n\nThen update the docs.`.trimEnd(),
+    );
   });
 
   it("preserves Telegram reply text when it is not the trailing wrapper", () => {

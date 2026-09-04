@@ -5259,14 +5259,21 @@ describe("SessionService", () => {
     expect(choices?.[0]).toBe(TEST_DATA_DIR);
     expect(choices?.[1]).toBe("api");
     expect(choices?.[2]).toBe("agentChat");
-    const stored = choices?.[3] as {
-      token: string;
-      offerId: string;
+    const offer = choices?.[3] as {
       sessionId: string;
       chatId: number;
-      messageThreadId?: number;
-      value: string;
-    }[];
+      choices: {
+        token: string;
+        offerId: string;
+        sessionId: string;
+        chatId: number;
+        messageThreadId?: number;
+        value: string;
+      }[];
+    };
+    expect(offer.sessionId).toBe("api-1");
+    expect(offer.chatId).toBe(-1001);
+    const stored = offer.choices;
     expect(stored).toHaveLength(2);
     expect(new Set(stored.map((choice) => choice.offerId)).size).toBe(1);
     expect(new Set(stored.map((choice) => choice.token)).size).toBe(2);

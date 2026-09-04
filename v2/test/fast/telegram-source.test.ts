@@ -310,28 +310,32 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const { bot, emit } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
-    writeTelegramOffer(dataDir, "api", "telegram", [
-      {
-        token: "tok0",
-        offerId: "offer-1",
-        sessionId: "api-1",
-        chatId: -1001,
-        messageThreadId: 22,
-        text: "Yes",
-        value: "yes, deploy",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      },
-      {
-        token: "tok1",
-        offerId: "offer-1",
-        sessionId: "api-1",
-        chatId: -1001,
-        messageThreadId: 22,
-        text: "Later",
-        value: "wait",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      },
-    ]);
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 22,
+          text: "Yes",
+          value: "yes, deploy",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+        {
+          token: "tok1",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 22,
+          text: "Later",
+          value: "wait",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
     const editMessageText = vi.fn().mockResolvedValue(undefined);
 
@@ -390,18 +394,23 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const { bot, emit } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
-    // Offered before the topic existed, so the stored choice carries no thread.
-    writeTelegramOffer(dataDir, "api", "telegram", [
-      {
-        token: "tok0",
-        offerId: "offer-1",
-        sessionId: "api-1",
-        chatId: -1001,
-        text: "Yes",
-        value: "yes",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      },
-    ]);
+    // A stale thread on the stored choice must lose to the clicked message's own.
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 11,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
 
     await bot.emitCallback({
@@ -420,23 +429,65 @@ describe("telegramSourceModule", () => {
     );
   });
 
+  it("delivers the click even when acknowledging it fails", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      // Telegram expires callback queries; a rejected ack must not eat the click.
+      answerCallbackQuery: vi.fn().mockRejectedValue(new Error("query is too old")),
+    });
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", text: "yes" }),
+    );
+    expect(readTelegramChoices(dataDir, "api", "telegram")).toHaveLength(0);
+  });
+
   it("drops an agent button click for an unknown token, a foreign chat, or a dead session", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const listSessions = vi.fn().mockResolvedValue([]);
     const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
     if (!bot) throw new Error("missing bot");
-    writeTelegramOffer(dataDir, "api", "telegram", [
-      {
-        token: "tok0",
-        offerId: "offer-1",
-        sessionId: "api-1",
-        chatId: -1001,
-        text: "Yes",
-        value: "yes",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      },
-    ]);
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
 
     await bot.emitCallback({
