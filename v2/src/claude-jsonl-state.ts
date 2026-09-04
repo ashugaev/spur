@@ -54,6 +54,14 @@ export interface ClaudeConversationReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
+// Ceiling on a cold read's allocation. A reader with no prior offset would
+// otherwise `Buffer.alloc` the whole transcript and then copy it again into a
+// string — on this host the largest is 49.5 MB, and the state reader keeps
+// only TAIL_RECORD_LIMIT records out of it. Cold reads are not rare: every
+// daemon restart is one, and pruneSessionScopedState drops a reader whenever
+// its session leaves the live set, so a session that flips back to live pays
+// the full re-read again. Sized well above 50 records of ordinary transcript.
+const MAX_COLD_READ_BYTES = 1 << 20; // 1 MiB
 // Claude stamps locally-generated placeholder assistant records (API errors,
 // stop-sequence stubs) with this instead of a model id.
 const SYNTHETIC_MODEL = "<synthetic>";
@@ -424,8 +432,15 @@ export async function readClaudeJsonlState(
     };
   }
 
-  // Read only new bytes since last offset
-  const readOffset = Math.min(currentReader.lastOffset, fileStat.size);
+  // Incremental reads always consume the full delta from lastOffset. The
+  // cold-read ceiling applies only when unreadFrom is 0 — a reader with no
+  // prior offset would otherwise Buffer.alloc the whole transcript. The window
+  // may start mid-file; the partial line that opens it is handled below.
+  const unreadFrom = Math.min(currentReader.lastOffset, fileStat.size);
+  const readOffset =
+    unreadFrom === 0 && fileStat.size > MAX_COLD_READ_BYTES
+      ? fileStat.size - MAX_COLD_READ_BYTES
+      : unreadFrom;
   const nowMs = Date.now();
 
   const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
@@ -435,6 +450,9 @@ export async function readClaudeJsonlState(
   }
 
   const newRecords: ParsedRecord[] = [];
+  // A truncated window can open mid-record; that fragment is not valid JSON,
+  // so parseJsonlRecord drops it. Discarding the first line unconditionally
+  // would instead lose a whole record whenever the cut lands on a boundary.
   for (const line of chunk.consumedText.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
