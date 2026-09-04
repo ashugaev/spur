@@ -435,6 +435,17 @@ export function armShutdownBackstop(
   return () => clearTimeout(timer);
 }
 
+// The backstop's `onForceExit` calls `process.exit(0)` directly and never reaches the
+// normal shutdown path's own `flushGhPollCycles()` call further down in `try` — so this
+// is its own flush point. `logBeforeExit` runs the caller's own log write between the
+// flush and the exit; `flushGhPollCycles()` deletes each run as it flushes, so this can
+// never double-emit against a normal-path flush that also ran.
+export function forceShutdownExit(logBeforeExit: () => void): void {
+  flushGhPollCycles();
+  logBeforeExit();
+  process.exit(0);
+}
+
 export interface ReloadApplyHooks {
   // Swap the registry to the reloaded config, then bring automation up against it.
   applyNext: () => void;
@@ -2017,18 +2028,25 @@ export async function startServer(
       // Armed before the first await so a step that wedges inside its own bound still
       // ends the process well under the service manager's stop timeout.
       const disarmBackstop = exitProcess
-        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) => {
-            logEvent("daemon.shutdown.forced_exit", {
-              level: "error",
-              message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
-                activeResources,
-              )}`,
-              details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
-            });
-            process.exit(0);
-          })
+        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) =>
+            forceShutdownExit(() =>
+              logEvent("daemon.shutdown.forced_exit", {
+                level: "error",
+                message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
+                  activeResources,
+                )}`,
+                details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
+              }),
+            ),
+          )
         : null;
       try {
+        // Flushed before dispose() — the one statement below that can throw
+        // synchronously — rather than after. Both are synchronous with no await
+        // between them, so Node's run-to-completion model guarantees nothing can add
+        // to a poll-cycle run in that gap; flushing here loses no window and survives
+        // a dispose() throw that would otherwise skip the flush entirely.
+        flushGhPollCycles();
         // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
         // poll, sidecar reaper, session reaper, 2s dashboard tick — before the first
         // await, so no tick can re-enter teardown or hold the loop open behind it.

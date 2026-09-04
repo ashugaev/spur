@@ -5,7 +5,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as EventSourcesModule from "../../src/event-sources/index.js";
 import type * as TriggersModule from "../../src/triggers.js";
 import { readEventLog } from "../../src/event-log.js";
-import { armShutdownBackstop, summarizeActiveResources } from "../../src/server.js";
+import {
+  _resetGhUsageForTests,
+  noteGhInvocation,
+  runGhPollCycle,
+  setGhEventSink,
+} from "../../src/gh.js";
+import {
+  armShutdownBackstop,
+  forceShutdownExit,
+  summarizeActiveResources,
+} from "../../src/server.js";
+import { SessionService } from "../../src/session-service.js";
 import { findFreePort } from "../helpers/common.js";
 
 const hangingSourcesStop = vi.hoisted(() => ({ enabled: false }));
@@ -113,11 +124,57 @@ describe("armShutdownBackstop", () => {
   });
 });
 
+describe("forceShutdownExit", () => {
+  afterEach(() => {
+    _resetGhUsageForTests();
+  });
+
+  it("flushes an open gh poll-cycle window before exiting the process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-force-exit-test-"));
+    setGhEventSink(root);
+    try {
+      // The backstop's process.exit(0) never reaches the normal shutdown path's own
+      // flush, so forceShutdownExit needs to flush on its own before it exits.
+      const seedInput = { kind: "attention" as const, sourceId: "test-force-exit" };
+      await runGhPollCycle(seedInput, async () => {
+        noteGhInvocation(["pr", "view", "1"]);
+      });
+      await runGhPollCycle(seedInput, async () => {
+        noteGhInvocation(["pr", "view", "2"]);
+      });
+
+      const order: string[] = [];
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        order.push(`exit:${code}`);
+        return undefined as never;
+      }) as typeof process.exit);
+      try {
+        forceShutdownExit(() => order.push("log"));
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      expect(order).toEqual(["log", "exit:0"]);
+      const windowEvents = readEventLog(root).filter(
+        (entry) =>
+          entry.event === "gh.poll_cycle" &&
+          "windowMs" in (entry.details ?? {}) &&
+          entry.sourceId === seedInput.sourceId,
+      );
+      expect(windowEvents).toHaveLength(1);
+      expect(windowEvents[0]?.details?.["calls"]).toBe(1);
+    } finally {
+      setGhEventSink(null);
+    }
+  });
+});
+
 describe("startServer shutdown budget", () => {
   afterEach(() => {
     vi.useRealTimers();
     hangingSourcesStop.enabled = false;
     hangingTriggersStop.enabled = false;
+    _resetGhUsageForTests();
   });
 
   it("abandons a source group whose stop() never settles and still finishes teardown", async () => {
@@ -173,5 +230,52 @@ describe("startServer shutdown budget", () => {
     const events = readEventLog(dataDir).map((entry) => entry.event);
     expect(events).toContain("daemon.shutdown.stop_timeout");
     expect(events).toContain("daemon.stopped");
+  }, 20_000);
+
+  it("still flushes an open gh poll-cycle window when dispose() throws", async () => {
+    const { configPath, dataDir } = await writeDaemonConfig();
+    const { startServer } = await import("../../src/server.js");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    // Seed a paying, still-open poll-cycle window across two cycles: the first
+    // only opens the run, the second is the one that actually accumulates cost
+    // onto it. `sourceId` is a fixture-only tag — real attention-monitor cycles
+    // key on `{ kind: "attention" }` alone, so this run stays isolated even
+    // though the server's own attention monitor is live in the background.
+    const seedInput = { kind: "attention" as const, sourceId: "test-shutdown-flush" };
+    await runGhPollCycle(seedInput, async () => {
+      noteGhInvocation(["pr", "view", "1"]);
+    });
+    await runGhPollCycle(seedInput, async () => {
+      noteGhInvocation(["pr", "view", "2"]);
+    });
+
+    const disposeSpy = vi.spyOn(SessionService.prototype, "dispose").mockImplementation(() => {
+      throw new Error("dispose boom");
+    });
+    try {
+      // Programmatic stop() is the only path a dispose() throw can reach: it runs
+      // with exitProcess=false, so the throw escapes shutdown()'s try/finally
+      // instead of being swallowed by a process.exit(0).
+      await expect(server.stop()).rejects.toThrow("dispose boom");
+    } finally {
+      disposeSpy.mockRestore();
+    }
+
+    // The first cycle above always emits its own standalone `gh.poll_cycle` event
+    // (opening the run), independent of any shutdown flush — so asserting on the
+    // event name alone would pass even with the fix reverted. Only a flushed
+    // window carries `windowMs`, so require that shape specifically.
+    const windowEvents = readEventLog(dataDir).filter(
+      (entry) =>
+        entry.event === "gh.poll_cycle" &&
+        "windowMs" in (entry.details ?? {}) &&
+        entry.sourceId === seedInput.sourceId,
+    );
+    expect(windowEvents).toHaveLength(1);
+    expect(windowEvents[0]?.details?.["calls"]).toBe(1);
   }, 20_000);
 });
