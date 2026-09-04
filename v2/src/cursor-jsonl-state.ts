@@ -269,7 +269,9 @@ export async function readCursorJsonlState(
   const filePath =
     resolvedPath ??
     (agentSessionId ? null : reader?.filePath) ??
-    (agentSessionId ? null : await findLatestCursorTranscriptFile(worktreePath, undefined, options));
+    (agentSessionId
+      ? null
+      : await findLatestCursorTranscriptFile(worktreePath, undefined, options));
   if (!filePath) {
     return null;
   }

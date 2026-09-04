@@ -15005,10 +15005,7 @@ export class SessionService {
           !rateLimitActive(rateLimit, nowMs)
         ) {
           state = "waiting";
-          this.cursorPaneReadyOverrides.set(
-            session.id,
-            nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS,
-          );
+          this.cursorPaneReadyOverrides.set(session.id, nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS);
           classifiedDetail = "State: waiting (cursor pane ready override)";
         } else {
           this.cursorPaneReadyOverrides.delete(session.id);

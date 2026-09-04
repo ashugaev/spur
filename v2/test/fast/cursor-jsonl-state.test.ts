@@ -619,21 +619,31 @@ describe("findLatestCursorTranscriptFile", () => {
     );
     await mkdir(join(transcriptsDir, "old-session"), { recursive: true });
     const oldPath = join(transcriptsDir, "old-session", "old-session.jsonl");
-    await writeFile(oldPath, '{"role":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n');
+    await writeFile(
+      oldPath,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n',
+    );
     const oldTime = new Date(1_000_000);
     await utimes(oldPath, oldTime, oldTime);
 
     const threshold = 2_000_000;
-    const ignored = await findLatestCursorTranscriptFile(worktreePath, undefined, { minMtimeMs: threshold });
+    const ignored = await findLatestCursorTranscriptFile(worktreePath, undefined, {
+      minMtimeMs: threshold,
+    });
     expect(ignored).toBeNull();
 
     await mkdir(join(transcriptsDir, "new-session"), { recursive: true });
     const newPath = join(transcriptsDir, "new-session", "new-session.jsonl");
-    await writeFile(newPath, '{"role":"assistant","message":{"content":[{"type":"text","text":"new"}]}}\n');
+    await writeFile(
+      newPath,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"new"}]}}\n',
+    );
     const newTime = new Date(3_000_000);
     await utimes(newPath, newTime, newTime);
 
-    const found = await findLatestCursorTranscriptFile(worktreePath, undefined, { minMtimeMs: threshold });
+    const found = await findLatestCursorTranscriptFile(worktreePath, undefined, {
+      minMtimeMs: threshold,
+    });
     expect(found).toBe(newPath);
   });
 
@@ -654,13 +664,19 @@ describe("findLatestCursorTranscriptFile", () => {
 
     await mkdir(join(transcriptsDir, id1), { recursive: true });
     const file1 = join(transcriptsDir, id1, `${id1}.jsonl`);
-    await writeFile(file1, '{"role":"assistant","message":{"content":[{"type":"text","text":"session 1"}]}}\n');
+    await writeFile(
+      file1,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"session 1"}]}}\n',
+    );
     const time1 = new Date(10_000_000);
     await utimes(file1, time1, time1);
 
     await mkdir(join(transcriptsDir, id2), { recursive: true });
     const file2 = join(transcriptsDir, id2, `${id2}.jsonl`);
-    await writeFile(file2, '{"role":"assistant","message":{"content":[{"type":"text","text":"session 2"}]}}\n');
+    await writeFile(
+      file2,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"session 2"}]}}\n',
+    );
     const time2 = new Date(20_000_000);
     await utimes(file2, time2, time2);
 
