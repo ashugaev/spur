@@ -804,15 +804,6 @@ async function handleAgentChoiceCallback(
     await ctx.answerCallbackQuery("Session is no longer active.");
     return;
   }
-  // Acknowledge first: Telegram expires callback queries, and a rejected
-  // answer must not swallow the click that was already made.
-  try {
-    await ctx.answerCallbackQuery(`Sent: ${pending.text}`);
-  } catch (error) {
-    deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
-    );
-  }
   const choice = takeTelegramChoice(
     deps.dataDir,
     deps.projectId,
@@ -820,7 +811,20 @@ async function handleAgentChoiceCallback(
     token,
     message.chat.id,
   );
-  if (!choice) return;
+  // Lost the race with a sibling click or a superseding reply.
+  if (!choice) {
+    await ctx.answerCallbackQuery("This choice is no longer active.");
+    return;
+  }
+  // Best-effort: Telegram expires callback queries, and a rejected answer must
+  // not swallow a click that was already consumed.
+  try {
+    await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
+    );
+  }
   // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
   if (ctx.editMessageText && message.text) {
     try {
@@ -1062,12 +1066,22 @@ async function routeTelegramPrompt(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
     );
   }
+  // A failed ack posts no new status message, so keep the unconsumed one rather
+  // than dropping it in the whole-file replace.
+  const carried =
+    statusMessageId === undefined
+      ? readTelegramReplyTarget(deps.dataDir, binding.sessionId)?.statusMessageId
+      : undefined;
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId: binding.sessionId,
     projectId: deps.projectId,
     sourceId: deps.sourceId,
     chatId: message.chat.id,
-    ...(statusMessageId !== undefined && message.chat.id > 0 ? { statusMessageId } : {}),
+    ...(statusMessageId !== undefined && message.chat.id > 0
+      ? { statusMessageId }
+      : carried !== undefined
+        ? { statusMessageId: carried }
+        : {}),
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),

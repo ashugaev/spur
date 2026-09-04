@@ -9925,14 +9925,15 @@ export class SessionService {
 
     const view = await this.enrich(session);
     const choices = buildTelegramChoices(sessionId, target, buttons);
-    // Persisted before the send: a click can only arrive after Telegram has the
-    // keyboard. A buttonless reply supersedes the question it answers, so it
-    // retires the pending offer instead of leaving a live keyboard above it.
-    writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
-      sessionId,
-      chatId: target.chatId,
-      choices,
-    });
+    // Persisted before the send: a click can only arrive once Telegram has the
+    // keyboard, and the row must already be there when it does.
+    if (choices.length > 0) {
+      writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
+        sessionId,
+        chatId: target.chatId,
+        choices,
+      });
+    }
     const result = await sendTelegramReply(source, target, message, {
       topicName: telegramTopicName(view),
       ...(choices.length > 0
@@ -9944,6 +9945,15 @@ export class SessionService {
           }
         : {}),
     });
+    // A buttonless reply supersedes the question it answers, so it retires the
+    // pending offer — after the send, since a throw leaves the keyboard up.
+    if (choices.length === 0) {
+      writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
+        sessionId,
+        chatId: target.chatId,
+        choices: [],
+      });
+    }
     const { statusMessageId: _statusMessageId, ...targetWithoutStatus } = target;
     const replyTarget = {
       ...(result.statusMessageIdConsumed ? targetWithoutStatus : target),

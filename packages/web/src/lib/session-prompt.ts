@@ -60,9 +60,10 @@ function stripTrailingSpurSections(text: string): string {
 }
 
 // Anchored on the wrapper's own first and last line, taken from the constant:
-// a prompt stored before a wording change still strips, and the churn-prone
-// middle stops mattering. Only the LAST occurrence goes, and only when the
-// wrapper is trailing, so a prompt quoting it keeps its own text.
+// a prompt stored before a change to the churn-prone middle still strips. Both
+// anchors stay byte-exact, so rewording either end orphans stored prompts.
+// Only the LAST occurrence goes, and only when the wrapper is trailing, so a
+// prompt quoting it keeps its own text.
 const TELEGRAM_REPLY_SUFFIX_LINES = TELEGRAM_REPLY_SUFFIX.split("\n");
 const TELEGRAM_REPLY_SUFFIX_HEAD = TELEGRAM_REPLY_SUFFIX_LINES.slice(0, 3).join("\n");
 const TELEGRAM_REPLY_SUFFIX_TAIL =

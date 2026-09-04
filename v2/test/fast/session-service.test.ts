@@ -5294,6 +5294,42 @@ describe("SessionService", () => {
     );
   });
 
+  it("retires the pending offer when a reply carries no buttons", async () => {
+    const config = baseConfig();
+    config.projects.api.sources = {
+      agentChat: {
+        type: "telegram" as const,
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      },
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1", status: "running" }));
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.replyToSource("api-1", { message: "never mind" });
+
+    expect(writeTelegramOfferMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api", "agentChat", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [],
+    });
+    // Retired only once the send landed: a throw would leave the keyboard up.
+    expect(sendTelegramReplyMock.mock.invocationCallOrder[0]).toBeLessThan(
+      writeTelegramOfferMock.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
   it("rejects malformed choice buttons before sending", async () => {
     const config = baseConfig();
     config.projects.api.sources = {

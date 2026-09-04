@@ -6,8 +6,9 @@ import * as metadataModule from "../../src/metadata.js";
 import {
   readTelegramChoices,
   readTelegramReplyTarget,
-  writeTelegramOffer,
   writeTelegramBindings,
+  writeTelegramOffer,
+  writeTelegramReplyTarget,
 } from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -427,6 +428,98 @@ describe("telegramSourceModule", () => {
       "telegram:message",
       expect.objectContaining({ messageThreadId: 5678 }),
     );
+  });
+
+  it("carries an unconsumed status message across a click", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: 123,
+      statusMessageId: 77,
+      lastReplyAt: "2026-03-18T10:02:00.000Z",
+    });
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: 123,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: 123,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: 123 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    });
+
+    // A click posts no status message; dropping the pending one would orphan it.
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({
+      statusMessageId: 77,
+      lastReplyAt: "2026-03-18T10:02:00.000Z",
+    });
+  });
+
+  it("tells a click that lost the race the choice is gone", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    // A buttonless reply retiring the offer between the peek and the take is the
+    // only way the take loses; listSessions is the await that opens the window.
+    const listSessions = vi.fn().mockImplementation(() => {
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [],
+      });
+      return Promise.resolve([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
+    });
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+
+    // Never "Sent" for a click that delivered nothing.
+    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).not.toHaveBeenCalledWith("Sent: Yes");
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("delivers the click even when acknowledging it fails", async () => {
