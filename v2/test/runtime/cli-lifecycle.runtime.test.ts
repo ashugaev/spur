@@ -3363,9 +3363,9 @@ projects:
 
     const attachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("l logs"),
+      accept: (value) =>
+        value.includes("l logs") && value.includes("service web:3000:running"),
     });
-    expect(attachedPane).toContain("service web:3000:running");
 
     await sendKeysToTmux(controllerSessionName, "l");
 
