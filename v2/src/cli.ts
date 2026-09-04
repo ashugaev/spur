@@ -1521,6 +1521,64 @@ function formatHelp(command: Command, helper: Help): string {
   return sections.join("\n\n");
 }
 
+// Refetches the selector's selected-session detail off GET /sessions/:id —
+// the one route left doing the per-session artifact filesystem walk.
+// Extracted so its single-flight and staleness guards are unit-testable
+// without a TTY: `load()` is called both on selection change (debounced)
+// and on every 2s refresh tick, since the pane renders fields that move
+// under a stable id (`updated`, `queued`, service status), so the tick
+// refetch can't simply be dropped. `inFlight` is a strict single-flight
+// guard — a tick landing while a selection-change fetch is still
+// outstanding (or vice versa) is dropped rather than issued, so two GETs
+// for the same walk can never stack. `bumpToken()` invalidates any
+// in-flight fetch for an abandoned selection so its resolve is dropped,
+// never rendered, and never clears `detailLoading` out from under a newer
+// fetch still in flight.
+export function createSelectedDetailLoader(deps: {
+  fetchDetail: (id: string) => Promise<SessionView>;
+  getSelectedSessionId: () => string | null;
+  setSelectedDetail: (detail: SessionView | null) => void;
+  setDetailLoading: (loading: boolean) => void;
+  setStatusMessage: (message: string) => void;
+  render: () => void;
+}): { load: () => Promise<void>; bumpToken: () => void } {
+  let token = 0;
+  let inFlight = false;
+  const bumpToken = (): void => {
+    token += 1;
+  };
+  const load = async (): Promise<void> => {
+    const selectedSessionId = deps.getSelectedSessionId();
+    if (selectedSessionId === null) {
+      deps.setSelectedDetail(null);
+      deps.setDetailLoading(false);
+      return;
+    }
+    if (inFlight) return;
+    token += 1;
+    const myToken = token;
+    const id = selectedSessionId;
+    inFlight = true;
+    try {
+      const detail = await deps.fetchDetail(id);
+      if (myToken !== token || id !== deps.getSelectedSessionId()) return;
+      deps.setSelectedDetail(detail);
+      deps.setDetailLoading(false);
+      deps.render();
+    } catch (error) {
+      if (myToken !== token || id !== deps.getSelectedSessionId()) return;
+      deps.setDetailLoading(false);
+      deps.setSelectedDetail(null);
+      const message = error instanceof Error ? error.message : String(error);
+      deps.setStatusMessage(brandLine(message));
+      deps.render();
+    } finally {
+      inFlight = false;
+    }
+  };
+  return { load, bumpToken };
+}
+
 async function runInteractiveSessionList(
   cliEntrypoint: string,
   configPath?: string,
@@ -1552,11 +1610,9 @@ async function runInteractiveSessionList(
   let refreshTimer: NodeJS.Timeout | undefined;
   // The selector's detail pane is fetched from GET /sessions/:id, never
   // sliced off the projected list row — the list no longer carries `prompt`
-  // or `launchCommand`. selectedDetailToken guards a stale fetch response
-  // (an abandoned row's answer arriving after a newer selection) from ever
-  // being rendered.
+  // or `launchCommand`. See createSelectedDetailLoader for the staleness
+  // and single-flight guards on that fetch.
   let selectedDetail: SessionView | null = null;
-  let selectedDetailToken = 0;
   let detailLoading = false;
   let detailDebounceTimer: NodeJS.Timeout | undefined;
 
@@ -1586,34 +1642,21 @@ async function runInteractiveSessionList(
     process.stdout.write(`\u001b[2J\u001b[H${renderLiveSessionList(listArgs)}\n`);
   };
 
-  // Refetches the selected session's detail off GET /sessions/:id. Guarded
-  // by the token so a resolve for an abandoned selection is dropped, never
-  // rendered — and a stale resolve never clears `detailLoading`, or the pane
-  // would flash to the reselect line while the newest fetch is still
-  // in flight.
-  const loadSelectedDetail = async (): Promise<void> => {
-    if (selectedSessionId === null) {
-      selectedDetail = null;
-      detailLoading = false;
-      return;
-    }
-    selectedDetailToken += 1;
-    const token = selectedDetailToken;
-    const id = selectedSessionId;
-    try {
-      const detail = await getJson<SessionView>(cliEntrypoint, `/sessions/${id}`, configPath);
-      if (token !== selectedDetailToken || id !== selectedSessionId) return;
+  const detailLoader = createSelectedDetailLoader({
+    fetchDetail: (id) => getJson<SessionView>(cliEntrypoint, `/sessions/${id}`, configPath),
+    getSelectedSessionId: () => selectedSessionId,
+    setSelectedDetail: (detail) => {
       selectedDetail = detail;
-      detailLoading = false;
-      render();
-    } catch (error) {
-      if (token !== selectedDetailToken || id !== selectedSessionId) return;
-      detailLoading = false;
-      const message = error instanceof Error ? error.message : String(error);
-      statusMessage = brandLine(message);
-      render();
-    }
-  };
+    },
+    setDetailLoading: (loading) => {
+      detailLoading = loading;
+    },
+    setStatusMessage: (message) => {
+      statusMessage = message;
+    },
+    render,
+  });
+  const loadSelectedDetail = detailLoader.load;
 
   // The single path every selection change routes through — arrow keys, a
   // mutation response (restore/pause/respawn already return a full
@@ -1627,7 +1670,7 @@ async function runInteractiveSessionList(
     // supplies a fresh detail or re-arms its own fetch — otherwise a
     // pre-mutation response landing after `detail` is assigned here would
     // overwrite it.
-    selectedDetailToken += 1;
+    detailLoader.bumpToken();
     selectedSessionId = id;
     if (detailDebounceTimer) {
       clearTimeout(detailDebounceTimer);
