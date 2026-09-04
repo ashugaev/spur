@@ -1723,6 +1723,57 @@ function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
   };
 }
 
+// Measured over 640 anchor dirs holding 26.78 GB of agent-history artifacts
+// (99.6% of all session-artifact bytes): the 2 GiB / 500-file caps keep 9.64 GB
+// and reclaim 17.14 GB, while the 30d age prune contributes ~4% because 25.4 GB
+// of the mass is under a week old. The caps are the lever; age is cleanup.
+// `enabled: false` like sessionGc — a destructive default is never shipped.
+export const DEFAULT_ARTIFACT_RETENTION: AppConfig["artifactRetention"] = {
+  enabled: false,
+  olderThanDays: 30,
+  intervalMinutes: 360,
+  maxAnchorsPerSweep: 20,
+  maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+  maxFilesPerSession: 500,
+};
+
+// Instance-only, same footgun as sessionGc/authRotation: parsed only when
+// mode === "instance", so a per-project artifactRetention block is silently
+// ignored (the daemon sweep and `spur artifacts-gc` both read the merged
+// instance config).
+function parseArtifactRetention(value: unknown): AppConfig["artifactRetention"] {
+  if (value === undefined) {
+    return DEFAULT_ARTIFACT_RETENTION;
+  }
+  const root = asObject(value, "artifactRetention");
+  return {
+    enabled:
+      asOptionalBoolean(root["enabled"], "artifactRetention.enabled") ??
+      DEFAULT_ARTIFACT_RETENTION.enabled,
+    olderThanDays:
+      asNonNegativeNumber(root["olderThanDays"], "artifactRetention.olderThanDays") ??
+      DEFAULT_ARTIFACT_RETENTION.olderThanDays,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "artifactRetention.intervalMinutes") ??
+      DEFAULT_ARTIFACT_RETENTION.intervalMinutes,
+    maxAnchorsPerSweep:
+      asOptionalPositiveInteger(
+        root["maxAnchorsPerSweep"],
+        "artifactRetention.maxAnchorsPerSweep",
+      ) ?? DEFAULT_ARTIFACT_RETENTION.maxAnchorsPerSweep,
+    maxBytesPerSession:
+      asOptionalPositiveInteger(
+        root["maxBytesPerSession"],
+        "artifactRetention.maxBytesPerSession",
+      ) ?? DEFAULT_ARTIFACT_RETENTION.maxBytesPerSession,
+    maxFilesPerSession:
+      asOptionalPositiveInteger(
+        root["maxFilesPerSession"],
+        "artifactRetention.maxFilesPerSession",
+      ) ?? DEFAULT_ARTIFACT_RETENTION.maxFilesPerSession,
+  };
+}
+
 // Ship enabled by default (unlike sessionGc): this reaper is a memory-safety
 // control that kills a restartable sidecar process, never a worktree or a
 // record, so the destructive-by-default caution sessionGc needs does not
@@ -2142,6 +2193,10 @@ function parseConfigFile(
     diskRetention:
       mode === "instance" ? parseDiskRetention(root["diskRetention"]) : DEFAULT_DISK_RETENTION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
+    artifactRetention:
+      mode === "instance"
+        ? parseArtifactRetention(root["artifactRetention"])
+        : DEFAULT_ARTIFACT_RETENTION,
     sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
     admission: parseAdmission(root["admission"], mode),
     staleAfterMinutes:

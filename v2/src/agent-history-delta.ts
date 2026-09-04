@@ -6,6 +6,10 @@ import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 // per-transition read O(1) instead of O(source).
 export const PREFIX_VERIFY_BYTES = 4096;
 
+// Filename prefix of every state-transition history capture. Retention selects on it, so
+// the id builder and the pruner must read the same constant, never two literals.
+export const AGENT_HISTORY_ARTIFACT_PREFIX = "agent-history-";
+
 const STAMP_KEY_SEPARATOR = "\u0000";
 
 export interface HistoryCaptureStamp {
