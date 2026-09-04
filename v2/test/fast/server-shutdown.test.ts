@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as EventSourcesModule from "../../src/event-sources/index.js";
+import type * as RuntimeLogCollectorModule from "../../src/runtime-log-collector.js";
 import type * as TriggersModule from "../../src/triggers.js";
 import { readEventLog } from "../../src/event-log.js";
 import {
@@ -21,6 +22,14 @@ import { findFreePort } from "../helpers/common.js";
 
 const hangingSourcesStop = vi.hoisted(() => ({ enabled: false }));
 const hangingTriggersStop = vi.hoisted(() => ({ enabled: false }));
+// Delays sources.stop() by a real tick without hanging it, so a fire-and-forget
+// runGhPollCycle task in flight at shutdown gets a real chance to settle and write
+// into pollCycleRuns strictly after dispose() but before a later teardown step throws.
+const delayedSourcesStop = vi.hoisted(() => ({ enabled: false, delayMs: 20 }));
+// Throws synchronously from runtimeLogs.stop(), same shape as an uncaught throw from
+// backlogs?.stop() — neither is wrapped by awaitBounded, so both used to skip the
+// pre-finally flush entirely.
+const throwingRuntimeLogsStop = vi.hoisted(() => ({ enabled: false }));
 
 vi.mock("../../src/event-sources/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof EventSourcesModule>();
@@ -28,8 +37,31 @@ vi.mock("../../src/event-sources/index.js", async (importOriginal) => {
     ...actual,
     startConfiguredSources: async (deps: Parameters<typeof actual.startConfiguredSources>[0]) => {
       const controller = await actual.startConfiguredSources(deps);
-      if (!hangingSourcesStop.enabled) return controller;
-      return { stop: () => new Promise<void>(() => undefined) };
+      if (hangingSourcesStop.enabled) {
+        return { stop: () => new Promise<void>(() => undefined) };
+      }
+      if (delayedSourcesStop.enabled) {
+        return {
+          stop: () =>
+            new Promise<void>((resolve) => setTimeout(resolve, delayedSourcesStop.delayMs)),
+        };
+      }
+      return controller;
+    },
+  };
+});
+
+vi.mock("../../src/runtime-log-collector.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof RuntimeLogCollectorModule>();
+  return {
+    ...actual,
+    startRuntimeLogCollector: (config: Parameters<typeof actual.startRuntimeLogCollector>[0]) => {
+      if (!throwingRuntimeLogsStop.enabled) return actual.startRuntimeLogCollector(config);
+      return {
+        stop: () => {
+          throw new Error("runtime logs stop boom");
+        },
+      };
     },
   };
 });
@@ -174,6 +206,8 @@ describe("startServer shutdown budget", () => {
     vi.useRealTimers();
     hangingSourcesStop.enabled = false;
     hangingTriggersStop.enabled = false;
+    delayedSourcesStop.enabled = false;
+    throwingRuntimeLogsStop.enabled = false;
     _resetGhUsageForTests();
   });
 
@@ -275,6 +309,52 @@ describe("startServer shutdown budget", () => {
         "windowMs" in (entry.details ?? {}) &&
         entry.sourceId === seedInput.sourceId,
     );
+    expect(windowEvents).toHaveLength(1);
+    expect(windowEvents[0]?.details?.["calls"]).toBe(1);
+  }, 20_000);
+
+  it("still flushes a window an in-flight cycle writes after dispose(), when a later step throws", async () => {
+    const { configPath, dataDir } = await writeDaemonConfig();
+    delayedSourcesStop.enabled = true;
+    throwingRuntimeLogsStop.enabled = true;
+    const { startServer } = await import("../../src/server.js");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    // Opens the run before shutdown starts, same as the dispose()-throw test above.
+    const seedInput = { kind: "attention" as const, sourceId: "test-in-flight-after-dispose" };
+    await runGhPollCycle(seedInput, async () => {
+      noteGhInvocation(["pr", "view", "1"]);
+    });
+
+    // Fire-and-forget: not awaited before shutdown starts, so this cycle's own
+    // `finally` in gh.ts settles on a later microtask turn — after dispose() runs
+    // synchronously below, during the awaited (delayed) sources.stop() — and writes
+    // its cost onto the already-open run strictly after dispose() clears the
+    // attention-monitor interval, exactly like a real in-flight attention poll would.
+    void runGhPollCycle(seedInput, async () => {
+      noteGhInvocation(["pr", "view", "2"]);
+    });
+
+    // runtimeLogs.stop() throws synchronously right after the delayed sources.stop()
+    // resolves — mirrors an uncaught throw from backlogs?.stop() — so the pre-dd4c9ddd9
+    // "flush right before dispose()" placement would have already missed this write,
+    // and there is no bottom-of-try flush left to catch it either: only the finally
+    // placement does.
+    await expect(server.stop()).rejects.toThrow("runtime logs stop boom");
+
+    const windowEvents = readEventLog(dataDir).filter(
+      (entry) =>
+        entry.event === "gh.poll_cycle" &&
+        "windowMs" in (entry.details ?? {}) &&
+        entry.sourceId === seedInput.sourceId,
+    );
+    // The seed cycle only opens the run and emits its own standalone event (filtered
+    // out above by the `windowMs` check); the fire-and-forget cycle is the one whose
+    // `calls` lands in the run, so this can only be 1 if that in-flight write actually
+    // reached pollCycleRuns before the shutdown flush ran.
     expect(windowEvents).toHaveLength(1);
     expect(windowEvents[0]?.details?.["calls"]).toBe(1);
   }, 20_000);
