@@ -342,6 +342,12 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
+- `artifactRetention.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur artifacts-gc`](commands.md#artifacts-gc) policy on the same 5-minute timer as `sessionGc`; `spur artifacts-gc` itself works regardless.
+- `artifactRetention.olderThanDays`: optional, default `30`. Age cutoff, applied only to a workspace whose every session is `completed`, `killed`, or `stopped`. Also the `spur artifacts-gc --older-than` default.
+- `artifactRetention.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed.
+- `artifactRetention.maxAnchorsPerSweep`: optional positive integer, default `20`. Per-sweep workspace cap (the CLI's own default cap is `100`).
+- `artifactRetention.maxBytesPerSession`: optional positive integer, default `2147483648` (2GiB). `agent-history-*.jsonl` bytes kept per workspace; the oldest are evicted until the workspace fits. Applies at any session status.
+- `artifactRetention.maxFilesPerSession`: optional positive integer, default `500`. `agent-history-*.jsonl` file count kept per workspace, oldest evicted first. Applies at any session status.
 - `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. On by default, unlike `sessionGc`: this reaper kills a restartable sidecar process, never a worktree or a record. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. Workspace idle time that reaps a non-MCP project sidecar. Per-sidecar override: `projects.<id>.sidecars.<name>.idleTtlMinutes`. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. Process age at which a kept sidecar logs `session.sidecar.age_warning`. Warn only — it authorizes no kill.
@@ -388,6 +394,18 @@ Pressure closes at the admission floor (RAM), below the cgroup-high threshold by
 While the guard would deny a wake, a host-wide memory hold engages on the same 1-second tick: due scheduled/interval/daily wakes, queued-message delivery, and pending trigger sends stay in place instead of being attempted. While held, a trigger batch for a `stopped` session is deferred, not dropped. The hold clears after ten consecutive non-denying ticks — sampling at or above the restore floor plus `perSessionBytes`, an unreadable `/proc/meminfo` sample, or a mix of the two — since an unreadable sample also fails open in the admission check the hold mirrors; `admission.enabled: false` force-releases an engaged one.
 
 Hold events: `daemon.memory.hold.engaged` (warn) with `availableBytes`, `floorBytes`, `someAvg10`, `cause` (`legacy_available`, `legacy_swap`, `context_floor`, `pressure`); `daemon.memory.hold.cleared` (info) with `reason` (`recovered`, `admission_disabled`, or `sample_unavailable`), `availableBytes`, `floorBytes`, `marginBytes`, `durationMs`, `engagedCause` — `admission_disabled` and `sample_unavailable` report `availableBytes` and `marginBytes` as `null`; `daemon.memory.hold.failed` (warn) with `message`. A held trigger delivery logs `trigger.send.suppressed_memory_guard` (info) with `interrupt`, `attempt` in place of `trigger.send.failed`.
+
+## Artifact retention
+
+`artifactRetention` prunes `agent-history-*.jsonl` session artifacts. Never touches worktrees or session records — that is [`spur gc`](commands.md#gc).
+
+Unit is the artifacts directory of a [desk group](#desk-groups) workspace, shared by every member.
+
+Only an artifact that is agent-written (`origin: automatic`), named `agent-history-*`, and not user-added is evictable. A user upload, a startup attachment, and any other artifact in the same directory always survive. A directory listing that hits its walk cap blocks the whole workspace for that run.
+
+Eviction is oldest-first, per workspace, in this order: age (only when every member is `completed`, `killed`, or `stopped`), then `maxBytesPerSession`, then `maxFilesPerSession`.
+
+An `agent-history-*.jsonl` artifact after a session's first capture holds only the transcript lines appended since the previous state transition, not the whole transcript. The UI still links each file as a history snapshot. Oldest-first eviction removes the base full copy, so surviving files do not reconstruct a full transcript.
 
 ## Sidecar reaping
 
