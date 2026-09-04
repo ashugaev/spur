@@ -343,7 +343,10 @@ describe("OpenCode adapter", () => {
             "setTimeout(() => {",
             '  fs.appendFileSync(log, "-");',
             '  process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
-            "}, 80);",
+            // Held long enough that spawn stagger cannot decide the peak: at an
+            // 80ms hold an early export can finish before the last one starts,
+            // and the exact assertion below false-fails on a loaded host.
+            "}, 500);",
           ].join("\n"),
           "utf8",
         );
@@ -411,8 +414,11 @@ describe("OpenCode adapter", () => {
         await rm(okDir, { recursive: true, force: true });
       }
       // Explicit, well under the runner default: a leaked slot hangs here, and
-      // the point is a fast attributable timeout rather than a 30s stall.
-    }, 10_000);
+      // the point is a fast attributable timeout rather than a 30s stall. The
+      // headroom is deliberate — this spawns six stub processes serially, and
+      // a contended run near 1s per cold start must not time out, or the
+      // timeout stops meaning "leaked slot".
+    }, 20_000);
   });
 
   it("picks the newest session from a top-level updated timestamp", async () => {

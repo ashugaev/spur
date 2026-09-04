@@ -413,6 +413,9 @@ function releaseOpenCodeExportSlot(): void {
   // queue is empty, so a burst never opens a gap above the limit.
   const next = openCodeExportQueue.shift();
   if (next) next();
+  // Clamped for the test seam only: it zeroes the counter under waiters that
+  // release afterwards. The export path releases exactly once, in `finally`,
+  // so nothing here is guarding against a double release in production.
   else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
 }
 
