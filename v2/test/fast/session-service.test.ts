@@ -1136,6 +1136,7 @@ type SessionServiceInternals = {
   ): Promise<{ state: SessionState }>;
   codexMcpDialogOverrides: Map<string, number>;
   claudeCompactingOverrides: Map<string, number>;
+  cursorPaneReadyOverrides: Map<string, number>;
   lastClassifiedLogStates: Map<string, SessionState>;
   paneWriteLocks: Map<string, Promise<void>>;
   deliveryRuns: Map<string, Promise<void>>;
@@ -9965,6 +9966,51 @@ describe("SessionService", () => {
       expect(classifiedCalls("api-2")[0]?.[1].message).toBe(
         "State: needs_input (codex MCP permission dialog)",
       );
+
+      const cursorSession = runningSession({ id: "api-3", agent: "cursor" });
+      internals.lastClassifiedLogStates.set("api-3", "working");
+      internals.cursorPaneReadyOverrides.set("api-3", Date.now() + 10_000);
+      mockCursorJsonlState("error");
+
+      const cursorReady = await internals.classifySessionRecord(cursorSession, { scanPane: false });
+
+      expect(cursorReady.state).toBe("waiting");
+      expect(classifiedCalls("api-3")[0]?.[1].message).toBe(
+        "State: waiting (cursor pane ready override)",
+      );
+    });
+
+    it("overrides cursor JSONL error to waiting when pane shows ready prompt without rate limit", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor" });
+      mockCursorJsonlState("error");
+      captureTmuxPaneMock.mockResolvedValue("previous output\n→ Add a follow-up\n");
+
+      const classified = await internals.classifySessionRecord(cursorSession, { scanPane: true });
+
+      expect(classified.state).toBe("waiting");
+      expect(internals.cursorPaneReadyOverrides.get("cursor-1")).toBeGreaterThan(Date.now());
+      expect(classifiedCalls("cursor-1")[0]?.[1].message).toBe(
+        "State: waiting (cursor pane ready override)",
+      );
+    });
+
+    it("passes minMtimeMs from session.createdAt when classifying cursor JSONL state", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const createdAt = "2026-03-18T10:00:00.000Z";
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor", createdAt });
+      mockCursorJsonlState("working");
+
+      await internals.classifySessionRecord(cursorSession);
+
+      expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
+        cursorSession.worktreePath,
+        undefined,
+        cursorSession.agentSessionId,
+        { minMtimeMs: new Date(createdAt).getTime() },
+      );
     });
 
     it("re-emits after a no-detail terminal classification resets the stored state", async () => {
@@ -10053,6 +10099,21 @@ describe("SessionService", () => {
         });
       },
     );
+
+    it("does not overwrite pinned cursor agentSessionId with discovery", async () => {
+      findAgentSessionIdMock.mockReset().mockResolvedValue("discovered-cursor-id");
+      const sessions = createSessionStore();
+      const seeded = runningSession({ agent: "cursor", agentSessionId: "pinned-cursor-id" });
+      sessions.set("api-1", seeded);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      const result = await internals.captureAgentSessionId(seeded, 0);
+
+      expect(result.agentSessionId).toBe("pinned-cursor-id");
+      expect(findAgentSessionIdMock).not.toHaveBeenCalled();
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
 
     it("does not re-emit session.agent_session_id.discovered for an unchanged id", async () => {
       findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
@@ -33231,6 +33292,7 @@ describe("SessionService", () => {
     type SessionScopedStateInternals = {
       codexMcpDialogOverrides: Map<string, number>;
       claudeCompactingOverrides: Map<string, number>;
+      cursorPaneReadyOverrides: Map<string, number>;
       lastClassifiedLogStates: Map<string, SessionState>;
       sessionProjectCache: Map<string, unknown>;
       claudeJsonlReaders: Map<string, unknown>;
@@ -33356,6 +33418,7 @@ describe("SessionService", () => {
       for (const id of seededIds) {
         internals.codexMcpDialogOverrides.set(id, Date.now());
         internals.claudeCompactingOverrides.set(id, Date.now());
+        internals.cursorPaneReadyOverrides.set(id, Date.now());
         internals.lastClassifiedLogStates.set(id, "waiting");
         internals.sessionProjectCache.set(id, {
           configPath: "/tmp/x/spur.yaml",
@@ -33413,6 +33476,7 @@ describe("SessionService", () => {
       const allPrunedMaps: Array<[string, Map<string, unknown>]> = [
         ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
         ["claudeCompactingOverrides", internals.claudeCompactingOverrides],
+        ["cursorPaneReadyOverrides", internals.cursorPaneReadyOverrides],
         ["lastClassifiedLogStates", internals.lastClassifiedLogStates],
         ["claudeJsonlReaders", internals.claudeJsonlReaders],
         ["cursorJsonlReaders", internals.cursorJsonlReaders],
@@ -33438,6 +33502,7 @@ describe("SessionService", () => {
       // sweep's behavior; it is asserted bounded (eviction-only) above.
       const cleanMaps: Array<[string, Map<string, unknown>]> = [
         ["codexMcpDialogOverrides", internals.codexMcpDialogOverrides],
+        ["cursorPaneReadyOverrides", internals.cursorPaneReadyOverrides],
         ["lastClassifiedLogStates", internals.lastClassifiedLogStates],
         ["claudeJsonlReaders", internals.claudeJsonlReaders],
         ["cursorJsonlReaders", internals.cursorJsonlReaders],

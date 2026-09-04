@@ -439,6 +439,7 @@ import {
   todoLedgerBlock,
   unfinishedTodo,
 } from "./todo.js";
+import { cursorShowsReadyPrompt } from "./cursor-state.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
 import {
   formatNestedSidecarStartError,
@@ -577,6 +578,8 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
+// Same outlast-the-sweep-gap reasoning for cursor ready prompt override.
+const CURSOR_PANE_READY_OVERRIDE_TTL_MS = 15_000;
 // Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
 // still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
 // only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
@@ -2418,6 +2421,7 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  private readonly cursorPaneReadyOverrides = new Map<string, number>();
   // Evidence-gated override (not TTL-gated) for a live usage-limit menu that
   // re-confirmed an expired claude rate-limit detection: keyed by session id.
   // A sweep can take longer than any fixed TTL to reach a given session (its
@@ -5014,6 +5018,11 @@ export class SessionService {
     for (const sessionId of this.claudeCompactingOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.cursorPaneReadyOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.cursorPaneReadyOverrides.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeRateLimitReconfirmOverrides.keys()) {
@@ -11169,6 +11178,7 @@ export class SessionService {
     this.conversationReadChain.delete(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
+    this.cursorPaneReadyOverrides.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
@@ -11621,10 +11631,13 @@ export class SessionService {
       return session;
     }
 
-    // Claude and OpenCode sessions pin their native session id. Never overwrite
+    // Claude, OpenCode, and Cursor sessions pin their native session id. Never overwrite
     // one with newest-session discovery, which could bind a sibling session
     // sharing the worktree. Legacy records without an id keep discovery below.
-    if ((session.agent === "claude" || session.agent === "opencode") && session.agentSessionId) {
+    if (
+      (session.agent === "claude" || session.agent === "opencode" || session.agent === "cursor") &&
+      session.agentSessionId
+    ) {
       return session;
     }
 
@@ -14794,6 +14807,7 @@ export class SessionService {
           session.worktreePath,
           this.cursorJsonlReaders.get(session.id),
           session.agentSessionId,
+          { minMtimeMs: new Date(session.createdAt).getTime() },
         );
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
@@ -14976,6 +14990,39 @@ export class SessionService {
           state = "needs_input";
           rateLimit = null;
           classifiedDetail = "State: needs_input (codex MCP permission dialog)";
+        }
+      } else if (scanPane && strategy === "cursor_jsonl") {
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        if (!rateLimit?.limited) {
+          const tmuxHit = scanTmuxRateLimit(paneText);
+          if (tmuxHit?.limited) {
+            rateLimit = tmuxHit;
+          }
+        }
+        if (
+          state === "error" &&
+          cursorShowsReadyPrompt(paneText) &&
+          !rateLimitActive(rateLimit, nowMs)
+        ) {
+          state = "waiting";
+          this.cursorPaneReadyOverrides.set(
+            session.id,
+            nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS,
+          );
+          classifiedDetail = "State: waiting (cursor pane ready override)";
+        } else {
+          this.cursorPaneReadyOverrides.delete(session.id);
+        }
+      } else if (!scanPane && strategy === "cursor_jsonl") {
+        const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
+        if (
+          expiresAt !== undefined &&
+          expiresAt > nowMs &&
+          state === "error" &&
+          !rateLimitActive(rateLimit, nowMs)
+        ) {
+          state = "waiting";
+          classifiedDetail = "State: waiting (cursor pane ready override)";
         }
       } else if (scanPane && !rateLimit?.limited && strategy !== "opencode") {
         const paneText = await captureTmuxPane(session.tmuxSession);

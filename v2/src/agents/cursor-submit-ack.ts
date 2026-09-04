@@ -10,8 +10,9 @@ export interface CursorSubmitBaseline {
 
 export async function captureCursorSubmitBaseline(
   worktreePath: string,
+  agentSessionId?: string,
 ): Promise<CursorSubmitBaseline | null> {
-  const file = await findLatestCursorTranscriptFile(worktreePath);
+  const file = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   if (!file) {
     return null;
   }
@@ -107,6 +108,7 @@ export async function scanCursorJsonlForMessage(
   baseline: CursorSubmitBaseline,
   text: string,
   worktreePath: string,
+  agentSessionId?: string,
 ): Promise<boolean> {
   const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
@@ -117,7 +119,7 @@ export async function scanCursorJsonlForMessage(
     return true;
   }
 
-  const latest = await findLatestCursorTranscriptFile(worktreePath);
+  const latest = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   if (!latest || latest === baseline.file) {
     return false;
   }
