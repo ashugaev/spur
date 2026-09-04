@@ -11,6 +11,7 @@ import {
   type ReviewEventData,
   type ReviewSignal,
   type ReviewSnapshot,
+  type SessionRecord,
   type WorkItemEventData,
 } from "../types.js";
 import {
@@ -50,6 +51,11 @@ export type { GitHubCheck, GitHubPrSummary };
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
 const RATE_LIMIT_BACKOFF_BASE_MS = 5 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
+// Must exceed the configured eventLog.collapseWindowMs (default 60_000, user-settable
+// with no upper bound, config.ts:2109-2110) or the event-log collapse summary/append
+// pair returns for a transiently-failing session (event-log.ts:170-183).
+const SESSION_POLL_BACKOFF_BASE_MS = 2 * 60 * 1000;
+const SESSION_POLL_BACKOFF_MAX_MS = 30 * 60 * 1000;
 const ADAPTIVE_ACTIVITY_ACTIONS = new Set(["session.send", "session.source_reply"]);
 // After this many consecutive poll failures for the same session, its failures stop
 // counting toward the CI-active hysteresis flag (see consecutiveSessionPollErrors).
@@ -99,6 +105,22 @@ function parseGitHubSearchPrItems(raw: string): GitHubSearchPrItem[] {
 
 function isGitHubBadCredentialsError(text: string): boolean {
   return text.toLowerCase().includes("bad credentials");
+}
+
+// True only when `text` is unambiguously a "this PR number does not exist" error for
+// `prNumber` and nothing else. A joined multi-session GraphQL error message (batch
+// poisoning, review-providers/github.ts:733-739) can name several PR numbers or a PR
+// number belonging to a different session; either case must stay transient so a
+// healthy co-batched session is never mistaken for a dead one.
+function isGitHubPermanentNotFoundError(text: string, prNumber: number): boolean {
+  const lower = text.toLowerCase();
+  if (!lower.includes("could not resolve to a") || !lower.includes("pullrequest")) return false;
+  if (isGitHubRateLimitError(text) || isGitHubBadCredentialsError(text)) return false;
+  const matches = new Set<number>();
+  for (const match of text.matchAll(/with the number of (\d+)/g)) {
+    matches.add(Number(match[1]));
+  }
+  return matches.size === 1 && matches.has(prNumber);
 }
 
 function parseEpochResetMs(value: number): number | null {
@@ -284,6 +306,25 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // defeating adaptivePoll source-wide. Past the tolerance, that session's failures
   // stop counting toward the hysteresis flag (still logged, just excluded from it).
   const consecutiveSessionPollErrors = new Map<string, number>();
+  // sessionId -> the PR number that was found permanently unresolvable. Cleared when
+  // the session rebinds away from that number or disappears (see the sweep at cycle end).
+  const permanentPrNotFound = new Map<string, number>();
+  // sessionId -> transient poll-failure backoff state. Cleared on a clean observation
+  // or when the session disappears.
+  const transientPollBackoff = new Map<string, { failures: number; nextRetryAtMs: number }>();
+
+  const isSessionPollGated = (session: SessionRecord, nowMs: number): boolean => {
+    const disabledPr = permanentPrNotFound.get(session.id);
+    if (disabledPr !== undefined) {
+      if (!session.pr || session.pr.number !== disabledPr) {
+        permanentPrNotFound.delete(session.id);
+      } else {
+        return true;
+      }
+    }
+    return (transientPollBackoff.get(session.id)?.nextRetryAtMs ?? 0) > nowMs;
+  };
+
   let nextEligiblePollAtMs = 0;
   let lastCycleCiActive = false;
   let stopped = false;
@@ -317,6 +358,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (Date.now() >= nextEligiblePollAtMs) return true;
     if (lastCycleCiActive) return true;
     for (const session of listPollableSessions()) {
+      if (isSessionPollGated(session, Date.now())) continue;
       const existing = snapshots.get(session.id);
       if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number))
         continue;
@@ -396,6 +438,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         // sticky across restarts: a CLOSED PR later reopened won't be re-detected
         // while the session stays bound to that PR number (no `reopened` lifecycle
         // kind exists). MERGED is unconditionally terminal.
+        if (isSessionPollGated(session, Date.now())) continue;
         const existing = snapshots.get(session.id);
         if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number)) {
           continue;
@@ -437,6 +480,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
           } else {
             consecutiveSessionPollErrors.delete(session.id);
+            transientPollBackoff.delete(session.id);
           }
           if (!collected) {
             snapshots.delete(session.id);
@@ -513,9 +557,29 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             emitSignalsByKind(deps, collected.data, toEmit);
           }
         } catch (error) {
+          const message = extractGithubErrorText(error);
+          if (session.pr && isGitHubPermanentNotFoundError(message, session.pr.number)) {
+            if (permanentPrNotFound.get(session.id) !== session.pr.number) {
+              permanentPrNotFound.set(session.id, session.pr.number);
+              deps.logger.warn?.(
+                `[source:${deps.projectId}/${deps.sourceId}] signal polling disabled for ${session.id}: PR #${session.pr.number} not found`,
+              );
+              logSpurEvent(deps.dataDir, {
+                event: "source.poll.disabled",
+                level: "error",
+                projectId: deps.projectId,
+                sourceId: deps.sourceId,
+                sessionId: session.id,
+                message: `Signal polling disabled for ${deps.projectId}/${deps.sourceId}/${session.id}: PR #${session.pr.number} not found`,
+                details: { prNumber: session.pr.number },
+              });
+            }
+            transientPollBackoff.delete(session.id);
+            consecutiveSessionPollErrors.delete(session.id);
+            continue;
+          }
           if (handleGitHubSuppressionError(error)) return;
           if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
-          const message = extractGithubErrorText(error);
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
           );
@@ -526,6 +590,17 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             sourceId: deps.sourceId,
             sessionId: session.id,
             message: `Signal poll failed for ${deps.projectId}/${deps.sourceId}/${session.id}: ${message}`,
+          });
+          const existingBackoff = transientPollBackoff.get(session.id);
+          const failures = (existingBackoff?.failures ?? 0) + 1;
+          transientPollBackoff.set(session.id, {
+            failures,
+            nextRetryAtMs:
+              Date.now() +
+              Math.min(
+                SESSION_POLL_BACKOFF_BASE_MS * 2 ** (failures - 1),
+                SESSION_POLL_BACKOFF_MAX_MS,
+              ),
           });
         }
       }
@@ -563,6 +638,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const sessionId of [...consecutiveSessionPollErrors.keys()]) {
         if (!currentSessionIds.has(sessionId)) consecutiveSessionPollErrors.delete(sessionId);
+      }
+
+      for (const sessionId of [...permanentPrNotFound.keys()]) {
+        if (!currentSessionIds.has(sessionId)) permanentPrNotFound.delete(sessionId);
+      }
+
+      for (const sessionId of [...transientPollBackoff.keys()]) {
+        if (!currentSessionIds.has(sessionId)) transientPollBackoff.delete(sessionId);
       }
     } finally {
       polling = false;

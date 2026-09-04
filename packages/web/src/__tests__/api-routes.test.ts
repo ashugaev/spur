@@ -1139,22 +1139,20 @@ describe("Spur web API routes", () => {
     );
   });
 
-  it("POST /api/sessions/:id/complete trims and forwards ToDo override reason", async () => {
+  it("POST /api/sessions/:id/complete drops a ToDo override reason the daemon no longer takes", async () => {
     mockedSpurRequest.mockResolvedValue(
       new Response(JSON.stringify(sessionFixture()), { status: 200 }),
     );
     await completeSession(
       new NextRequest("http://localhost/api/sessions/api-a1/complete", {
         method: "POST",
-        body: JSON.stringify({ todoOverrideReason: "  Operator accepted risk  " }),
+        body: JSON.stringify({ todoOverrideReason: "Operator accepted risk" }),
       }),
       { params: Promise.resolve({ id: "api-a1" }) },
     );
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/complete",
-      expect.objectContaining({
-        body: JSON.stringify({ todoOverrideReason: "Operator accepted risk" }),
-      }),
+      expect.objectContaining({ body: JSON.stringify({}) }),
     );
   });
 

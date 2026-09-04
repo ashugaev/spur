@@ -1702,17 +1702,7 @@ projects:
     );
 
     const completed = JSON.parse(
-      (
-        await context.execCli([
-          "--config",
-          configPath,
-          "complete",
-          spawned.id,
-          "--todo-override-reason",
-          "Runtime fixture completes before recording any ToDo step",
-          "--json",
-        ])
-      ).stdout,
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
     ) as SessionView;
     expect(completed.status).toBe("completed");
     expect(completed.workspaceExists).toBe(false);
@@ -1952,15 +1942,7 @@ projects:
     ) as SessionView;
     expect(spawned.branch).toBe(occupiedBranch);
 
-    await context.execCli([
-      "--config",
-      configPath,
-      "complete",
-      spawned.id,
-      "--todo-override-reason",
-      "Runtime fixture completes before recording any ToDo step",
-      "--json",
-    ]);
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
 
     const occupiedWorktreePath = join(context.rootDir, "occupied-respawn-branch");
     await execFileAsync("git", ["worktree", "add", occupiedWorktreePath, occupiedBranch], {
@@ -3152,15 +3134,7 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
-    await context.execCli([
-      "--config",
-      configPath,
-      "complete",
-      spawned.id,
-      "--todo-override-reason",
-      "Runtime fixture completes before recording any ToDo step",
-      "--json",
-    ]);
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
     expect(existsSync(artifactDir)).toBe(false);
 
     const missing = await fetch(
@@ -4566,15 +4540,7 @@ projects:
         ])
       ).stdout,
     ) as SessionView;
-    await context.execCli([
-      "--config",
-      configPath,
-      "complete",
-      target.id,
-      "--todo-override-reason",
-      "Runtime fixture completes before recording any ToDo step",
-      "--json",
-    ]);
+    await context.execCli(["--config", configPath, "complete", target.id, "--json"]);
 
     const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
     const respawned = JSON.parse(

@@ -1846,7 +1846,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("blocks completion on an empty ledger, then records a human override before completing", async () => {
+    it("blocks agent completion on an empty ledger, but allows human completion without override", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       await useRealTodoLedger();
@@ -1856,21 +1856,15 @@ describe("SessionService", () => {
       await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_ledger_empty" });
       await service.complete(
         "api-1",
-        { todoOverrideReason: "Operator accepts unfinished work", skipPrCheck: true },
+        { skipPrCheck: true },
         { todoActor: { kind: "human", origin: "ui" } },
       );
 
       expect(sessions.get("api-1")?.status).toBe("completed");
-      const projection = await service.readTodo("api-1");
-      expect(projection.finishOverrides).toHaveLength(1);
-      expect(projection.finishOverrides[0]).toMatchObject({
-        type: "finish_override_recorded",
-        reason: "Operator accepts unfinished work",
-      });
       service.dispose();
     });
 
-    it("blocks completion on open work, then records a human override before completing", async () => {
+    it("blocks agent completion on open work, but allows human completion without override", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       await useRealTodoLedger();
@@ -1885,14 +1879,13 @@ describe("SessionService", () => {
       await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
       await service.complete(
         "api-1",
-        { todoOverrideReason: "Operator accepts unfinished work", skipPrCheck: true },
+        { skipPrCheck: true },
         { todoActor: { kind: "human", origin: "ui" } },
       );
 
       expect(sessions.get("api-1")?.status).toBe("completed");
       const projection = await service.readTodo("api-1");
       expect(projection.items[0]?.status).toBe("open");
-      expect(projection.finishOverrides).toHaveLength(1);
       service.dispose();
     });
 
@@ -2055,14 +2048,12 @@ describe("SessionService", () => {
 
       await service.completeDesk(
         "api-1",
-        { todoOverrideReason: "Operator accepts the empty desk", skipPrCheck: true },
+        { skipPrCheck: true },
         { todoActor: { kind: "human", origin: "ui" } },
       );
 
       expect(sessions.get("api-1")?.status).toBe("completed");
       expect(sessions.get("api-2")?.status).toBe("completed");
-      const projection = await service.readTodo("api-1");
-      expect(projection.finishOverrides).toHaveLength(1);
       service.dispose();
     });
 

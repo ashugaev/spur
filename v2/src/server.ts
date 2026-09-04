@@ -141,6 +141,17 @@ export async function resolveTodoMutationActor(args: {
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
+// ToDo state gates the agent, never the person driving Spur: a CLI or UI
+// request that no session made on its own behalf carries a human actor, and
+// the service skips the empty/unfinished ledger block for it.
+function humanTodoOptions(
+  origin: UserActionOrigin,
+  callerHeader: string | string[] | undefined,
+): { todoActor: TodoActor } | undefined {
+  if (callerHeader || (origin !== "cli" && origin !== "ui")) return undefined;
+  return { todoActor: { kind: "human", origin } };
+}
+
 export type StartedServer = SessionService & {
   stop(): Promise<void>;
 };
@@ -310,20 +321,10 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
-  const todoOverrideReason = raw["todoOverrideReason"];
-  if (
-    todoOverrideReason !== undefined &&
-    (typeof todoOverrideReason !== "string" || !todoOverrideReason.trim())
-  ) {
-    throw new Error("todoOverrideReason must be nonblank");
-  }
   return {
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
-    ...(typeof todoOverrideReason === "string"
-      ? { todoOverrideReason: todoOverrideReason.trim() }
-      : {}),
   };
 }
 
@@ -1595,12 +1596,7 @@ export async function startServer(
           );
           return;
         }
-        const todoOptions =
-          body.todoOverrideReason &&
-          !request.headers["x-spur-caller-session"] &&
-          (origin === "cli" || origin === "ui")
-            ? { todoActor: { kind: "human" as const, origin } }
-            : undefined;
+        const todoOptions = humanTodoOptions(origin, request.headers["x-spur-caller-session"]);
         sendJson(
           response,
           200,
@@ -1641,7 +1637,15 @@ export async function startServer(
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
-        sendJson(response, 200, await service.handoff(handoffSessionId, body));
+        sendJson(
+          response,
+          200,
+          await service.handoff(
+            handoffSessionId,
+            body,
+            humanTodoOptions(origin, request.headers["x-spur-caller-session"]),
+          ),
+        );
         return;
       }
 

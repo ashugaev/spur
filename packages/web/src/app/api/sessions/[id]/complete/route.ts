@@ -11,7 +11,6 @@ interface CompleteBody {
   prAction?: OpenPrAction;
   scope?: "session" | "desk";
   skipPrCheck?: boolean;
-  todoOverrideReason?: string;
 }
 
 async function readCompleteBody(request: NextRequest): Promise<CompleteBody> {
@@ -29,20 +28,10 @@ async function readCompleteBody(request: NextRequest): Promise<CompleteBody> {
   if (skipPrCheck !== undefined && typeof skipPrCheck !== "boolean") {
     throw new Error("Invalid skipPrCheck");
   }
-  const todoOverrideReason = raw["todoOverrideReason"];
-  if (
-    todoOverrideReason !== undefined &&
-    (typeof todoOverrideReason !== "string" || !todoOverrideReason.trim())
-  ) {
-    throw new Error("Invalid todoOverrideReason");
-  }
   return {
     ...(isOpenPrAction(prAction) ? { prAction } : {}),
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(skipPrCheck === true ? { skipPrCheck: true } : {}),
-    ...(typeof todoOverrideReason === "string"
-      ? { todoOverrideReason: todoOverrideReason.trim() }
-      : {}),
   };
 }
 

@@ -19,7 +19,7 @@ Any proxy that forwards `/` covers `/ws` (same origin) — no extra port or env 
 
 - Host packages: `git tmux nginx gh curl`.
 - A C/C++ toolchain: `build-essential make g++` (Debian/Ubuntu) or equivalent. `pnpm install` builds `node-pty` from source; without a toolchain that build fails silently and the web terminal has no PTY — install completes, but the terminal doesn't work.
-- Node 20+.
+- Node.js — range in [`package.json`](../package.json) `engines.node`.
 - pnpm pinned to `9.15.4` via corepack. This exact version matters: pnpm 11+ uses vm dynamic-import semantics incompatible with Node 24 and crashes on startup with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`.
 - GitHub SSH access on the VM (for the clone).
 - Agent CLIs installed user-scoped, not `sudo npm -g`: `npm install -g --prefix ~/.npm-global @anthropic-ai/claude-code @openai/codex opencode-ai` — a one-shot `--prefix`, never `npm config set prefix ~/.npm-global` (persists into `~/.npmrc`, see below for why that breaks self-update). Put `~/.npm-global/bin` on PATH; the daemon unit's `PATH` includes that dir already. Then `codex login` / `claude login` / `opencode auth login` / `gh auth login` on the host.

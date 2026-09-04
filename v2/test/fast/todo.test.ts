@@ -6,7 +6,6 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import {
   ensureTodoLedger,
   mutateTodo,
-  recordTodoFinishOverride,
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
@@ -190,16 +189,27 @@ describe("Spur ToDo ledger", () => {
     ).toThrow(InvalidTodoRequestError);
   });
 
-  it("records a human override on an empty ledger without throwing", async () => {
+  it("replays a legacy human override on an empty ledger without throwing", async () => {
     const { dataDir, session } = await fixture();
-    const projection = ensureTodoLedger(dataDir, session);
-    const after = recordTodoFinishOverride(
-      dataDir,
-      session.id,
-      "Nothing to track",
-      { kind: "human", origin: "cli" },
-      projection,
+    ensureTodoLedger(dataDir, session);
+    const sessionDir = join(dataDir, "sessions", session.id);
+    mkdirSync(sessionDir, { recursive: true });
+    const path = join(sessionDir, "todo.jsonl");
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        version: 1,
+        eventId: "override-1",
+        sessionId: session.id,
+        at: "2026-08-20T00:01:00.000Z",
+        actor: { kind: "human", origin: "cli" },
+        type: "finish_override_recorded",
+        reason: "Nothing to track",
+        unfinishedItemIds: [],
+      })}\n`,
+      "utf8",
     );
+    const after = replayTodo(dataDir, session.id);
     expect(after.counts.total).toBe(0);
     expect(after.finishOverrides).toHaveLength(1);
   });

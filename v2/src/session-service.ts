@@ -434,7 +434,6 @@ import {
 import {
   ensureTodoLedger,
   mutateTodo as applyTodoMutation,
-  recordTodoFinishOverride,
   TodoEmptyLedgerError,
   TodoOpenWorkError,
   todoLedgerBlock,
@@ -10695,14 +10694,9 @@ export class SessionService {
             unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
           }
         }
-        if (
-          (emptySessionIds.length > 0 || unfinishedBlocked.length > 0) &&
-          (!request.todoOverrideReason?.trim() ||
-            !options?.todoActor ||
-            options.todoActor.kind !== "human")
-        ) {
+        if (options?.todoActor?.kind !== "human") {
           if (emptySessionIds.length > 0) throw new TodoEmptyLedgerError(emptySessionIds);
-          throw new TodoOpenWorkError(unfinishedBlocked);
+          if (unfinishedBlocked.length > 0) throw new TodoOpenWorkError(unfinishedBlocked);
         }
         const completedIds: string[] = [];
         for (const candidate of candidates) {
@@ -11407,19 +11401,11 @@ export class SessionService {
       if (targetStatus === "completed") {
         const projection = ensureTodoLedger(this.config.dataDir, session);
         const block = todoLedgerBlock(projection);
-        if (block) {
-          const overrideReason = request.todoOverrideReason?.trim();
-          if (!overrideReason || !options?.todoActor || options.todoActor.kind !== "human") {
-            if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
-            throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
-          }
-          recordTodoFinishOverride(
-            this.config.dataDir,
-            sessionId,
-            overrideReason,
-            options.todoActor,
-            projection,
-          );
+        // The ledger gates the agent, never the human: a person closing through
+        // the CLI or UI completes regardless of empty or unfinished work.
+        if (block && options?.todoActor?.kind !== "human") {
+          if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+          throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
         }
       }
       if (targetStatus === "completed" && !request.skipPrCheck) {
@@ -13067,15 +13053,20 @@ export class SessionService {
     return spawned;
   }
 
-  async handoff(sessionId: string, request: HandoffSessionRequest): Promise<SessionView> {
+  async handoff(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options?: { todoActor?: TodoActor },
+  ): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.handoffLocked(sessionId, request),
+      this.handoffLocked(sessionId, request, options),
     );
   }
 
   private async handoffLocked(
     sessionId: string,
     request: HandoffSessionRequest,
+    options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -13096,8 +13087,8 @@ export class SessionService {
     }
     const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
     const handoffBlock = todoLedgerBlock(handoffProjection);
-    if (handoffBlock === "empty") throw new TodoEmptyLedgerError([sessionId]);
-    if (handoffBlock === "unfinished") {
+    if (handoffBlock && options?.todoActor?.kind !== "human") {
+      if (handoffBlock === "empty") throw new TodoEmptyLedgerError([sessionId]);
       throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
     }
     // Gate before any teardown below. The source session is still on-disk as
