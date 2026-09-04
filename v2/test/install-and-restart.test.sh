@@ -290,11 +290,35 @@ wait "$first_pid" "$second_pid"
 # and records install_failed so a record-less retry can never happen (a lock
 # give-up now runs under the armed trap; A1). No daemon writes the "running"
 # record here, so the :64-78 wait loop spins its full ~2s before the lock is
-# even attempted — acceptable, noted in the spec's test plan. Held long enough
-# (5s) to outlast that 2s wait plus the 1s lock-wait timeout below.
-flock "$LOCK_FILE" -c "sleep 5" &
+# even attempted — acceptable, noted in the spec's test plan. The hold is not
+# a tuned duration: the case kills the holder below, so a hold far longer than
+# any runner can spend in the barrier plus the helper's wait costs nothing and
+# makes the guarantee unconditional.
+# stdout/stderr detached: a failing run leaves the holder alive, and an
+# inherited stdout would hold the caller's pipe open for the rest of the hold.
+flock "$LOCK_FILE" -c "sleep 600" >/dev/null 2>&1 &
 holder_pid=$!
-sleep 0.2
+# Barrier, not a sleep: wait until the holder actually owns the lock. A fixed
+# delay is a guess about how long a backgrounded flock takes to acquire, and
+# under load it can still be starting — the helper then wins the lock and the
+# case asserts nothing, failing with rc=0. Probe non-blockingly instead: while
+# the probe can take the lock, the holder does not have it yet. rc 1 is the
+# only "held" answer flock gives; any other non-zero rc (66 on an unopenable
+# lock file) is a broken probe, not a held lock, so fail on it with the rc.
+lock_held=""
+for _ in $(seq 1 200); do
+  set +e
+  flock -n "$LOCK_FILE" -c true
+  probe_rc=$?
+  set -e
+  if [ "$probe_rc" -eq 1 ]; then
+    lock_held="yes"
+    break
+  fi
+  [ "$probe_rc" -eq 0 ] || fail "lock probe failed (rc=$probe_rc)"
+  sleep 0.05
+done
+[ -n "$lock_held" ] || fail "lock holder never acquired the lock"
 STATUS_FILE14="$PREFIX_DIR/lock-give-up-status.json"
 LEDGER_FILE14="$PREFIX_DIR/lock-give-up-ledger.jsonl"
 rm -f "$STATUS_FILE14" "$LEDGER_FILE14"
@@ -311,7 +335,31 @@ grep -q '"failureKind":"install_failed"' "$STATUS_FILE14" || fail "a lock give-u
 if [ -e "$LEDGER_FILE14" ]; then
   fail "a lock give-up must never write a ledger line: $(cat "$LEDGER_FILE14")"
 fi
-wait "$holder_pid"
+# The hold outlasts the helper's wait by a wide margin so a slow runner cannot
+# release it early; the case ends it here rather than sitting out the remainder.
+# Kill both the backgrounded flock wrapper and any child sleep holding the fd.
+pkill -P "$holder_pid" 2>/dev/null || true
+kill "$holder_pid" 2>/dev/null || true
+# Both kills swallow their rc, and the hold outlives the whole suite, so a kill
+# that failed would surface as the `wait` below, and then Case 15, sitting out
+# the remaining hold. Probe the lock back before waiting on the holder:
+# signal delivery is asynchronous, so allow a short window, then fail here by
+# name instead of stalling later.
+lock_released=""
+for _ in $(seq 1 40); do
+  set +e
+  flock -n "$LOCK_FILE" -c true
+  probe_rc=$?
+  set -e
+  if [ "$probe_rc" -eq 0 ]; then
+    lock_released="yes"
+    break
+  fi
+  [ "$probe_rc" -eq 1 ] || fail "lock probe failed (rc=$probe_rc)"
+  sleep 0.05
+done
+[ -n "$lock_released" ] || fail "lock holder survived the kill and still holds the lock"
+wait "$holder_pid" 2>/dev/null || true
 
 # Case 15: detached deploy runs replace the durable running record with terminal status.
 STATUS_FILE="$PREFIX_DIR/deploy-switch.json"
