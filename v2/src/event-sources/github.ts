@@ -306,8 +306,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // defeating adaptivePoll source-wide. Past the tolerance, that session's failures
   // stop counting toward the hysteresis flag (still logged, just excluded from it).
   const consecutiveSessionPollErrors = new Map<string, number>();
-  // sessionId -> the PR number that was found permanently unresolvable. Cleared on
-  // rebind (session.pr.number no longer matches) or when the session disappears.
+  // sessionId -> the PR number that was found permanently unresolvable. A rebind
+  // (session.pr.number no longer matches) just makes the gate check below fail, so
+  // the stale entry is ignored, not removed; it is only actually cleared when the
+  // session disappears (see the sweep at cycle end).
   const permanentPrNotFound = new Map<string, number>();
   // sessionId -> transient poll-failure backoff state. Cleared on a clean observation
   // or when the session disappears.
