@@ -1590,6 +1590,19 @@ async function readSidecarPortConflict(
   }
 }
 
+// A response is stale once a newer request for the same loader has started,
+// or once navigation has moved on to a different session entirely.
+function isStaleRequest(
+  requestId: number,
+  latestRequestIdRef: { current: number },
+  currentSessionIdRef: { current: string },
+  requestedSessionId: string,
+): boolean {
+  return (
+    requestId !== latestRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId
+  );
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
@@ -1754,20 +1767,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
+      if (isStaleRequest(requestId, loadRequestIdRef, currentSessionIdRef, requestedSessionId)) {
         return;
       }
       if (!response.ok) {
         throw new Error(await readApiErrorMessage(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
+      if (isStaleRequest(requestId, loadRequestIdRef, currentSessionIdRef, requestedSessionId)) {
         return;
       }
       const nextSession = toDashboardSession(payload);
@@ -1775,10 +1782,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setError(null);
       dismissLoadErrorToast();
     } catch (loadError) {
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
+      if (isStaleRequest(requestId, loadRequestIdRef, currentSessionIdRef, requestedSessionId)) {
         return;
       }
       const message = errorMessage(loadError, "Failed to load session");
@@ -1793,6 +1797,39 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       lastLoadErrorToastRef.current = { id, message };
     }
   }, [dismissLoadErrorToast, sessionId, showErrorToast]);
+
+  const coreLoadRequestIdRef = useRef(0);
+  const loadSessionCore = useCallback(async () => {
+    const requestedSessionId = sessionId;
+    const requestId = coreLoadRequestIdRef.current + 1;
+    coreLoadRequestIdRef.current = requestId;
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}/core`, {
+        cache: "no-store",
+      });
+      if (
+        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId)
+      ) {
+        return;
+      }
+      if (!response.ok) return;
+      const core = (await response.json()) as SpurSessionView;
+      if (
+        isStaleRequest(requestId, coreLoadRequestIdRef, currentSessionIdRef, requestedSessionId)
+      ) {
+        return;
+      }
+      // Functional update, not a sessionRef read-then-setSession: sessionRef
+      // is written by a passive effect and can lag a setSession that already
+      // committed the full enriched session for this id. Reading current
+      // state here instead of the ref closes that one-render clobber window.
+      setSession((current) =>
+        current?.id === requestedSessionId ? current : toDashboardSession(core),
+      );
+    } catch {
+      return;
+    }
+  }, [sessionId]);
 
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
@@ -1819,12 +1856,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
 
   useEffect(() => {
+    void loadSessionCore();
     void loadSession();
     const timer = setInterval(() => {
       void loadSession();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [loadSession]);
+  }, [loadSession, loadSessionCore]);
 
   useEffect(() => {
     if (!session) return;

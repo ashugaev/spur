@@ -7424,6 +7424,171 @@ describe("SessionService", () => {
     expect(readClaudeJsonlStateMock).toHaveBeenCalled();
   });
 
+  describe("getCore", () => {
+    type CoreSpyableService = {
+      classifySessionRecord: (...args: unknown[]) => unknown;
+      readRuntimeSnapshot: (...args: unknown[]) => unknown;
+      buildDeskGroupMembers: (...args: unknown[]) => unknown;
+      isInRestoreWarmup: (...args: unknown[]) => unknown;
+      reconcileUnexpectedStop: (...args: unknown[]) => unknown;
+    };
+
+    function coreSpies(service: unknown) {
+      const spyable = service as unknown as CoreSpyableService;
+      return {
+        classify: vi.spyOn(spyable, "classifySessionRecord"),
+        runtimeSnapshot: vi.spyOn(spyable, "readRuntimeSnapshot"),
+        deskMembers: vi.spyOn(spyable, "buildDeskGroupMembers"),
+        restoreWarmup: vi.spyOn(spyable, "isInRestoreWarmup"),
+        reconcileUnexpectedStop: vi.spyOn(spyable, "reconcileUnexpectedStop"),
+      };
+    }
+
+    it("returns a cheap core view without heavy enrichment for a live session", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
+      tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spies = coreSpies(service);
+
+      const core = await service.getCore("api-1");
+
+      expect(core.id).toBe("api-1");
+      expect(core.runtimeAlive).toBe(true);
+      expect(core.workspaceExists).toBe(true);
+      expect(core.state).toBe("working");
+      expect(core.lastActivityAt).toBe("2026-03-18T10:01:00.000Z");
+      expect(core.lastActivityAt).toBe(runningSession().updatedAt);
+      expect(core).not.toHaveProperty("services");
+      expect(core).not.toHaveProperty("sidecars");
+      expect(core).not.toHaveProperty("artifacts");
+      expect(core).not.toHaveProperty("deskGroupMembers");
+      expect(core).not.toHaveProperty("stateHistory");
+      expect(spies.classify).not.toHaveBeenCalled();
+      expect(spies.deskMembers).not.toHaveBeenCalled();
+      expect(spies.reconcileUnexpectedStop).not.toHaveBeenCalled();
+      expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+      expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(tmuxSessionExistsMock).toHaveBeenCalledTimes(1);
+      expect(tmuxPaneDeadMock).toHaveBeenCalledTimes(1);
+      expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("forces runtimeAlive without probing tmux during restore warmup", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spies = coreSpies(service);
+      spies.restoreWarmup.mockReturnValue(true);
+
+      const core = await service.getCore("api-1");
+
+      expect(core.runtimeAlive).toBe(true);
+      expect(tmuxSessionExistsMock).not.toHaveBeenCalled();
+    });
+
+    it("reflects a dead runtime for a non-terminal session", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(false);
+      tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.runtimeAlive).toBe(false);
+      expect(core.state).toBe("stopped");
+      expect(tmuxSessionExistsMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports stopped when the pane is dead", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
+      tmuxPaneDeadMock.mockReset().mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.state).toBe("stopped");
+      expect(core.runtimeAlive).toBe(true);
+    });
+
+    it("reports stopped when the agent process is gone", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
+      tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.state).toBe("stopped");
+    });
+
+    it("keeps a spawning session working while its spawn is in flight", async () => {
+      readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      (service as unknown as { spawnsInFlight: Set<string> }).spawnsInFlight.add("api-1");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.state).toBe("working");
+      expect(core.runtimeAlive).toBe(false);
+    });
+
+    it("reports stopped for an orphaned spawning record with a dead runtime", async () => {
+      readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.state).toBe("stopped");
+    });
+
+    it("short-circuits runtime for a terminal session without probing tmux", async () => {
+      readSessionMock.mockReturnValue(runningSession({ status: "completed" }));
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.runtimeAlive).toBe(false);
+      expect(core.state).toBe("stopped");
+      expect(tmuxSessionExistsMock).not.toHaveBeenCalled();
+    });
+
+    it("reflects a missing workspace", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      workspaceExistsMock.mockReset().mockReturnValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.workspaceExists).toBe(false);
+    });
+
+    it("throws SessionResourceNotFoundError for an unknown id", async () => {
+      readSessionMock.mockReturnValue(null);
+      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.getCore("ghost")).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+    });
+  });
+
   describe("switchAuth", () => {
     function seedAccounts(): void {
       testAccounts = [

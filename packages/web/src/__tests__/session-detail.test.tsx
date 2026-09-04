@@ -152,6 +152,27 @@ function sessionFixture(overrides?: Partial<SpurSessionView>) {
   };
 }
 
+function sparseCoreFixture(overrides?: Partial<SpurSessionView>) {
+  return {
+    id: "api-a1",
+    project: "api",
+    agent: "claude",
+    prompt: "Fix auth",
+    branch: "feat/auth",
+    worktree: true,
+    tmuxSession: "api-a1",
+    status: "running",
+    state: "working",
+    createdAt: "2026-04-02T10:00:00.000Z",
+    updatedAt: "2026-04-02T10:00:00.000Z",
+    lastActivityAt: "2026-04-02T10:00:00.000Z",
+    runtimeAlive: true,
+    workspaceExists: true,
+    worktreePath: "/tmp/api-a1",
+    ...overrides,
+  };
+}
+
 function conversationFixture(
   overrides?: Partial<{
     messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }>;
@@ -5252,6 +5273,69 @@ describe("SessionDetail load state", () => {
     expect(screen.queryByRole("heading", { name: "Stale first session" })).not.toBeInTheDocument();
   });
 
+  it("ignores a stale core response after navigation", async () => {
+    let resolveFirstCore: ((response: Response) => void) | null = null;
+    const firstCoreResponse = new Promise<Response>((resolve) => {
+      resolveFirstCore = resolve;
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/core") {
+        return firstCoreResponse;
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return Promise.resolve(
+          new Response(JSON.stringify(sessionFixture({ id: "api-a1", prompt: "First session" })), {
+            status: 200,
+          }),
+        );
+      }
+
+      if (url === "/api/sessions/api-b2" || url === "/api/sessions/api-b2/core") {
+        return Promise.resolve(
+          new Response(JSON.stringify(sessionFixture({ id: "api-b2", prompt: "Second session" })), {
+            status: 200,
+          }),
+        );
+      }
+
+      if (
+        url === "/api/sessions/api-a1/conversation" ||
+        url === "/api/sessions/api-b2/conversation"
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify(conversationFixture()), { status: 200 }),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+    rerender(<SessionDetail sessionId="api-b2" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      if (!resolveFirstCore) throw new Error("Missing api-a1 core resolver");
+      resolveFirstCore(
+        new Response(
+          JSON.stringify(sessionFixture({ id: "api-a1", prompt: "Stale core session" })),
+          { status: 200 },
+        ),
+      );
+      await firstCoreResponse;
+    });
+
+    expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Stale core session" })).not.toBeInTheDocument();
+  });
+
   it("dismisses a load-error toast after a successful reload", async () => {
     let sessionRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -5293,6 +5377,130 @@ describe("SessionDetail load state", () => {
     await waitFor(() => {
       expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
     });
+  });
+
+  it("paints the frame and action buttons from the cheap core payload before the full session load resolves, with no flip after enrich", async () => {
+    let resolveFullSession: ((response: Response) => void) | null = null;
+    const fullSessionResponse = new Promise<Response>((resolve) => {
+      resolveFullSession = resolve;
+    });
+    let coreRequests = 0;
+    let conversationRequests = 0;
+
+    vi.spyOn(global, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/core") {
+        coreRequests += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(sparseCoreFixture({ status: "running", runtimeAlive: true })),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return fullSessionResponse;
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        conversationRequests += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify(conversationFixture()), { status: 200 }),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send now" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(coreRequests).toBeGreaterThan(0);
+
+    await waitFor(() => {
+      expect(conversationRequests).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      if (!resolveFullSession) throw new Error("Missing api-a1 resolver");
+      resolveFullSession(
+        new Response(JSON.stringify(sessionFixture({ status: "running", runtimeAlive: true })), {
+          status: 200,
+        }),
+      );
+      await fullSessionResponse;
+    });
+
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send now" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
+
+  it("never clobbers an already-committed full session with a core response that resolves after it, even before sessionRef would flush", async () => {
+    let resolveFullSession: ((response: Response) => void) | null = null;
+    const fullSessionResponse = new Promise<Response>((resolve) => {
+      resolveFullSession = resolve;
+    });
+    let resolveCore: ((response: Response) => void) | null = null;
+    const coreResponse = new Promise<Response>((resolve) => {
+      resolveCore = resolve;
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/core") {
+        return coreResponse;
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return fullSessionResponse;
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return Promise.resolve(
+          new Response(JSON.stringify(conversationFixture()), { status: 200 }),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    // Resolve the full, enriched session AND the late core response inside
+    // the same act callback, before either continuation's setSession has had
+    // a chance to flush the passive effect that writes sessionRef. A
+    // ref-based "already painted" check reads a stale (null) ref here and
+    // would wrongly let the sparse core payload clobber the committed
+    // session for a render; the functional setSession update reads the real
+    // current state instead and must not.
+    await act(async () => {
+      if (!resolveFullSession) throw new Error("Missing api-a1 resolver");
+      if (!resolveCore) throw new Error("Missing api-a1 core resolver");
+      resolveFullSession(
+        new Response(JSON.stringify(sessionFixture({ prompt: "Fix auth" })), { status: 200 }),
+      );
+      resolveCore(
+        new Response(JSON.stringify(sparseCoreFixture({ prompt: "Stale sparse core" })), {
+          status: 200,
+        }),
+      );
+      await Promise.all([fullSessionResponse, coreResponse]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("heading", { name: "Stale sparse core" })).not.toBeInTheDocument();
   });
 });
 
