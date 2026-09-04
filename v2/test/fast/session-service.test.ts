@@ -1133,7 +1133,7 @@ type SessionServiceInternals = {
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
-  ): Promise<{ state: SessionState }>;
+  ): Promise<{ state: SessionState; session: SessionRecord }>;
   codexMcpDialogOverrides: Map<string, number>;
   claudeCompactingOverrides: Map<string, number>;
   lastClassifiedLogStates: Map<string, SessionState>;
@@ -30816,6 +30816,11 @@ describe("SessionService", () => {
           stopCondition: "Stop condition",
         },
       });
+      // The agent process is gone: that is what an errored record means here.
+      // Without this the ambient live-runtime default lets
+      // reconcileStaleErroredSession promote the record back to running (it no
+      // longer exempts shepherd), and the wake then legitimately fires.
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -30915,6 +30920,11 @@ describe("SessionService", () => {
           stopCondition: "Stop condition",
         },
       });
+      // The agent process is gone: that is what an errored record means here.
+      // Without this the ambient live-runtime default lets
+      // reconcileStaleErroredSession promote the record back to running (it no
+      // longer exempts shepherd), and the wake then legitimately fires.
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -36819,6 +36829,125 @@ describe("SessionService", () => {
           .filter((entry) => entry.event === "session.wake.deferred");
         expect(deferredEvents.map((entry) => entry.sessionId).sort()).toEqual(deferredIds.sort());
         service.dispose();
+      });
+    });
+
+    describe("shepherd stale reconciliation", () => {
+      function shepherdSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
+        return {
+          id: "shp-1",
+          project: "spur-shepherd",
+          agent: "claude",
+          prompt: "shepherd the fleet",
+          branch: "shp-1",
+          worktree: false,
+          worktreePath: "/tmp/spur-worktrees/spur-shepherd/shp-1",
+          tmuxSession: "shp-1",
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "running",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+          ...overrides,
+        };
+      }
+
+      it("promotes an errored shepherd back to running while its runtime is alive", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "shp-1",
+          shepherdSession({ status: "errored", error: "Agent runtime exited unexpectedly." }),
+        );
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        mockClaudeJsonlState("working");
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("running");
+        expect(sessions.get("shp-1")?.status).toBe("running");
+        expect(sessions.get("shp-1")?.error).toBeUndefined();
+      });
+
+      it("promotes a stopped shepherd back to running while its runtime is alive", async () => {
+        const sessions = createSessionStore();
+        sessions.set("shp-1", shepherdSession({ status: "stopped" }));
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        mockClaudeJsonlState("working");
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("running");
+        expect(sessions.get("shp-1")?.status).toBe("running");
+      });
+
+      it("leaves an errored shepherd alone when its agent process is gone", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "shp-1",
+          shepherdSession({ status: "errored", error: "Agent runtime exited unexpectedly." }),
+        );
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("errored");
+        expect(result.state).toBe("error");
+        expect(sessions.get("shp-1")?.status).toBe("errored");
+      });
+
+      it("leaves a manually paused shepherd alone even with a live runtime", async () => {
+        const sessions = createSessionStore();
+        sessions.set("shp-1", shepherdSession({ status: "stopped", stopReason: "manual_pause" }));
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("stopped");
+        expect(sessions.get("shp-1")?.stopReason).toBe("manual_pause");
+      });
+
+      it("leaves an errored shepherd alone when its workspace is missing", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "shp-1",
+          shepherdSession({ status: "errored", error: "Agent worktree is missing." }),
+        );
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        probeWorkspaceMock.mockReturnValue({ exists: false, missing: true });
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("errored");
+        expect(sessions.get("shp-1")?.status).toBe("errored");
       });
     });
 
