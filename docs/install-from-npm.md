@@ -18,8 +18,18 @@ Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (
 ```bash
 npm config set prefix ~/.local      # required — see gotchas
 npm install -g @shugaev/spur@latest
+
+# agent CLIs before init — Spur drives Claude Code, Codex, and OpenCode;
+# install whichever the host lacks, keep any present
+command -v claude   >/dev/null || npm install -g --prefix ~/.local @anthropic-ai/claude-code
+command -v codex    >/dev/null || npm install -g --prefix ~/.local @openai/codex
+command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
+mkdir -p ~/.claude/skills ~/.codex/skills
+
 spur init                           # installs + starts the systemd user units, links host skills
 ```
+
+Agent CLIs and the two `skills` dirs come first: `spur init` links host skills only into a `skills` dir that already exists, so a fresh host that runs `init` first links nothing and needs a second `spur reinit`.
 
 Two non-obvious points:
 
@@ -35,14 +45,6 @@ Units installed:
 | `spur-web.service`    | Web UI `:5555`; terminal WebSocket in-process on `/ws` (same port, no own unit) |
 
 Daemon unit bounds the shared fleet cgroup with `MemoryHigh=75%`, `MemoryMax=85%`, and `MemorySwapMax=2G`. On a 62 GiB host, reclaim starts near 46.5 GiB and the hard cap lands near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB for the host. The daemon shares this cgroup, so sustained pressure can throttle its guard; the gap preserves control-path room. Set `MemorySwapMax=0` in a systemd drop-in for no fleet swap. Package templates have no live effect until `spur init` or `spur update` reinstalls units.
-
-Spur drives Claude Code, Codex, and OpenCode. Install whichever the host doesn't already have; keep any that are present:
-
-```bash
-command -v claude >/dev/null || npm install -g --prefix ~/.local @anthropic-ai/claude-code
-command -v codex  >/dev/null || npm install -g --prefix ~/.local @openai/codex
-command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
-```
 
 Authenticate OpenCode once before spawning it:
 
