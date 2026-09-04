@@ -471,9 +471,9 @@ export async function runGhPollCycle<T>(
       // opened: registering one anyway would start its windowStartedAtMs
       // clock on a cycle nobody logged (a phantom span once a sink is later
       // set) and, in a process that never sets one at all (e.g. the CLI),
-      // would accumulate an entry per key for the life of the process. The
-      // failing cycle itself is not lost — it already propagates as a thrown
-      // error to the caller, which is its own signal without a sink.
+      // would accumulate an entry per key for the life of the process. This
+      // standalone event is the only window this cycle ever belongs to, so a
+      // failure is reported on it directly via the details.errors field.
       if (dataDir) {
         logSpurEvent(dataDir, {
           event: "gh.poll_cycle",
@@ -487,11 +487,12 @@ export async function runGhPollCycle<T>(
             calls: cycle.calls,
             graphqlCost: cycle.graphqlCost,
             bySubcommand: Object.fromEntries(cycle.bySubcommand),
+            ...(cycleFailed ? { errors: 1 } : {}),
           },
         });
         // The run's own cycles/errors counters start clean: this first cycle
-        // was just emitted standalone above (with no errors field, by
-        // design), so seeding its failure into the run would attribute it to
+        // was just emitted standalone above (already carrying its own
+        // failure, if any), so seeding it into the run would attribute it to
         // a window that never actually counted this cycle as one of its own.
         pollCycleRuns.set(
           key,

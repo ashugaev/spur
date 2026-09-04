@@ -619,19 +619,20 @@ describe("gh usage accounting", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       vi.setSystemTime(T0);
-      // First cycle for a brand-new key fails outright: emits immediately
-      // (unchanged single-cycle shape, no errors field) and opens a run with
-      // clean counters. This cycle was never counted as one of the run's
-      // cycles, so its own failure must not be seeded into the run — that
-      // would attribute a failure to a window that never actually folded
-      // this cycle into it.
+      // First cycle for a brand-new key fails outright: emits immediately as
+      // its own standalone event, carrying its own errors:1, and opens a run
+      // with clean counters. This cycle was never counted as one of the
+      // run's cycles, so its own failure must not be seeded into the run —
+      // that would attribute a failure to a window that never actually
+      // folded this cycle into it. The standalone event is the only window
+      // this cycle belongs to, so it reports the failure itself.
       await expect(
         runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "dead" }, async () => {
           throw new Error("gh unavailable");
         }),
       ).rejects.toThrow("gh unavailable");
       expect(cycleEvents()).toHaveLength(1);
-      expect(cycleEvents()[0]).not.toHaveProperty("errors");
+      expect(cycleEvents()[0]).toMatchObject({ errors: 1 });
 
       // Three more failing, zero-cost cycles fold silently into the window.
       for (let index = 0; index < 3; index += 1) {
