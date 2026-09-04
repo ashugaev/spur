@@ -211,7 +211,10 @@ describe("planArtifactRetention", () => {
 
 describe("executeArtifactRetention", () => {
   it("dry run deletes nothing and still reports the bytes it would free", () => {
-    const deleteArtifacts = vi.fn<(anchorId: string, ids: readonly string[]) => string[]>();
+    const deleteArtifacts =
+      vi.fn<
+        (anchorId: string, ids: readonly string[]) => { deleted: string[]; failed: string[] }
+      >();
     const built = plan([session({ id: "s1" })], {
       s1: { artifacts: historyFiles(600), truncated: false },
     });
@@ -233,7 +236,7 @@ describe("executeArtifactRetention", () => {
       {
         deleteArtifacts: (anchorId, ids) => {
           seen.push({ anchorId, ids });
-          return [...ids];
+          return { deleted: [...ids], failed: [] };
         },
       },
       { dryRun: false },
@@ -245,16 +248,37 @@ describe("executeArtifactRetention", () => {
     expect(report.totals.errors).toBe(0);
   });
 
-  it("counts a boundary-rejected id as an error, not as freed bytes", () => {
+  it("counts a refused delete as an error, not as freed bytes", () => {
     const built = plan([session({ id: "s1" })], {
       s1: { artifacts: historyFiles(600), truncated: false },
     });
     const report = executeArtifactRetention(
       built,
-      { deleteArtifacts: (_anchorId, ids) => [...ids].slice(0, 98) },
+      {
+        deleteArtifacts: (_anchorId, ids) => ({
+          deleted: [...ids].slice(0, 98),
+          failed: [...ids].slice(98),
+        }),
+      },
       { dryRun: false },
     );
     expect(report.totals.errors).toBe(2);
     expect(report.totals.freedBytes).toBe(98 * 1024);
+  });
+
+  it("treats an id another cleanup already removed as no error", () => {
+    const built = plan([session({ id: "s1" })], {
+      s1: { artifacts: historyFiles(600), truncated: false },
+    });
+    const report = executeArtifactRetention(
+      built,
+      // Neither deleted nor failed: a concurrent cleanup or a second operator run got
+      // there first. `spur artifacts-gc --execute` must not exit 1 on that.
+      { deleteArtifacts: (_anchorId, ids) => ({ deleted: [...ids].slice(0, 98), failed: [] }) },
+      { dryRun: false },
+    );
+    expect(report.totals.errors).toBe(0);
+    expect(report.totals.freedBytes).toBe(98 * 1024);
+    expect(report.anchors[0]?.deletedFiles).toBe(98);
   });
 });

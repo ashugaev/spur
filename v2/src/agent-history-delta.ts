@@ -12,9 +12,14 @@ export const AGENT_HISTORY_ARTIFACT_PREFIX = "agent-history-";
 
 const STAMP_KEY_SEPARATOR = "\u0000";
 
+// Heap ceiling for one capture. A larger source drains across transitions
+// instead of allocating its whole size at once: an allocation throw is
+// swallowed by the caller, and the stamp would then never advance, so that
+// source would emit nothing ever again.
+export const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+
 export interface HistoryCaptureStamp {
   sourcePath: string;
-  size: number;
   mtimeMs: number;
   offset: number;
   tailHash: string;
@@ -53,6 +58,9 @@ export function planHistoryCapture(
   if (!previous) {
     return { kind: "full", readFrom: 0 };
   }
+  // Guards this planner's own contract, not today's caller: the stamp map is
+  // keyed by sessionId+sourcePath, so the sole caller cannot reach this rule.
+  // Keep it — the exported planner accepts any stamp.
   if (previous.sourcePath !== sourcePath) {
     return { kind: "full", readFrom: 0 };
   }
@@ -106,28 +114,30 @@ export function captureHistoryDelta(
     if (plan.kind === "empty") {
       return null;
     }
-    const pending = Buffer.alloc(stat.size - plan.readFrom);
-    if (pending.length > 0) {
-      readSync(fd, pending, 0, pending.length, plan.readFrom);
-    }
-    // Cut on a line boundary so every emitted file is valid JSONL and no
-    // partial line is written twice. A source that carries no newline at all
-    // (the agent status JSON) is emitted whole.
-    const cut = cutAtLastNewline(pending);
-    if (cut === 0 && plan.kind === "delta") {
+    const pending = Buffer.alloc(Math.min(stat.size - plan.readFrom, MAX_CAPTURE_BYTES));
+    // The returned count is the authoritative length, never the buffer's: a
+    // truncation between the fstat and this read short-reads, and the
+    // untouched zero-fill tail would otherwise ship inside the artifact.
+    const read = pending.length > 0 ? readSync(fd, pending, 0, pending.length, plan.readFrom) : 0;
+    const available = pending.subarray(0, read);
+    // One decision, one exit. A delta emits whole lines only: a trailing
+    // fragment stays unconsumed and the next capture re-reads it from the
+    // unchanged offset, so no partial line is ever written and none is written
+    // twice. A full capture of a source holding no newline at all (the agent
+    // status JSON) is emitted whole — there is no earlier artifact for the
+    // fragment to join.
+    const cut = cutAtLastNewline(available);
+    const emitLength = cut > 0 ? cut : plan.kind === "full" ? available.length : 0;
+    if (emitLength === 0) {
       return null;
     }
-    const payload = cut > 0 ? pending.subarray(0, cut) : pending;
-    if (payload.length === 0) {
-      return null;
-    }
+    const payload = available.subarray(0, emitLength);
     // Written once and never reopened: the artifact route sets content-length
     // from a stat taken before it streams the file.
     writeArtifact(payload);
     const offset = plan.readFrom + payload.length;
     return {
       sourcePath,
-      size: stat.size,
       mtimeMs: stat.mtimeMs,
       offset,
       tailHash: hashHistoryTail(readHistoryTail(fd, offset)),
