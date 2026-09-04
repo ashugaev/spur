@@ -666,9 +666,9 @@ describe("parseConversationBatch", () => {
 
       expect(result).not.toBeNull();
       if (!result) throw new Error("expected a result");
-      expect(result.reader.tailRecords.some((record) => record.model === "claude-in-skipped-gap")).toBe(
-        true,
-      );
+      expect(
+        result.reader.tailRecords.some((record) => record.model === "claude-in-skipped-gap"),
+      ).toBe(true);
       expect(result.reader.lastOffset).toBe(fileSize);
     } finally {
       vi.useRealTimers();
