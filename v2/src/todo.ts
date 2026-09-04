@@ -57,7 +57,7 @@ export class TodoOpenWorkError extends Error {
     readonly sessions: Array<{ sessionId: string; openItemIds: string[]; heldItemIds: string[] }>,
   ) {
     super(
-      'Spur ToDo has open or held items. Resolve each with "$SPUR_TODO_COMMAND" complete/cancel/resume --reason <why>, or override with --todo-override-reason.',
+      'Spur ToDo has open or held items. Resolve each with "$SPUR_TODO_COMMAND" complete/cancel/resume --reason <why>.',
     );
   }
 }
@@ -227,6 +227,8 @@ export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
       byId.set(item.id, item);
       continue;
     }
+    // No writer left: overrides ended when a human close stopped being gated.
+    // Ledgers written before that still replay, so the branch stays.
     if (event.type === "finish_override_recorded") {
       const unfinished = items
         .filter((item) => item.status === "open" || item.status === "held")
@@ -414,23 +416,4 @@ export function unfinishedTodo(projection: TodoProjection) {
     openItemIds: projection.items.filter((item) => item.status === "open").map((item) => item.id),
     heldItemIds: projection.items.filter((item) => item.status === "held").map((item) => item.id),
   };
-}
-
-export function recordTodoFinishOverride(
-  dataDir: string,
-  sessionId: string,
-  reason: string,
-  actor: TodoActor,
-  projection: TodoProjection,
-): TodoProjection {
-  const unfinishedItemIds = projection.items
-    .filter((item) => item.status === "open" || item.status === "held")
-    .map((item) => item.id);
-  appendEvent(dataDir, {
-    ...eventBase(sessionId, actor),
-    type: "finish_override_recorded",
-    reason: reason.trim(),
-    unfinishedItemIds,
-  });
-  return replayTodo(dataDir, sessionId);
 }

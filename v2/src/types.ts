@@ -1124,7 +1124,6 @@ export interface CompleteSessionRequest {
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
   skipRuntimeTeardown?: boolean;
-  todoOverrideReason?: string;
 }
 
 export type TodoActor =

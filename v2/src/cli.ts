@@ -664,7 +664,6 @@ type CompleteCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
-  todoOverrideReason?: string;
 };
 
 function renderTodoProjection(projection: TodoProjection): string {
@@ -2874,22 +2873,15 @@ export function createProgram(cliEntrypoint: string): Command {
       parsePrActionOption,
     )
     .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
-    .option("--todo-override-reason <reason>", "Record a manual override for unfinished ToDo items")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body: { prAction?: OpenPrAction; skipPrCheck?: true; todoOverrideReason?: string } = {};
+      const body: { prAction?: OpenPrAction; skipPrCheck?: true } = {};
       if (options.prAction) {
         body.prAction = options.prAction;
       }
       if (options.skipPrCheck) {
         body.skipPrCheck = true;
-      }
-      if (options.todoOverrideReason) {
-        if (process.env["SPUR_SESSION"] === sessionId) {
-          throw new Error("A session cannot override its own unfinished ToDo items");
-        }
-        body.todoOverrideReason = options.todoOverrideReason;
       }
       await outputResult({
         json: Boolean(options.json),
