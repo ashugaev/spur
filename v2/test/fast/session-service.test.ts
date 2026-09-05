@@ -2084,6 +2084,10 @@ describe("SessionService", () => {
         .map(([, entry]) => entry)
         .filter((entry) => entry.event === "session.todo.nudge_failed");
       expect(failedEvents).toHaveLength(0);
+      // Pins the gate at the top of the guard block: after the first
+      // give-up, every later tick must return before reaching
+      // ensureTodoLedger, not merely before emitting an event.
+      expect(vi.mocked(todo.ensureTodoLedger)).toHaveBeenCalledTimes(1);
       service.dispose();
     });
 
@@ -2148,7 +2152,61 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("a transient failure never permanently disables a session", async () => {
+    it("a transient failure never permanently disables a session — clean-observation clear only", async () => {
+      // Isolates the `!message` clear (:5995). No success ever occurs in this
+      // test, so the success-path clear (:6000) never executes; a mutation
+      // that deletes ONLY :5995 must red this test.
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValue(new Error("pane unavailable"));
+      const t0 = Date.now();
+
+      // First failure. failures=1, next retry at t0 + BASE.
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // At the retry boundary, a clean observation (nothing to send) instead
+      // of a failure: this must clear the backoff via the `!message` path.
+      vi.mocked(todo.ensureTodoLedger).mockReturnValueOnce({
+        revision: "fixture-resolved",
+        status: "resolved",
+        counts: { total: 1, open: 0, held: 0, completed: 1, cancelled: 0 },
+        items: [],
+        finishOverrides: [],
+      });
+      vi.setSystemTime(t0 + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // A fresh rejection right after the clean observation must restart at
+      // BASE, not 2 * BASE.
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const secondFailureAt = t0 + 120_000;
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+
+      vi.setSystemTime(secondFailureAt + 119_999);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+
+      vi.setSystemTime(secondFailureAt + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(3);
+      service.dispose();
+    });
+
+    it("a transient failure never permanently disables a session — success clear only", async () => {
+      // Isolates the success-path clear (:6000). The `!message` branch never
+      // executes in this test (ensureTodoLedger always returns an open
+      // projection); a mutation that deletes ONLY :6000 must red this test.
       const sessions = createSessionStore();
       const session = runningSession();
       sessions.set(session.id, session);
@@ -2160,32 +2218,23 @@ describe("SessionService", () => {
       const send = vi
         .spyOn(internals, "sendAgentMessage")
         .mockRejectedValueOnce(new Error("pane unavailable"))
-        .mockResolvedValue(SUBMITTED);
+        .mockResolvedValueOnce(SUBMITTED)
+        .mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
+      // First failure. failures=1, next retry at t0 + BASE.
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(1);
 
+      // At the retry boundary, the send succeeds: this must clear the
+      // backoff via the success path and set lastSuccessfulTodoNudgeAt.
       vi.setSystemTime(t0 + 120_000);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(2);
 
-      // A clean observation (nothing to send) clears the backoff.
-      vi.mocked(todo.ensureTodoLedger).mockReturnValueOnce({
-        revision: "fixture-resolved",
-        status: "resolved",
-        counts: { total: 1, open: 0, held: 0, completed: 1, cancelled: 0 },
-        items: [],
-        finishOverrides: [],
-      });
-      vi.setSystemTime(t0 + 120_000 + 61_000);
-      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-      expect(send).toHaveBeenCalledTimes(2);
-
-      // A fresh rejection must restart at BASE, not 2 * BASE.
-      send.mockRejectedValueOnce(new Error("pane unavailable"));
-      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
-      const secondFailureAt = t0 + 120_000 + 61_000 + 62_000;
+      // Wait past the 60s post-success throttle, then fail again. Restart
+      // must be at BASE, not 2 * BASE.
+      const secondFailureAt = t0 + 120_000 + 61_000;
       vi.setSystemTime(secondFailureAt);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(3);
@@ -2357,6 +2406,55 @@ describe("SessionService", () => {
       send.mockClear();
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("clears a target_gone gate (not a ledger_corrupt gate) at relaunchSessionInPlace's send-path recovery, not only at restore()", async () => {
+      // Case (vii)'s other call site: send() heals a dead-process session via
+      // ensureSessionReadyForSend -> relaunchSessionInPlace, whose first
+      // statement is clearTargetGoneNudgeGate. Drive it via send() with a
+      // dead pane process, following the "refuses to launch a replacement"
+      // fixture's tmux/terminate mocks. The relaunch is made to fail fast
+      // (a surviving process) — clearTargetGoneNudgeGate runs before that
+      // failure, so the assertion only needs the throw, not a full relaunch.
+      readSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
+        runningSession({ id: sessionId }),
+      );
+      tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [999] });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      internals.todoNudgeDisabled.set("api-1", {
+        kind: "target_gone",
+        reason: "can't find session: api-1",
+      });
+
+      await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(/999/);
+
+      expect(internals.todoNudgeDisabled.has("api-1")).toBe(false);
+      service.dispose();
+    });
+
+    it("keeps a ledger_corrupt gate across relaunchSessionInPlace's send-path recovery", async () => {
+      readSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
+        runningSession({ id: sessionId }),
+      );
+      tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [999] });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      internals.todoNudgeDisabled.set("api-1", {
+        kind: "ledger_corrupt",
+        reason: "Event contains an invalid transition",
+      });
+
+      await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(/999/);
+
+      expect(internals.todoNudgeDisabled.get("api-1")?.kind).toBe("ledger_corrupt");
       service.dispose();
     });
 
