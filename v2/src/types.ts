@@ -906,6 +906,13 @@ export interface SessionRecord {
   error?: string;
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
+  /**
+   * The last observed ToDo-nudge give-up for this session, not a live gate:
+   * the gate itself lives only in SessionService memory and is dropped on
+   * daemon restart (and, for target_gone, on the next same-id respawn).
+   * Cleared on the next successful nudge.
+   */
+  todoNudgeDisabled?: { kind: "ledger_corrupt" | "target_gone"; reason: string; atMs: number };
 }
 
 // Terminal-for-lifecycle predicate. Gates ~16 session-service.ts call sites

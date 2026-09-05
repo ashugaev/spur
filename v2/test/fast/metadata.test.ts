@@ -467,6 +467,50 @@ describe("staleSidecars", () => {
   });
 });
 
+describe("todoNudgeDisabled", () => {
+  const base = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "running" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
+  it("survives a write/read round-trip", async () => {
+    // Guards the whitelist trap: normalizeSessionRecord drops any optional
+    // field it does not explicitly list, silently, with no error.
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      todoNudgeDisabled: {
+        kind: "ledger_corrupt",
+        reason: "Event contains an invalid transition",
+        atMs: 1,
+      },
+    });
+
+    expect(readSession(dataDir, "api-1")?.todoNudgeDisabled).toEqual({
+      kind: "ledger_corrupt",
+      reason: "Event contains an invalid transition",
+      atMs: 1,
+    });
+  });
+
+  it("omits the field entirely for a record that never had it", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...base, id: "api-1" });
+
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("todoNudgeDisabled");
+  });
+});
+
 describe("sidecarProcs", () => {
   const base = {
     project: "api",
