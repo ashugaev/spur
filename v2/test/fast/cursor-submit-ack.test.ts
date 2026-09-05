@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { findCursorAckTranscriptFileMock, resolveCursorPinnedTranscriptPathMock } = vi.hoisted(() => ({
-  findCursorAckTranscriptFileMock:
-    vi.fn<(worktreePath: string, agentSessionId?: string) => Promise<string | null>>(),
-  resolveCursorPinnedTranscriptPathMock:
-    vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string>>(),
-}));
+const { findCursorAckTranscriptFileMock, resolveCursorPinnedTranscriptPathMock } = vi.hoisted(
+  () => ({
+    findCursorAckTranscriptFileMock:
+      vi.fn<(worktreePath: string, agentSessionId?: string) => Promise<string | null>>(),
+    resolveCursorPinnedTranscriptPathMock:
+      vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string>>(),
+  }),
+);
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
   findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,

@@ -80,7 +80,13 @@ async function findLatestCursorTranscriptInDir(
 }
 
 function transcriptsDirFor(candidate: string): string {
-  return join(homedir(), ".cursor", "projects", toCursorProjectPath(candidate), "agent-transcripts");
+  return join(
+    homedir(),
+    ".cursor",
+    "projects",
+    toCursorProjectPath(candidate),
+    "agent-transcripts",
+  );
 }
 
 export async function findLatestCursorTranscriptFile(
