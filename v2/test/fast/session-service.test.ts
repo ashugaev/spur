@@ -49,6 +49,7 @@ import type {
   SessionStateTransition,
   SessionView,
   StateSource,
+  TodoProjection,
 } from "../../src/types.js";
 // Type-only, so it never bypasses the mocked module registry below.
 import type { AgentSendOutcome } from "../../src/session-service.js";
@@ -1142,6 +1143,8 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
+  todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -1976,7 +1979,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("retries failed level-triggered nudges and throttles successful delivery", async () => {
+    it("backs off after a failed nudge and throttles successful delivery", async () => {
       const sessions = createSessionStore();
       const session = runningSession();
       sessions.set(session.id, session);
@@ -1997,15 +2000,20 @@ describe("SessionService", () => {
         .mockRejectedValueOnce(new Error("pane unavailable"))
         .mockResolvedValue(SUBMITTED);
 
+      // 10:05:00 — call 1, send rejects. Backoff to 10:07:00.
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // 10:05:00 — calls 2 and 3, no clock move: still backed off.
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // 10:07:01 — call 4: send #2 resolves.
+      vi.setSystemTime(new Date("2026-03-18T10:07:01.000Z"));
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(2);
       expect(send.mock.calls[1]?.[1]).toContain("Spur ToDo still has open work");
-
-      vi.setSystemTime(new Date("2026-03-18T10:06:01.000Z"));
-      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-      expect(send).toHaveBeenCalledTimes(3);
 
       await service.mutateTodo(
         session.id,
@@ -2018,9 +2026,337 @@ describe("SessionService", () => {
         },
         { kind: "agent", agent: "claude", sessionId: session.id },
       );
-      vi.setSystemTime(new Date("2026-03-18T10:07:02.000Z"));
+      // 10:08:02 — call 5, >60s after the 10:07:01 success: throttle clears.
+      vi.setSystemTime(new Date("2026-03-18T10:08:02.000Z"));
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(3);
       expect(send.mock.calls.at(-1)?.[1]).toContain("Choose the release window");
+      service.dispose();
+    });
+
+    function openLedgerProjection(): TodoProjection {
+      return {
+        revision: "fixture-open",
+        status: "active",
+        counts: { total: 1, open: 1, held: 0, completed: 0, cancelled: 0 },
+        items: [
+          {
+            id: "todo-1",
+            text: "Ship it",
+            status: "open",
+            added: {
+              reason: "Session objective",
+              actor: { kind: "agent", agent: "claude", sessionId: "api-1" },
+              at: "2026-03-18T10:00:00.000Z",
+            },
+            history: [],
+          },
+        ],
+        finishOverrides: [],
+      };
+    }
+
+    it("stops nudging after an invalid-transition ledger error", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
+        throw new todo.TodoLedgerCorruptError(session.id, "Event contains an invalid transition");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+
+      for (let i = 0; i < 20; i++) {
+        await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+        vi.setSystemTime(new Date(Date.now() + 5_000));
+      }
+
+      expect(send).not.toHaveBeenCalled();
+      const disabledEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.todo.nudge_disabled");
+      expect(disabledEvents).toHaveLength(1);
+      expect(disabledEvents[0]?.details).toMatchObject({ kind: "ledger_corrupt" });
+      const failedEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.todo.nudge_failed");
+      expect(failedEvents).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("backs off exponentially on a transient nudge failure", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValue(new Error("pane unavailable"));
+      const t0 = Date.now();
+
+      // Attempt 1 at t0.
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // No send while now < t0 + 120_000.
+      vi.setSystemTime(t0 + 119_999);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // Attempt 2 at t0 + 120_000.
+      vi.setSystemTime(t0 + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+
+      // No send before + 240_000 more (t0 + 360_000).
+      vi.setSystemTime(t0 + 120_000 + 239_999);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+
+      // Attempt 3 at t0 + 360_000.
+      vi.setSystemTime(t0 + 360_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(3);
+
+      // Advance past 8 failures with jumps well beyond any possible delay
+      // (the 1_800_000 cap), so each jump always clears the gate and drives
+      // exactly one more failure. 3 failures recorded above; 5 more here
+      // reaches 8.
+      let now = t0 + 360_000;
+      for (let i = 0; i < 5; i++) {
+        now += 2_000_000;
+        vi.setSystemTime(now);
+        await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      }
+      expect(send).toHaveBeenCalledTimes(8);
+
+      // The 8th failure's delay must be exactly the 1_800_000 cap.
+      vi.setSystemTime(now + 1_800_000 - 1);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(8);
+
+      vi.setSystemTime(now + 1_800_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(9);
+      service.dispose();
+    });
+
+    it("a transient failure never permanently disables a session", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValueOnce(new Error("pane unavailable"))
+        .mockResolvedValue(SUBMITTED);
+      const t0 = Date.now();
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(t0 + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+
+      // A clean observation (nothing to send) clears the backoff.
+      vi.mocked(todo.ensureTodoLedger).mockReturnValueOnce({
+        revision: "fixture-resolved",
+        status: "resolved",
+        counts: { total: 1, open: 0, held: 0, completed: 1, cancelled: 0 },
+        items: [],
+        finishOverrides: [],
+      });
+      vi.setSystemTime(t0 + 120_000 + 61_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+
+      // A fresh rejection must restart at BASE, not 2 * BASE.
+      send.mockRejectedValueOnce(new Error("pane unavailable"));
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const secondFailureAt = t0 + 120_000 + 61_000 + 62_000;
+      vi.setSystemTime(secondFailureAt);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(3);
+
+      vi.setSystemTime(secondFailureAt + 119_999);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(3);
+
+      vi.setSystemTime(secondFailureAt + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(4);
+      service.dispose();
+    });
+
+    it("stops nudging when the tmux target is gone", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValue(
+          new Error(
+            "Command failed: tmux -L spur send-keys -t =api-1: Enter\ncan't find session: api-1",
+          ),
+        );
+
+      for (let i = 0; i < 10; i++) {
+        await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+        vi.setSystemTime(new Date(Date.now() + 120_000));
+      }
+      // Exactly one send across 10 ticks, each 120_000ms apart: no backoff
+      // retry at t0 + 120_000 or beyond.
+      expect(send).toHaveBeenCalledTimes(1);
+      const disabledEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.todo.nudge_disabled");
+      expect(disabledEvents).toHaveLength(1);
+      expect(disabledEvents[0]?.details).toMatchObject({ kind: "target_gone" });
+      service.dispose();
+    });
+
+    it("keeps a tmux-less error transient without the tmux token", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession({ id: "api-2" });
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValue(new Error("agent replied: can't find session notes"));
+      const t0 = Date.now();
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+      const failedEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter(
+          (entry) => entry.event === "session.todo.nudge_failed" && entry.sessionId === session.id,
+        );
+      expect(failedEvents).toHaveLength(1);
+
+      vi.setSystemTime(t0 + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("records the give-up reason on the session record and clears it on the next successful nudge", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
+        throw new todo.TodoLedgerCorruptError(session.id, "Event contains an invalid transition");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const t0Ms = Date.now();
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(sessions.get(session.id)?.todoNudgeDisabled).toEqual({
+        kind: "ledger_corrupt",
+        reason: expect.stringContaining("invalid transition"),
+        atMs: t0Ms,
+      });
+
+      // Standing in for a daemon restart: drop the in-memory gate.
+      internals.todoNudgeDisabled.delete(session.id);
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue({
+        revision: "fixture-resolved",
+        status: "resolved",
+        counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+        items: [],
+        finishOverrides: [],
+      });
+      vi.setSystemTime(t0Ms + 61_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+
+      expect(sessions.get(session.id)).not.toHaveProperty("todoNudgeDisabled");
+      service.dispose();
+    });
+
+    it("re-arms nudges for a relaunched session whose tmux target was gone", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValueOnce(
+          new Error(
+            "Command failed: tmux -L spur send-keys -t =api-1: Enter\ncan't find session: api-1",
+          ),
+        );
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(internals.todoNudgeDisabled.get(session.id)?.kind).toBe("target_gone");
+
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      send.mockResolvedValue(SUBMITTED);
+      await service.restore(session.id);
+
+      expect(internals.todoNudgeDisabled.has(session.id)).toBe(false);
+      send.mockClear();
+      send.mockResolvedValue(SUBMITTED);
+      vi.setSystemTime(Date.now() + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("keeps a ledger_corrupt give-up disabled across a relaunch of the same session", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
+        throw new todo.TodoLedgerCorruptError(session.id, "Event contains an invalid transition");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(internals.todoNudgeDisabled.get(session.id)?.kind).toBe("ledger_corrupt");
+
+      mockClaudeJsonlState("waiting");
+      mockExitedThenRestoredProcess();
+      send.mockResolvedValue(SUBMITTED);
+      await service.restore(session.id);
+
+      expect(internals.todoNudgeDisabled.get(session.id)?.kind).toBe("ledger_corrupt");
+      send.mockClear();
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).not.toHaveBeenCalled();
       service.dispose();
     });
 
@@ -33242,6 +33578,9 @@ describe("SessionService", () => {
       claudeRotationEpisode: Map<string, unknown>;
       wakeSuppressionNotified: Set<string>;
       attentionStates: Map<string, string>;
+      lastSuccessfulTodoNudgeAt: Map<string, number>;
+      todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
+      todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
       attentionMonitorRunning: boolean;
       dashboardLoopRunning: boolean;
       dashboardCacheReady: Promise<void> | null;
@@ -33390,6 +33729,9 @@ describe("SessionService", () => {
         internals.usageMenuConfirmedAt.set(id, Date.now());
         internals.claudeRotationEpisode.set(id, { episode: "e1", count: 1 });
         internals.wakeSuppressionNotified.add(id);
+        internals.lastSuccessfulTodoNudgeAt.set(id, Date.now());
+        internals.todoNudgeDisabled.set(id, { kind: "ledger_corrupt", reason: "seed" });
+        internals.todoNudgeBackoff.set(id, { failures: 1, nextRetryAtMs: Date.now() });
       }
 
       // api-1 stays running (non-terminal). api-2 completes. api-3 was
@@ -33419,6 +33761,9 @@ describe("SessionService", () => {
         ["prCheckTrackers", internals.prCheckTrackers],
         ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
         ["claudeRotationEpisode", internals.claudeRotationEpisode],
+        ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
+        ["todoNudgeDisabled", internals.todoNudgeDisabled],
+        ["todoNudgeBackoff", internals.todoNudgeBackoff],
       ];
       for (const [name, map] of allPrunedMaps) {
         expect(map.has("api-2"), `${name} should drop the completed id`).toBe(false);
@@ -33444,6 +33789,9 @@ describe("SessionService", () => {
         ["prCheckTrackers", internals.prCheckTrackers],
         ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
         ["claudeRotationEpisode", internals.claudeRotationEpisode],
+        ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
+        ["todoNudgeDisabled", internals.todoNudgeDisabled],
+        ["todoNudgeBackoff", internals.todoNudgeBackoff],
       ];
       for (const [name, map] of cleanMaps) {
         expect(map.has("api-1"), `${name} should keep the non-terminal id`).toBe(true);
