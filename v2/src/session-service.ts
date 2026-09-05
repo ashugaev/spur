@@ -10829,12 +10829,28 @@ export class SessionService {
   ): Promise<SessionView> {
     const caller = sidecarCallerContextFromRequest(request);
     const sidecarDepth = nextSidecarDepth(caller);
-    const session = readSession(this.config.dataDir, sessionId);
+    let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    // An `errored` record can outlive the blip that wrote it while the agent
+    // keeps working, and this path otherwise never classifies. Classify once
+    // so reconcileStaleErroredSession promotes it back to running before the
+    // guard reads the status. Promotion still requires processAlive, so a
+    // genuinely dead agent stays errored and stays refused.
+    if (session.status === "errored") {
+      try {
+        session = (await this.classifySessionRecord(session, { scanPane: false })).session;
+      } catch {
+        // Fail closed, same as memoryShedCandidates: the heal is opportunistic
+        // and this path did no probing at all before it, so an unclassifiable
+        // session keeps the record as read and the guard below refuses on it.
+      }
+    }
     if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
+      throw new Error(
+        `Cannot start sidecar "${sidecarName}" for ${sessionId}: session status is ${session.status}`,
+      );
     }
     if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session workspace is not available: ${sessionId}`);
