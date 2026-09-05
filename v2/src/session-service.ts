@@ -10839,7 +10839,13 @@ export class SessionService {
     // guard reads the status. Promotion still requires processAlive, so a
     // genuinely dead agent stays errored and stays refused.
     if (session.status === "errored") {
-      session = (await this.classifySessionRecord(session, { scanPane: false })).session;
+      try {
+        session = (await this.classifySessionRecord(session, { scanPane: false })).session;
+      } catch {
+        // Fail closed, same as memoryShedCandidates: the heal is opportunistic
+        // and this path did no probing at all before it, so an unclassifiable
+        // session keeps the record as read and the guard below refuses on it.
+      }
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(
