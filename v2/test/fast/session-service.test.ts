@@ -5381,6 +5381,10 @@ describe("SessionService", () => {
     ).resolves.toBe(SUBMITTED);
 
     expect(waitForAckMock).toHaveBeenCalledTimes(13);
+    // Pins the knownDead reuse from the other side: a LIVE mid-loop probe must
+    // never be cached, so this live-but-unacked run makes 12 mid-loop probes
+    // (one per resend) plus the final post-loop probe — 13 total, never 12.
+    expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(13);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -5400,6 +5404,94 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  // AC6: a genuinely dead cursor agent fails fast — one window, no resends,
+  // driven by the mid-loop fresh:true liveness probe (change d).
+  it("fails fast for a dead cursor agent instead of exhausting all 13 windows", async () => {
+    const cursorScanMock = vi
+      .fn()
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "cursor" ? { scan: cursorScanMock } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+    const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "cursor",
+          launchCommand: "agent --force --sandbox disabled",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      ),
+    ).rejects.toBeInstanceOf(SubmitAckTimeoutError);
+
+    expect(waitForAckMock).toHaveBeenCalledTimes(1);
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    expect(isProcessRunningInTmuxMock).toHaveBeenNthCalledWith(1, "api-1", expect.any(Array), {
+      fresh: true,
+    });
+    // Pins the knownDead reuse: exactly one probe total, never a second
+    // post-loop re-probe. The dangerous inverse — caching a LIVE result — is
+    // pinned separately by the 13-count assertion in the recovery case above.
+    expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        sessionId: "api-1",
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.submit.recovered",
+        sessionId: "api-1",
+      }),
+    );
+  });
+
+  // B2: the cursor gate at session-service.ts:10489 is the spec's chosen
+  // mitigation for I2 (claude/codex/opencode keep their long window and
+  // resend pacing untouched). This pins that a non-cursor agent (codex) never
+  // runs the mid-loop liveness probe and always exhausts its full resend
+  // budget, even when the pane process is reported dead.
+  it("never runs the mid-loop liveness probe for a non-cursor agent (codex keeps its full resend budget)", async () => {
+    const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/file.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      ),
+    ).rejects.toBeInstanceOf(SubmitAckTimeoutError);
+
+    expect(waitForAckMock).toHaveBeenCalledTimes(3);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
   });
 
   it("acknowledges claude submit when the JSONL scanner finds the message on first poll", async () => {

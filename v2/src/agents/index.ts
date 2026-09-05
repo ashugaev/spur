@@ -498,14 +498,19 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
     submitAck: async (ctx) => {
-      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath);
+      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
       if (!baseline) {
         return null;
       }
       return {
         async scan(text) {
-          const found = await scanCursorJsonlForMessage(baseline, text, ctx.worktreePath);
-          return { found, lastScannedFile: baseline.file };
+          const result = await scanCursorJsonlForMessage(
+            baseline,
+            text,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+          );
+          return { found: result.found, lastScannedFile: result.scannedFile };
         },
       };
     },
