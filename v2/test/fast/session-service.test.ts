@@ -5381,6 +5381,10 @@ describe("SessionService", () => {
     ).resolves.toBe(SUBMITTED);
 
     expect(waitForAckMock).toHaveBeenCalledTimes(13);
+    // Pins the knownDead reuse from the other side: a LIVE mid-loop probe must
+    // never be cached, so this live-but-unacked run makes 12 mid-loop probes
+    // (one per resend) plus the final post-loop probe — 13 total, never 12.
+    expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(13);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -5439,10 +5443,8 @@ describe("SessionService", () => {
       fresh: true,
     });
     // Pins the knownDead reuse: exactly one probe total, never a second
-    // post-loop re-probe (and never a cached-true reuse either — this count
-    // would also catch that, since a cached true would still need the same
-    // single probe to have happened, but the mutation below proves the
-    // dangerous direction is caught).
+    // post-loop re-probe. The dangerous inverse — caching a LIVE result — is
+    // pinned separately by the 13-count assertion in the recovery case above.
     expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(1);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
@@ -5466,7 +5468,9 @@ describe("SessionService", () => {
   // runs the mid-loop liveness probe and always exhausts its full resend
   // budget, even when the pane process is reported dead.
   it("never runs the mid-loop liveness probe for a non-cursor agent (codex keeps its full resend budget)", async () => {
-    const service = await createDisposedSessionService();
+    const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     isProcessRunningInTmuxMock.mockResolvedValue(false);
     const waitForAckMock = vi
@@ -5484,7 +5488,7 @@ describe("SessionService", () => {
         },
         "follow up",
       ),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(SubmitAckTimeoutError);
 
     expect(waitForAckMock).toHaveBeenCalledTimes(3);
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
