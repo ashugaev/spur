@@ -10472,23 +10472,47 @@ export class SessionService {
       freshLaunch,
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
+    // Set only when the mid-loop probe below observes a dead pane; reused for
+    // the post-loop processAlive check so a confirmed-dead agent is not
+    // re-probed. Never set on a live result — a live pane can still die before
+    // the next check, so "alive" is never cached, only "dead" (see the probe's
+    // own fresh:true comment).
+    let knownDead = false;
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
       lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
         return "submitted";
       }
       if (attempt < maxResends) {
+        // Cursor-only fast dead-agent exit (I2 scopes this to cursor's short
+        // window/high-resend pacing; claude/codex/opencode keep their long
+        // window and freshLaunch "submit_unconfirmed" pacing untouched). A
+        // dead pane process does not come back inside one send, so a false
+        // result here can be trusted for the rest of this loop; { fresh: true }
+        // is mandatory — a stale cached hit would report an agent that just
+        // died as alive.
+        if (session.agent === "cursor") {
+          const alive = await isProcessRunningInTmux(
+            session.tmuxSession,
+            sessionProcessMatchers(session),
+            { fresh: true },
+          );
+          if (!alive) {
+            knownDead = true;
+            break;
+          }
+        }
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const processAlive = await isProcessRunningInTmux(
-      session.tmuxSession,
-      sessionProcessMatchers(session),
-      { fresh: true },
-    );
+    const processAlive = knownDead
+      ? false
+      : await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
+          fresh: true,
+        });
     const elapsedMs = Date.now() - startedAt;
     if (session.agent === "cursor" && processAlive) {
       this.logEvent("session.submit.recovered", {

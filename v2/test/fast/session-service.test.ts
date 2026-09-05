@@ -5402,6 +5402,58 @@ describe("SessionService", () => {
     );
   });
 
+  // AC6: a genuinely dead cursor agent fails fast — one window, no resends,
+  // driven by the mid-loop fresh:true liveness probe (change d).
+  it("fails fast for a dead cursor agent instead of exhausting all 13 windows", async () => {
+    const cursorScanMock = vi
+      .fn()
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "cursor" ? { scan: cursorScanMock } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+    const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "cursor",
+          launchCommand: "agent --force --sandbox disabled",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      ),
+    ).rejects.toBeInstanceOf(SubmitAckTimeoutError);
+
+    expect(waitForAckMock).toHaveBeenCalledTimes(1);
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    expect(isProcessRunningInTmuxMock).toHaveBeenNthCalledWith(1, "api-1", expect.any(Array), {
+      fresh: true,
+    });
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        sessionId: "api-1",
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.submit.recovered",
+        sessionId: "api-1",
+      }),
+    );
+  });
+
   it("acknowledges claude submit when the JSONL scanner finds the message on first poll", async () => {
     const claudeScanMock = vi.fn().mockResolvedValue({
       found: true,
