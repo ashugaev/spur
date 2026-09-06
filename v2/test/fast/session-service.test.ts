@@ -24003,6 +24003,55 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")).not.toHaveProperty("error");
   });
 
+  it("startSidecar heals a stale errored session even when the agent transcript read rejects", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    // The transcript readers swallow their own read errors but not their
+    // `finally { await fd?.close() }` (claude-jsonl-state.ts, cursor-jsonl-state.ts),
+    // so a close failure rejects out of the read. Reject only inside the heal
+    // window — before the sidecar pane exists — and let the post-start enrich
+    // read normally, so this pins the heal alone. Probing decides the heal, and
+    // nothing fallible may run between the promotion write and the status
+    // guard: a heal routed through classifySessionRecord reads the transcript
+    // right after that write, loses this rejection to the fail-closed catch,
+    // and refuses on its stale `errored` snapshot while disk reads `running`.
+    readClaudeJsonlStateMock.mockImplementation(() =>
+      createTmuxSidecarSessionMock.mock.calls.length === 0
+        ? Promise.reject(new Error("EIO: i/o error, close"))
+        : Promise.resolve(null),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
+  });
+
   it("startSidecar refuses an errored session whose agent process is gone even when the pane is usable", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
