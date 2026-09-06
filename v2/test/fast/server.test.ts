@@ -25,7 +25,7 @@ import {
   readConfigRegistryFile,
   writeConfigRegistryFile,
 } from "../../src/registry.js";
-import { findFreePort } from "../helpers/common.js";
+import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
   it("rejects a missing non-default config path without bootstrapping it on disk", async () => {
@@ -1132,33 +1132,35 @@ describe("startServer", () => {
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
     const worktreeDir = join(root, "worktrees");
-    const port = await findFreePort();
     await mkdir(repoDir, { recursive: true });
-    const configPath = join(root, "spur.yaml");
-    await writeFile(
-      configPath,
-      [
-        "server:",
-        "  host: 127.0.0.1",
-        `  port: ${port}`,
-        `dataDir: ${dataDir}`,
-        `worktreeDir: ${worktreeDir}`,
-        "projects:",
-        "  demo:",
-        `    path: ${repoDir}`,
-      ].join("\n"),
-      "utf8",
-    );
 
     const originalSend = SessionService.prototype.send;
     SessionService.prototype.send = async function mockSend(_sessionId, _body) {
       throw new SessionRateLimitedError("Session demo-1 is rate limited");
     };
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
 
     try {
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/send`, {
