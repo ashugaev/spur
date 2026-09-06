@@ -769,7 +769,7 @@ describe("runtime-tmux", () => {
         return { stdout: "api-1 1 1 0 1234 /dev/pts/0", stderr: "" };
       }
       if (file === "ps") {
-        return { stdout: "1234 pts/0 node agent", stderr: "" };
+        return { stdout: "1234 1 pts/0 node agent", stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
@@ -794,9 +794,9 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 pts/8 4200 -zsh",
-            "2301303 pts/8 512000 /home/vershinin/.local/bin/codex --enable hooks --model gpt-5.6-sol",
-            "2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+            "2300788 1 pts/8 4200 -zsh",
+            "2301303 2300788 pts/8 512000 /home/vershinin/.local/bin/codex --enable hooks --model gpt-5.6-sol",
+            "2302772 2300788 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
           ].join("\n"),
           stderr: "",
         };
@@ -839,8 +839,11 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 pts/8 4200 -zsh",
-            "2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+            "2300788 1 pts/8 4200 -zsh",
+            // After codex exits, this helper is reparented to init (ppid 1),
+            // NOT to the pane shell (2300788) — it is not a pane descendant,
+            // so the pane-child fallback must not resurrect it either.
+            "2302772 1 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
           ].join("\n"),
           stderr: "",
         };
@@ -851,5 +854,106 @@ describe("runtime-tmux", () => {
     const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("reads a wrapper-exec'd codex as alive through the pane-child fallback (issue #806)", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 1 pts/8 4200 -zsh",
+            "2301303 2300788 pts/8 512000 /opt/codex-0.147.0 --model x",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    // Name matchers alone miss the wrapper-exec'd binary.
+    expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(true);
+  });
+
+  it("reads a wrapper-exec'd claude version binary as alive through the pane-child fallback", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 1 pts/8 4200 -zsh",
+            "2301303 2300788 pts/8 512000 /home/u/.claude/versions/2.1.251 --resume",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("intelas-c007", ["claude"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["claude"], { paneChildFallback: true }),
+    ).toBe(true);
+  });
+
+  it("keeps the pane-child fallback dead when the pane holds no child process", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout: "2300788 1 pts/8 4200 -zsh", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("never counts one pane pid as another pane's child", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return {
+          stdout: [
+            "intelas-c007 1 1 0 2300788 /dev/pts/8",
+            "intelas-c007 0 0 0 2300900 /dev/pts/9",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      if (file === "ps") {
+        // 2300900's ppid IS a pane pid (2300788), but 2300900 is ITSELF also
+        // a pane pid, so it must not be counted as a pane-shell child.
+        return {
+          stdout: ["2300788 1 pts/8 4200 -zsh", "2300900 2300788 pts/9 4200 -zsh"].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
   });
 });

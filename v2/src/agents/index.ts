@@ -253,11 +253,32 @@ function openCodePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
+function derivedLaunchBinaryName(agent: AgentName, launchCommand: string): string {
+  return basename(extractCommandBinary(launchCommand, agentExecutableCommand(agent)));
+}
+
 function defaultProcessMatchers(agent: AgentName, launchCommand: string): string[] {
-  const derived = basename(extractCommandBinary(launchCommand, agentExecutableCommand(agent)));
+  const derived = derivedLaunchBinaryName(agent, launchCommand);
   return [...new Set([derived, ...agentProcessNames(agent)])].filter(
     (matcher) => matcher.length > 0,
   );
+}
+
+// RESIDUAL 1: a wrapper whose own filename IS the canonical name (a script named
+// `claude` on PATH that execs .../versions/2.1.251) leaves this gate CLOSED, so that
+// host stays false-DEAD in isProcessRunningInTmux. Accepted: SPUR_<AGENT>_BIN is not
+// used as a second gate condition because its common use is pointing at an off-PATH
+// binary whose basename IS canonical, and opening the fallback there trades zero gain
+// for a possible hang (see RESIDUAL 2).
+// RESIDUAL 2: when this gate is open, isProcessRunningInTmux's pane-child fallback
+// reports ALIVE for ANY direct child of the pane shell, since createTmuxSession types
+// the launch command into a default-shell pane rather than execing the agent as
+// pane_pid. A transient child delays reconcileUnexpectedStop by one tick; a long-lived
+// shell worker (gitstatusd, zsh-async, powerlevel10k instant-prompt) can block the
+// terminal write for that session indefinitely. Accepted because it is confined to
+// hosts that are otherwise 100% destructively false-DEAD today.
+export function agentLaunchUsesForeignBinary(agent: AgentName, launchCommand: string): boolean {
+  return !agentProcessNames(agent).includes(derivedLaunchBinaryName(agent, launchCommand));
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

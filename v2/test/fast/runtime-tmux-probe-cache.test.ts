@@ -57,7 +57,7 @@ function installFleetTmuxMock(): void {
       return { stdout: lines.join("\n"), stderr: "" };
     }
     if (file === "ps") {
-      const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} 51200 node agent`);
+      const psLines = sessionNames.map((_, i) => `${1000 + i} 1 pts/${i} 51200 node agent`);
       return { stdout: psLines.join("\n"), stderr: "" };
     }
     throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
@@ -155,8 +155,8 @@ describe("runtime-tmux shared probe cache", () => {
         return { stdout: lines.join("\n"), stderr: "" };
       }
       if (file === "ps") {
-        const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} 51200 node agent`);
-        psLines.push("9000 pts/900 20480 node playwright-mcp");
+        const psLines = sessionNames.map((_, i) => `${1000 + i} 1 pts/${i} 51200 node agent`);
+        psLines.push("9000 1 pts/900 20480 node playwright-mcp");
         return { stdout: psLines.join("\n"), stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
@@ -185,7 +185,7 @@ describe("runtime-tmux shared probe cache", () => {
       }
       if (file === "ps") {
         return {
-          stdout: ["1001 pts/1 20480 node dev", "1002 pts/2 51200 node agent"].join("\n"),
+          stdout: ["1001 1 pts/1 20480 node dev", "1002 1 pts/2 51200 node agent"].join("\n"),
           stderr: "",
         };
       }
@@ -285,7 +285,7 @@ describe("runtime-tmux shared probe cache", () => {
         return { stdout: rows.join("\n"), stderr: "" };
       }
       if (file === "ps") {
-        return { stdout: "222 pts/51 1024 agent-on-split-pane --flag", stderr: "" };
+        return { stdout: "222 1 pts/51 1024 agent-on-split-pane --flag", stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });

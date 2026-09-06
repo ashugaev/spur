@@ -189,6 +189,10 @@ interface FleetPaneEntry {
   // targeted before batching) — isProcessRunningInTmux needs all of them
   // since the agent process can be in any pane/window of the session.
   allTtys: string[];
+  // Every pane's pid across the whole session — the pane-child fallback in
+  // isProcessRunningInTmux uses these to recognize a wrapper-exec'd agent by
+  // parentage (ppid is a pane pid) when name matching misses (issue #806).
+  allPanePids: number[];
 }
 
 // `readable: false` means the `list-panes` fork itself failed, so the empty
@@ -230,16 +234,21 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           activePaneDead: true,
           activePanePid: null,
           allTtys: [],
+          allPanePids: [],
         };
         if (paneTty) {
           entry.allTtys.push(paneTty);
         }
+        const parsedPanePid = Number.parseInt(panePid ?? "", 10);
+        if (Number.isFinite(parsedPanePid) && parsedPanePid > 0) {
+          entry.allPanePids.push(parsedPanePid);
+        }
         // window_active + pane_active together identify the exact pane a
         // no-window/no-pane target (`=name:`) resolves to.
         if (windowActive === "1" && paneActive === "1") {
-          const pid = Number.parseInt(panePid ?? "", 10);
           entry.activePaneDead = paneDead === "1";
-          entry.activePanePid = Number.isFinite(pid) && pid > 0 ? pid : null;
+          entry.activePanePid =
+            Number.isFinite(parsedPanePid) && parsedPanePid > 0 ? parsedPanePid : null;
         }
         panes.set(sessionName, entry);
       }
@@ -503,6 +512,8 @@ export async function lookupTmuxPanePid(
 }
 
 interface PsRow {
+  pid: number;
+  ppid: number;
   tty: string;
   rssKb: number;
   args: string;
@@ -525,7 +536,7 @@ const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 function getPsSnapshot(): Promise<PsRow[]> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,rss,args"], {
+      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,ppid,tty,rss,args"], {
         timeout: 5_000,
         maxBuffer: PS_MAX_BUFFER_BYTES,
       });
@@ -533,14 +544,18 @@ function getPsSnapshot(): Promise<PsRow[]> {
         .split("\n")
         .map((line) => {
           const cols = line.trimStart().split(/\s+/);
-          if (cols.length < 4) {
+          if (cols.length < 5) {
             return null;
           }
-          const rssKb = Number.parseInt(cols[2] ?? "", 10);
+          const pid = Number.parseInt(cols[0] ?? "", 10);
+          const ppid = Number.parseInt(cols[1] ?? "", 10);
+          const rssKb = Number.parseInt(cols[3] ?? "", 10);
           return {
-            tty: cols[1] ?? "",
+            pid: Number.isFinite(pid) ? pid : -1,
+            ppid: Number.isFinite(ppid) ? ppid : -1,
+            tty: cols[2] ?? "",
             rssKb: Number.isFinite(rssKb) ? rssKb : 0,
-            args: cols.slice(3).join(" "),
+            args: cols.slice(4).join(" "),
           };
         })
         .filter((row): row is PsRow => row !== null);
@@ -595,7 +610,7 @@ export async function getFleetSessionRssBytes(
 export async function isProcessRunningInTmux(
   sessionName: string,
   processMatchers: string[],
-  options?: { fresh?: boolean },
+  options?: { fresh?: boolean; paneChildFallback?: boolean },
 ): Promise<boolean> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
@@ -603,7 +618,8 @@ export async function isProcessRunningInTmux(
   }
   try {
     const { panes } = await getFleetPaneSnapshot();
-    const ttys = panes.get(sessionName)?.allTtys ?? [];
+    const entry = panes.get(sessionName);
+    const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
       return false;
     }
@@ -624,6 +640,25 @@ export async function isProcessRunningInTmux(
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
         return true;
+      }
+    }
+    // Pane-child fallback (issue #806): a SPUR_*_BIN wrapper that exec's a
+    // binary whose filename is not one of the agent's canonical process
+    // names never matches pass 1 above. Only reached when the caller has
+    // determined the launch binary is foreign to the agent (session-service's
+    // agentProcessAlive); a live direct child of the pane shell counts as
+    // alive since createTmuxSession types the launch command into a
+    // default-shell pane rather than execing the agent as pane_pid.
+    const allPanePids = entry?.allPanePids ?? [];
+    if (options?.paneChildFallback && allPanePids.length > 0) {
+      const panePids = new Set(allPanePids);
+      for (const row of rows) {
+        if (!ttySet.has(row.tty)) {
+          continue;
+        }
+        if (panePids.has(row.ppid) && !panePids.has(row.pid)) {
+          return true;
+        }
       }
     }
     return false;
