@@ -20431,7 +20431,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("sidecarGc.enabled: false skips candidate collection entirely (no ps snapshot, no probes)", async () => {
+    it("sidecarGc.enabled: false still takes ONE ps snapshot for orphan detection, but skips candidate collection and probes", async () => {
       loadConfigMock.mockReturnValue({
         ...frontLocalConfig(),
         sidecarGc: { enabled: false, idleTtlMinutes: 120, maxAgeWarnMinutes: 360 },
@@ -20461,7 +20461,11 @@ describe("SessionService", () => {
 
       await service.reapDeadSessionSidecars();
 
-      expect(snapshotProcessesMock).not.toHaveBeenCalled();
+      // Decision D: detection runs before the sidecarGc.enabled check, off
+      // the ONE shared snapshot — so a disabled host still gets orphan
+      // visibility. What stays gated is the expensive per-candidate work:
+      // no connection probes, no kill.
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
       expect(hasEstablishedConnectionsMock).not.toHaveBeenCalled();
       expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
       service.dispose();

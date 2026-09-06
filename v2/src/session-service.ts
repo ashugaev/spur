@@ -55,15 +55,18 @@ import {
   assembleSidecarSweepClaims,
   collectTree,
   confirmReaps,
+  findLeakedSidecarTrees,
   reapRecordedIdentity,
   reapSidecarPane,
   readProcessStarttime,
   signalSidecarPane,
   snapshotProcesses,
   sweepSidecars,
+  type LeakedSidecarTree,
   type PendingReap,
   type ProcSnapshot,
   type ReapOutcome,
+  type SidecarSweepClaims,
   type SidecarSweepResult,
 } from "./sidecars/reap.js";
 import {
@@ -1776,6 +1779,45 @@ const SIDECAR_STARTUP_VERIFY_MS = 600;
 const SIDECAR_STARTUP_TAIL_LINES = 40;
 const ATTENTION_PANE_TAIL_LINES = 15;
 
+/**
+ * Detection-only pass over one shared `ps` snapshot: finds every leaked
+ * sidecar tree via `findLeakedSidecarTrees` and emits
+ * `session.sidecar.orphan_detected` for each. Signals or kills NOTHING —
+ * I10. A plain exported function (no `this`) so it is testable against a
+ * synthetic snapshot/claims triple without booting a SessionService.
+ */
+export async function detectOrphanedSidecarTrees(
+  snapshot: ProcSnapshot,
+  assembled: SidecarSweepClaims,
+  logEvent: (event: string, entry: Omit<SpurLogEntry, "event" | "timestamp">) => void,
+): Promise<LeakedSidecarTree[]> {
+  const { supported, leaked } = await findLeakedSidecarTrees({
+    snapshot,
+    claims: assembled.claims,
+    worktreePaths: assembled.worktreePaths,
+    worktreeDirRealpath: assembled.worktreeDirRealpath,
+  });
+  if (!supported) {
+    return [];
+  }
+  for (const tree of leaked) {
+    logEvent("session.sidecar.orphan_detected", {
+      level: "info",
+      message: `Orphaned sidecar process tree detected at pid ${tree.rootPid} under ${tree.worktreePath}${tree.sidecarName ? ` (${tree.sidecarName})` : ""}.`,
+      details: {
+        rootPid: tree.rootPid,
+        pgid: tree.pgid,
+        treeRssKb: tree.treeRssKb,
+        ageSeconds: tree.ageSeconds,
+        worktreePath: tree.worktreePath,
+        sidecarName: tree.sidecarName,
+        reapable: tree.reapable,
+      },
+    });
+  }
+  return leaked;
+}
+
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
@@ -3249,8 +3291,8 @@ export class SessionService {
   private async collectSidecarReapCandidates(
     tmuxNames: ReadonlySet<string>,
     sessions: readonly SessionRecord[],
+    psSnapshot: ProcSnapshot,
   ): Promise<SidecarReapCandidate[]> {
-    const psSnapshot = await snapshotProcesses();
     const seenTmuxNames = new Set<string>();
     const connectionCache = new Map<number, Promise<"established" | "none" | "unknown">>();
     const probeConnections = (port: number): Promise<"established" | "none" | "unknown"> => {
@@ -3418,15 +3460,30 @@ export class SessionService {
     sessions: readonly SessionRecord[],
     tmuxNames: ReadonlySet<string>,
   ): Promise<SidecarReapPlan> {
-    // Check the config before any of the expensive work below: a `ps`
-    // snapshot, an `ss` probe per distinct reserved port, and a
-    // listSessions/listDeskSessions scan per candidate all ran unconditionally
-    // even with sidecarGc.enabled: false, since planSidecarReap only decides
+    // ONE `ps` snapshot for the whole pass, shared by detection and the
+    // candidate pass below — a second fork could let a tree be attributed
+    // to two passes (same discipline as executeSidecarReapPlan's own
+    // pre-signal snapshot).
+    const psSnapshot = await snapshotProcesses();
+    // Detection runs BEFORE the sidecarGc.enabled check below: that switch
+    // governs killing, and a detect-only event that kills nothing has no
+    // reason to inherit it — a host with GC disabled still gets orphan
+    // visibility.
+    const assembled = assembleSidecarSweepClaims(sessions, this.config.worktreeDir);
+    if (assembled) {
+      await detectOrphanedSidecarTrees(psSnapshot, assembled, (event, entry) =>
+        this.logEvent(event, entry),
+      );
+    }
+    // Check the config before any of the expensive work below: an `ss`
+    // probe per distinct reserved port, and a listSessions/listDeskSessions
+    // scan per candidate all ran unconditionally even with
+    // sidecarGc.enabled: false, since planSidecarReap only decides
     // "keep: disabled" per candidate after all of that already happened.
     if (!this.config.sidecarGc.enabled) {
       return { reap: [], warn: [], keep: [] };
     }
-    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions);
+    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions, psSnapshot);
     const plan = planSidecarReap({
       nowMs: Date.now(),
       config: this.config.sidecarGc,
