@@ -73,7 +73,13 @@ prune_stale_config_dirs() {
       continue
     fi
 
-    rm -rf "$dir"
+    # `|| true`: under `set -euo pipefail`, an unremovable candidate (another
+    # uid's leftover in sticky /tmp, a partially-unwritable tree) must never
+    # abort the whole script — this prune runs before TOOL_DIR is resolved
+    # and before `trap cleanup EXIT`, so an abort here would block the
+    # isolated daemon from starting at all and leak its own fresh
+    # $CONFIG_DIR with no reclaimer.
+    rm -rf "$dir" || true
   done < <(
     find "$tmp_root" -maxdepth 1 -type d -name 'spur-isolated-daemon.*' -mmin +60 -print0 2>/dev/null
   )

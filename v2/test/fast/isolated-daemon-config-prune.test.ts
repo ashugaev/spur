@@ -71,16 +71,22 @@ async function runPrune(options: {
   const fakePs = join(fakeBinDir, "ps");
   makeExecutable(
     fakePs,
+    // Pins the exact argv invariant I3 rests on: GATE A is \`ps -eo args=\`
+    // (exactly 2 args), GATE B is \`ps -o pid= -u <uid>\` (exactly 4, "-o"
+    // never "-e" — "-e" overrides "-u" and returns the whole table). Any
+    // other invocation fails LOUDLY instead of falling through to the real
+    // \`ps\`, so a mutation of either flag set is a prune-suite failure, not
+    // a silent real-ps passthrough that happens to still look fine.
     `#!/usr/bin/env bash
 set -euo pipefail
-if [[ "$1" == "-eo" && "$2" == "args=" ]]; then
+if [[ "$#" -eq 2 && "$1" == "-eo" && "$2" == "args=" ]]; then
   if [[ "${psArgsFail ? "1" : "0"}" == "1" ]]; then
     exit 1
   fi
   printf '%s\\n' "$PRUNE_TEST_PS_ARGS_OUTPUT"
   exit 0
 fi
-if [[ "$1" == "-o" && "$2" == "pid=" ]]; then
+if [[ "$#" -eq 4 && "$1" == "-o" && "$2" == "pid=" && "$3" == "-u" && "$4" =~ ^[0-9]+$ ]]; then
   if [[ "${psPidFail ? "1" : "0"}" == "1" ]]; then
     exit 1
   fi
@@ -88,7 +94,8 @@ if [[ "$1" == "-o" && "$2" == "pid=" ]]; then
   exit 0
 fi
 
-exec /usr/bin/ps "$@"
+echo "unexpected ps invocation: $*" >&2
+exit 97
 `,
   );
 
@@ -256,6 +263,46 @@ describe("spur-isolated-daemon.sh prune_stale_config_dirs", () => {
     });
 
     expect(existsSync(stale)).toBe(false);
+  });
+
+  it("an unremovable candidate does not abort the script or block later candidates (fail-DANGEROUS regression pin)", async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+
+    // A candidate whose subdir this uid cannot write into — `rm -rf` on it
+    // fails (nonzero) while `set -euo pipefail` is active. Named so it
+    // sorts and is scanned BEFORE the second, fully-removable candidate:
+    // `find`'s output order is not contractual, so both a leading and a
+    // later ordinal are covered by naming this "aaa" and the removable one
+    // "zzz".
+    const unremovable = await makeStaleDir(tmpRoot, "spur-isolated-daemon.aaa-unremovable", 120);
+    const lockedSubdir = join(unremovable, "locked");
+    mkdirSync(lockedSubdir, { recursive: true });
+    writeFileSync(join(lockedSubdir, "file"), "x", "utf8");
+    chmodSync(lockedSubdir, 0o500);
+    // Re-apply: creating the subdir/file above just bumped `unremovable`'s
+    // own mtime to now, which would drop it below the 60-minute floor and
+    // mean the buggy `rm -rf` line is never reached at all.
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.aaa-unremovable", 120);
+
+    const removable = await makeStaleDir(tmpRoot, "spur-isolated-daemon.zzz-removable", 120);
+
+    try {
+      await runPrune({
+        tmpRoot,
+        configDir,
+        fakeBinDir: join(tmpRoot, "bin"),
+      });
+    } finally {
+      chmodSync(lockedSubdir, 0o700);
+    }
+
+    // The exact assertion the reviewer's fix targets: `rm -rf "$dir" ||
+    // true` means the script reaches its end (execFileAsync above did not
+    // throw) and the LATER candidate still gets pruned.
+    expect(existsSync(removable)).toBe(false);
   });
 
   it("touches no path outside the injected TMPDIR", async () => {
