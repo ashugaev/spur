@@ -6,7 +6,7 @@ CLI reference: what to run, what it does, what `--help` skips. Config fields: [c
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
-`spur <unknown> --help` (help flag after the command word) reports the unknown command and exits `1`. A help flag before the command word (`spur --help <unknown>`, `spur -h <unknown>`) prints root help and exits `0`.
+`spur <unknown> --help` reports the unknown command, exits `1`. `spur --help <unknown>`/`spur -h <unknown>` prints root help, exits `0`.
 
 ## Session tools and environment
 
