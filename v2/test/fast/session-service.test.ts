@@ -26528,6 +26528,68 @@ describe("SessionService", () => {
     expect(result.id).toBe("api-1");
   });
 
+  it("does not resurrect a sidecar when stopSidecar runs after a pre-scheduled heal task", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: true },
+            other: { command: "pnpm other", autoStart: true },
+          },
+        },
+      },
+    });
+    let record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockImplementation(() => clone(record));
+    writeSessionMock.mockImplementation((_dataDir: string, updated: SessionRecord) => {
+      record = clone(updated);
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    let devAlive = true;
+    sidecarTmuxAliveMock.mockImplementation(async (_id: string, name: string) =>
+      name === "dev" ? devAlive : false,
+    );
+    killTmuxSessionMock.mockImplementation(() => {
+      devAlive = false;
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const healed = await service.get("api-1");
+    expect(healed.status).toBe("running");
+
+    await service.stopSidecar("api-1", "dev");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "other" }),
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "dev" }),
+    );
+
+    service.dispose();
+  });
+
   it("stopSidecar on an errored record does not let the same-call heal resurrect the sidecar it just stopped", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
