@@ -1158,10 +1158,12 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
     // Tree total, not the root pid's own rss — the root alone understated
     // the measured 863333/863351 leak by 17x.
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}  tree [${tree.tree.join(",")}]${survivorsSuffix}`,
     );
   });
-  return lines.join("\n");
+  const totalRssKb = result.leaked.reduce((sum, tree) => sum + tree.treeRssKb, 0);
+  const totalLine = dimText(`Total would-free: ${formatBytes(totalRssKb * 1024)}`);
+  return [...lines, totalLine].join("\n");
 }
 
 // Test-only: exercises the sweep summary's status/survivors formatting
