@@ -153,6 +153,9 @@ describe("spur-isolated-daemon.sh prune_stale_config_dirs", () => {
     const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-cwd", 120);
     const worktreeCwd = join(stale, "worktrees", "api", "api-1");
     mkdirSync(worktreeCwd, { recursive: true });
+    // Re-apply: the nested mkdir just bumped `stale`'s mtime to now, dropping
+    // it below the 60-minute floor so GATE B is never reached.
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-cwd", 120);
 
     // A real, disposable child whose cwd is genuinely inside the candidate
     // dir's worktrees subtree — readlink -f /proc/<pid>/cwd must resolve to
