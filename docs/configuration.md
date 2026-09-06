@@ -408,6 +408,8 @@ A dev server survives a pass while something holds a connection to one of its re
 
 Each pass logs `session.sidecar.reaped` per kill with the matched rule and freed tree RSS, and `session.sidecar.age_warning` per kept sidecar past `maxAgeWarnMinutes` — once per sidecar per window, not per tick.
 
+The same pass also runs a detect-only step over one shared process-table snapshot: an orphaned process tree under a worktree (an unclaimed pgid the sweep predicate would call leaked) logs `session.sidecar.orphan_detected` with `rootPid`, `pgid`, `treeRssKb`, `ageSeconds`, `worktreePath`, `sidecarName`, and `reapable`. This step never signals or kills anything, and runs even when `sidecarGc.enabled` is `false` — that flag governs killing only, not detection.
+
 Every session view (`GET /sessions`, `GET /sessions/<id>`, dashboard) carries each sidecar's `ageSeconds` (omitted when unresolvable) and `ageWarn` (true at `maxAgeWarnMinutes`, the same threshold as the event). The session detail page, the dashboard sidecars row, and `spur list` ([list](commands.md#list)) render the age and mark an over-threshold one.
 
 Cross-workspace port collision: a sidecar start refuses when this workspace's recorded reservation for this sidecar matches a live other workspace's recorded reservation for a non-MCP sidecar in the same project AND that port is free right now. The error names the holding workspace and sidecar; stop that sidecar or its session first — Spur reuses no pane and reaps nothing across a workspace boundary. Refuses nothing: a shared `ports` range alone, an occupied colliding port (the start scans for another free port), a same-workspace sidecar, another project, a holder with no live pane, an explicit `clearPort`.
