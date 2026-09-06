@@ -12626,13 +12626,16 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (session.status !== "completed") {
-      // enrich() can persist a reconcileUnexpectedStop status flip for a
-      // running/spawning record (14701-14709 below) — the same write
-      // restore()'s own refusal (12175) and the dashboard cache tick already
-      // perform. Accepted so the message never names restore/respawn for a
-      // status their own gates would reject (the bug this refusal exists to
-      // avoid); the happy path above never reaches here, so it costs nothing
-      // extra.
+      // enrich() can persist a write here via three reconcilers it calls
+      // unconditionally (classifySessionRecord, ~14743-14753 below):
+      // reconcileUnexpectedStop (running/spawning), reconcileStaleStoppedSession
+      // (stopped), reconcileStaleErroredSession (errored) — each fires only
+      // when the live-pane evidence contradicts the persisted status. This is
+      // the same enrich() restore()'s own refusal (12175) and the dashboard
+      // cache tick already call. Accepted so the message never names
+      // restore/respawn for a status their own gates would reject (the bug
+      // this refusal exists to avoid); the happy path above never reaches
+      // here, so it costs nothing extra.
       const view = await this.enrich(session);
       const restorable = isRestorableSession(view);
       const respawnable = isRespawnableStatus(view.status);

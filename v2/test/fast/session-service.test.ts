@@ -23242,18 +23242,23 @@ describe("SessionService", () => {
     // when the default live-pane mocks (isProcessRunningInTmuxMock,
     // workspaceExistsMock) make a stopped/errored record look reconcilable —
     // the exact same enrich() restore()'s own refusal (12175 above) already
-    // runs. Only "killed" is genuinely inert here: isTerminalSessionStatus
-    // hardcodes its runtime snapshot to not-alive, so neither reconcile helper
-    // can fire.
-    it("writes nothing when refusing a killed session", async () => {
-      readSessionMock.mockReturnValue(runningSession({ status: "killed" }));
+    // runs. "killed" is genuinely inert: isTerminalSessionStatus hardcodes
+    // its runtime snapshot to not-alive, so neither reconcile helper can
+    // fire. "running" also writes nothing under these default mocks:
+    // reconcileUnexpectedStop only flips the record when the pane is
+    // actually dead, and isProcessRunningInTmuxMock defaults to alive.
+    it.each(["running", "killed"] as const)(
+      "writes nothing when refusing a %s session",
+      async (status) => {
+        readSessionMock.mockReturnValue(runningSession({ status }));
 
-      const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
-      expect(writeSessionMock).not.toHaveBeenCalled();
-    });
+        await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
+        expect(writeSessionMock).not.toHaveBeenCalled();
+      },
+    );
 
     it("sends no message to tmux and passes an empty prompt to the fresh launch", async () => {
       seedReopenableSession();
