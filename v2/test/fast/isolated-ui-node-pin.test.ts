@@ -324,6 +324,31 @@ describe("spur-isolated-ui node pin", () => {
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
+  // #826 criterion 3: a prerelease genuinely below the range must still be
+  // rejected as a REAL engines verdict (NODE_CHECK_ERROR empty) so the `nvm
+  // install` remedy still renders — mirrors "fails fast, naming the
+  // range/found version/.nvmrc/nvm install, when nvm exists but the pin
+  // isn't installed" above, just with a prerelease system node instead of a
+  // plain one.
+  it("fails fast with the nvm install remedy still rendering for a prerelease below the range (#826)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    writeStubNvm(worktree.nvmDir);
+    writeNvmVersion(worktree.nvmDir, "20.12.2");
+
+    const rejection = await runIsolatedUiExpectFailure(worktree, {
+      NVM_DIR: worktree.nvmDir,
+      SPUR_TEST_SYS_NODE: "v21.0.0-rc.0",
+    });
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0 \|\| >=24/);
+    expect(rejection.stderr).toMatch(/v21\.0\.0-rc\.0/);
+    expect(rejection.stderr).toMatch(/nvm install 24/);
+    expect(rejection.stderr).not.toMatch(/unparseable output/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
   it("proceeds with no nvm at all when the system node already satisfies engines", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
@@ -576,6 +601,15 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
       "21.0.0-rc.0",
       "20.19.0-rc.0",
       "22.12.0-rc.1",
+      // Discriminating case: every other suffix above sits at a segment
+      // boundary, where Number.parseInt truncation on an unstripped value
+      // ("0-rc" -> 0) happens to already match the stripped tuple — that
+      // leaves the shell's own strip (as opposed to the widened regex)
+      // unpinned. Here the suffix starts MID-segment, so an unstripped
+      // parse keeps the "19" and "5" segments ([20,19,5], satisfies
+      // ^20.19.0) while the correct stripped parse collapses to [20,0,0]
+      // (does not satisfy any clause) — only a real strip agrees with TS.
+      "20-x.19.5",
     ];
 
     const worktree = createFakeWorktree();
