@@ -43,6 +43,7 @@ import {
   findLeakedSidecarTrees,
   snapshotProcesses,
   SWEEP_DETAIL_MAX_TREES,
+  type LeakedSidecarTree,
 } from "./sidecars/reap.js";
 import type { AppConfig } from "./types.js";
 import {
@@ -1492,21 +1493,18 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   return checks;
 }
 
-function formatSweepTreeLine(tree: {
-  rootPid: number;
-  pgid: number;
-  treeRssKb: number;
-  ageSeconds: number;
-  worktreePath: string;
-  sidecarName: string | null;
-}): string {
+function formatSweepTreeLine(tree: LeakedSidecarTree): string {
   const ageMinutes = Math.floor(tree.ageSeconds / 60);
   const hours = Math.floor(ageMinutes / 60);
   const minutes = ageMinutes % 60;
   // Tree total, not the root pid's own rss — the root alone understated the
   // measured 863333/863351 leak by 17x.
   const rssMb = Math.round(tree.treeRssKb / 1024);
-  return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  age ${hours}h${minutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
+  const age = `age ${hours}h${minutes}m`;
+  if (tree.kind === "orphan-daemon") {
+    return `  [report-only, verify before killing] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  daemon ${tree.configPath ?? "unknown"}  ${tree.worktreePath}`;
+  }
+  return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
 }
 
 // Read-only doctor check: calls findLeakedSidecarTrees only, never
@@ -1545,21 +1543,38 @@ async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck>
       detail: "sidecar-orphans: none found",
     };
   }
+  return { id: "sidecar-orphans", ok: false, severity: "warn", ...formatLeakedSidecarsCheck(leaked) };
+}
+
+// Split out from checkLeakedSidecars so its per-kind header/fix logic is
+// unit-testable without a real `ps` fork (checkLeakedSidecars itself always
+// runs against the live host process table).
+function formatLeakedSidecarsCheck(leaked: LeakedSidecarTree[]): { detail: string; fix: string } {
   const shown = leaked.slice(0, SWEEP_DETAIL_MAX_TREES);
   const remaining = leaked.length - shown.length;
+  const worktreeTreeCount = leaked.filter((tree) => tree.kind === "worktree-tree").length;
+  const orphanDaemonCount = leaked.length - worktreeTreeCount;
+  const headerParts = [
+    ...(worktreeTreeCount > 0 ? [`${worktreeTreeCount} leaked sidecar process tree(s)`] : []),
+    ...(orphanDaemonCount > 0 ? [`${orphanDaemonCount} orphan daemon(s)`] : []),
+  ];
   const detail = [
-    `sidecar-orphans: ${leaked.length} leaked sidecar process tree(s) found`,
+    `sidecar-orphans: ${headerParts.join(", ")} found`,
     ...shown.map(formatSweepTreeLine),
     ...(remaining > 0 ? [`  +${remaining} more`] : []),
   ].join("\n");
+  const hasReapable = leaked.some((tree) => tree.reapable);
   return {
-    id: "sidecar-orphans",
-    ok: false,
-    severity: "warn",
     detail,
-    fix: "spur sidecar sweep --reap",
+    fix: hasReapable
+      ? "spur sidecar sweep --reap"
+      : "verify each row is genuinely dead, then `kill <pid>` by hand",
   };
 }
+
+// Test-only: exercises the per-kind header/fix split without a real `ps`
+// fork or a live leaked process tree.
+export const _formatLeakedSidecarsCheckForTests = formatLeakedSidecarsCheck;
 
 export function hasErrorSeverity(checks: HostInstallCheck[]): boolean {
   return checks.some((check) => !check.ok && check.severity === "error");

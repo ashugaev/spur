@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -293,6 +294,120 @@ describe("findLeakedSidecarTrees", () => {
     const leaked = must(result.leaked[0], "expected one leaked tree");
     expect(leaked.sidecarName).toBeNull();
     expect(leaked.reapable).toBe(false);
+  });
+});
+
+describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
+  const nonDefaultConfigPath = "/tmp/spur-isolated-daemon.abc123/config.yaml";
+  const cliEntryPath = "/tmp/spur-worktrees-checkout/v2/dist/cli.js";
+  const daemonArgs = `/usr/bin/node ${cliEntryPath} --config ${nonDefaultConfigPath} daemon start`;
+
+  // No worktree-tree claim is exercised by these rows (empty claims/paths):
+  // orphan-daemon detection is entirely independent of the worktree-tree
+  // predicate's claims/cwd machinery.
+  it("AC8: reports a reparented daemon (ppid 1) with a missing cli.js as kind orphan-daemon, reapable:false", async () => {
+    const snapshot = snapshotFrom([info({ pid: 900, ppid: 1, pgid: 900, args: daemonArgs })]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+    });
+    expect(result.leaked).toHaveLength(1);
+    const leaked = must(result.leaked[0], "expected one leaked orphan-daemon row");
+    expect(leaked.kind).toBe("orphan-daemon");
+    expect(leaked.reapable).toBe(false);
+    expect(leaked.configPath).toBe(nonDefaultConfigPath);
+    expect(leaked.cliEntryPath).toBe(cliEntryPath);
+  });
+
+  it("AC8: reports a reparented daemon whose ppid is absent from the snapshot", async () => {
+    const snapshot = snapshotFrom([info({ pid: 901, ppid: 55555, pgid: 901, args: daemonArgs })]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+    });
+    expect(result.leaked).toHaveLength(1);
+    expect(must(result.leaked[0], "expected one row").kind).toBe("orphan-daemon");
+  });
+
+  it("AC8: reports a reparented daemon whose parent is systemd --user", async () => {
+    const snapshot = snapshotFrom([
+      info({ pid: 1415, ppid: 1, pgid: 1415, args: "/usr/lib/systemd/systemd --user" }),
+      info({ pid: 902, ppid: 1415, pgid: 902, args: daemonArgs }),
+    ]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+    });
+    // The daemon at 902 qualifies; the systemd --user process itself at 1415
+    // (ppid 1, no daemon-shaped argv) never does.
+    const orphanRows = result.leaked.filter((tree) => tree.kind === "orphan-daemon");
+    expect(orphanRows).toHaveLength(1);
+    expect(must(orphanRows[0], "expected one row").rootPid).toBe(902);
+  });
+
+  it("AC9: never reports it when the cli.js still exists on disk", async () => {
+    const snapshot = snapshotFrom([info({ pid: 903, ppid: 1, pgid: 903, args: daemonArgs })]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => true,
+    });
+    expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
+  });
+
+  it("AC9: never reports it when argv carries no --config", async () => {
+    const snapshot = snapshotFrom([
+      info({
+        pid: 904,
+        ppid: 1,
+        pgid: 904,
+        args: `/usr/bin/node ${cliEntryPath} daemon start`,
+      }),
+    ]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+    });
+    expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
+  });
+
+  it("AC9: never reports it when --config is the default instance config", async () => {
+    const snapshot = snapshotFrom([
+      info({
+        pid: 905,
+        ppid: 1,
+        pgid: 905,
+        args: `/usr/bin/node ${cliEntryPath} --config ${homedir()}/.spur/config.yaml daemon start`,
+      }),
+    ]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+    });
+    expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
   });
 });
 

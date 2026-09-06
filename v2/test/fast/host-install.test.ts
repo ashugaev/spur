@@ -104,6 +104,7 @@ vi.mock("../../src/workspace.js", async () => {
 });
 
 import {
+  _formatLeakedSidecarsCheckForTests as formatLeakedSidecarsCheck,
   checkConfigRegistry,
   checkHostSkillSymlinks,
   checkServiceHealth,
@@ -1865,6 +1866,28 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
       severity: "warn",
       detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
     });
+  });
+
+  it("AC12: an orphan-daemon-only leak set is ok:false, severity:warn, never calls it a leaked sidecar tree, and never suggests --reap", () => {
+    const { detail, fix } = formatLeakedSidecarsCheck([
+      {
+        kind: "orphan-daemon",
+        rootPid: 900,
+        pgid: 900,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.xyz/config.yaml daemon start",
+        sidecarName: null,
+        tree: [900],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.xyz/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+      },
+    ]);
+    expect(detail).toContain("1 orphan daemon(s)");
+    expect(detail).not.toContain("leaked sidecar process tree");
+    expect(fix).not.toContain("--reap");
   });
 
   it("never writes or signals — collectHostInstallChecks stays read-only", async () => {

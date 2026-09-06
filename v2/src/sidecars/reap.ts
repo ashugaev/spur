@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
+import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getTmuxPanePid, killTmuxSession } from "../runtime-tmux.js";
 import { readProcessCwd } from "../process-tree.js";
+import { isDefaultInstanceConfigPath } from "../config.js";
 import {
   isTerminalSessionStatus,
   type SessionRecord,
@@ -78,20 +80,28 @@ export interface SidecarClaim {
 }
 
 export interface LeakedSidecarTree {
+  /** "worktree-tree": the original sweep predicate. "orphan-daemon": a
+   * reparented Spur daemon whose CLI entrypoint no longer exists on disk —
+   * report-only, never reapable, no new kill authority. */
+  kind: "worktree-tree" | "orphan-daemon";
   rootPid: number;
   pgid: number;
   ageSeconds: number;
   /** realpath of /proc/<rootPid>/cwd. A leak is never reported without it. */
   worktreePath: string;
   args: string;
-  /** Sidecar name when the worktree's claim names one, else null. */
+  /** Sidecar name when the worktree's claim names one, else null. Always null for "orphan-daemon". */
   sidecarName: string | null;
   /** Descendant pids from the same snapshot, root first. */
   tree: readonly number[];
   /** Total rss of `tree` in KiB. */
   treeRssKb: number;
-  /** true when Spur provenance is proven and `--reap` may signal it. */
+  /** true when Spur provenance is proven and `--reap` may signal it. Always false for "orphan-daemon". */
   reapable: boolean;
+  /** "orphan-daemon" only: the `--config` value from its argv. */
+  configPath?: string;
+  /** "orphan-daemon" only: the `cli.js` path from its argv (confirmed absent from disk). */
+  cliEntryPath?: string;
 }
 
 export interface SidecarSweepResult {
@@ -690,6 +700,8 @@ export interface FindLeakedSidecarTreesInput {
   worktreeDirRealpath: string;
   /** Injectable for tests; defaults to a real `/proc/<pid>/cwd` realpath read. */
   readCwd?: (pid: number) => Promise<string | null>;
+  /** Injectable for tests; defaults to a real filesystem existence check. */
+  pathExists?: (path: string) => Promise<boolean>;
 }
 
 /**
@@ -703,7 +715,14 @@ export interface FindLeakedSidecarTreesInput {
 export async function findLeakedSidecarTrees(
   input: FindLeakedSidecarTreesInput,
 ): Promise<{ supported: boolean; leaked: LeakedSidecarTree[] }> {
-  const { snapshot, claims, worktreePaths, worktreeDirRealpath, readCwd = readProcessCwd } = input;
+  const {
+    snapshot,
+    claims,
+    worktreePaths,
+    worktreeDirRealpath,
+    readCwd = readProcessCwd,
+    pathExists = defaultPathExists,
+  } = input;
   if (!snapshot.ok) {
     return { supported: false, leaked: [] };
   }
@@ -749,6 +768,7 @@ export async function findLeakedSidecarTrees(
     // nothing left to attribute against, so any orphan there is fair game.
     const reapable = claim === undefined || (claim.identityRecorded && sidecarName !== null);
     leaked.push({
+      kind: "worktree-tree",
       rootPid: info.pid,
       pgid: info.pgid,
       ageSeconds: info.etimes,
@@ -760,7 +780,95 @@ export async function findLeakedSidecarTrees(
       reapable,
     });
   }
+  leaked.push(...(await findOrphanDaemonTrees(snapshot, pathExists)));
   return { supported: true, leaked };
+}
+
+/**
+ * Parses a snapshot row's `args` for an isolated-daemon-shaped invocation:
+ * `<node> <path ending in cli.js> ... daemon start ... --config <path>`.
+ * A substring/token scan, matching the rest of this module's `ps args`
+ * parsing (e.g. the sidecar-name attribution above) rather than a strict
+ * argv model — `ps -eo args=` already collapses argv to one string.
+ */
+function parseDaemonArgs(args: string): { cliEntryPath: string; configPath: string } | null {
+  const tokens = args.trim().split(/\s+/);
+  const cliEntryPath = tokens[1];
+  if (!cliEntryPath || !cliEntryPath.endsWith("cli.js")) {
+    return null;
+  }
+  if (!/\bdaemon\s+start\b/.test(args)) {
+    return null;
+  }
+  const configMatch = /--config\s+(\S+)/.exec(args);
+  const configPath = configMatch?.[1];
+  if (!configPath) {
+    return null;
+  }
+  return { cliEntryPath, configPath };
+}
+
+async function defaultPathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Second, independent detection pass: a reparented Spur daemon whose own
+ * checkout is gone from disk. Every row is `reapable: false` by
+ * construction — this function never feeds `sweepSidecars`' reap step.
+ * Not merged into the worktree-tree loop above: that loop's `reapable`
+ * computation (claim === undefined -> true) would wrongly make an
+ * unclaimed daemon fork "reapable", exactly the failure mode a cwd-grouped
+ * ps guard was already added once to prevent.
+ */
+async function findOrphanDaemonTrees(
+  snapshot: ProcSnapshot,
+  pathExists: (path: string) => Promise<boolean>,
+): Promise<LeakedSidecarTree[]> {
+  const rows: LeakedSidecarTree[] = [];
+  for (const info of snapshot.byPid.values()) {
+    const parentInfo = snapshot.byPid.get(info.ppid);
+    const isReparented =
+      info.ppid === 1 || !parentInfo || parentInfo.args.includes("systemd --user");
+    if (!isReparented) {
+      continue;
+    }
+    const parsed = parseDaemonArgs(info.args);
+    if (!parsed) {
+      continue;
+    }
+    if (isDefaultInstanceConfigPath(parsed.configPath)) {
+      continue;
+    }
+    if (await pathExists(parsed.cliEntryPath)) {
+      continue;
+    }
+    const tree = collectTree(info.pid, snapshot);
+    const treeRssKb = tree.reduce((sum, pid) => sum + (snapshot.byPid.get(pid)?.rssKb ?? 0), 0);
+    rows.push({
+      kind: "orphan-daemon",
+      rootPid: info.pid,
+      pgid: info.pgid,
+      ageSeconds: info.etimes,
+      // cliEntryPath is always "<worktree root>/v2/dist/cli.js" for a Spur
+      // checkout (scripts/spur-isolated-daemon.sh:24, and every in-repo
+      // `daemon start`); three levels up from cli.js is the worktree root.
+      worktreePath: dirname(dirname(dirname(parsed.cliEntryPath))),
+      args: info.args,
+      sidecarName: null,
+      tree,
+      treeRssKb,
+      reapable: false,
+      configPath: parsed.configPath,
+      cliEntryPath: parsed.cliEntryPath,
+    });
+  }
+  return rows;
 }
 
 export interface SweepSidecarsInput {

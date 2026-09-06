@@ -1158,8 +1158,12 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
       outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
     // Tree total, not the root pid's own rss — the root alone understated
     // the measured 863333/863351 leak by 17x.
+    const attribution =
+      tree.kind === "orphan-daemon"
+        ? `daemon ${tree.configPath ?? "unknown"} — verify it is genuinely dead before killing`
+        : (tree.sidecarName ?? "unattributed");
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,
     );
   });
   return lines.join("\n");

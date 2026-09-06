@@ -22,7 +22,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 
 Read-only: checks host install, config, daemon/web health; exits non-zero only on a broken host. `--scaffold` writes a minimal local `spur.yaml` when missing, no daemon start, no `~/.spur/config.yaml` write.
 
-- `sidecar-orphans` (warn) — leaked trees `sidecar sweep` reaps, report-only.
+- `sidecar-orphans` (warn) — leaked trees `sidecar sweep` reaps, report-only; also lists reparented Spur daemons whose CLI entrypoint no longer exists on disk (`kind: orphan-daemon`), always report-only, never counted toward `fix: --reap`.
 - `config-registry` (info) — every registered path, alive/dead/worktree-internal state.
 - `session-headroom` (warn, daemon up) — live count vs [cap](configuration.md#admission-control), id+RSS, `fix` names ids to stop.
 - `home-disk-headroom` (warn/info) — `$HOME` space under [`diskRetention.warnFreeGb`](configuration.md), default 10GB.
@@ -143,6 +143,8 @@ Ports reserve/probe on the host at start, inject into the sidecar env only — p
 Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubuntu, nvm needs `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A remapped `$HOME` still resolves via `$SPUR_REAL_HOME` (from `/etc/passwd`). A long-lived server should start its own command with `exec` — otherwise the pane pid is a shell above the real process, hiding it from pid/args-based reaping and leaving the shell holding unexpanded `$PORT` env.
 
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
+
+`sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path and a verify-before-killing note; never signaled by `--reap`, no matter what).
 
 `sidecar stop` prints the real outcome, never a claimed stop that did not happen: `reaped` ("Stopped sidecar ...", exit `0`), `partial` ("Stopped sidecar ..., but N process(es) survived: <pids>. Report them: spur sidecar sweep", exit `1`), `nothing-to-stop` ("... was not running; nothing to stop.", exit `0`).
 

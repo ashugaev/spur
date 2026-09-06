@@ -4,6 +4,7 @@ import type { LeakedSidecarTree, SidecarSweepResult } from "../../src/sidecars/r
 
 function tree(overrides: Partial<LeakedSidecarTree> & { rootPid: number }): LeakedSidecarTree {
   return {
+    kind: "worktree-tree",
     pgid: overrides.rootPid,
     ageSeconds: 120,
     worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -62,5 +63,26 @@ describe("renderSidecarSweepResult", () => {
     const output = renderSidecarSweepResult(result);
     expect(output).toContain("[reapable] pid 500");
     expect(output).toContain("[report-only] pid 600");
+  });
+
+  it("AC11: marks an orphan-daemon row report-only, shows its configPath, and warns to verify before killing", () => {
+    const result: SidecarSweepResult = {
+      supported: true,
+      leaked: [
+        tree({
+          rootPid: 700,
+          kind: "orphan-daemon",
+          reapable: false,
+          sidecarName: null,
+          configPath: "/tmp/spur-isolated-daemon.abc/config.yaml",
+          cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        }),
+      ],
+      reaped: [],
+    };
+    const output = renderSidecarSweepResult(result);
+    expect(output).toContain("[report-only] pid 700");
+    expect(output).toContain("daemon /tmp/spur-isolated-daemon.abc/config.yaml");
+    expect(output).toContain("verify it is genuinely dead before killing");
   });
 });
