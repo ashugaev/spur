@@ -24108,6 +24108,49 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
   });
 
+  it("startSidecar refuses an errored session when the heal write fails after the probes succeed", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    writeSessionMock.mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // The promotion write is the last statement the heal can run, so a failed
+    // one leaves disk and the in-memory record on the same `errored` snapshot
+    // the guard then refuses. A heal that wrote before further fallible reads
+    // would strand disk on `running` here.
+    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+      'Cannot start sidecar "dev" for api-1: session status is errored',
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.status).toBe("errored");
+    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
+  });
+
   it("startSidecar rejects when session workspace is not available", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

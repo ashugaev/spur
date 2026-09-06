@@ -10834,17 +10834,28 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     // An `errored` record can outlive the blip that wrote it while the agent
-    // keeps working, and this path otherwise never classifies. Classify once
-    // so reconcileStaleErroredSession promotes it back to running before the
-    // guard reads the status. Promotion still requires processAlive, so a
-    // genuinely dead agent stays errored and stays refused.
+    // keeps working, and this path otherwise never reconciles. Probe the
+    // runtime, then let reconcileStaleErroredSession promote the record back
+    // to running before the guard reads the status. Promotion still requires
+    // processAlive, so a genuinely dead agent stays errored and stays refused.
+    // Probe first, commit last — same order as reconcileStoppedSessions: the
+    // reconcile's writeSession is the last statement here that can run, so a
+    // failed probe can never leave disk on `running` while this frame refuses
+    // on an in-memory `errored` snapshot. Going through classifySessionRecord
+    // instead would put the write ahead of the agent-transcript reads, whose
+    // fail-closed contract this frame would then depend on forever.
     if (session.status === "errored") {
       try {
-        session = (await this.classifySessionRecord(session, { scanPane: false })).session;
+        const runtime = await this.readRuntimeSnapshot(session);
+        session = this.reconcileStaleErroredSession(
+          session,
+          runtime,
+          probeWorkspace(session.worktreePath).missing,
+        );
       } catch {
         // Fail closed, same as memoryShedCandidates: the heal is opportunistic
-        // and this path did no probing at all before it, so an unclassifiable
-        // session keeps the record as read and the guard below refuses on it.
+        // and nothing above it has written, so an unprobeable session keeps the
+        // record as read and the guard below refuses on it.
       }
     }
     if (!isRestorableStatus(session.status)) {
