@@ -994,6 +994,13 @@ export interface DashboardSessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
 }
 
+export type SidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
+export type SidecarStopView = SessionView & { sidecarStop: SidecarStopReport };
+
 export type SessionListView = SessionView | DashboardSessionView;
 
 export interface SessionWorkspaceAccessItem {

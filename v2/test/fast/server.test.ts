@@ -19,7 +19,7 @@ import {
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
-import type { SessionRecord, SessionView } from "../../src/types.js";
+import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
@@ -876,6 +876,79 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  it("passes the sidecarStop outcome through the stop route's 200 body alongside id and sidecars", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalStopSidecar = SessionService.prototype.stopSidecar;
+    SessionService.prototype.stopSidecar = async function mockStopSidecar() {
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        artifacts: [],
+        services: [],
+        sidecars: [{ name: "dev", alive: false, ports: [], tmuxSession: "demo-1--dev" }],
+        sidecarStop: { outcome: "partial", survivors: [777] },
+      } satisfies SidecarStopView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/sidecars/dev/stop`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as SidecarStopView;
+      expect(body.id).toBe("demo-1");
+      expect(body.sidecars).toEqual([
+        { name: "dev", alive: false, ports: [], tmuxSession: "demo-1--dev" },
+      ]);
+      expect(body.sidecarStop).toEqual({ outcome: "partial", survivors: [777] });
+    } finally {
+      SessionService.prototype.stopSidecar = originalStopSidecar;
       await server.stop();
     }
   });

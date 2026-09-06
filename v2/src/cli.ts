@@ -118,6 +118,7 @@ import {
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
   type SessionView,
+  type SidecarStopView,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
@@ -1167,6 +1168,23 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
 // Test-only: exercises the sweep summary's status/survivors formatting
 // without spinning up a live CLI command or the daemon route it calls.
 export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
+
+// `sidecar stop`'s success line, per real outcome — never claims a reap that
+// did not happen (`sidecarStop.outcome`, session-service.ts's stopSidecar).
+function renderSidecarStopMessage(name: string, session: SidecarStopView): string {
+  const { sidecarStop } = session;
+  if (sidecarStop.outcome === "nothing-to-stop") {
+    return `Sidecar ${name} on ${session.id} was not running; nothing to stop.`;
+  }
+  if (sidecarStop.outcome === "partial") {
+    return `Stopped sidecar ${name} for ${session.id}, but ${sidecarStop.survivors.length} process(es) survived: ${sidecarStop.survivors.join(",")}. Report them: spur sidecar sweep`;
+  }
+  return `Stopped sidecar ${name} for ${session.id}.`;
+}
+
+// Test-only: exercises the stop message's per-outcome branching without a
+// live CLI command or the daemon route it calls.
+export const _renderSidecarStopMessageForTests = renderSidecarStopMessage;
 
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
@@ -3698,13 +3716,14 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "stopping sidecar",
         action: () =>
-          postJson<SessionView>(
+          postJson<SidecarStopView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
             {},
             configPath,
           ),
-        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
+        success: (session) => renderSidecarStopMessage(options.name as string, session),
+        exitCode: (session) => (session.sidecarStop.outcome === "partial" ? 1 : undefined),
         render: renderSessionCard,
       });
     });

@@ -416,6 +416,8 @@ import {
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
+  type SidecarStopReport,
+  type SidecarStopView,
   type SessionStateTransition,
   type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
@@ -11004,13 +11006,16 @@ export class SessionService {
     }
   }
 
-  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async stopSidecar(sessionId: string, sidecarName: string): Promise<SidecarStopView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.stopSidecarLocked(sessionId, sidecarName),
     );
   }
 
-  private async stopSidecarLocked(sessionId: string, sidecarName: string): Promise<SessionView> {
+  private async stopSidecarLocked(
+    sessionId: string,
+    sidecarName: string,
+  ): Promise<SidecarStopView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -11035,13 +11040,19 @@ export class SessionService {
       if (clearsWorkspaceReplay) {
         this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
       }
-      return this.enrich(session);
+      return { ...(await this.enrich(session)), sidecarStop: { outcome: "nothing-to-stop" } };
     }
 
-    await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
+    const outcome = await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
     if (clearsWorkspaceReplay) {
       this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
     }
+    const sidecarStop: SidecarStopReport =
+      outcome === null
+        ? { outcome: "nothing-to-stop" }
+        : outcome.survivors.length === 0
+          ? { outcome: "reaped" }
+          : { outcome: "partial", survivors: outcome.survivors };
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -11052,7 +11063,8 @@ export class SessionService {
         tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
       },
     });
-    return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+    const view = await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+    return { ...view, sidecarStop };
   }
 
   // Report-first sweep for sidecar process trees no live session claims.

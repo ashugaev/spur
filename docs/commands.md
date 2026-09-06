@@ -144,6 +144,8 @@ Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubunt
 
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
 
+`sidecar stop` prints the real outcome, never a claimed stop that did not happen: `reaped` ("Stopped sidecar ...", exit `0`), `partial` ("Stopped sidecar ..., but N process(es) survived: <pids>. Report them: spur sidecar sweep", exit `1`), `nothing-to-stop` ("... was not running; nothing to stop.", exit `0`).
+
 ### Built-in MCP sidecars
 
 A sidecar entry can carry MCP wiring, injecting its port into the launching agent's MCP config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright` is the one built-in: an HTTP playwright MCP sidecar for claude/codex, never cursor, off by default: `sidecars: { playwright: { autoStart: true } }`. YAML only overrides `autoStart`, rejects any other key incl. `dependsOn` (MCP sidecars start before the agent, ahead of the dependency-aware autostart pass). Re-resolved every spawn/restore/recover, no per-session toggle.

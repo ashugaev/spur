@@ -25583,6 +25583,7 @@ describe("SessionService", () => {
 
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(result.id).toBe("api-1");
+    expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
   });
 
   it("stopSidecar reaps the recorded sidecar identity when the tmux session is already gone", async () => {
@@ -25623,6 +25624,10 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(result.id).toBe("api-1");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarProcs");
+    // The recorded pid is unresolvable (no matching pgid in the snapshot),
+    // so reapRecordedIdentity signals nothing and returns null — nothing was
+    // actually reaped, even though the stale identity gets cleaned up.
+    expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
   });
 
   it("stopSidecar kills the sidecar tmux session and logs the stop event", async () => {
@@ -25671,6 +25676,48 @@ describe("SessionService", () => {
       }),
     );
     expect(result.id).toBe("api-1");
+    expect(result.sidecarStop).toEqual({ outcome: "reaped" });
+  });
+
+  it("stopSidecar reports a partial outcome with survivor pids when the reap window leaves processes alive", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(true);
+    const reapRuntime = await import("../../src/sidecars/reap.js");
+    const reapSpy = vi.spyOn(reapRuntime, "reapSidecarPane").mockResolvedValueOnce({
+      sessionName: "api-1--dev",
+      panePid: 4242,
+      survivors: [777],
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.stopSidecar("api-1", "dev");
+
+    expect(result.sidecarStop).toEqual({ outcome: "partial", survivors: [777] });
+    reapSpy.mockRestore();
   });
 
   it("get lists sidecars from the session worktree config", async () => {
