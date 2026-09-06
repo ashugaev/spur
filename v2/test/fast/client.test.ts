@@ -435,4 +435,28 @@ describe("client.ensureServer", () => {
       "Session api-1 is not restorable. Try `spur kill api-1 --force` to discard it.",
     );
   });
+
+  it("formats a session-not-restorable error with only respawn when force_kill is unavailable", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "session_not_restorable",
+            sessionId: "api-1",
+            reason: "Session api-1 is not restorable",
+            availableActions: ["respawn"],
+          }),
+          { status: 409 },
+        ),
+      );
+
+    const { postJson } = await loadClientModule();
+
+    await expect(
+      postJson("/tmp/dist/cli.js", "/sessions/api-1/restore", {}, "/tmp/spur.yaml"),
+    ).rejects.toThrow(
+      "Session api-1 is not restorable. Try `spur respawn api-1` to start a fresh session.",
+    );
+  });
 });

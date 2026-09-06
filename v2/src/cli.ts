@@ -97,6 +97,7 @@ import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
+  isRespawnableStatus,
   isSessionState,
   type AppConfig,
   type OpenPrAction,
@@ -1893,11 +1894,7 @@ async function runInteractiveSessionList(
   const respawnSelectedSession = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
-    if (
-      session.status !== "completed" &&
-      session.status !== "killed" &&
-      session.status !== "errored"
-    ) {
+    if (!isRespawnableStatus(session.status)) {
       statusMessage = brandLine(`Session ${session.id} is not in a terminal state.`);
       render();
       return;
@@ -4044,36 +4041,63 @@ export function createProgram(cliEntrypoint: string): Command {
 /**
  * Commander checks for -h/--help before it checks for an unknown command, so
  * `spur bogus --help` prints root help and exits 0 instead of reporting the
- * unknown command. Strip stray help flags off an unrecognized command word so
- * commander's own unknownCommand() handler runs instead, exiting 1 with its
- * did-you-mean suggestion. Known commands and help requests for them are left
- * untouched.
+ * unknown command. Strip stray help flags placed AFTER an unrecognized
+ * command word so commander's own unknownCommand() handler runs instead,
+ * exiting 1 with its did-you-mean suggestion. A help flag placed BEFORE the
+ * command word (`spur --help bogus`, `spur -h bogus`) is a root-help request
+ * and is left untouched, matching commander's own precedence. Known commands
+ * and help requests for them are left untouched too.
  */
 export function argvWithoutStrayHelpFlags(program: Command, argv: string[]): string[] {
   const knownCommands = new Set(
     program.commands.flatMap((command) => [command.name(), ...command.aliases()]),
   );
+  // Value-taking top-level options consume their next argv entry so its
+  // value is never mistaken for the command word — derived from
+  // program.options rather than hardcoding "--config" so a future top-level
+  // option is covered automatically. Matched by exact token only: the equals
+  // form (`--config=/p`) carries its own value and must not consume the
+  // following entry.
+  const valueTakingFlags = new Set(
+    program.options
+      .filter((option) => option.required || option.optional)
+      .flatMap((option) => [option.short, option.long].filter((flag): flag is string => !!flag)),
+  );
   let commandWord: string | undefined;
+  let commandIndex = -1;
   for (let index = 2; index < argv.length; index += 1) {
     const token = argv[index];
-    if (token === "--config") {
-      index += 1;
+    if (token !== undefined && valueTakingFlags.has(token)) {
+      const next = argv[index + 1];
+      // Commander's own rule: a required-arg option always consumes the
+      // next token; an optional-arg option consumes it only when it does
+      // not itself look like a flag.
+      const option = program.options.find((opt) => opt.short === token || opt.long === token);
+      if (option?.required || (option?.optional && next !== undefined && !next.startsWith("-"))) {
+        index += 1;
+      }
       continue;
     }
     if (token?.startsWith("-")) {
       continue;
     }
     commandWord = token;
+    commandIndex = index;
     break;
   }
   if (commandWord === undefined || knownCommands.has(commandWord)) {
     return argv;
   }
-  const hasHelpFlag = argv.slice(2).some((token) => token === "-h" || token === "--help");
-  if (!hasHelpFlag) {
+  const strayHelpIndices = new Set(
+    argv
+      .map((token, index) => ({ token, index }))
+      .filter(({ token, index }) => index > commandIndex && (token === "-h" || token === "--help"))
+      .map(({ index }) => index),
+  );
+  if (strayHelpIndices.size === 0) {
     return argv;
   }
-  return argv.filter((token) => token !== "-h" && token !== "--help");
+  return argv.filter((_token, index) => !strayHelpIndices.has(index));
 }
 
 export async function run(argv = process.argv): Promise<void> {
