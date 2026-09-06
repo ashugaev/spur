@@ -16,7 +16,7 @@ function payload(
 }
 
 describe("RecoverActionDialog", () => {
-  it("always renders Force Kill and the reason", () => {
+  it("renders Force Kill and the reason when canForceKill is true", () => {
     render(
       <RecoverActionDialog
         payload={payload({ availableActions: ["force_kill"] })}
