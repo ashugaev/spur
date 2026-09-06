@@ -543,12 +543,12 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
 
     const worktree = createFakeWorktree();
     const scriptSource = readFileSync(
-      join(worktree.repoDir, "scripts", "spur-isolated-ui.sh"),
+      join(worktree.repoDir, "scripts", "spur-sidecar-common.sh"),
       "utf8",
     );
     const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
     if (!functionMatch) {
-      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+      throw new Error("could not extract node_satisfies_engines from spur-sidecar-common.sh");
     }
 
     for (const version of versions) {
@@ -601,10 +601,10 @@ fi
   // process.exitCode, never an explicit process.exit(satisfied ...) call,
   // so the hazard cannot be silently reintroduced.
   it("regression guard: the engines-range write is never immediately followed by process.exit (finding: #824 LOW 2)", () => {
-    const scriptSource = readFileSync(join(SOURCE_SCRIPT_DIR, "spur-isolated-ui.sh"), "utf8");
+    const scriptSource = readFileSync(join(SOURCE_SCRIPT_DIR, "spur-sidecar-common.sh"), "utf8");
     const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
     if (!functionMatch) {
-      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+      throw new Error("could not extract node_satisfies_engines from spur-sidecar-common.sh");
     }
 
     expect(functionMatch[0]).not.toMatch(/process\.exit\(satisfied/);

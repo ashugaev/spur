@@ -7,6 +7,13 @@ REPO_ROOT="$(realpath "$SCRIPT_DIR/..")"
 # shellcheck source=./spur-sidecar-common.sh
 source "$SCRIPT_DIR/spur-sidecar-common.sh"
 
+# Runs first, before CONFIG_DIR's mktemp below: an engines hard-exit here
+# leaks nothing, since the cleanup trap that removes CONFIG_DIR isn't
+# registered until after this point. Also fixes both sidecars' probes onto
+# one node binary — see ensure_workspace_deps below, and the invariant this
+# guards in scripts/spur-sidecar-common.sh.
+ensure_node_ready
+
 PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
 AGENT_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_DAEMON" "$PORT_START" "$PORT_END")
@@ -106,6 +113,7 @@ exec "$NODE_BIN" "$CLI_PATH" --config "$CONFIG_DIR/config.yaml" "\$@"
 WRAPPER
 chmod +x "$ISOLATED_WRAPPER"
 
+ensure_workspace_deps
 ensure_v2_build
 
 if ! "$NODE_BIN" "$CLI_PATH" --version >/dev/null; then
@@ -113,7 +121,7 @@ if ! "$NODE_BIN" "$CLI_PATH" --version >/dev/null; then
   exit 1
 fi
 
-# isolated-ui waits for this file before replacing symlinked dependency trees.
+# isolated-ui waits for this file before starting its own dev server.
 # Publish it only after tsc finishes, and atomically so readers never source a
 # partial environment.
 cat > "$RUNTIME_TMP_FILE" <<ENVFILE
