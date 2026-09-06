@@ -2525,6 +2525,19 @@ export class SessionService {
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
   private readonly reopensInFlight = new Set<string>();
+  // Session ids with a scheduleHealedSidecarRestart task currently queued or
+  // running, mapped to that task. Claimed synchronously (`has`, before any
+  // await) so two classify passes that both observe the same
+  // errored->running transition schedule at most one restart task; the same
+  // map's values() let settleBackgroundSpawns drain every in-flight task
+  // alongside the other fire-and-forget work it already awaits.
+  private readonly sidecarHealTasks = new Map<string, Promise<void>>();
+  // Sidecar names a stopSidecar call is actively stopping, keyed by session
+  // id. scheduleHealedSidecarRestart reads this synchronously before it
+  // fires, so a heal triggered by stopSidecar's own trailing enrich never
+  // restarts the sidecar that call just stopped. Emptied (and the session
+  // key deleted) in stopSidecarLocked's finally.
+  private readonly suppressedSidecarHeals = new Map<string, Set<string>>();
   // Serializes lifecycle mutations that can kill, relaunch, write to, or
   // snapshot one session's agent and sidecar panes. Distinct from the pane
   // write lock: callers acquire lifecycle first, then pane-write. Helpers
@@ -2627,14 +2640,16 @@ export class SessionService {
 
   /**
    * Resolves once every in-flight fire-and-forget run has settled: background
-   * spawns, PR auto-detect checks, and the dashboard cache tick. Lets teardown
-   * drain async work whose writes and `gh` calls would otherwise land after the
+   * spawns, PR auto-detect checks, healed-sidecar restarts, and the dashboard
+   * cache tick. Lets teardown drain async work whose writes and `gh` calls
+   * would otherwise land after the
    * caller is gone.
    */
   async settleBackgroundSpawns(): Promise<void> {
     await Promise.allSettled([
       ...this.backgroundSpawnRuns,
       ...this.prCheckRuns,
+      ...this.sidecarHealTasks.values(),
       ...(this.dashboardCacheReady ? [this.dashboardCacheReady] : []),
     ]);
   }
@@ -6794,14 +6809,40 @@ export class SessionService {
     return sidecar ? sidecarOwnerId(session, sidecar) : session.id;
   }
 
+  // True when sidecarName or any sidecar it (transitively) dependsOn is in
+  // skipNames. Used to decide the fate of a dependent whose dependency the
+  // caller asked to skip (see startSidecarWithDependencies): the dependent
+  // is skipped too rather than started against a dependency the operator
+  // just stopped.
+  private sidecarDependencyChainSkipped(
+    sidecarName: string,
+    project: ProjectConfig,
+    skipNames: ReadonlySet<string> | undefined,
+    visited: Set<string> = new Set(),
+  ): boolean {
+    if (!skipNames || skipNames.size === 0) return false;
+    if (skipNames.has(sidecarName)) return true;
+    if (visited.has(sidecarName)) return false;
+    visited.add(sidecarName);
+    const sidecar = project.sidecars[sidecarName];
+    if (!sidecar) return false;
+    return (sidecar.dependsOn ?? []).some((dependency) =>
+      this.sidecarDependencyChainSkipped(dependency, project, skipNames, visited),
+    );
+  }
+
   private async startSidecarWithDependencies(args: {
     session: SessionRecord;
     project: ProjectConfig;
     sidecarName: string;
     sidecarDepth: number;
     clearPort?: number;
+    skipNames?: ReadonlySet<string>;
     onStarted: (name: string, sidecar: ProjectConfig["sidecars"][string]) => void;
   }): Promise<SessionRecord> {
+    if (this.sidecarDependencyChainSkipped(args.sidecarName, args.project, args.skipNames)) {
+      return args.session;
+    }
     let currentSession = args.session;
     const visited = new Set<string>();
 
@@ -7481,6 +7522,7 @@ export class SessionService {
   private async startAutoStartSidecars(
     session: SessionRecord,
     project: ProjectConfig,
+    skipNames?: ReadonlySet<string>,
   ): Promise<SessionRecord> {
     let updatedRecord = session;
     for (const [name, sidecar] of Object.entries(resolveSessionSidecars(session, project))) {
@@ -7492,6 +7534,7 @@ export class SessionService {
           project,
           sidecarName: name,
           sidecarDepth,
+          ...(skipNames ? { skipNames } : {}),
           onStarted: (startedName, startedSidecar) => {
             this.logEvent("session.sidecar.started", {
               level: "info",
@@ -7523,6 +7566,66 @@ export class SessionService {
       }
     }
     return updatedRecord;
+  }
+
+  // Called by reconcileStaleErroredSession right after it promotes a record
+  // errored -> running: that write undid an errored flip that may have torn
+  // down the session's non-mcp autoStart sidecars (teardownSessionSidecars),
+  // so this restarts them. Fire-and-forget by design: reconcileStaleErroredSession
+  // stays synchronous and its only caller (classifySessionRecord) can already
+  // be running under withWorkspaceLifecycleLocks (park, delivery, and after
+  // #844 also startSidecarLocked) — awaiting the restart here would reenter
+  // that non-reentrant lock. The task instead takes its own
+  // withWorkspaceLifecycleLocks call, which simply queues behind the
+  // holder's release.
+  //
+  // Writes no SessionRecord itself: startSidecarInternal persists its own
+  // reservations inline, and a whole-record write built from this function's
+  // pre-start snapshot would be the teardown-snapshot-clobber bug shape.
+  private scheduleHealedSidecarRestart(session: SessionRecord): void {
+    if (this.deliveryStopped) return;
+    const project = this.resolveProjectForSession(session);
+    if (!project) return;
+
+    // mcp sidecars are excluded: restarting one mid-session cannot rewire the
+    // running agent (its MCP config was frozen at launch). Names currently
+    // suppressed by an in-flight stopSidecar call are excluded too, so the
+    // heal never resurrects the sidecar that call just stopped.
+    const skipNames = new Set<string>();
+    for (const [name, sidecar] of Object.entries(resolveSessionSidecars(session, project))) {
+      if (sidecar.mcp) skipNames.add(name);
+    }
+    for (const name of this.suppressedSidecarHeals.get(session.id) ?? []) {
+      skipNames.add(name);
+    }
+
+    const hasRestartableSidecar = Object.entries(resolveSessionSidecars(session, project)).some(
+      ([name, sidecar]) => sidecar.autoStart && !skipNames.has(name),
+    );
+    if (!hasRestartableSidecar) return;
+
+    if (this.sidecarHealTasks.has(session.id)) return;
+
+    const task = (async () => {
+      await this.withWorkspaceLifecycleLocks(session.id, async () => {
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest || latest.status !== "running") return;
+        await this.startAutoStartSidecars(latest, project, skipNames);
+      });
+    })()
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.sidecar.autostart.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Healed-session sidecar restart failed for ${session.id}: ${message}`,
+        });
+      })
+      .finally(() => {
+        this.sidecarHealTasks.delete(session.id);
+      });
+    this.sidecarHealTasks.set(session.id, task);
   }
 
   // The single place both wake entry points (relaunchSessionInPlace, reached
@@ -11015,9 +11118,6 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
-    }
     const project = this.resolveProjectForSession(session);
     const sidecarNames = sessionSidecarNames(session, project);
     if (!sidecarNames.includes(sidecarName)) {
@@ -11027,32 +11127,55 @@ export class SessionService {
     const sidecar = project?.sidecars[sidecarName];
     const clearsWorkspaceReplay = sidecar !== undefined && !sidecar.mcp;
 
-    // A dead pane or an absent tmux session with no recorded identity means
-    // there is genuinely nothing left to reap.
-    const owner = readSession(this.config.dataDir, ownerId);
-    const alive = await sidecarTmuxAlive(ownerId, sidecarName);
-    if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
+    // Claimed synchronously before any await, and released in the finally
+    // below (which wraps the terminal `enrich` too): that enrich reclassifies
+    // the record and can heal-and-schedule an autoStart restart of the very
+    // sidecar this call is stopping (see scheduleHealedSidecarRestart). The
+    // claim has to still be live when that snapshot is taken, not merely
+    // when the kill happens, so the release cannot happen before the awaited
+    // enrich completes.
+    let suppressed = this.suppressedSidecarHeals.get(sessionId);
+    if (!suppressed) {
+      suppressed = new Set<string>();
+      this.suppressedSidecarHeals.set(sessionId, suppressed);
+    }
+    suppressed.add(sidecarName);
+    try {
+      // A dead pane or an absent tmux session with no recorded identity means
+      // there is genuinely nothing left to reap.
+      const owner = readSession(this.config.dataDir, ownerId);
+      const alive = await sidecarTmuxAlive(ownerId, sidecarName);
+      if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
+        if (clearsWorkspaceReplay) {
+          this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
+        }
+        return await this.enrich(session);
+      }
+
+      await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
       if (clearsWorkspaceReplay) {
         this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
       }
-      return this.enrich(session);
+      this.logEvent("session.sidecar.stopped", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+        details: {
+          sidecarName,
+          tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
+        },
+      });
+      return await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+    } finally {
+      const current = this.suppressedSidecarHeals.get(sessionId);
+      if (current) {
+        current.delete(sidecarName);
+        if (current.size === 0) {
+          this.suppressedSidecarHeals.delete(sessionId);
+        }
+      }
     }
-
-    await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
-    if (clearsWorkspaceReplay) {
-      this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
-    }
-    this.logEvent("session.sidecar.stopped", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
-      details: {
-        sidecarName,
-        tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
-      },
-    });
-    return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
   }
 
   // Report-first sweep for sidecar process trees no live session claims.
@@ -14646,6 +14769,7 @@ export class SessionService {
         processAlive: runtime.processAlive,
       },
     });
+    this.scheduleHealedSidecarRestart(updated);
     return updated;
   }
 

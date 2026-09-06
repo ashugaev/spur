@@ -1142,6 +1142,8 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  scheduleHealedSidecarRestart(session: SessionRecord): void;
+  sidecarHealTasks: Map<string, Promise<void>>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -15300,6 +15302,286 @@ describe("SessionService", () => {
     );
   });
 
+  it("restarts a non-mcp autoStart sidecar when it heals a stale errored session", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+
+    await vi.waitFor(() => {
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+    });
+
+    service.dispose();
+  });
+
+  it("performs no sidecar work healing a stale errored session whose only autoStart sidecar is mcp", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { mcpsvc: { command: "pnpm mcp", autoStart: true, mcp: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("excludes an mcp autoStart sidecar from a heal that also restarts a non-mcp sibling", async () => {
+    // Unlike the single-sidecar mcp test above, "dev" here makes
+    // scheduleHealedSidecarRestart's hasRestartableSidecar gate true on its
+    // own, so this exercises the mcp exclusion at the one remaining
+    // enforcement point — startSidecarWithDependencies's
+    // sidecarDependencyChainSkipped check — rather than that earlier gate.
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: true },
+            mcpsvc: { command: "pnpm mcp", autoStart: true, mcp: true },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "dev" }),
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "mcpsvc" }),
+    );
+
+    service.dispose();
+  });
+
+  it("keeps a healed session running without an error when its sidecar restart fails", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    createTmuxSidecarSessionMock.mockRejectedValueOnce(new Error("sidecar launch boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+
+    await vi.waitFor(() => {
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.sidecar.autostart.failed",
+          sessionId: "api-1",
+        }),
+      );
+    });
+
+    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
+
+    service.dispose();
+  });
+
+  it("starts the sidecar pane exactly once when two heals race for the same session", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    const record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    sessions.set("api-1", record);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = sessionServiceInternals(service);
+
+    // Both calls happen synchronously, before either task's first await —
+    // this is the concurrent-classify race the sidecarHealTasks claim
+    // guards, not the (already-impossible) two-service.get() shape.
+    internals.scheduleHealedSidecarRestart(record);
+    internals.scheduleHealedSidecarRestart(record);
+
+    await Promise.allSettled([...internals.sidecarHealTasks.values()]);
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("starts no healed sidecar restart on a disposed service", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+  });
+
   it("pauses a session without removing its worktree", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -25671,6 +25953,171 @@ describe("SessionService", () => {
       }),
     );
     expect(result.id).toBe("api-1");
+  });
+
+  it("stopSidecar reaps the pane on an errored record instead of throwing", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.stopSidecar("api-1", "dev");
+
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
+    expect(result.id).toBe("api-1");
+  });
+
+  it("stopSidecar on an errored record does not let the same-call heal resurrect the sidecar it just stopped", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: true },
+            other: { command: "pnpm other", autoStart: true },
+          },
+        },
+      },
+    });
+    // A bare readSession/writeSession pair (not createSessionStore, which also
+    // wires listSessionsMock): the dashboard-cache and attention-monitor
+    // background loops both enumerate via listSessions, and with a non-empty
+    // result they would classify (and independently heal) this same errored
+    // record concurrently with the stop call under test, confounding which
+    // classify pass's suppression state is actually being observed.
+    // listSessionsMock stays at its default `[]`, so stopSidecar's own
+    // trailing enrich is the only classify path touching this record.
+    let record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockImplementation(() => clone(record));
+    writeSessionMock.mockImplementation((_dataDir: string, updated: SessionRecord) => {
+      record = clone(updated);
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    // "dev" starts alive (so stop's own liveness check reaps it rather than
+    // short-circuiting as already-dead) and flips to dead once the kill
+    // actually runs — so a heal that is NOT suppressing "dev" observes it
+    // as dead and genuinely tries to restart it, instead of the mock
+    // reporting "still alive" and masking a resurrection as a no-op.
+    let devAlive = true;
+    sidecarTmuxAliveMock.mockImplementation(async (_id: string, name: string) =>
+      name === "dev" ? devAlive : false,
+    );
+    killTmuxSessionMock.mockImplementation(() => {
+      devAlive = false;
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.stopSidecar("api-1", "dev");
+
+    // Argument shape: createTmuxSidecarSession receives { sessionId,
+    // sidecarName, cwd, command, env }. "api-1--dev" (killTmuxSessionMock's
+    // argument) does not appear here.
+    await vi.waitFor(() => {
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "other" }),
+      );
+    });
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "dev" }),
+    );
+
+    service.dispose();
+  });
+
+  it("stopSidecar on an errored record does not let the heal restart a sibling whose stopped dependency it needs", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            db: { command: "pnpm db", autoStart: true },
+            web: { command: "pnpm web", autoStart: true, dependsOn: ["db"] },
+          },
+        },
+      },
+    });
+    // See the previous test: a bare readSession/writeSession pair, not
+    // createSessionStore, keeps listSessionsMock at its default `[]` so the
+    // background dashboard-cache and attention-monitor loops find nothing to
+    // classify and cannot confound this record's single stop-triggered heal.
+    let record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["db", "web"],
+    };
+    readSessionMock.mockImplementation(() => clone(record));
+    writeSessionMock.mockImplementation((_dataDir: string, updated: SessionRecord) => {
+      record = clone(updated);
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    sidecarTmuxAliveMock.mockImplementation(async (_id: string, name: string) => name === "db");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.stopSidecar("api-1", "db");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+
+    service.dispose();
   });
 
   it("get lists sidecars from the session worktree config", async () => {
