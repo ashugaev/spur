@@ -11786,7 +11786,18 @@ export class SessionService {
     return session;
   }
 
-  private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
+  // `paneAlreadyConfirmedGone`: set only by a caller that has JUST killed and
+  // confirmed dead this exact pane itself (switchAuth's relaunch path, via
+  // killAgentPaneAndConfirmExit) — there, a timeout-killed probe right after
+  // is not ambiguous, the caller already knows the pane is gone, and refusing
+  // to relaunch would strand the session pane-dead with the new account
+  // already persisted. Every other caller (the delivery loop, send(),
+  // restore()) has NOT just killed anything, so a timeout-killed probe there
+  // stays ambiguous and defaults to refusing recovery.
+  private async ensureSessionReadyForSend(
+    session: SessionRecord,
+    options?: { paneAlreadyConfirmedGone?: boolean },
+  ): Promise<SessionRecord> {
     const presence = await getTmuxSessionPresence(session.tmuxSession);
     const runtimeAlive = presence.present;
     let processAlive = false;
@@ -11798,7 +11809,7 @@ export class SessionService {
       if (processAlive) {
         return this.captureAgentSessionId(session, 0);
       }
-    } else if (presence.unresponsive) {
+    } else if (presence.unresponsive && options?.paneAlreadyConfirmedGone !== true) {
       // A timeout-killed tmux probe is ambiguous, not confirmed absence: below
       // this point a "not ready" verdict falls into relaunchSessionInPlace,
       // which kills the pane (killAgentPaneAndConfirmExit) and relaunches —
@@ -12900,7 +12911,12 @@ export class SessionService {
     //
     const recoveryTarget = readSession(this.config.dataDir, sessionId) ?? updated;
     await this.killAgentPaneAndConfirmExit(recoveryTarget, { failOnSurvivors: true });
-    const relaunched = await this.ensureSessionReadyForSend(recoveryTarget);
+    // The pane's death is already confirmed above, by this call's own kill —
+    // a timeout-killed probe here is not ambiguous the way it is for every
+    // other ensureSessionReadyForSend caller, so it must not refuse to relaunch.
+    const relaunched = await this.ensureSessionReadyForSend(recoveryTarget, {
+      paneAlreadyConfirmedGone: true,
+    });
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
@@ -13986,8 +14002,8 @@ export class SessionService {
       ? await getTmuxPanePresence(session.tmuxSession, { fresh })
       : null;
     // panePresence is non-null exactly when runtimeAlive (assigned by the same
-    // condition just above) — no fallback needed on either read below.
-    const paneUsable = runtimeAlive ? !panePresence!.dead : false;
+    // condition just above) — narrow on the value itself rather than assert.
+    const paneUsable = panePresence ? !panePresence.dead : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
@@ -13999,7 +14015,7 @@ export class SessionService {
     // sessionsUnresponsive only matters when the session read itself came up
     // absent, panesUnresponsive only when the pane read came up dead.
     const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
-    const panesUnresponsive = runtimeAlive && !paneUsable && panePresence!.unresponsive;
+    const panesUnresponsive = panePresence !== null && !paneUsable && panePresence.unresponsive;
     return {
       runtimeAlive,
       paneUsable,

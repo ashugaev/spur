@@ -7628,6 +7628,47 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    // SHOULD FIX (reviewer, round 3): switchAuthLocked's relaunch already
+    // killed and confirmed the pane dead via killAgentPaneAndConfirmExit
+    // BEFORE ensureSessionReadyForSend runs — a timeout-killed probe there is
+    // not ambiguous the way it is for every other caller (the delivery loop,
+    // send(), restore()), and refusing to relaunch would strand the session
+    // pane-dead with the new account already persisted. Contrast with the
+    // preceding "migration" test (a genuinely absent tmux, unresponsive:false,
+    // relaunches exactly the same way).
+    it("migration relaunch still proceeds when the post-kill probe is itself killed by its own timeout", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      seedAccounts();
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      const expectedHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
+      mkdirSync(expectedHome, { recursive: true });
+      killTmuxSessionMock.mockImplementation(async () => {
+        // killAgentPaneAndConfirmExit's own confirmation reads `ps`, not
+        // tmux (isProcessRunningInTmuxMock, already false by default) — a
+        // tmux-only hang here does not block the kill from completing.
+        getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("api-1", "backup", {
+        reason: "manual",
+        force: true,
+      });
+
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
+      expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+        "claude",
+        "session-uuid",
+        expect.any(String),
+        expect.anything(),
+      );
+      service.dispose();
+    });
+
     it("in-place swap: session home exists — swaps credentials without kill/relaunch", async () => {
       const sessions = createSessionStore();
       const sessionHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
