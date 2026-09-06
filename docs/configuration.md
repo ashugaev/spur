@@ -410,6 +410,8 @@ Each pass logs `session.sidecar.reaped` per kill with the matched rule and freed
 
 Every session view (`GET /sessions`, `GET /sessions/<id>`, dashboard) carries each sidecar's `ageSeconds` (omitted when unresolvable) and `ageWarn` (true at `maxAgeWarnMinutes`, the same threshold as the event). The session detail page, the dashboard sidecars row, and `spur list` ([list](commands.md#list)) render the age and mark an over-threshold one.
 
+`deadPane` (omitted when false) marks a sidecar whose tmux session exists but whose pane exited (`remain-on-exit`, same `alive`/`dead` split as [ports](commands.md#sidecars)); the session detail page keeps its Terminal button reachable but shows the Start action.
+
 Cross-workspace port collision: a sidecar start refuses when this workspace's recorded reservation for this sidecar matches a live other workspace's recorded reservation for a non-MCP sidecar in the same project AND that port is free right now. The error names the holding workspace and sidecar; stop that sidecar or its session first — Spur reuses no pane and reaps nothing across a workspace boundary. Refuses nothing: a shared `ports` range alone, an occupied colliding port (the start scans for another free port), a same-workspace sidecar, another project, a holder with no live pane, an explicit `clearPort`.
 
 ## Stale mode
