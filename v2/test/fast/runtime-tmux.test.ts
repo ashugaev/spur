@@ -105,7 +105,7 @@ describe("runtime-tmux", () => {
   // AC2: a capture-pane killed by its own timeout must never surface as a
   // thrown error out of captureTmuxPane — the sweep continues to the next
   // session on a plain "".
-  it("AC2: captureTmuxPane resolves \"\" when capture-pane is killed by its own timeout", async () => {
+  it('AC2: captureTmuxPane resolves "" when capture-pane is killed by its own timeout', async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args[0] === "capture-pane") {
         throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });

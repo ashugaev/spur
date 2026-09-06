@@ -449,9 +449,8 @@ describe("runtime-tmux shared probe cache", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { getTmuxSessionPresence, getTmuxPanePresence } = await import(
-      "../../src/runtime-tmux.js"
-    );
+    const { getTmuxSessionPresence, getTmuxPanePresence } =
+      await import("../../src/runtime-tmux.js");
 
     await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
       present: false,
