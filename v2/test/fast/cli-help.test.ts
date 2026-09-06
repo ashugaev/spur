@@ -319,6 +319,11 @@ describe("argvWithoutStrayHelpFlags", () => {
     expect(
       argvWithoutStrayHelpFlags(program, ["node", "spur", "--config=/p", "bogus", "-h"]),
     ).toEqual(["node", "spur", "--config=/p", "bogus"]);
+    // Space form: --config's required-arg value ("/p") must be consumed as
+    // its own token, not mistaken for the command word.
+    expect(
+      argvWithoutStrayHelpFlags(program, ["node", "spur", "--config", "/p", "bogus", "-h"]),
+    ).toEqual(["node", "spur", "--config", "/p", "bogus"]);
     expect(argvWithoutStrayHelpFlags(program, ["node", "spur", "bogus", "-h", "--force"])).toEqual([
       "node",
       "spur",

@@ -4052,30 +4052,26 @@ export function argvWithoutStrayHelpFlags(program: Command, argv: string[]): str
   const knownCommands = new Set(
     program.commands.flatMap((command) => [command.name(), ...command.aliases()]),
   );
-  // Value-taking top-level options consume their next argv entry so its
+  // Required-arg top-level options consume their next argv entry so its
   // value is never mistaken for the command word — derived from
   // program.options rather than hardcoding "--config" so a future top-level
   // option is covered automatically. Matched by exact token only: the equals
   // form (`--config=/p`) carries its own value and must not consume the
-  // following entry.
-  const valueTakingFlags = new Set(
+  // following entry. No top-level optional-arg option exists today (an
+  // optional-arg option's own value can start with "-", so consuming it
+  // unconditionally would be wrong) — add that distinction here if one is
+  // ever registered, not before.
+  const requiredArgFlags = new Set(
     program.options
-      .filter((option) => option.required || option.optional)
+      .filter((option) => option.required)
       .flatMap((option) => [option.short, option.long].filter((flag): flag is string => !!flag)),
   );
   let commandWord: string | undefined;
   let commandIndex = -1;
   for (let index = 2; index < argv.length; index += 1) {
     const token = argv[index];
-    if (token !== undefined && valueTakingFlags.has(token)) {
-      const next = argv[index + 1];
-      // Commander's own rule: a required-arg option always consumes the
-      // next token; an optional-arg option consumes it only when it does
-      // not itself look like a flag.
-      const option = program.options.find((opt) => opt.short === token || opt.long === token);
-      if (option?.required || (option?.optional && next !== undefined && !next.startsWith("-"))) {
-        index += 1;
-      }
+    if (token !== undefined && requiredArgFlags.has(token)) {
+      index += 1;
       continue;
     }
     if (token?.startsWith("-")) {
