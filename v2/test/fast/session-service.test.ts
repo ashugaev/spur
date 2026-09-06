@@ -16769,6 +16769,88 @@ describe("SessionService", () => {
       }
     });
 
+    // AC-a: stopping a sidecar signals its recorded tree before tmux is
+    // destroyed, and leaves no survivor — even when the tmux pane is
+    // ALREADY gone (getTmuxPanePid resolves null throughout), which forces
+    // teardownSessionSidecars' signalSidecarPane call into its blind branch.
+    // The recorded identity is the ONLY thing that can still find this
+    // process. Discriminator: revert ONLY the teardownSessionSidecars
+    // fallback argument (drop the `fallback` passed to signalSidecarPane at
+    // its `:11106`-era call site) and this test reds because the synthetic
+    // process survives — the unit-level signalSidecarPane tests in
+    // reap.test.ts still pass on their own.
+    it("AC-a: teardownSessionSidecars reaps the recorded identity when the pane is already gone, leaving no survivor", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      // Backgrounds `sleep 30` and exits immediately: the child keeps the
+      // parent's pgid (no setsid) and stays alive after the parent exits —
+      // the exact leaderless-group shape reapRecordedIdentity's fallback
+      // reaps via cwd containment once the recorded pid (the exited bash)
+      // reads as "gone".
+      const bash = spawnChildProcess("bash", ["-c", "sleep 30 & exit 0"], {
+        stdio: "ignore",
+        detached: true,
+        cwd: TEST_DATA_DIR,
+      });
+      const bashPid = bash.pid;
+      expect(bashPid).toBeDefined();
+      if (bashPid === undefined) {
+        throw new Error("expected a spawned pid");
+      }
+      await new Promise<void>((resolve) => bash.once("exit", () => resolve()));
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: TEST_DATA_DIR,
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        sidecarNames: ["dev"],
+        sidecarProcs: { dev: { pid: bashPid, pgid: bashPid, starttime: 0 } },
+      });
+      // The tmux pane is already gone by the time teardown runs — the only
+      // path left to the still-alive backgrounded `sleep` is the recorded
+      // identity.
+      getTmuxPanePidMock.mockResolvedValue(null);
+      // snapshotProcesses is mocked for this whole file; give it a REAL ps
+      // snapshot (bypassing the mock via importActual) so
+      // reapLeaderlessGroup's `snapshot.byPgid.get(identity.pgid)` lookup
+      // actually finds the still-alive backgrounded `sleep`.
+      const reapActual = await vi.importActual<typeof reapModule>("../../src/sidecars/reap.js");
+      snapshotProcessesMock.mockImplementation(() => reapActual.snapshotProcesses());
+
+      try {
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const completePromise = service.complete("api-1");
+        await vi.advanceTimersByTimeAsync(1_500);
+        await completePromise;
+
+        expect(() => process.kill(-bashPid, 0)).toThrow();
+      } finally {
+        try {
+          process.kill(-bashPid, "SIGKILL");
+        } catch {
+          // already gone (the reap itself should have killed it)
+        }
+      }
+    });
+
     it("refuses a fresh reservation on a completed anchor's shared port while a member is live, and accepts it once every member is terminal", async () => {
       loadConfigMock.mockReturnValue(daemonSidecarProjectConfig());
       const sessions = createSessionStore();
@@ -25208,6 +25290,103 @@ describe("SessionService", () => {
       /Sidecar "dev" exited immediately after launch/,
     );
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
+  });
+
+  // AC-d: the identity capture is hoisted above verifySidecarStartup so the
+  // failed-start catch's reapSidecarByName can read the identity off disk
+  // before clearSidecarProcEntry drops it. Ordering discriminator (not a
+  // presence assertion, per the spec): wrap readSessionMock to record what
+  // `owner.sidecarProcs?.dev` looked like on EVERY read of "api-1", then
+  // assert a read saw the {pid,pgid,starttime} identity BEFORE the final
+  // read (after clearSidecarProcEntry) sees it gone. Moving the write back
+  // below verifySidecarStartup makes every read in this failed-start chain
+  // see `undefined` — the assertion never finds the identity at all.
+  it("AC-d: persists the sidecar identity before verifySidecarStartup, so the failed-start catch reads it before it is cleared", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: { command: "bash -c 'echo boom; exit 1'", autoStart: false },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["dev"],
+    });
+    tmuxPaneDeadMock.mockResolvedValue(true);
+    captureTmuxPaneMock.mockResolvedValue("boom\n");
+    // The identity capture needs a pid whose /proc/<pid>/stat is real and
+    // readable: a disposable, group-isolated (`detached: true`) child of
+    // THIS test, never the test worker's own pid. It is never actually
+    // signaled: `snapshotProcesses` stays mocked `ok: false` for the whole
+    // test, so reapRecordedIdentity's fallback bails out before ever
+    // building a tree — this test proves the identity reached disk and was
+    // read, not that a kill happened (that's AC-a, in reap.test.ts).
+    const child = spawnChildProcess("bash", ["-c", "sleep 30"], {
+      stdio: "ignore",
+      detached: true,
+    });
+    const childPid = child.pid;
+    expect(childPid).toBeDefined();
+    getTmuxPanePidMock.mockResolvedValueOnce(childPid ?? null).mockResolvedValue(null);
+    // Host safety belt-and-suspenders: guarantees reapRecordedIdentity's
+    // fallback bails at its own `if (!snapshot.ok) return null` before ever
+    // building a tree from this pid.
+    snapshotProcessesMock.mockResolvedValue({ ok: false, byPid: new Map(), byPgid: new Map() });
+
+    const seenIdentityOnRead: Array<unknown> = [];
+    const baseReadImpl = readSessionMock.getMockImplementation();
+    readSessionMock.mockImplementation((dataDir: string, sessionId: string) => {
+      const result = baseReadImpl?.(dataDir, sessionId);
+      if (sessionId === "api-1") {
+        seenIdentityOnRead.push(
+          (result as { sidecarProcs?: Record<string, unknown> } | null)?.sidecarProcs?.["dev"],
+        );
+      }
+      return result;
+    });
+
+    try {
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+        /Sidecar "dev" exited immediately after launch/,
+      );
+    } finally {
+      if (childPid !== undefined) {
+        try {
+          process.kill(-childPid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
+
+    const identityIndex = seenIdentityOnRead.findIndex((v) => v !== undefined);
+    expect(identityIndex).toBeGreaterThanOrEqual(0);
+    // The LAST read of this record — after clearSidecarProcEntry's own
+    // read-then-write — sees the identity cleared, not just the one read
+    // that observed it (reapSidecarByName and clearSidecarProcEntry each
+    // read it once, in that order, before the clear lands).
+    expect(seenIdentityOnRead.at(-1)).toBeUndefined();
+    expect(sessions.get("api-1")?.sidecarProcs).toBeUndefined();
   });
 
   it("startSidecar does not block or roll back a new URL sidecar when readiness fails", async () => {
