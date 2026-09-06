@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { loadConfig } from "./config.js";
+import { isDefaultInstanceConfigPath, loadConfig } from "./config.js";
+import { SPUR_SIDECAR_NAME_ENV } from "./sidecar-runtime.js";
 import {
   type ConnectProjectConfigRequest,
   type DisconnectProjectConfigRequest,
@@ -288,16 +289,35 @@ async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<vo
   }
 }
 
-function spawnDaemon(cliEntrypoint: string, configPath: string): void {
+function spawnDaemon(
+  cliEntrypoint: string,
+  configPath: string,
+  reason: "autostart" | "restart",
+): void {
   // SPUR_DISABLE_AUTOSTART blocks CLI auto-spawn so the daemon is only ever
   // started by an external manager (e.g. systemd on the prod VM). Without
   // this guard, a CLI invocation during a restart window can fork a daemon
   // outside the service cgroup, win the :4310 bind race, and put
-  // spur-daemon.service into an EADDRINUSE crash loop.
+  // spur-daemon.service into an EADDRINUSE crash loop. This guard applies to
+  // both reasons, unconditionally.
   if (process.env.SPUR_DISABLE_AUTOSTART === "1") {
     throw new Error(
       "Spur daemon is unreachable and SPUR_DISABLE_AUTOSTART=1; this managed instance must come back through the repo deploy or service restart flow.",
     );
+  }
+  if (reason === "autostart") {
+    const sessionId = process.env.SPUR_SESSION?.trim() ?? "";
+    const sidecarName = process.env[SPUR_SIDECAR_NAME_ENV]?.trim() ?? "";
+    if (sessionId !== "" || sidecarName !== "") {
+      throw new Error(
+        `Spur daemon at ${configPath} is unreachable and this is a Spur session context (SPUR_SESSION=${sessionId || sidecarName}); a session pane must not fork a daemon. Start it from a host shell: \`systemctl --user restart spur-daemon\` (npm install) or \`spur daemon start\`.`,
+      );
+    }
+    if (!isDefaultInstanceConfigPath(configPath)) {
+      throw new Error(
+        `Spur daemon for ${configPath} is unreachable; a non-default instance config never auto-starts. Start it explicitly: \`spur --config ${configPath} daemon start\`, or for an isolated sidecar \`spur sidecar start --name isolated-daemon\`.`,
+      );
+    }
   }
   const child = spawn(
     process.execPath,
@@ -367,7 +387,7 @@ export async function restartDaemonIfRunning(
   // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
   let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS);
   if (!runtime) {
-    spawnDaemon(cliEntrypoint, resolvedConfigPath);
+    spawnDaemon(cliEntrypoint, resolvedConfigPath, "restart");
     runtime = await waitForReadyDaemon(baseUrl);
   }
   if (!runtime) {
@@ -393,7 +413,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     probe = await probeDaemon(baseUrl);
   }
   if (probe.state === "unreachable") {
-    spawnDaemon(cliEntrypoint, resolvedConfigPath);
+    spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
   }
 
   for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
@@ -406,7 +426,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
       await stopIncompatibleDaemon(baseUrl, probe.pid);
       probe = await probeDaemon(baseUrl);
       if (probe.state === "unreachable") {
-        spawnDaemon(cliEntrypoint, resolvedConfigPath);
+        spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
       }
     }
   }

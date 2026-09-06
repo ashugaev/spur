@@ -4,6 +4,7 @@ import { SPUR_DAEMON_API_VERSION } from "../../src/types.js";
 const spawnMock = vi.fn();
 const sleepMock = vi.fn().mockResolvedValue(undefined);
 const loadConfigMock = vi.fn();
+const isDefaultInstanceConfigPathMock = vi.fn();
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
@@ -15,6 +16,7 @@ vi.mock("node:timers/promises", () => ({
 
 vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
+  isDefaultInstanceConfigPath: isDefaultInstanceConfigPathMock,
 }));
 
 function runtimeInfo(apiVersion = SPUR_DAEMON_API_VERSION, pid = 4242) {
@@ -42,12 +44,15 @@ async function loadClientModule() {
 describe("client.ensureServer", () => {
   beforeEach(() => {
     vi.stubEnv("SPUR_DISABLE_AUTOSTART", undefined);
+    vi.stubEnv("SPUR_SESSION", "");
+    vi.stubEnv("SPUR_SIDECAR_NAME", "");
     spawnMock.mockReset().mockReturnValue({ unref: vi.fn() });
     sleepMock.mockClear();
     loadConfigMock.mockReset().mockReturnValue({
       configPath: "/tmp/spur.yaml",
       server: { host: "127.0.0.1", port: 4310 },
     });
+    isDefaultInstanceConfigPathMock.mockReset().mockReturnValue(true);
     vi.stubGlobal("fetch", vi.fn());
   });
 
@@ -271,6 +276,79 @@ describe("client.ensureServer", () => {
     await expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
       /SPUR_DISABLE_AUTOSTART/,
     );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses implicit auto-start from a session pane and never spawns", async () => {
+    vi.stubEnv("SPUR_SESSION", "sess-1");
+    vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
+      /session pane must not fork a daemon/,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses implicit auto-start from a sidecar and never spawns", async () => {
+    vi.stubEnv("SPUR_SIDECAR_NAME", "isolated-daemon");
+    vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
+      /session pane must not fork a daemon/,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses implicit auto-start for a non-default instance config and never spawns", async () => {
+    isDefaultInstanceConfigPathMock.mockReturnValue(false);
+    vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
+      /non-default instance config never auto-starts/,
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("restartDaemonIfRunning still spawns under a non-default config and with SPUR_SESSION set", async () => {
+    isDefaultInstanceConfigPathMock.mockReturnValue(false);
+    vi.stubEnv("SPUR_SESSION", "sess-1");
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
+    fetchMock.mockRejectedValueOnce(new Error("daemon stopped"));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      fetchMock.mockRejectedValueOnce(new Error("still down"));
+    }
+    fetchMock
+      .mockRejectedValueOnce(new Error("starting"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(runtimeInfo(undefined, 8888)), { status: 200 }),
+      );
+
+    const { restartDaemonIfRunning } = await loadClientModule();
+    const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");
+
+    expect(result.restarted).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(4242, "SIGTERM");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("restartDaemonIfRunning still throws under SPUR_DISABLE_AUTOSTART=1 and never spawns", async () => {
+    vi.stubEnv("SPUR_DISABLE_AUTOSTART", "1");
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
+    fetchMock.mockRejectedValueOnce(new Error("daemon stopped"));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      fetchMock.mockRejectedValueOnce(new Error("still down"));
+    }
+
+    const { restartDaemonIfRunning } = await loadClientModule();
+    await expect(
+      restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml"),
+    ).rejects.toThrow(/SPUR_DISABLE_AUTOSTART/);
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
