@@ -33886,6 +33886,14 @@ describe("SessionService", () => {
         .filter((entry) => entry.event === "session.pipeline.stalled");
     }
 
+    function mustGetSession(sessions: Map<string, SessionRecord>, id: string): SessionRecord {
+      const session = sessions.get(id);
+      if (!session) {
+        throw new Error(`fixture session missing: ${id}`);
+      }
+      return session;
+    }
+
     // waitForPipelineStep's poll sleep is `node:timers/promises`' real
     // setTimeout (the mock's default beforeEach implementation delegates to
     // it), which fake timers do not drive: advancing vi's mocked clock never
@@ -33914,7 +33922,7 @@ describe("SessionService", () => {
 
         // The session leaves "running" out from under the still-running
         // pipeline record (drift, not a "ready"/"errored" write).
-        sessions.set("api-1", { ...sessions.get("api-1")!, status: "completed" });
+        sessions.set("api-1", { ...mustGetSession(sessions, "api-1"), status: "completed" });
         await realPoll();
 
         expect(stalledEvents()).toHaveLength(1);
@@ -33958,7 +33966,7 @@ describe("SessionService", () => {
         await realPoll();
         expect(stalledEvents()).toEqual([]);
 
-        sessions.set("api-1", { ...sessions.get("api-1")!, status: "completed" });
+        sessions.set("api-1", { ...mustGetSession(sessions, "api-1"), status: "completed" });
         await realPoll();
 
         expect(stalledEvents()).toHaveLength(1);
@@ -33984,7 +33992,7 @@ describe("SessionService", () => {
 
       try {
         await realPoll();
-        sessions.set("api-1", { ...sessions.get("api-1")!, status: "completed" });
+        sessions.set("api-1", { ...mustGetSession(sessions, "api-1"), status: "completed" });
         await realPoll();
 
         expect(stalledEvents()).toHaveLength(1);
@@ -34033,10 +34041,30 @@ describe("SessionService", () => {
       try {
         await realPoll();
         sessions.set("api-1", {
-          ...sessions.get("api-1")!,
+          ...mustGetSession(sessions, "api-1"),
           status: "stopped",
           stopReason: "stale_timeout",
         });
+        await realPoll();
+
+        expect(stalledEvents()).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("does not log a stall when the session was killed", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore();
+      sessions.set("api-1", pipelineStallSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await realPoll();
+        sessions.set("api-1", { ...mustGetSession(sessions, "api-1"), status: "killed" });
         await realPoll();
 
         expect(stalledEvents()).toEqual([]);

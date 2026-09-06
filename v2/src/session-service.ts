@@ -13811,7 +13811,10 @@ export class SessionService {
     if (!session?.pipeline || session.pipeline.status !== "running") {
       return;
     }
-    if (session.status === "stopped" && session.stopReason !== undefined) {
+    if (
+      session.status === "killed" ||
+      (session.status === "stopped" && session.stopReason !== undefined)
+    ) {
       return;
     }
 

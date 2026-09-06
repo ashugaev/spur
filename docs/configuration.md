@@ -447,7 +447,7 @@ GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `gr
 
 Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
 
-Pipeline events: `session.pipeline.step_sent` (`details: { stepIndex, totalSteps }`, `stepIndex` 1-based), `session.pipeline.completed` (no details), `session.pipeline.errored` (`details: { nextStepIndex, awaitingStepIndex }`, 0-based), `session.pipeline.stalled` (the session left `running` while `pipeline.status` still reads `running`; suppressed for a resumable pause/park; `details: { awaitingStepIndex, nextStepIndex, totalSteps, stepsPending, sessionStatus, stopReason }`, 0-based).
+Pipeline events: `session.pipeline.step_sent` (payload above), `session.pipeline.completed` (no details), `session.pipeline.errored` (`details: { nextStepIndex, awaitingStepIndex }`, 0-based), `session.pipeline.stalled` (the session left `running` while `pipeline.status` still reads `running`; suppressed for a kill or a resumable pause/park; `details: { awaitingStepIndex, nextStepIndex, totalSteps, stepsPending, sessionStatus, stopReason }`, 0-based).
 
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
 
