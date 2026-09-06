@@ -42,7 +42,9 @@ describe("renderSidecarSweepResult", () => {
     const result: SidecarSweepResult = {
       supported: true,
       leaked: [tree({ rootPid: 500 })],
-      reaped: [{ sessionName: "leaked:500", panePid: 500, survivors: [501, 502], blindKill: false }],
+      reaped: [
+        { sessionName: "leaked:500", panePid: 500, survivors: [501, 502], blindKill: false },
+      ],
     };
     const output = renderSidecarSweepResult(result);
     expect(output).toContain("[partial]");

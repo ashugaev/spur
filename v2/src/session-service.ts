@@ -10965,8 +10965,7 @@ export class SessionService {
   private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
     const owner = readSession(this.config.dataDir, ownerId);
     const identity = owner?.sidecarProcs?.[sidecarName];
-    const fallback =
-      owner && identity ? { identity, worktreePath: owner.worktreePath } : undefined;
+    const fallback = owner && identity ? { identity, worktreePath: owner.worktreePath } : undefined;
     const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName), fallback);
     this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
     return outcome;
