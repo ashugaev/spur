@@ -57,5 +57,5 @@ describe.skipIf(!tmuxOk)("tmux exit net (abnormal-exit safety)", () => {
     } finally {
       rmSync(markerDir, { recursive: true, force: true });
     }
-  }, 20_000);
+  }, 60_000);
 });

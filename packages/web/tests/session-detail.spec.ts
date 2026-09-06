@@ -3535,6 +3535,59 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByText(/worktrees\/detail-s5-2/)).toBeVisible();
   });
 
+  test("token usage states render and an exhausted session cannot restore", async ({ page }) => {
+    const sessions = [
+      makeWorkingSession({
+        id: "detail-s5-token-waiting",
+        tokenUsageView: { status: "waiting", budget: 2_000, exhausted: false },
+      }),
+      makeWorkingSession({
+        id: "detail-s5-token-available",
+        tokenUsageView: {
+          status: "available",
+          inputTokens: 1_000,
+          outputTokens: 234,
+          totalTokens: 1_234,
+          budget: 2_000,
+          exhausted: false,
+        },
+      }),
+      makeWorkingSession({
+        id: "detail-s5-token-unavailable",
+        agent: "cursor",
+        tokenUsageView: {
+          status: "unavailable",
+          budget: 2_000,
+          exhausted: false,
+          unenforced: true,
+        },
+      }),
+      makeStoppedSession({
+        id: "detail-s5-token-exhausted",
+        stopReason: "token_budget",
+        tokenUsageView: {
+          status: "available",
+          inputTokens: 1_700,
+          outputTokens: 300,
+          totalTokens: 2_000,
+          budget: 2_000,
+          exhausted: true,
+        },
+      }),
+    ];
+    for (const session of sessions) await mockSessionDetail(page, session);
+
+    await page.goto("/sessions/detail-s5-token-waiting");
+    await expect(page.getByText("Waiting for usage")).toBeVisible();
+    await page.goto("/sessions/detail-s5-token-available");
+    await expect(page.getByText("1,234 / 2,000")).toBeVisible();
+    await page.goto("/sessions/detail-s5-token-unavailable");
+    await expect(page.getByText("Unavailable · budget unenforced")).toBeVisible();
+    await page.goto("/sessions/detail-s5-token-exhausted");
+    await expect(page.getByText("2,000 / 2,000 · limit hit")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+  });
+
   test("copy workspace access entries are visible when configured", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s5-3",

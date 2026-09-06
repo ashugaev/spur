@@ -142,6 +142,18 @@ function displayLinkLabel(label: string, url: string): string {
   return label;
 }
 
+function tokenUsageLabel(session: Pick<SpurSessionView, "tokenUsageView">): string {
+  const usage = session.tokenUsageView;
+  if (!usage) return "Waiting for usage";
+  if (usage.status === "unavailable") {
+    return usage.unenforced ? "Unavailable · budget unenforced" : "Unavailable";
+  }
+  if (usage.status === "waiting") return "Waiting for usage";
+  const used = usage.totalTokens.toLocaleString();
+  const value = usage.budget === undefined ? used : `${used} / ${usage.budget.toLocaleString()}`;
+  return usage.exhausted ? `${value} · limit hit` : value;
+}
+
 function splitSessionLinks(
   links: DashboardSession["links"],
   sidecarLinkLabels: Set<string>,
@@ -2941,7 +2953,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
-            {isRestorable(session) ? (
+            {isRestorable(session) && session.tokenUsageView?.exhausted !== true ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
                 aria-label={busyAction === "restore" ? "Restoring session" : undefined}
@@ -3427,6 +3439,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
+                  ["Tokens", tokenUsageLabel(session)],
                   ...(wakeSummary && wakeCountdown
                     ? ([
                         ["Wake", wakeSummary.label],

@@ -1470,6 +1470,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const tokenBudget = asOptionalPositiveInteger(raw["tokenBudget"], `${label}.tokenBudget`);
   const staleAfterMinutes = asNonNegativeNumber(
     raw["staleAfterMinutes"],
     `${label}.staleAfterMinutes`,
@@ -1572,6 +1573,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     backlog,
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
     ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }

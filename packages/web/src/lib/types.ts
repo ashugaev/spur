@@ -298,6 +298,23 @@ export interface SessionDailyWakeState {
   message: string;
   stopCondition: string;
 }
+export type SpurSessionTokenUsageView =
+  | {
+      status: "available";
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      budget?: number;
+      exhausted: boolean;
+    }
+  | { status: "waiting"; budget?: number; exhausted: false }
+  | {
+      status: "unavailable";
+      budget?: number;
+      exhausted: false;
+      unenforced: boolean;
+    };
+
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -353,6 +370,7 @@ export interface SpurSessionView {
     enabled: boolean;
     conditions?: string;
   };
+  tokenUsageView?: SpurSessionTokenUsageView;
 }
 
 export type SpurTodoActor =
@@ -702,6 +720,7 @@ export interface DashboardSession {
     enabled: boolean;
     conditions?: string;
   };
+  tokenUsageView?: SpurSessionTokenUsageView;
 }
 
 export interface SpawnOverrides {
@@ -784,6 +803,7 @@ export function toDashboardSession(
       : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
+    ...(session.tokenUsageView ? { tokenUsageView: session.tokenUsageView } : {}),
   };
 }
 

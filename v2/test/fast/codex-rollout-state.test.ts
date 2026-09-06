@@ -229,6 +229,107 @@ describe("readCodexRolloutState", () => {
     });
   });
 
+  it("uses provider total_tokens without adding cached or reasoning subsets", async () => {
+    const sessionsDir = await makeSessionsDir(
+      JSON.stringify({
+        timestamp: "2026-06-28T09:03:41.314Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: 90,
+              cached_input_tokens: 50,
+              output_tokens: 30,
+              reasoning_output_tokens: 20,
+              total_tokens: 120,
+            },
+          },
+        },
+      }),
+      "rollout-usage.jsonl",
+    );
+    expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toMatchObject({
+      inputTokens: 90,
+      outputTokens: 30,
+      totalTokens: 120,
+    });
+  });
+
+  it("selects token-only files by the token event timestamp, not file mtime", async () => {
+    const tokenLine = (timestamp: string, totalTokens: number) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: totalTokens - 10,
+              output_tokens: 10,
+              total_tokens: totalTokens,
+            },
+          },
+        },
+      });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "newer-mtime.jsonl",
+        content: tokenLine("2026-06-28T09:00:00.000Z", 100),
+        mtimeMs: 2_000_000_000_000,
+      },
+      {
+        filename: "newer-event.jsonl",
+        content: tokenLine("2026-06-28T10:00:00.000Z", 200),
+        mtimeMs: 1_000_000_000_000,
+      },
+    ]);
+
+    expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toMatchObject({
+      sourceId: join(sessionsDir, "2026", "04", "19", "newer-event.jsonl"),
+      totalTokens: 200,
+      observedAtMs: Date.parse("2026-06-28T10:00:00.000Z"),
+    });
+  });
+
+  it("keeps token usage bound to the selected active rollout", async () => {
+    const tokenLine = (timestamp: string, totalTokens: number) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: totalTokens - 10,
+              output_tokens: 10,
+              total_tokens: totalTokens,
+            },
+          },
+        },
+      });
+    const active = [
+      tokenLine("2026-06-28T09:00:00.000Z", 100),
+      JSON.stringify({
+        timestamp: "2026-06-28T11:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "active-turn" },
+      }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "active.jsonl", content: active, mtimeMs: 1_000_000_000_000 },
+      {
+        filename: "sibling.jsonl",
+        content: tokenLine("2026-06-28T10:00:00.000Z", 200),
+        mtimeMs: 2_000_000_000_000,
+      },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+    expect(result.rollout?.turnId).toBe("active-turn");
+    expect(result.tokenUsage).toMatchObject({ totalTokens: 100 });
+  });
+
   it("reads waiting from a real interrupted turn_aborted tail", async () => {
     const content = await readFile(INTERRUPTED_TAIL_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-interrupted.jsonl");

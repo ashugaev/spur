@@ -467,6 +467,95 @@ describe("staleSidecars", () => {
   });
 });
 
+describe("tokenUsage", () => {
+  it("survives the session metadata whitelist", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      tokenUsage: {
+        provider: "codex",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        sources: {
+          "rollout.jsonl": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+        },
+      },
+    });
+    expect(readSession(dataDir, "api-1")?.tokenUsage?.totalTokens).toBe(100);
+  });
+
+  it.each([
+    { provider: "codex", inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+    {
+      provider: "unknown",
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: { source: { inputTokens: 80, outputTokens: 20, totalTokens: 100 } },
+    },
+    {
+      provider: "codex",
+      inputTokens: "80",
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: { source: { inputTokens: 80, outputTokens: 20, totalTokens: 100 } },
+    },
+    {
+      provider: "codex",
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: {},
+    },
+    {
+      provider: "codex",
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: { source: { inputTokens: 80, outputTokens: -1, totalTokens: 100 } },
+    },
+    {
+      provider: "codex",
+      inputTokens: 8,
+      outputTokens: 2,
+      totalTokens: 10,
+      sources: { source: { inputTokens: 80, outputTokens: 20, totalTokens: 100 } },
+    },
+  ])("discards incomplete or invalid persisted token usage %#", async (tokenUsage) => {
+    const dataDir = await newDataDir();
+    const session = {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      tokenUsage,
+    } as unknown as SessionRecord;
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+  });
+});
+
 describe("sidecarProcs", () => {
   const base = {
     project: "api",

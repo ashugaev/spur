@@ -4480,6 +4480,30 @@ projects:
     expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
   });
 
+  it("parses a positive projects.<id>.tokenBudget in both config modes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: 12000
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.tokenBudget).toBe(12000);
+    expect(loadProjectConfig(configPath).projects["backend"]?.tokenBudget).toBe(12000);
+  });
+
+  it.each([0, -1, 1.5])("rejects projects.<id>.tokenBudget=%s", async (tokenBudget) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: ${tokenBudget}
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.tokenBudget must be a positive integer",
+    );
+  });
+
   it("defaults staleAfterMinutes to 12 hours when the config does not set it", async () => {
     const configPath = await writeConfig(`
 projects:
