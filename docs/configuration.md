@@ -449,6 +449,8 @@ Message delivery events: `session.message.sent`, `session.message.delivery_recov
 
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
 
+Attention monitor events: every tmux probe forked during the attention sweep is killed after 5s if it hangs. `session.attention_monitor.slow` (one sweep's wall time reached the 5s poll interval; carries `durationMs`, `intervalMs`, `suppressedTicks` — ticks the re-entrancy guard dropped while this sweep was running). `session.runtime.probe_unresponsive` (a running session's reconcile-to-stopped was skipped because its tmux probe was killed by its own timeout rather than confirming the runtime gone; the session record is left untouched).
+
 ## Daemon restarts
 
 Tmux agent sessions survive daemon restarts: the systemd unit uses `KillMode=process`, so `systemctl restart` stops the node process only. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, restarts attention monitoring.

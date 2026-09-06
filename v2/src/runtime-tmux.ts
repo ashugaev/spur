@@ -95,6 +95,13 @@ interface FleetSessionSnapshot {
   names: Set<string>;
   activity: Map<string, Date | null>;
   readable: boolean;
+  // True only when `readable` is false AND the fork that failed was killed by
+  // its own `TMUX_COMMAND_TIMEOUT_MS` timeout (see isTmuxTimeoutKill) rather
+  // than genuinely failing (e.g. no tmux server running). Ambiguous — the
+  // fleet could not be read, not "the fleet is empty" — so callers reasoning
+  // about a session's ABSENCE must treat this apart from an ordinary
+  // `readable: false`.
+  unresponsive: boolean;
 }
 
 const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>();
@@ -128,6 +135,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     const names = new Set<string>();
     const activity = new Map<string, Date | null>();
     let readable = true;
+    let unresponsive = false;
     try {
       const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
@@ -146,12 +154,13 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
             : previous,
         );
       }
-    } catch {
+    } catch (error) {
       // No tmux server running (or another list-windows failure) — an empty
       // fleet, never a thrown error.
       readable = false;
+      unresponsive = isTmuxTimeoutKill(error);
     }
-    return { names, activity, readable };
+    return { names, activity, readable, unresponsive };
   });
 }
 
@@ -168,10 +177,29 @@ export async function tmuxSessionExists(
   sessionName: string,
   options?: { fresh?: boolean },
 ): Promise<boolean> {
+  return (await getTmuxSessionPresence(sessionName, options)).present;
+}
+
+// Combined presence+unresponsiveness read off ONE fleet-snapshot fetch.
+// Deliberately not two separate readers (one for `present`, a second for
+// `unresponsive`): memoizedProbe's cache entry expires RUNTIME_PROBE_CACHE_TTL_MS
+// (2s) after the fetch STARTS, and a timeout-killed `list-windows` takes
+// TMUX_COMMAND_TIMEOUT_MS (5s) — by the time a caller awaits this read and
+// then makes a SECOND top-level call for the other field, the entry is
+// already expired, gets swept, and re-forks a second 5s probe. Reading the
+// snapshot once and deriving both fields from it has no such gap.
+export async function getTmuxSessionPresence(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<{ present: boolean; unresponsive: boolean }> {
   if (options?.fresh) {
     fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
   }
-  return (await listTmuxSessionNames()).has(sessionName);
+  const snapshot = await getFleetSessionSnapshot();
+  return {
+    present: snapshot.names.has(sessionName),
+    unresponsive: !snapshot.readable && snapshot.unresponsive,
+  };
 }
 
 export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
@@ -198,6 +226,10 @@ interface FleetPaneEntry {
 // lookupTmuxPanePid).
 interface FleetPaneSnapshot {
   readable: boolean;
+  // Same meaning as FleetSessionSnapshot.unresponsive: only true when
+  // `readable` is false because the `list-panes` fork was killed by its own
+  // timeout, never for an ordinary probe failure.
+  unresponsive: boolean;
   panes: Map<string, FleetPaneEntry>;
 }
 
@@ -212,6 +244,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
   return memoizedProbe(fleetPaneCache, FLEET_PANE_CACHE_KEY, async () => {
     const panes = new Map<string, FleetPaneEntry>();
     let readable = true;
+    let unresponsive = false;
     try {
       const out = await tmux(
         "list-panes",
@@ -243,13 +276,14 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
         }
         panes.set(sessionName, entry);
       }
-    } catch {
+    } catch (error) {
       // No tmux server running (or another list-panes failure) — an empty
       // fleet, never a thrown error. `readable: false` keeps that
       // distinguishable from a server that answered with no panes.
       readable = false;
+      unresponsive = isTmuxTimeoutKill(error);
     }
-    return { readable, panes };
+    return { readable, unresponsive, panes };
   });
 }
 
@@ -259,11 +293,23 @@ export async function tmuxPaneDead(
   sessionName: string,
   options?: { fresh?: boolean },
 ): Promise<boolean> {
+  return (await getTmuxPanePresence(sessionName, options)).dead;
+}
+
+// Combined pane-dead+unresponsiveness read off ONE fleet-pane-snapshot fetch —
+// same one-read rationale as getTmuxSessionPresence.
+export async function getTmuxPanePresence(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<{ dead: boolean; unresponsive: boolean }> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
   }
-  const { panes } = await getFleetPaneSnapshot();
-  return panes.get(sessionName)?.activePaneDead ?? true;
+  const snapshot = await getFleetPaneSnapshot();
+  return {
+    dead: snapshot.panes.get(sessionName)?.activePaneDead ?? true,
+    unresponsive: !snapshot.readable && snapshot.unresponsive,
+  };
 }
 
 const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
@@ -303,9 +349,37 @@ export function withTmuxSocketArgs(args: string[]): string[] {
   return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
 }
 
+// Every tmux() fork is a local, short-lived control command (list-windows,
+// list-panes, capture-pane, send-keys, ...) — never `attach-session`/`wait-for`
+// (those stay on execFileSync in cli.ts, outside this helper, and block by
+// design). Matches the sibling `getPsSnapshot`'s `timeout: 5_000` for the same
+// kind of local probe; ~250x the measured worst-case latency for these
+// commands on a 78-session fleet, so it only fires on a genuine hang.
+// `runTmuxNewSession` (new-session path) deliberately does NOT go through
+// `tmux()` and keeps no timeout — a new session's own launch command is
+// allowed to take longer.
+const TMUX_COMMAND_TIMEOUT_MS = 5_000;
+
 async function tmux(...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args));
+  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args), {
+    timeout: TMUX_COMMAND_TIMEOUT_MS,
+  });
   return stdout.trimEnd();
+}
+
+// Node's execFile `timeout` option sends SIGTERM and reports `killed: true`,
+// `signal: "SIGTERM"` on the rejected error — distinct from an external
+// SIGTERM (`killed: false`), a maxBuffer overrun (`killed` undefined), and a
+// plain non-zero exit (`killed: false`). This is the only ambiguous failure:
+// the fork MIGHT still be alive server-side, so callers must not treat it the
+// same as a confirmed-absent tmux server.
+function isTmuxTimeoutKill(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const killed = "killed" in error ? error.killed : undefined;
+  const signal = "signal" in error ? error.signal : undefined;
+  return killed === true && signal === "SIGTERM";
 }
 
 function isSystemdRunUnavailable(error: unknown): boolean {

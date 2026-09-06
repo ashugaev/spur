@@ -72,6 +72,52 @@ describe("runtime-tmux", () => {
     await expect(killTmuxSessionTree("api-1--dev")).resolves.toBe(false);
   });
 
+  // AC1: every fork issued through the file-local tmux() chokepoint carries
+  // the timeout option — capture-pane and send-keys cover the swallowed-error
+  // path and the propagating path respectively.
+  it("AC1: forks capture-pane with a 5s timeout", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "pane text", stderr: "" });
+
+    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+
+    await captureTmuxPane("api-1");
+
+    const call = execFileAsyncMock.mock.calls.find(
+      ([file, args]) => file === "tmux" && args[0] === "capture-pane",
+    );
+    expect(call?.[2]).toEqual({ timeout: 5_000 });
+  });
+
+  it("AC1: forks send-keys with a 5s timeout", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up");
+
+    for (const [file, args, options] of execFileAsyncMock.mock.calls) {
+      if (file === "tmux" && args[0] === "send-keys") {
+        expect(options).toEqual({ timeout: 5_000 });
+      }
+    }
+  });
+
+  // AC2: a capture-pane killed by its own timeout must never surface as a
+  // thrown error out of captureTmuxPane — the sweep continues to the next
+  // session on a plain "".
+  it("AC2: captureTmuxPane resolves \"\" when capture-pane is killed by its own timeout", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-1")).resolves.toBe("");
+  });
+
   it("starts tmux sessions with the Spur-specific config", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => ({
       stdout: args.includes("new-session") ? "" : "ok",
