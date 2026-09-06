@@ -52,7 +52,13 @@ Prunable: `vendor-cache` (`~/.npm/_cacache`) — 7d, protected while npm/pnpm/np
 
 Any CLI command syncs its `--config` into the daemon's durable registry. Attached configs must agree on `server.host`, `server.port`, `dataDir`, `worktreeDir`; project ids/`sessionPrefix` stay globally unique per daemon. Registry mechanics: [config registry](configuration.md#config-registry).
 
-Implicit auto-start (any command that reaches an unreachable daemon outside `daemon start|stop|restart`) refuses and never forks a detached daemon when: `$SPUR_SESSION` or `$SPUR_SIDECAR_NAME` is set (session/sidecar context — start it from a host shell: `systemctl --user restart spur-daemon` or `spur daemon start`), or the resolved `--config` isn't the default instance config (start it explicitly: `spur --config <path> daemon start`, or `spur sidecar start --name isolated-daemon` for an isolated sidecar). `$SPUR_DISABLE_AUTOSTART=1` refuses auto-start unconditionally, same as today, and covers `daemon restart`'s internal fallback too — `daemon restart` itself is exempt from the two new terms above and keeps restarting a stopped daemon under a non-default config or from a session pane.
+Implicit auto-start (any command that reaches an unreachable daemon outside `daemon start|stop|restart`) refuses and never forks a detached daemon:
+
+- `$SPUR_SESSION` or `$SPUR_SIDECAR_NAME` set: `systemctl --user restart spur-daemon` or `spur daemon start` from a host shell.
+- Resolved `--config` isn't the default instance config: `spur --config <path> daemon start`, or `spur sidecar start --name isolated-daemon` for an isolated sidecar.
+- `$SPUR_DISABLE_AUTOSTART=1`: applies to every auto-start path, including `daemon restart`'s internal fallback.
+
+`daemon restart` itself is exempt from the first two terms.
 
 ## spawn
 
@@ -146,7 +152,7 @@ Stop/restart reap the sidecar's whole tmux pane process tree, not just the direc
 
 `sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path and a verify-before-killing note; never signaled by `--reap`, no matter what).
 
-`sidecar stop` prints the real outcome, never a claimed stop that did not happen: `reaped` ("Stopped sidecar ...", exit `0`), `partial` ("Stopped sidecar ..., but N process(es) survived: <pids>. Report them: spur sidecar sweep", exit `1`), `nothing-to-stop` ("... was not running; nothing to stop.", exit `0`).
+`sidecar stop` prints the real outcome, never a claimed stop that did not happen, per `sidecarStop.outcome` ([daemon-api.md](daemon-api.md)): `reaped` (exit `0`), `partial` — names the survivor pids and points at `spur sidecar sweep` (exit `1`), `nothing-to-stop` (exit `0`).
 
 ### Built-in MCP sidecars
 

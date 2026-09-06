@@ -24,7 +24,7 @@ function stopView(sidecarStop: SidecarStopView["sidecarStop"]): SidecarStopView 
     services: [],
     sidecars: [],
     sidecarStop,
-  } as unknown as SidecarStopView;
+  } satisfies SidecarStopView;
 }
 
 describe("renderSidecarStopMessage", () => {

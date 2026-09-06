@@ -346,9 +346,9 @@ describe("client.ensureServer", () => {
     }
 
     const { restartDaemonIfRunning } = await loadClientModule();
-    await expect(
-      restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml"),
-    ).rejects.toThrow(/SPUR_DISABLE_AUTOSTART/);
+    await expect(restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
+      /SPUR_DISABLE_AUTOSTART/,
+    );
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
