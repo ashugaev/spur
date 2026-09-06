@@ -2538,6 +2538,11 @@ export class SessionService {
   // restarts the sidecar that call just stopped. Emptied (and the session
   // key deleted) in stopSidecarLocked's finally.
   private readonly suppressedSidecarHeals = new Map<string, Set<string>>();
+  // Mutable skip set for a pending scheduleHealedSidecarRestart task, keyed
+  // by session id. stopSidecar adds to this when a heal task is already
+  // queued so a sidecar killed after schedule time stays excluded even after
+  // suppressedSidecarHeals clears in stopSidecarLocked's finally.
+  private readonly healTaskSkipNames = new Map<string, Set<string>>();
   // Serializes lifecycle mutations that can kill, relaunch, write to, or
   // snapshot one session's agent and sidecar panes. Distinct from the pane
   // write lock: callers acquire lifecycle first, then pane-write. Helpers
@@ -7582,15 +7587,10 @@ export class SessionService {
   // Writes no SessionRecord itself: startSidecarInternal persists its own
   // reservations inline, and a whole-record write built from this function's
   // pre-start snapshot would be the teardown-snapshot-clobber bug shape.
-  private scheduleHealedSidecarRestart(session: SessionRecord): void {
-    if (this.deliveryStopped) return;
-    const project = this.resolveProjectForSession(session);
-    if (!project) return;
-
-    // mcp sidecars are excluded: restarting one mid-session cannot rewire the
-    // running agent (its MCP config was frozen at launch). Names currently
-    // suppressed by an in-flight stopSidecar call are excluded too, so the
-    // heal never resurrects the sidecar that call just stopped.
+  private healedSidecarRestartSkipNames(
+    session: SessionRecord,
+    project: ProjectConfig,
+  ): Set<string> {
     const skipNames = new Set<string>();
     for (const [name, sidecar] of Object.entries(resolveSessionSidecars(session, project))) {
       if (sidecar.mcp) skipNames.add(name);
@@ -7598,6 +7598,15 @@ export class SessionService {
     for (const name of this.suppressedSidecarHeals.get(session.id) ?? []) {
       skipNames.add(name);
     }
+    return skipNames;
+  }
+
+  private scheduleHealedSidecarRestart(session: SessionRecord): void {
+    if (this.deliveryStopped) return;
+    const project = this.resolveProjectForSession(session);
+    if (!project) return;
+
+    const skipNames = this.healedSidecarRestartSkipNames(session, project);
 
     const hasRestartableSidecar = Object.entries(resolveSessionSidecars(session, project)).some(
       ([name, sidecar]) => sidecar.autoStart && !skipNames.has(name),
@@ -7606,11 +7615,15 @@ export class SessionService {
 
     if (this.sidecarHealTasks.has(session.id)) return;
 
+    this.healTaskSkipNames.set(session.id, skipNames);
+
     const task = (async () => {
       await this.withWorkspaceLifecycleLocks(session.id, async () => {
         const latest = readSession(this.config.dataDir, session.id);
         if (!latest || latest.status !== "running") return;
-        await this.startAutoStartSidecars(latest, project, skipNames);
+        const executionSkipNames = this.healTaskSkipNames.get(session.id);
+        if (!executionSkipNames) return;
+        await this.startAutoStartSidecars(latest, project, executionSkipNames);
       });
     })()
       .catch((error) => {
@@ -7624,6 +7637,7 @@ export class SessionService {
       })
       .finally(() => {
         this.sidecarHealTasks.delete(session.id);
+        this.healTaskSkipNames.delete(session.id);
       });
     this.sidecarHealTasks.set(session.id, task);
   }
@@ -11140,6 +11154,7 @@ export class SessionService {
       this.suppressedSidecarHeals.set(sessionId, suppressed);
     }
     suppressed.add(sidecarName);
+    this.healTaskSkipNames.get(sessionId)?.add(sidecarName);
     try {
       // A dead pane or an absent tmux session with no recorded identity means
       // there is genuinely nothing left to reap.
