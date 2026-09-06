@@ -33855,6 +33855,221 @@ describe("SessionService", () => {
     });
   });
 
+  describe("pipeline stall diagnostics", () => {
+    function pipelineStallSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
+      return {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        pipeline: {
+          steps: ["research", "test"],
+          nextStepIndex: 1,
+          awaitingStepIndex: 0,
+          status: "running",
+        },
+        ...overrides,
+      };
+    }
+
+    function stalledEvents() {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.pipeline.stalled");
+    }
+
+    // waitForPipelineStep's poll sleep is `node:timers/promises`' real
+    // setTimeout (the mock's default beforeEach implementation delegates to
+    // it), which fake timers do not drive: advancing vi's mocked clock never
+    // resolves it. Parking on it for one real PIPELINE_POLL_INTERVAL_MS tick,
+    // then mutating the store, reproduces the drift the loop's next iteration
+    // must observe.
+    async function realPoll(): Promise<void> {
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_100);
+    }
+
+    it("logs session.pipeline.stalled when the session leaves running mid-pipeline", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore();
+      sessions.set("api-1", pipelineStallSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        // First tick: classified "working", the wait loop sleeps and parks
+        // on its next poll without re-reading a changed record.
+        await realPoll();
+        expect(stalledEvents()).toEqual([]);
+
+        // The session leaves "running" out from under the still-running
+        // pipeline record (drift, not a "ready"/"errored" write).
+        sessions.set("api-1", { ...sessions.get("api-1")!, status: "completed" });
+        await realPoll();
+
+        expect(stalledEvents()).toHaveLength(1);
+        expect(stalledEvents()[0]).toMatchObject({
+          level: "warn",
+          sessionId: "api-1",
+          details: {
+            awaitingStepIndex: 0,
+            nextStepIndex: 1,
+            totalSteps: 2,
+            stepsPending: true,
+            sessionStatus: "completed",
+            stopReason: null,
+          },
+        });
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("logs session.pipeline.stalled when the drift happens while awaiting the final step", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        pipelineStallSession({
+          pipeline: {
+            steps: ["research", "test"],
+            nextStepIndex: 2,
+            awaitingStepIndex: 1,
+            status: "running",
+          },
+        }),
+      );
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await realPoll();
+        expect(stalledEvents()).toEqual([]);
+
+        sessions.set("api-1", { ...sessions.get("api-1")!, status: "completed" });
+        await realPoll();
+
+        expect(stalledEvents()).toHaveLength(1);
+        expect(stalledEvents()[0]?.details).toMatchObject({
+          awaitingStepIndex: 1,
+          nextStepIndex: 2,
+          totalSteps: 2,
+          stepsPending: false,
+        });
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("leaves the pipeline record untouched when it logs a stall", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore();
+      sessions.set("api-1", pipelineStallSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await realPoll();
+        sessions.set("api-1", { ...sessions.get("api-1")!, status: "completed" });
+        await realPoll();
+
+        expect(stalledEvents()).toHaveLength(1);
+        expect(sessions.get("api-1")?.pipeline).toEqual({
+          steps: ["research", "test"],
+          nextStepIndex: 1,
+          awaitingStepIndex: 0,
+          status: "running",
+        });
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("daemon shutdown logs no session.pipeline.stalled", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore();
+      sessions.set("api-1", pipelineStallSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+      service.dispose();
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then(() => "retired"),
+        realTimers.setTimeout(3_000, "parked"),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(stalledEvents()).toEqual([]);
+    });
+
+    it("does not log a stall when a stale park stopped the session", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore();
+      sessions.set("api-1", pipelineStallSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await realPoll();
+        sessions.set("api-1", {
+          ...sessions.get("api-1")!,
+          status: "stopped",
+          stopReason: "stale_timeout",
+        });
+        await realPoll();
+
+        expect(stalledEvents()).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("does not log a stall when the pipeline already errored", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        pipelineStallSession({
+          pipeline: {
+            steps: ["research", "test"],
+            nextStepIndex: 1,
+            awaitingStepIndex: 0,
+            status: "errored",
+            error: "boom",
+          },
+        }),
+      );
+      listSessionsMock.mockReturnValue([]);
+      const service = await createDisposedSessionService();
+
+      (service as unknown as { logPipelineStalled(sessionId: string): void }).logPipelineStalled(
+        "api-1",
+      );
+
+      expect(stalledEvents()).toEqual([]);
+    });
+  });
+
   describe("stale mode", () => {
     type StaleModeInternals = {
       spawnsInFlight: Set<string>;

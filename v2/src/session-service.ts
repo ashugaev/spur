@@ -1041,7 +1041,7 @@ function clampPageStart(from: number, floor: number, totalEntries: number): numb
   return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
 }
 
-type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
+type PipelineWaitOutcome = "ready" | "shutdown" | "drift" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -13462,7 +13462,7 @@ export class SessionService {
             continue;
           }
 
-          if (waitOutcome === "stopped") {
+          if (waitOutcome === "shutdown" || waitOutcome === "drift") {
             return;
           }
 
@@ -13488,7 +13488,11 @@ export class SessionService {
           session.pipeline.awaitingStepIndex !== undefined
         ) {
           const waitOutcome = await this.waitForPipelineStep(sessionId);
-          if (waitOutcome === "stopped") {
+          if (waitOutcome === "shutdown") {
+            return;
+          }
+          if (waitOutcome === "drift") {
+            this.logPipelineStalled(sessionId);
             return;
           }
           if (waitOutcome === "ready") {
@@ -13672,7 +13676,7 @@ export class SessionService {
 
     while (Date.now() < deadline) {
       if (this.deliveryStopped) {
-        return "stopped";
+        return "shutdown";
       }
       const session = readSession(this.config.dataDir, sessionId);
       if (
@@ -13680,7 +13684,7 @@ export class SessionService {
         session.status !== "running" ||
         session.pipeline.status !== "running"
       ) {
-        return "stopped";
+        return "drift";
       }
       if (session.pipeline.awaitingStepIndex === undefined) {
         return "ready";
@@ -13714,11 +13718,11 @@ export class SessionService {
   private async waitForQueuedMessage(sessionId: string): Promise<PipelineWaitOutcome> {
     for (;;) {
       if (this.deliveryStopped) {
-        return "stopped";
+        return "shutdown";
       }
       const session = readSession(this.config.dataDir, sessionId);
       if (!session || session.status !== "running") {
-        return "stopped";
+        return "drift";
       }
       if (!session.queuedMessages?.awaitingPrompt) {
         return "ready";
@@ -13798,6 +13802,33 @@ export class SessionService {
       details: {
         nextStepIndex: session.pipeline.nextStepIndex,
         awaitingStepIndex: session.pipeline.awaitingStepIndex ?? null,
+      },
+    });
+  }
+
+  private logPipelineStalled(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session?.pipeline || session.pipeline.status !== "running") {
+      return;
+    }
+    if (session.status === "stopped" && session.stopReason !== undefined) {
+      return;
+    }
+
+    const nextStepIndex = session.pipeline.nextStepIndex;
+    const totalSteps = session.pipeline.steps.length;
+    this.logEvent("session.pipeline.stalled", {
+      level: "warn",
+      sessionId,
+      projectId: session.project,
+      message: `Pipeline stalled for ${sessionId} after step ${nextStepIndex}/${totalSteps}: session status is ${session.status}`,
+      details: {
+        awaitingStepIndex: session.pipeline.awaitingStepIndex ?? null,
+        nextStepIndex,
+        totalSteps,
+        stepsPending: nextStepIndex < totalSteps,
+        sessionStatus: session.status,
+        stopReason: session.stopReason ?? null,
       },
     });
   }
