@@ -425,6 +425,36 @@ describe("pr lookup batching", () => {
     expect(ghMock).toHaveBeenCalledTimes(0);
   });
 
+  it("cancels a lookup already dequeued into a running flush", async () => {
+    let release = (_value: string): void => {
+      throw new Error("auto-flush did not start");
+    };
+    ghMock.mockImplementation(() => {
+      return new Promise<string>((resolve) => {
+        release = resolve;
+      });
+    });
+
+    const promises = Array.from({ length: 50 }, (_unused, index) =>
+      enqueuePrLookup({ slug: SLUG, branch: `feature/${index}`, worktreePath: CWD }),
+    );
+    await vi.waitFor(() => expect(ghMock).toHaveBeenCalledTimes(1));
+
+    cancelPendingPrLookups();
+
+    const sentinel = Symbol("timeout");
+    const sentinelAfter100ms = new Promise((resolve) => setTimeout(() => resolve(sentinel), 100));
+    await expect(Promise.race([promises[0], sentinelAfter100ms])).resolves.toEqual({
+      status: "skipped",
+      reason: "cancelled",
+    });
+
+    release(envelope(allNodesEmpty(50)));
+    await flushPrLookups();
+
+    expect(await promises[0]).toEqual({ status: "skipped", reason: "cancelled" });
+  });
+
   it("resolves the repo slug from upstream first, then origin, in one git spawn", async () => {
     readRemoteUrlsMock.mockResolvedValue(
       new Map([
