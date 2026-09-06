@@ -9,6 +9,8 @@ import {
   confirmReaps,
   findLeakedSidecarTrees,
   reapRecordedIdentity,
+  reapSidecarPane,
+  signalSidecarPane,
   snapshotProcesses,
   _computeSurvivorCandidatesForTests,
   _isPathInsideForTests,
@@ -34,9 +36,22 @@ vi.mock("node:timers/promises", async (importOriginal) => {
   return { ...actual, setTimeout: timerPromisesSleepMock };
 });
 
+// signalSidecarPane's two blind branches are driven by these two
+// runtime-tmux reads; mocking them lets the blind-branch/blindKill tests
+// below stay host-safe — no real tmux session is ever touched.
+const getTmuxPanePidMock = vi.hoisted(() => vi.fn<() => Promise<number | null>>());
+const killTmuxSessionMock = vi.hoisted(() => vi.fn<() => Promise<void>>());
+
+vi.mock("../../../src/runtime-tmux.js", () => ({
+  getTmuxPanePid: getTmuxPanePidMock,
+  killTmuxSession: killTmuxSessionMock,
+}));
+
 beforeEach(async () => {
   const actual = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
   timerPromisesSleepMock.mockReset().mockImplementation((ms: number) => actual.setTimeout(ms));
+  getTmuxPanePidMock.mockReset();
+  killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
 });
 
 // Narrows `T | undefined` without a non-null assertion.
@@ -526,6 +541,114 @@ describe("reapRecordedIdentity", () => {
       // confirmGone's own bounded ESRCH polling; a second wait-then-probe
       // here races real pid reuse under load instead of adding coverage.
       expect(outcome?.survivors).toEqual([]);
+    } finally {
+      killGroupSafely(pid);
+    }
+  });
+});
+
+describe("confirmReaps blindKill", () => {
+  const emptySnapshot: ProcSnapshot = { ok: false, byPid: new Map(), byPgid: new Map() };
+
+  // AC-e / AC-g: a blind kill's blindKill flag must survive confirmReaps
+  // unmodified, in both the all-empty-batch early return and the
+  // per-pending no-tree branch inside the loop — these are two of the
+  // four `ReapOutcome` literals the spec calls out. Mutation check:
+  // hardcoding `blindKill: false` at either literal makes this test red.
+  it("threads blindKill through the all-empty-batch early return", async () => {
+    const [outcome] = await confirmReaps([
+      {
+        sessionName: "ghost",
+        panePid: null,
+        tree: [],
+        ownedGroups: [],
+        snapshot: emptySnapshot,
+        blindKill: true,
+      },
+    ]);
+    expect(outcome?.survivors).toEqual([]);
+    expect(outcome?.blindKill).toBe(true);
+  });
+
+  it("threads blindKill through the per-pending no-tree branch of a mixed batch", async () => {
+    const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
+    const pid = must(child.pid, "expected a spawned pid");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const snapshot = await snapshotProcesses();
+      const tree = collectTree(pid, snapshot);
+      const outcomes = await confirmReaps(
+        [
+          {
+            sessionName: "ghost",
+            panePid: null,
+            tree: [],
+            ownedGroups: [],
+            snapshot: emptySnapshot,
+            blindKill: true,
+          },
+          {
+            sessionName: "real",
+            panePid: pid,
+            tree,
+            ownedGroups: [],
+            snapshot,
+            blindKill: false,
+          },
+        ],
+        50,
+      );
+      const ghost = outcomes.find((o) => o.sessionName === "ghost");
+      const real = outcomes.find((o) => o.sessionName === "real");
+      expect(ghost?.survivors).toEqual([]);
+      expect(ghost?.blindKill).toBe(true);
+      expect(real?.survivors).toEqual([]);
+      expect(real?.blindKill).toBe(false);
+    } finally {
+      killGroupSafely(pid);
+    }
+  });
+});
+
+describe("signalSidecarPane", () => {
+  it("AC-e: reports a blind kill when there is no pane pid and no fallback identity", async () => {
+    getTmuxPanePidMock.mockResolvedValue(null);
+    const pending = await signalSidecarPane("ghost-session");
+    expect(pending.blindKill).toBe(true);
+    expect(pending.tree).toEqual([]);
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("ghost-session");
+    const [outcome] = await confirmReaps([pending]);
+    // AC-g: survivors: [] alone would read as a verified clean reap; the
+    // flag is what tells a caller this was never checked.
+    expect(outcome?.survivors).toEqual([]);
+    expect(outcome?.blindKill).toBe(true);
+  });
+
+  it("AC-a: attempts the recorded-identity fallback BEFORE killing tmux, and clears blindKill on a confirmed reap", async () => {
+    getTmuxPanePidMock.mockResolvedValue(null);
+    // Backgrounds `sleep 30` and exits immediately — the leaderless-group
+    // shape reapRecordedIdentity's fallback path reaps by cwd containment.
+    const child = spawn("bash", ["-c", "sleep 30 & exit 0"], {
+      stdio: "ignore",
+      detached: true,
+      cwd: "/tmp",
+    });
+    const pid = must(child.pid, "expected a spawned pid");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    // Fails the test the moment killTmuxSession runs before the fallback
+    // group has actually been signaled and confirmed gone — this is the
+    // signal-then-kill ordering discriminator: reordering the two calls in
+    // signalSidecarPane makes this mock observe a still-alive group.
+    killTmuxSessionMock.mockImplementation(async () => {
+      expect(() => process.kill(-pid, 0)).toThrow();
+    });
+    try {
+      const pending = await signalSidecarPane("ghost-session", {
+        identity: { pid, pgid: pid, starttime: 0 },
+        worktreePath: "/tmp",
+      });
+      expect(pending.blindKill).toBe(false);
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("ghost-session");
     } finally {
       killGroupSafely(pid);
     }
