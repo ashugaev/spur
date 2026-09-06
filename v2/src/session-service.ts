@@ -1781,7 +1781,14 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
   if (!(await tmuxPaneDead(tmuxSession))) return;
   const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
-  await killTmuxSession(tmuxSession);
+  // Signal the pane's process tree before tearing down tmux, same as every
+  // other sidecar-kill site — a bare killTmuxSession here would blind-kill
+  // whatever the failed launch already forked. This is a free function with
+  // no record access, so it carries no identity fallback of its own; the
+  // caller's catch block (session-service.ts ~6540) supplies that via
+  // reapSidecarByName against the identity already persisted before this
+  // call runs.
+  await signalSidecarPane(tmuxSession);
   const detail = output ? `\nLast output:\n${output}` : "";
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
@@ -6481,13 +6488,15 @@ export class SessionService {
             args.sidecarDepth,
           ),
         });
-        await verifySidecarStartup(reservedSession.id, args.sidecarName);
-
         // Record this instance's identity so a tree that outlives its
         // tmux supervisor is still identifiable and reapable later — see
         // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
         // (race, no procfs) leaves sidecarProcs unset for this name rather
-        // than blocking the start.
+        // than blocking the start. Recorded BEFORE verifySidecarStartup —
+        // hoisted above it deliberately, so a failed-start catch below has
+        // an identity on disk to reap by even once the pane itself is dead;
+        // recording it only after a successful verify would leave that catch
+        // with nothing to signal (Finding B3).
         const freshPanePid = await getTmuxPanePid(
           sidecarTmuxSession(reservedSession.id, args.sidecarName),
           { fresh: true },
@@ -6529,6 +6538,9 @@ export class SessionService {
           delete updated.sidecarProcs;
         }
         writeSession(this.config.dataDir, updated);
+
+        await verifySidecarStartup(reservedSession.id, args.sidecarName);
+
         this.scheduleSidecarUrlReadyAndPublish(
           reservedSession.id,
           args.sidecarName,
@@ -7797,7 +7809,10 @@ export class SessionService {
       if (existingRuntimeAlive && !existingPaneDead) {
         throw new Error(`Service is already running: ${sessionId}/${serviceId}`);
       }
-      await killTmuxSession(existing.tmuxSession);
+      // Same launcher as a sidecar (createTmuxCommandSession), same leak
+      // shape; a service records no identity, so this is the un-fallbacked
+      // signal — still a real ps-tree signal instead of a blind tmux kill.
+      await signalSidecarPane(existing.tmuxSession);
       deleteServiceInstance(this.config.dataDir, sessionId, serviceId);
     }
     deleteServiceSourceStatesForService(this.config.dataDir, session.project, sessionId, serviceId);
@@ -7846,7 +7861,7 @@ export class SessionService {
       });
       return await this.enrichService(record);
     } catch (error) {
-      await killTmuxSession(tmuxSession);
+      await signalSidecarPane(tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
       const record: ServiceInstanceRecord = {
         sessionId,
@@ -10886,8 +10901,16 @@ export class SessionService {
   // for every single-shot sidecar-kill site; only teardownSessionSidecars
   // bypasses it (signals all its sidecars first, confirms once, batching
   // the grace window instead of paying it once per sidecar here).
+  // Reads the owner record so a blind signalSidecarPane branch (no pane
+  // pid, or an unusable snapshot) still has the recorded identity to reap
+  // by — without this read, every caller upstream of here (the failed-start
+  // catch, the reap pass) is inert (Finding B3).
   private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
-    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName));
+    const owner = readSession(this.config.dataDir, ownerId);
+    const identity = owner?.sidecarProcs?.[sidecarName];
+    const fallback =
+      owner && identity ? { identity, worktreePath: owner.worktreePath } : undefined;
+    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName), fallback);
     this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
     return outcome;
   }
@@ -11103,7 +11126,10 @@ export class SessionService {
           });
         }
       }
-      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
+      const identity = record?.sidecarProcs?.[scName];
+      const fallback =
+        record && identity ? { identity, worktreePath: record.worktreePath } : undefined;
+      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName), fallback);
       pendingBySidecar.push({ ownerId, scName, pending });
     }
     const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
@@ -11133,7 +11159,7 @@ export class SessionService {
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     await this.teardownSessionSidecars(session);
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
-      await killTmuxSession(service.tmuxSession);
+      await signalSidecarPane(service.tmuxSession);
     }
     deleteServiceSourceStatesForSession(this.config.dataDir, session.project, session.id);
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
