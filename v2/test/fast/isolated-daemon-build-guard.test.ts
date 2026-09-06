@@ -30,6 +30,7 @@ type FakeWorktree = {
   pathDir: string;
   repoDir: string;
   toolDir: string;
+  tmpDir: string;
 };
 
 function makeExecutable(path: string, source: string): void {
@@ -56,9 +57,11 @@ function createFakeWorktree(): FakeWorktree {
   mkdirSync(scriptDir, { recursive: true });
   mkdirSync(v2BinDir, { recursive: true });
   mkdirSync(join(repoDir, "v2", "src"), { recursive: true });
+  const tmpDir = join(repoDir, "tmp");
   mkdirSync(toolDir);
   mkdirSync(join(repoDir, "home"));
   mkdirSync(pathDir);
+  mkdirSync(tmpDir);
 
   copyFileSync(
     join(SOURCE_SCRIPT_DIR, "spur-isolated-daemon.sh"),
@@ -146,9 +149,14 @@ esac
     pathDir,
     repoDir,
     toolDir,
+    tmpDir,
   };
 }
 
+// MANDATORY: without an injected TMPDIR, the script's own prune (added by
+// spur-6128) resolves `${TMPDIR:-/tmp}` to this host's real /tmp and prunes
+// its stale spur-isolated-daemon.* dirs. `worktree.tmpDir` is a fresh,
+// per-fixture directory the test owns exclusively.
 function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     HOME: join(worktree.repoDir, "home"),
@@ -158,6 +166,7 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_TEST_LOG: worktree.logPath,
     SPUR_TEST_REPO: worktree.repoDir,
+    TMPDIR: worktree.tmpDir,
     ...extraEnv,
   };
 }

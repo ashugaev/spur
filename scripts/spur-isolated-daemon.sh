@@ -16,6 +16,70 @@ CURRENT_WORKTREE="$REPO_ROOT"
 V2_DIR="$REPO_ROOT/v2"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
+
+# Reclaims stale spur-isolated-daemon.* dirs this same script leaks on every
+# successful start (the trailing `exec` at the bottom of this file replaces
+# the shell, so the EXIT `cleanup` trap never runs on that path — see
+# spur#811). Fail-safe throughout: any gate that cannot be evaluated prunes
+# nothing, and only a nonzero `ps` exit aborts the whole pass. Never touches
+# $ISOLATED_WRAPPER (lives in $TOOL_DIR, outside ${TMPDIR:-/tmp}) or
+# $CONFIG_DIR itself.
+prune_stale_config_dirs() {
+  local tmp_root ps_output own_pids pid cwd dir matched candidate_cwd
+
+  tmp_root="${TMPDIR:-/tmp}"
+
+  # GATE A source: a live isolated daemon always names its own CONFIG_DIR in
+  # argv (this script's own `exec "$NODE_BIN" "$CLI_PATH" --config
+  # "$CONFIG_DIR/config.yaml" ...` below) — a sound liveness proof for that
+  # daemon, but not for an agent merely working inside `<dir>/worktrees`,
+  # hence GATE B.
+  if ! ps_output="$(ps -eo args= 2>/dev/null)"; then
+    return 0
+  fi
+
+  # GATE B source: own-uid pids' cwds. `-o pid= -u "$(id -u)"` — NEVER `-e`,
+  # which overrides `-u` and returns the whole table. An unreadable own-uid
+  # /proc/<pid>/cwd SKIPS that one pid and the scan continues; it does NOT
+  # abort the prune (a non-dumpable own-uid process, e.g. `(sd-pam)` or a
+  # `gpg-agent --supervised`, is permanent on any linger-enabled host and
+  # would otherwise make this prune a silent no-op forever).
+  if ! own_pids="$(ps -o pid= -u "$(id -u)" 2>/dev/null)"; then
+    return 0
+  fi
+  local -a live_cwds=()
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    if cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)"; then
+      live_cwds+=("$cwd")
+    fi
+  done <<<"$own_pids"
+
+  while IFS= read -r -d '' dir; do
+    [[ "$dir" == "$CONFIG_DIR" ]] && continue
+
+    if printf '%s' "$ps_output" | grep -qF -- "$dir"; then
+      continue
+    fi
+
+    matched=0
+    for candidate_cwd in "${live_cwds[@]:-}"; do
+      if [[ "$candidate_cwd" == "$dir" || "$candidate_cwd" == "$dir"/* ]]; then
+        matched=1
+        break
+      fi
+    done
+    if [[ "$matched" -eq 1 ]]; then
+      continue
+    fi
+
+    rm -rf "$dir"
+  done < <(
+    find "$tmp_root" -maxdepth 1 -type d -name 'spur-isolated-daemon.*' -mmin +60 -print0 2>/dev/null
+  )
+}
+prune_stale_config_dirs
+
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 ISOLATED_WRAPPER="$TOOL_DIR/spur-isolated"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
