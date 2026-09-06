@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -12,8 +13,10 @@ import {
   reapRecordedIdentity,
   snapshotProcesses,
   _computeSurvivorCandidatesForTests,
+  _defaultPathExistsForTests,
   _isPathInsideForTests,
   _parsePsOutputForTests,
+  type LeakedSidecarTree,
   type ProcSnapshot,
   type ProcessInfo,
   type SidecarClaim,
@@ -46,6 +49,22 @@ function must<T>(value: T | undefined, message: string): T {
     throw new Error(message);
   }
   return value;
+}
+
+// Narrows the LeakedSidecarTree union to one variant, for tests that only
+// exercise that variant — a runtime assertion, not a cast, so a predicate
+// regression that emits the wrong kind fails the test instead of silently
+// reading undefined fields.
+function mustKind<K extends LeakedSidecarTree["kind"]>(
+  value: LeakedSidecarTree | undefined,
+  kind: K,
+  message: string,
+): Extract<LeakedSidecarTree, { kind: K }> {
+  const found = must(value, message);
+  if (found.kind !== kind) {
+    throw new Error(`expected kind "${kind}", got "${found.kind}"`);
+  }
+  return found as Extract<LeakedSidecarTree, { kind: K }>;
 }
 
 // Test-only cleanup: signals the whole detached group so a test process
@@ -127,6 +146,28 @@ describe("snapshotProcesses", () => {
     const snapshot = await snapshotProcesses();
     expect(snapshot.ok).toBe(true);
     expect(snapshot.byPid.get(process.pid)).toBeDefined();
+  });
+});
+
+describe("_defaultPathExistsForTests", () => {
+  it("returns false only on ENOENT (genuinely gone)", async () => {
+    await expect(_defaultPathExistsForTests("/nonexistent-spur-test-path/cli.js")).resolves.toBe(
+      false,
+    );
+  });
+
+  it("returns true on any other error (e.g. EACCES on a cross-uid checkout) — cannot tell means assume it exists", async () => {
+    const unreadableDir = await mkdtemp(join(tmpdir(), "spur-patexists-test-"));
+    const nestedPath = join(unreadableDir, "nested", "cli.js");
+    mkdirSync(join(unreadableDir, "nested"), { recursive: true });
+    writeFileSync(nestedPath, "", "utf8");
+    chmodSync(unreadableDir, 0o000);
+    try {
+      await expect(_defaultPathExistsForTests(nestedPath)).resolves.toBe(true);
+    } finally {
+      chmodSync(unreadableDir, 0o755);
+      await rm(unreadableDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -237,7 +278,7 @@ describe("findLeakedSidecarTrees", () => {
       readCwd: async () => worktreePath,
     });
     expect(result.leaked).toHaveLength(1);
-    const leaked = must(result.leaked[0], "expected one leaked tree");
+    const leaked = mustKind(result.leaked[0], "worktree-tree", "expected one leaked tree");
     expect(leaked.rootPid).toBe(500);
     expect(leaked.pgid).toBe(500);
     expect(leaked.worktreePath).toBe(worktreePath);
@@ -291,7 +332,7 @@ describe("findLeakedSidecarTrees", () => {
       readCwd: async () => worktreePath,
     });
     expect(result.leaked).toHaveLength(1);
-    const leaked = must(result.leaked[0], "expected one leaked tree");
+    const leaked = mustKind(result.leaked[0], "worktree-tree", "expected one leaked tree");
     expect(leaked.sidecarName).toBeNull();
     expect(leaked.reapable).toBe(false);
   });
@@ -316,8 +357,11 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       pathExists: async () => false,
     });
     expect(result.leaked).toHaveLength(1);
-    const leaked = must(result.leaked[0], "expected one leaked orphan-daemon row");
-    expect(leaked.kind).toBe("orphan-daemon");
+    const leaked = mustKind(
+      result.leaked[0],
+      "orphan-daemon",
+      "expected one leaked orphan-daemon row",
+    );
     expect(leaked.reapable).toBe(false);
     expect(leaked.configPath).toBe(nonDefaultConfigPath);
     expect(leaked.cliEntryPath).toBe(cliEntryPath);
@@ -408,6 +452,34 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       pathExists: async () => false,
     });
     expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
+  });
+
+  it("dedupes a pid matching both predicates (ppid exactly 1, no subreaper) to a single worktree-tree row", async () => {
+    // A non-systemd host (container, CI image) has no subreaper to
+    // reparent onto, so a genuinely orphaned pid's ppid is exactly 1 — the
+    // same fact both the worktree-tree loop and findOrphanDaemonTrees key
+    // on. Without the claimedPids exclusion this pid would render twice:
+    // once [reapable] (worktree-tree, unclaimed worktree) and once
+    // [report-only] (orphan-daemon, missing cli.js) — and --reap would
+    // silently signal the row an operator read as report-only.
+    const dedupeWorktreeDir = "/tmp/spur-worktrees";
+    const dedupeWorktreePath = "/tmp/spur-worktrees/api/api-1";
+    const snapshot = snapshotFrom([info({ pid: 950, ppid: 1, pgid: 950, args: daemonArgs })]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [dedupeWorktreePath],
+      worktreeDirRealpath: dedupeWorktreeDir,
+      readCwd: async () => dedupeWorktreePath,
+      pathExists: async () => false,
+    });
+    expect(result.leaked).toHaveLength(1);
+    const leaked = mustKind(
+      result.leaked[0],
+      "worktree-tree",
+      "expected exactly one row, not a double count",
+    );
+    expect(leaked.rootPid).toBe(950);
   });
 });
 

@@ -79,30 +79,42 @@ export interface SidecarClaim {
   identityRecorded: boolean;
 }
 
-export interface LeakedSidecarTree {
-  /** "worktree-tree": the original sweep predicate. "orphan-daemon": a
-   * reparented Spur daemon whose CLI entrypoint no longer exists on disk —
-   * report-only, never reapable, no new kill authority. */
-  kind: "worktree-tree" | "orphan-daemon";
+interface LeakedSidecarTreeCommon {
   rootPid: number;
   pgid: number;
   ageSeconds: number;
   /** realpath of /proc/<rootPid>/cwd. A leak is never reported without it. */
   worktreePath: string;
   args: string;
-  /** Sidecar name when the worktree's claim names one, else null. Always null for "orphan-daemon". */
-  sidecarName: string | null;
   /** Descendant pids from the same snapshot, root first. */
   tree: readonly number[];
   /** Total rss of `tree` in KiB. */
   treeRssKb: number;
-  /** true when Spur provenance is proven and `--reap` may signal it. Always false for "orphan-daemon". */
-  reapable: boolean;
-  /** "orphan-daemon" only: the `--config` value from its argv. */
-  configPath?: string;
-  /** "orphan-daemon" only: the `cli.js` path from its argv (confirmed absent from disk). */
-  cliEntryPath?: string;
 }
+
+/**
+ * "worktree-tree": the original sweep predicate. "orphan-daemon": a
+ * reparented Spur daemon whose CLI entrypoint no longer exists on disk —
+ * report-only, never reapable, no new kill authority. Discriminated on
+ * `kind` so `reapable`/`configPath`/`cliEntryPath` are compiler-enforced per
+ * variant, not just documented.
+ */
+export type LeakedSidecarTree =
+  | (LeakedSidecarTreeCommon & {
+      kind: "worktree-tree";
+      /** Sidecar name when the worktree's claim names one, else null. */
+      sidecarName: string | null;
+      /** true when Spur provenance is proven and `--reap` may signal it. */
+      reapable: boolean;
+    })
+  | (LeakedSidecarTreeCommon & {
+      kind: "orphan-daemon";
+      reapable: false;
+      /** the `--config` value from its argv. */
+      configPath: string;
+      /** the `cli.js` path from its argv (confirmed absent from disk). */
+      cliEntryPath: string;
+    });
 
 export interface SidecarSweepResult {
   /** false when the process table or procfs is unreadable; `leaked` is then []. */
@@ -780,7 +792,8 @@ export async function findLeakedSidecarTrees(
       reapable,
     });
   }
-  leaked.push(...(await findOrphanDaemonTrees(snapshot, pathExists)));
+  const claimedPids = new Set(leaked.map((tree) => tree.rootPid));
+  leaked.push(...(await findOrphanDaemonTrees(snapshot, pathExists, claimedPids)));
   return { supported: true, leaked };
 }
 
@@ -808,14 +821,23 @@ function parseDaemonArgs(args: string): { cliEntryPath: string; configPath: stri
   return { cliEntryPath, configPath };
 }
 
+// Only ENOENT proves the checkout is genuinely gone. Any other failure
+// (EACCES on a cross-uid checkout, ELOOP, ...) means "cannot tell" — fail
+// safe by reporting the path as existing, so an unreadable-but-live daemon
+// (e.g. another user's, on a shared host) never gets misreported as an
+// orphan.
 async function defaultPathExists(path: string): Promise<boolean> {
   try {
     await access(path);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return !(isErrnoException(error) && error.code === "ENOENT");
   }
 }
+
+// Test-only: exercises the ENOENT-vs-other-error distinction without
+// wiring a whole findLeakedSidecarTrees pass through it.
+export const _defaultPathExistsForTests = defaultPathExists;
 
 /**
  * Second, independent detection pass: a reparented Spur daemon whose own
@@ -825,13 +847,24 @@ async function defaultPathExists(path: string): Promise<boolean> {
  * computation (claim === undefined -> true) would wrongly make an
  * unclaimed daemon fork "reapable", exactly the failure mode a cwd-grouped
  * ps guard was already added once to prevent.
+ *
+ * `claimedPids` excludes any rootPid the worktree-tree loop already
+ * emitted: on a non-systemd host (container, CI image — no subreaper), a
+ * daemon with ppid exactly 1, a cwd inside worktreeDirRealpath, and no live
+ * claim satisfies BOTH predicates. Without this exclusion it would render
+ * twice — once `[reapable]`, once `[report-only]` — and `--reap` would
+ * silently signal a row the operator read as report-only.
  */
 async function findOrphanDaemonTrees(
   snapshot: ProcSnapshot,
   pathExists: (path: string) => Promise<boolean>,
+  claimedPids: ReadonlySet<number>,
 ): Promise<LeakedSidecarTree[]> {
   const rows: LeakedSidecarTree[] = [];
   for (const info of snapshot.byPid.values()) {
+    if (claimedPids.has(info.pid)) {
+      continue;
+    }
     const parentInfo = snapshot.byPid.get(info.ppid);
     const isReparented =
       info.ppid === 1 || !parentInfo || parentInfo.args.includes("systemd --user");
@@ -860,7 +893,6 @@ async function findOrphanDaemonTrees(
       // `daemon start`); three levels up from cli.js is the worktree root.
       worktreePath: dirname(dirname(dirname(parsed.cliEntryPath))),
       args: info.args,
-      sidecarName: null,
       tree,
       treeRssKb,
       reapable: false,

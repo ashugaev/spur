@@ -1877,7 +1877,6 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
         ageSeconds: 3600,
         worktreePath: "/tmp/gone-checkout",
         args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.xyz/config.yaml daemon start",
-        sidecarName: null,
         tree: [900],
         treeRssKb: 1000,
         reapable: false,

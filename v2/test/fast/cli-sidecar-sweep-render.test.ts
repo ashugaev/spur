@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { _renderSidecarSweepResultForTests as renderSidecarSweepResult } from "../../src/cli.js";
 import type { LeakedSidecarTree, SidecarSweepResult } from "../../src/sidecars/reap.js";
 
-function tree(overrides: Partial<LeakedSidecarTree> & { rootPid: number }): LeakedSidecarTree {
+type WorktreeTree = Extract<LeakedSidecarTree, { kind: "worktree-tree" }>;
+type OrphanDaemonTree = Extract<LeakedSidecarTree, { kind: "orphan-daemon" }>;
+
+function tree(overrides: Partial<WorktreeTree> & { rootPid: number }): WorktreeTree {
   return {
     kind: "worktree-tree",
     pgid: overrides.rootPid,
@@ -13,6 +16,24 @@ function tree(overrides: Partial<LeakedSidecarTree> & { rootPid: number }): Leak
     tree: [overrides.rootPid],
     treeRssKb: 4096,
     reapable: true,
+    ...overrides,
+  };
+}
+
+function orphanDaemonTree(
+  overrides: Partial<OrphanDaemonTree> & { rootPid: number },
+): OrphanDaemonTree {
+  return {
+    kind: "orphan-daemon",
+    pgid: overrides.rootPid,
+    ageSeconds: 120,
+    worktreePath: "/tmp/gone-checkout",
+    args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/config.yaml daemon start",
+    tree: [overrides.rootPid],
+    treeRssKb: 4096,
+    reapable: false,
+    configPath: "/tmp/config.yaml",
+    cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
     ...overrides,
   };
 }
@@ -69,11 +90,8 @@ describe("renderSidecarSweepResult", () => {
     const result: SidecarSweepResult = {
       supported: true,
       leaked: [
-        tree({
+        orphanDaemonTree({
           rootPid: 700,
-          kind: "orphan-daemon",
-          reapable: false,
-          sidecarName: null,
           configPath: "/tmp/spur-isolated-daemon.abc/config.yaml",
           cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
         }),

@@ -1502,7 +1502,7 @@ function formatSweepTreeLine(tree: LeakedSidecarTree): string {
   const rssMb = Math.round(tree.treeRssKb / 1024);
   const age = `age ${hours}h${minutes}m`;
   if (tree.kind === "orphan-daemon") {
-    return `  [report-only, verify before killing] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  daemon ${tree.configPath ?? "unknown"}  ${tree.worktreePath}`;
+    return `  [report-only, verify before killing] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  daemon ${tree.configPath}  ${tree.worktreePath}`;
   }
   return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
 }
@@ -1543,7 +1543,12 @@ async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck>
       detail: "sidecar-orphans: none found",
     };
   }
-  return { id: "sidecar-orphans", ok: false, severity: "warn", ...formatLeakedSidecarsCheck(leaked) };
+  return {
+    id: "sidecar-orphans",
+    ok: false,
+    severity: "warn",
+    ...formatLeakedSidecarsCheck(leaked),
+  };
 }
 
 // Split out from checkLeakedSidecars so its per-kind header/fix logic is
