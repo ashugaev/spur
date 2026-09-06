@@ -15088,7 +15088,8 @@ export class SessionService {
       await Promise.all(
         sidecarNames.map(async (name) => {
           const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
-          return (await sidecarTmuxAlive(ownerId, name)) ? name : null;
+          const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
+          return exists && !paneDead ? name : null;
         }),
       )
     ).filter((name): name is string => name !== null);
@@ -15112,6 +15113,22 @@ export class SessionService {
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
+  }
+
+  // Readout-only pane state for a sidecar: does its tmux session name exist,
+  // and if so is its pane dead (remain-on-exit keeps the name around after
+  // the pane exits). Reads only the two already-memoized fleet snapshots
+  // (getFleetSessionSnapshot / getFleetPaneSnapshot, both on a 2s TTL) —
+  // never passes { fresh: true }, so this adds zero new tmux forks. Every
+  // non-readout sidecarTmuxAlive call site keeps its "name exists" meaning
+  // unchanged; this helper only backs the two view readouts below.
+  private async sidecarPaneState(
+    ownerId: string,
+    sidecarName: string,
+  ): Promise<{ exists: boolean; paneDead: boolean }> {
+    const exists = await sidecarTmuxAlive(ownerId, sidecarName);
+    const paneDead = exists && (await tmuxPaneDead(sidecarTmuxSession(ownerId, sidecarName)));
+    return { exists, paneDead };
   }
 
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
@@ -15197,13 +15214,15 @@ export class SessionService {
       // the backend event can never disagree.
       const ageWarn =
         ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60;
+      const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
       sidecars.push({
         name,
-        alive: await sidecarTmuxAlive(ownerId, name),
+        alive: exists && !paneDead,
         ports: sidecarViewPorts(ownerRecord, name, sidecar),
         tmuxSession: sidecarTmuxSession(ownerId, name),
         ...(ageSeconds !== undefined ? { ageSeconds } : {}),
         ...(ageWarn ? { ageWarn } : {}),
+        ...(paneDead ? { deadPane: true } : {}),
       });
     }
     const queuedMessagesView = displayQueuedMessages(session);

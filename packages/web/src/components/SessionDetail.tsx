@@ -3572,7 +3572,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
-                            {sc.alive && canAttach ? (
+                            {(sc.alive || sc.deadPane) && canAttach ? (
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"

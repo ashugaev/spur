@@ -116,6 +116,9 @@ export interface SpurSessionSidecarView {
   ageSeconds?: number;
   /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
   ageWarn?: boolean;
+  /** True when the sidecar's tmux session exists but its pane has exited
+   * (remain-on-exit); absent otherwise. */
+  deadPane?: boolean;
 }
 
 export interface SpurSidecarPortConflictCandidate {
