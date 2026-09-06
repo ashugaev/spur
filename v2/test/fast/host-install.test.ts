@@ -759,6 +759,32 @@ describe("collectHostInstallChecks", () => {
     });
   });
 
+  // #826: pins doctor against a later parseVersionTuple tightening — cannot
+  // fail pre-fix (Number.parseInt("0-nightly...", 10) already degraded to 0
+  // and the check was already ok:true), but pins the stated contract now
+  // that the strip is explicit.
+  describe("node-version check with a prerelease process.version", () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(process, "version");
+
+    afterEach(() => {
+      if (originalDescriptor) {
+        Object.defineProperty(process, "version", originalDescriptor);
+      }
+    });
+
+    it("reports node-version ok:true for a nightly prerelease interpreter", async () => {
+      Object.defineProperty(process, "version", {
+        value: "v25.0.0-nightly20260101abcdef",
+        configurable: true,
+      });
+      const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
+      const check = checks.find((c) => c.id === "node-version");
+      expect(check).toMatchObject({ ok: true, severity: "error" });
+      expect(check?.detail).toMatch(/satisfies/);
+      expect(check?.detail).not.toMatch(/skipped/);
+    });
+  });
+
   // Folded-in regression guard: a genuine npm install resolves `engines.node`
   // from `dist/../package.json` (this package's own installed root, mirroring
   // `version.ts`'s own resolution) — on a real npm-published package lacking
@@ -1015,6 +1041,27 @@ describe("satisfiesNodeEngineRange", () => {
     }
     // And the pinned range must actually admit a version inside it.
     expect(satisfiesNodeEngineRange(range, "v20.19.0")).toBe(true);
+  });
+
+  // #826: a prerelease/build suffix never changes the verdict — only the
+  // release triple is evaluated against the root range.
+  it("ignores a prerelease/build suffix, deciding on the release triple alone", () => {
+    const range = "^20.19.0 || ^22.13.0 || >=24";
+    expect(satisfiesNodeEngineRange(range, "v25.0.0-nightly20260101abcdef")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v26.0.0-pre")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v24.0.0-rc.1")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v22.13.0+build.5")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v20.19.0-rc.0")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v21.0.0-rc.0")).toBe(false);
+    expect(satisfiesNodeEngineRange(range, "vgarbage")).toBe(false);
+  });
+
+  // #826: strip-before-split, not split-before-strip — reversing the order
+  // would let a garbage suffix on the FIRST segment leak digits into the
+  // parsed tuple (`v20.19-x.9` pre-strip parses as [20,19,9], which
+  // satisfies `^20.19.5`; post-strip it is [20,19,0], which does not).
+  it("strips the suffix before splitting on '.', not after", () => {
+    expect(satisfiesNodeEngineRange("^20.19.5", "v20.19-x.9")).toBe(false);
   });
 });
 

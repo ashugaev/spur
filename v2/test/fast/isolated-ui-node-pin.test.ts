@@ -344,6 +344,36 @@ describe("spur-isolated-ui node pin", () => {
     ]);
   });
 
+  // #826: a prerelease/build node (nightly, `-pre`, `-rc.N`, `+build.N`)
+  // must satisfy the gate on its release triple alone — the suffix is
+  // stripped, never rejected as unparseable.
+  it("proceeds with no nvm at all on a nightly prerelease node that satisfies the release triple (#826)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+
+    await expect(
+      runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v25.0.0-nightly20260101abcdef" }),
+    ).resolves.toEqual([
+      "install node=v25.0.0-nightly20260101abcdef",
+      "dev node=v25.0.0-nightly20260101abcdef",
+    ]);
+  });
+
+  // #826: unparseable `node -v` output must still fail closed — the widened
+  // regex accepts well-formed prerelease/build suffixes, not garbage.
+  it("fails closed on unparseable node -v output (#826)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+
+    const rejection = await runIsolatedUiExpectFailure(worktree, {
+      SPUR_TEST_SYS_NODE: "vgarbage",
+    });
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/unparseable output/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
   // PR #824 review: a suite that only ever exercises the real `>=24` clause
   // cannot tell "reads engines.node" apart from a `major >= pin` floor —
   // node 21 fails both, so a regression back to the floor would stay green.
@@ -539,6 +569,13 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
       "24.0.0",
       "24.15.0",
       "25.2.0",
+      "25.0.0-nightly20260101abcdef",
+      "26.0.0-pre",
+      "24.0.0-rc.1",
+      "22.13.0+build.5",
+      "21.0.0-rc.0",
+      "20.19.0-rc.0",
+      "22.12.0-rc.1",
     ];
 
     const worktree = createFakeWorktree();
