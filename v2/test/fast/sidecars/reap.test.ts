@@ -405,6 +405,7 @@ describe("confirmReaps", () => {
       tree: [900000 + n],
       ownedGroups: [],
       snapshot: { ok: true, byPid: new Map(), byPgid: new Map() } as ProcSnapshot,
+      blindKill: false,
     }));
     const outcomes = await confirmReaps(pendings, 100);
     expect(outcomes).toHaveLength(3);
@@ -435,7 +436,14 @@ describe("confirmReaps", () => {
       const snapshot = await snapshotProcesses();
       expect(snapshot.byPid.has(pid)).toBe(true);
       const tree = collectTree(pid, snapshot);
-      const pending = { sessionName: "test", panePid: pid, tree, ownedGroups: [], snapshot };
+      const pending = {
+        sessionName: "test",
+        panePid: pid,
+        tree,
+        ownedGroups: [],
+        snapshot,
+        blindKill: false,
+      };
       const [outcome] = await confirmReaps([pending], 50);
       // `survivors: []` IS the death proof: confirmGone only reaches it via
       // its own bounded ESRCH-polling loop. A second ad hoc probe here
