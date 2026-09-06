@@ -198,7 +198,10 @@ export async function getTmuxSessionPresence(
   const snapshot = await getFleetSessionSnapshot();
   return {
     present: snapshot.names.has(sessionName),
-    unresponsive: !snapshot.readable && snapshot.unresponsive,
+    // unresponsive is only ever set true alongside readable:false in the
+    // snapshot's own catch block, never otherwise — no `!snapshot.readable`
+    // guard needed here.
+    unresponsive: snapshot.unresponsive,
   };
 }
 
@@ -308,7 +311,10 @@ export async function getTmuxPanePresence(
   const snapshot = await getFleetPaneSnapshot();
   return {
     dead: snapshot.panes.get(sessionName)?.activePaneDead ?? true,
-    unresponsive: !snapshot.readable && snapshot.unresponsive,
+    // unresponsive is only ever set true alongside readable:false in the
+    // snapshot's own catch block, never otherwise — no `!snapshot.readable`
+    // guard needed here.
+    unresponsive: snapshot.unresponsive,
   };
 }
 

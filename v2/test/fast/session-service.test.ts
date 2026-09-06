@@ -6616,6 +6616,62 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
   });
 
+  // MUST FIX (reviewer, round 2): ensureSessionReadyForSend is a third
+  // ungated consumer of a timeout-killed tmux probe reading as absence — a
+  // false "not ready" here falls into relaunchSessionInPlace, which KILLS
+  // and relaunches a genuinely live agent (capturePaneAgentProcesses reads
+  // `ps`, not tmux, so a tmux-only hang sails past the survivor guard). This
+  // path is reached automatically from the delivery loop
+  // (tryDeliverQueuedMessageLocked), so it must throw a retryable error
+  // instead of attempting recovery — the message stays queued, exactly like
+  // the missing-workspace throw above.
+  it("throws (never recovers) when the tmux probe is killed by its own timeout, so the delivery loop retries instead of killing a live agent", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first queued"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionPresenceMock.mockReset().mockResolvedValue({
+      present: false,
+      unresponsive: true,
+    });
+
+    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+
+    expect(delivered).toBe(true);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    // No recovery attempt at all: relaunchSessionInPlace never got the
+    // chance to kill or relaunch the (possibly still-live) pane.
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.message.delivery_failed",
+        level: "error",
+        sessionId: "api-1",
+        message: expect.stringContaining("timed out"),
+      }),
+    );
+  });
+
   it("does not lose a send landing mid-drain: both messages survive and deliver in order (AC3)", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
@@ -37133,6 +37189,37 @@ describe("SessionService", () => {
 
         expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
         expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1");
+        service.dispose();
+      });
+
+      // SHOULD FIX (reviewer, round 2): a timeout-killed probe is ambiguous,
+      // not confirmed absence — gated the same way as reconcileUnexpectedStop
+      // and confirmAgentExited. Contrast with the preceding test (a genuinely
+      // absent agent pane, unresponsive:false, still reaps its orphaned
+      // sidecar exactly as before).
+      it("leaves a terminal session's sidecars untouched when its tmux probe is killed by its own timeout, rather than reaping them as if the tmux were confirmed gone", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            status: "stopped",
+            stopReason: "stale_timeout",
+            sidecarNames: ["proxy"],
+          }),
+        );
+        getTmuxSessionPresenceMock.mockReset().mockResolvedValue({
+          present: false,
+          unresponsive: true,
+        });
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
         service.dispose();
       });
 

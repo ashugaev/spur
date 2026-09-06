@@ -5360,7 +5360,8 @@ export class SessionService {
       let liveUnderTerminal = 0;
       for (const session of sessions) {
         let agentAlive = false;
-        if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
+        const presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        if (presence.present) {
           // A lone "process gone" read is inconclusive, not a verdict: a
           // transient tmux/ps failure reads exactly like an exited agent.
           // confirmAgentExited re-samples with fresh:true after a delay, so only
@@ -5380,6 +5381,13 @@ export class SessionService {
             await killTmuxSession(session.tmuxSession);
             reaped += 1;
           }
+        } else if (presence.unresponsive) {
+          // A timeout-killed probe is ambiguous, not confirmed absence — the
+          // one mistake this loop must never make is treating a slow-but-alive
+          // tmux as gone and reaping a live session's sidecars under it.
+          // Leave this session untouched this tick; the next reaper pass
+          // re-probes from scratch.
+          continue;
         }
         if (agentAlive) {
           // Sidecars serve the agent still running in this tmux. Reaping them
@@ -11779,7 +11787,8 @@ export class SessionService {
   }
 
   private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    const presence = await getTmuxSessionPresence(session.tmuxSession);
+    const runtimeAlive = presence.present;
     let processAlive = false;
     if (runtimeAlive) {
       processAlive = await isProcessRunningInTmux(
@@ -11789,6 +11798,19 @@ export class SessionService {
       if (processAlive) {
         return this.captureAgentSessionId(session, 0);
       }
+    } else if (presence.unresponsive) {
+      // A timeout-killed tmux probe is ambiguous, not confirmed absence: below
+      // this point a "not ready" verdict falls into relaunchSessionInPlace,
+      // which kills the pane (killAgentPaneAndConfirmExit) and relaunches —
+      // capturePaneAgentProcesses reads `ps`, not tmux, so a tmux-only hang
+      // would sail past the survivor guard and kill+relaunch a genuinely live
+      // agent. This is reached automatically from the delivery loop
+      // (tryDeliverQueuedMessageLocked), which already treats any throw here
+      // as "retry on the next poll, message stays queued" — never a dropped
+      // message and never a silent recovery attempt.
+      throw new Error(
+        `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
+      );
     }
 
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
@@ -13963,7 +13985,9 @@ export class SessionService {
     const panePresence = runtimeAlive
       ? await getTmuxPanePresence(session.tmuxSession, { fresh })
       : null;
-    const paneUsable = runtimeAlive ? !(panePresence?.dead ?? true) : false;
+    // panePresence is non-null exactly when runtimeAlive (assigned by the same
+    // condition just above) — no fallback needed on either read below.
+    const paneUsable = runtimeAlive ? !panePresence!.dead : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
@@ -13975,7 +13999,7 @@ export class SessionService {
     // sessionsUnresponsive only matters when the session read itself came up
     // absent, panesUnresponsive only when the pane read came up dead.
     const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
-    const panesUnresponsive = runtimeAlive && !paneUsable && (panePresence?.unresponsive ?? false);
+    const panesUnresponsive = runtimeAlive && !paneUsable && panePresence!.unresponsive;
     return {
       runtimeAlive,
       paneUsable,
