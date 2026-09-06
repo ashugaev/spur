@@ -240,15 +240,16 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           entry.allTtys.push(paneTty);
         }
         const parsedPanePid = Number.parseInt(panePid ?? "", 10);
-        if (Number.isFinite(parsedPanePid) && parsedPanePid > 0) {
-          entry.allPanePids.push(parsedPanePid);
+        const panePidValue =
+          Number.isFinite(parsedPanePid) && parsedPanePid > 0 ? parsedPanePid : null;
+        if (panePidValue !== null) {
+          entry.allPanePids.push(panePidValue);
         }
         // window_active + pane_active together identify the exact pane a
         // no-window/no-pane target (`=name:`) resolves to.
         if (windowActive === "1" && paneActive === "1") {
           entry.activePaneDead = paneDead === "1";
-          entry.activePanePid =
-            Number.isFinite(parsedPanePid) && parsedPanePid > 0 ? parsedPanePid : null;
+          entry.activePanePid = panePidValue;
         }
         panes.set(sessionName, entry);
       }

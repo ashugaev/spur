@@ -956,4 +956,31 @@ describe("runtime-tmux", () => {
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
     ).toBe(false);
   });
+
+  it("never counts a foreign-tty row whose ppid happens to match a pane pid", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        // 9999's ppid IS a pane pid (2300788), but it sits on pts/99, a tty
+        // this session's pane snapshot never reported — a different
+        // session's pane, or a stale/reused pid — so it must not count as
+        // this session's pane-shell child even though the ppid matches.
+        return {
+          stdout: ["2300788 1 pts/8 4200 -zsh", "9999 2300788 pts/99 128000 rogue-child"].join(
+            "\n",
+          ),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
 });
