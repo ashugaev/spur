@@ -5763,7 +5763,7 @@ describe("SessionDetail links", () => {
     expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
     expect(screen.getByText("Session api-a1 is not restorable")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Force Kill" })).toBeInTheDocument();
-    // Parity with daemon restore() availableActions for an errored session: respawn offered.
+    // Respawn renders regardless of availableActions (canForceKill gates Force Kill instead).
     expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
   });
 
@@ -5790,7 +5790,7 @@ describe("SessionDetail links", () => {
             code: "session_not_restorable",
             sessionId: "api-a1",
             reason: "Session api-a1 is not restorable",
-            availableActions: ["force_kill", "respawn"],
+            availableActions: ["respawn"],
           }),
           { status: 409 },
         );
@@ -5806,6 +5806,11 @@ describe("SessionDetail links", () => {
       expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
     });
     expect(screen.getByText("Session api-a1 is not restorable")).toBeInTheDocument();
+    // The daemon narrowed availableActions to ["respawn"] for this status, but the
+    // dialog's buttons follow web's own handlers (canForceKill), not the wire payload:
+    // the session under test is "stopped" (non-terminal), so Force Kill still renders.
+    expect(screen.getByRole("button", { name: "Force Kill" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
   });
 
   it("reopens a completed session with a single POST", async () => {

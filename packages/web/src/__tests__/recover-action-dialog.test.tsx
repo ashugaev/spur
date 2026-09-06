@@ -20,6 +20,7 @@ describe("RecoverActionDialog", () => {
     render(
       <RecoverActionDialog
         payload={payload({ availableActions: ["force_kill"] })}
+        canForceKill
         onForceKill={vi.fn()}
         onRespawn={vi.fn()}
         onCancel={vi.fn()}
@@ -28,20 +29,47 @@ describe("RecoverActionDialog", () => {
 
     expect(screen.getByText("Session api-1 is not restorable")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Force Kill" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Respawn" })).not.toBeInTheDocument();
   });
 
-  it("renders Respawn only when it is an available action", () => {
+  it("renders Respawn regardless of availableActions", () => {
+    const forceKillOnly = render(
+      <RecoverActionDialog
+        payload={payload({ availableActions: ["force_kill"] })}
+        canForceKill
+        onForceKill={vi.fn()}
+        onRespawn={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
+    forceKillOnly.unmount();
+
+    render(
+      <RecoverActionDialog
+        payload={payload({ availableActions: ["respawn"] })}
+        canForceKill
+        onForceKill={vi.fn()}
+        onRespawn={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
+  });
+
+  it("hides Force Kill while keeping Respawn and Cancel when canForceKill is false", () => {
     render(
       <RecoverActionDialog
         payload={payload()}
+        canForceKill={false}
         onForceKill={vi.fn()}
         onRespawn={vi.fn()}
         onCancel={vi.fn()}
       />,
     );
 
+    expect(screen.queryByRole("button", { name: "Force Kill" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
   });
 
   it("fires the matching callback for each action", () => {
@@ -52,6 +80,7 @@ describe("RecoverActionDialog", () => {
     render(
       <RecoverActionDialog
         payload={payload()}
+        canForceKill
         onForceKill={onForceKill}
         onRespawn={onRespawn}
         onCancel={onCancel}
@@ -73,6 +102,7 @@ describe("RecoverActionDialog", () => {
     render(
       <RecoverActionDialog
         payload={payload()}
+        canForceKill
         busy
         onForceKill={onForceKill}
         onRespawn={vi.fn()}
