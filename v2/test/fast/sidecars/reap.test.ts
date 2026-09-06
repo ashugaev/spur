@@ -9,7 +9,6 @@ import {
   confirmReaps,
   findLeakedSidecarTrees,
   reapRecordedIdentity,
-  reapSidecarPane,
   signalSidecarPane,
   snapshotProcesses,
   _computeSurvivorCandidatesForTests,
