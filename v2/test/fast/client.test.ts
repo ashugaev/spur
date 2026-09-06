@@ -4,7 +4,6 @@ import { SPUR_DAEMON_API_VERSION } from "../../src/types.js";
 const spawnMock = vi.fn();
 const sleepMock = vi.fn().mockResolvedValue(undefined);
 const loadConfigMock = vi.fn();
-const isDefaultInstanceConfigPathMock = vi.fn();
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
@@ -16,7 +15,6 @@ vi.mock("node:timers/promises", () => ({
 
 vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
-  isDefaultInstanceConfigPath: isDefaultInstanceConfigPathMock,
 }));
 
 function runtimeInfo(apiVersion = SPUR_DAEMON_API_VERSION, pid = 4242) {
@@ -52,7 +50,6 @@ describe("client.ensureServer", () => {
       configPath: "/tmp/spur.yaml",
       server: { host: "127.0.0.1", port: 4310 },
     });
-    isDefaultInstanceConfigPathMock.mockReset().mockReturnValue(true);
     vi.stubGlobal("fetch", vi.fn());
   });
 
@@ -301,19 +298,7 @@ describe("client.ensureServer", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("refuses implicit auto-start for a non-default instance config and never spawns", async () => {
-    isDefaultInstanceConfigPathMock.mockReturnValue(false);
-    vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
-
-    const { ensureServer } = await loadClientModule();
-    await expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
-      /non-default instance config never auto-starts/,
-    );
-    expect(spawnMock).not.toHaveBeenCalled();
-  });
-
-  it("restartDaemonIfRunning still spawns under a non-default config and with SPUR_SESSION set", async () => {
-    isDefaultInstanceConfigPathMock.mockReturnValue(false);
+  it("restartDaemonIfRunning still spawns with SPUR_SESSION set", async () => {
     vi.stubEnv("SPUR_SESSION", "sess-1");
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     const fetchMock = vi.mocked(fetch);

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { isDefaultInstanceConfigPath, loadConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 import { SPUR_SIDECAR_NAME_ENV } from "./sidecar-runtime.js";
 import {
   type ConnectProjectConfigRequest,
@@ -311,11 +311,6 @@ function spawnDaemon(
     if (sessionId !== "" || sidecarName !== "") {
       throw new Error(
         `Spur daemon at ${configPath} is unreachable and this is a Spur session context (SPUR_SESSION=${sessionId || sidecarName}); a session pane must not fork a daemon. Start it from a host shell: \`systemctl --user restart spur-daemon\` (npm install) or \`spur daemon start\`.`,
-      );
-    }
-    if (!isDefaultInstanceConfigPath(configPath)) {
-      throw new Error(
-        `Spur daemon for ${configPath} is unreachable; a non-default instance config never auto-starts. Start it explicitly: \`spur --config ${configPath} daemon start\`, or for an isolated sidecar \`spur sidecar start --name isolated-daemon\`.`,
       );
     }
   }
