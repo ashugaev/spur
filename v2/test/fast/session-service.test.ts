@@ -129,7 +129,8 @@ const listServiceInstancesForSessionMock = vi.fn();
 const readServiceInstanceMock = vi.fn();
 const writeServiceInstanceMock = vi.fn();
 const serviceRecords = new Map<string, ServiceInstanceRecord>();
-const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
+const captureTmuxPaneMock = vi.fn((): Promise<string | null> => Promise.resolve(""));
+const captureTmuxPaneOrEmptyMock = vi.fn(() => Promise.resolve(""));
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
@@ -636,6 +637,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
   return {
     PromptReadyTimeoutError: actual.PromptReadyTimeoutError,
     captureTmuxPane: captureTmuxPaneMock,
+    captureTmuxPaneOrEmpty: captureTmuxPaneOrEmptyMock,
     createTmuxSession: createTmuxSessionMock,
     createTmuxCommandSession: createTmuxCommandSessionMock,
     createTmuxSidecarSession: createTmuxSidecarSessionMock,
@@ -1402,6 +1404,7 @@ describe("SessionService", () => {
       .mockImplementation((id: string, name: string) => `${id}--${name}`);
     listTmuxSessionNamesMock.mockReset().mockResolvedValue(new Set());
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
+    captureTmuxPaneOrEmptyMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
@@ -14175,7 +14178,7 @@ describe("SessionService", () => {
     });
     seedClaudeAttentionSession();
     mockClaudeJsonlState("waiting");
-    captureTmuxPaneMock.mockResolvedValue("Please confirm before I proceed.");
+    captureTmuxPaneOrEmptyMock.mockResolvedValue("Please confirm before I proceed.");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -27362,7 +27365,7 @@ describe("SessionService", () => {
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
       mockClaudeJsonlState("waiting");
-      captureTmuxPaneMock.mockResolvedValueOnce("last agent output\n");
+      captureTmuxPaneOrEmptyMock.mockResolvedValueOnce("last agent output\n");
       const sessions = createSessionStore();
       sessions.set(
         "api-1",

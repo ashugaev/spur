@@ -436,18 +436,33 @@ export function captureTmuxPane(
   sessionName: string,
   lines = 200,
   options?: { fresh?: boolean },
-): Promise<string> {
+): Promise<string | null> {
   const key = `${sessionName}:${lines}`;
   if (options?.fresh) {
     capturePaneCache.delete(key);
   }
   // The fetch throws on a real capture failure (rather than swallowing it
   // into "") so memoizedProbe's evict-on-reject never caches a transient
-  // failure as a stable empty result for the rest of the TTL window.
+  // failure as a stable empty result for the rest of the TTL window. The
+  // catch here yields `null` — "could not look" — kept distinct from `""`,
+  // a real capture that saw a blank pane. Every caller must treat `null` as
+  // no observation; use `captureTmuxPaneOrEmpty` below for display-only
+  // callers that are fine collapsing the distinction.
   return memoizedProbe(capturePaneCache, key, () => {
     const target = exactPaneTarget(sessionName);
     return tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
-  }).catch(() => "");
+  }).catch(() => null);
+}
+
+// Display-only convenience: collapses "could not look" into "", the same
+// value a blank pane would produce. Never feed this into a rate-limit or
+// menu detector — those must see `null` to skip taking an observation.
+export async function captureTmuxPaneOrEmpty(
+  sessionName: string,
+  lines = 200,
+  options?: { fresh?: boolean },
+): Promise<string> {
+  return (await captureTmuxPane(sessionName, lines, options)) ?? "";
 }
 
 // Test-only introspection: capturePaneCache is keyed per (session, lines), so
@@ -891,7 +906,7 @@ export async function waitForTmuxReady(
     // Cursor trust-confirm retries. Back off to reduce pressure on the shared
     // tmux server when several agents start concurrently, with per-session
     // jitter so batch spawns don't stay phase-aligned.
-    const capture = await captureTmuxPane(sessionName, 200, { fresh: true });
+    const capture = await captureTmuxPaneOrEmpty(sessionName, 200, { fresh: true });
     const paneChanged = capture !== lastCapture;
     lastCapture = capture;
     if (paneChanged) {

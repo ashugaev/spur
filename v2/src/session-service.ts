@@ -214,6 +214,7 @@ import {
 } from "./session-mode.js";
 import {
   captureTmuxPane,
+  captureTmuxPaneOrEmpty,
   createTmuxCommandSession,
   createTmuxSidecarSession,
   createTmuxSession,
@@ -1780,7 +1781,7 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
   if (!(await tmuxPaneDead(tmuxSession))) return;
-  const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
+  const output = (await captureTmuxPaneOrEmpty(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
   await killTmuxSession(tmuxSession);
   const detail = output ? `\nLast output:\n${output}` : "";
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
@@ -5866,7 +5867,7 @@ export class SessionService {
   }
 
   private async buildPaneTail(tmuxSession: string): Promise<string> {
-    const tail = (await captureTmuxPane(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
+    const tail = (await captureTmuxPaneOrEmpty(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
     return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
   }
 
