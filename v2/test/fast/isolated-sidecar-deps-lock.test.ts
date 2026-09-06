@@ -331,7 +331,10 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     const markers = materializeReadyTree(worktree.repoDir);
 
     await runIsolatedDaemon(worktree);
-    await runIsolatedUi(worktree).catch(() => undefined);
+    // Runtime file is already published by the daemon above, so the UI runs
+    // to completion here (no swallowed rejection to hide a dead-before-probe
+    // UI making "no install-start" trivially true).
+    await runIsolatedUi(worktree);
 
     const log = readLog(worktree);
     expect(log).not.toContain("install-start");
@@ -364,24 +367,28 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     await daemonPromise;
   });
 
-  it("AC7: against an already-ready tree, either start order installs nothing and leaves the tree alone", async () => {
-    const daemonFirst = createFixture();
-    const markersDaemonFirst = materializeReadyTree(daemonFirst.repoDir);
-    await runIsolatedDaemon(daemonFirst);
-    await runIsolatedUi(daemonFirst).catch(() => undefined);
-    const logDaemonFirst = readLog(daemonFirst);
-    expect(logDaemonFirst).not.toContain("install-start");
-    for (const marker of Object.values(markersDaemonFirst)) {
-      expect(existsSync(marker)).toBe(true);
-    }
+  // Daemon-first order against a ready tree is exactly the AC3 case above
+  // (daemon runs first there too); the order this case adds beyond AC3 is
+  // ui-first, which AC3 does not cover.
+  it("AC7: against an already-ready tree, starting the UI before the daemon still installs nothing", async () => {
+    const worktree = createFixture();
+    const markers = materializeReadyTree(worktree.repoDir);
 
-    const uiFirst = createFixture();
-    const markersUiFirst = materializeReadyTree(uiFirst.repoDir);
-    await runIsolatedUi(uiFirst).catch(() => undefined);
-    await runIsolatedDaemon(uiFirst);
-    const logUiFirst = readLog(uiFirst);
-    expect(logUiFirst).not.toContain("install-start");
-    for (const marker of Object.values(markersUiFirst)) {
+    // The UI starts before the daemon has published isolated-env.sh, so it
+    // fails at its runtime-file wait — a real, asserted failure, not a
+    // swallowed one — but only after its own dependency gate already ran.
+    const rejection = (await runIsolatedUi(worktree).catch((error) => error)) as {
+      code: number;
+      stderr: string;
+    };
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/Missing isolated runtime file/);
+
+    await runIsolatedDaemon(worktree);
+
+    const log = readLog(worktree);
+    expect(log).not.toContain("install-start");
+    for (const marker of Object.values(markers)) {
       expect(existsSync(marker)).toBe(true);
     }
   });

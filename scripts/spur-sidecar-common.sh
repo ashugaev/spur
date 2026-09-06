@@ -4,8 +4,11 @@ set -euo pipefail
 # Prefixed so sourcing this file never clobbers a caller's own SCRIPT_DIR or
 # REPO_ROOT (spur-isolated-daemon.sh already defines REPO_ROOT). Derived from
 # this file's own BASH_SOURCE, not the caller's, so it is correct regardless
-# of which sidecar sources it or what cwd it runs from.
-SIDECAR_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# of which sidecar sources it or what cwd it runs from. Same `realpath`
+# derivation spur-isolated-daemon.sh:4-6 uses for its own REPO_ROOT, so a
+# symlinked scripts/ resolves to the identical tree for both sidecars.
+SIDECAR_REPO_ROOT="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.."
+SIDECAR_REPO_ROOT="$(realpath "$SIDECAR_REPO_ROOT")"
 
 NVMRC_FILE="$SIDECAR_REPO_ROOT/.nvmrc"
 ROOT_PACKAGE_JSON="$SIDECAR_REPO_ROOT/package.json"
@@ -260,15 +263,17 @@ INNER
 # process), and an `exec`-opened fd would be inherited by that daemon for
 # its entire lifetime, wedging every later sidecar start behind a lock the
 # daemon never releases.
-# Bounded wait, not a knob: 900s covers a cold `pnpm install --frozen-lockfile`
+# Bounded wait, not a knob: covers a cold `pnpm install --frozen-lockfile`
 # on this workspace (minutes, not seconds); a timeout is a named error and a
 # nonzero exit, never a proceed-and-wipe.
+WORKSPACE_DEPS_LOCK_WAIT_SECONDS=900
+
 ensure_workspace_deps() {
   local lock_file="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}/workspace-deps.lock"
 
   (
-    flock -w 900 9 || {
-      echo "spur-sidecar: timed out waiting up to 900s for the workspace dependency lock: $lock_file" >&2
+    flock -w "$WORKSPACE_DEPS_LOCK_WAIT_SECONDS" 9 || {
+      echo "spur-sidecar: timed out waiting up to ${WORKSPACE_DEPS_LOCK_WAIT_SECONDS}s for the workspace dependency lock: $lock_file" >&2
       exit 1
     }
 

@@ -62,13 +62,6 @@ fi
 if [[ "\${1:-}" == "-e" ]]; then
   exec "$SPUR_TEST_REAL_NODE" "$@"
 fi
-if [[ $# -eq 0 ]]; then
-  # workspace_deps_ready's node-pty/next probe (heredoc on stdin, no argv).
-  # Not reached by these fixtures: root node_modules is absent, so the
-  # common script's first leg short-circuits before ever spawning node here.
-  cat >/dev/null
-  exit 1
-fi
 if [[ "$1" == "$SPUR_TEST_REPO/v2/dist/cli.js" && "\${2:-}" == "--version" ]]; then
   runtime_state=missing
   if [[ -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then

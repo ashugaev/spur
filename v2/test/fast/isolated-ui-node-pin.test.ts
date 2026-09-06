@@ -206,14 +206,14 @@ function writeStubNvm(nvmDir: string): void {
 }
 
 // A PATH entry that carries only what ensure_node_ready's early failure
-// paths need to run (bash itself, dirname for SCRIPT_DIR, tr for parsing
-// .nvmrc) and deliberately no `node` — real `/usr/bin` and `/bin` both carry
-// a real node on this host, so a plain fallback PATH can never reproduce
-// "node not found on PATH".
+// paths need to run (bash itself, dirname/realpath for SCRIPT_DIR and
+// SIDECAR_REPO_ROOT, tr for parsing .nvmrc) and deliberately no `node` —
+// real `/usr/bin` and `/bin` both carry a real node on this host, so a plain
+// fallback PATH can never reproduce "node not found on PATH".
 function createNodeFreePathDir(repoDir: string): string {
   const dir = join(repoDir, "no-node-path");
   mkdirSync(dir, { recursive: true });
-  for (const bin of ["bash", "dirname", "tr"]) {
+  for (const bin of ["bash", "dirname", "tr", "realpath"]) {
     symlinkSync(`/usr/bin/${bin}`, join(dir, bin));
   }
   return dir;
