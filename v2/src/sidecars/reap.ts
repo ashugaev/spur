@@ -315,12 +315,38 @@ function signalOwnedThenTree(
   killTree(remaining, signal);
 }
 
+// /proc/<pid>/stat state field ("Z" == zombie). A signaled process that has
+// already exited but whose parent (the tmux server, under CI load) hasn't
+// called waitpid() yet still answers `kill(pid, 0)` successfully — it is a
+// zombie, not a survivor. Defaults to false (not a zombie) on ENOENT/EPERM/
+// parse failure: `confirmGone`'s `kill(pid, 0)` probe is the source of truth
+// for "still exists", this only refines an already-alive pid.
+async function isZombie(pid: number): Promise<boolean> {
+  let content: string;
+  try {
+    content = await readFile(`/proc/${pid}/stat`, "utf8");
+  } catch {
+    return false;
+  }
+  const close = content.lastIndexOf(")");
+  if (close === -1) {
+    return false;
+  }
+  const state = content
+    .slice(close + 2)
+    .trim()
+    .split(/\s+/)[0];
+  return state === "Z";
+}
+
 /**
  * Bounded confirmation loop: probe each pid with `process.kill(pid, 0)`
  * every REAP_CONFIRM_INTERVAL_MS up to REAP_CONFIRM_TIMEOUT_MS. ESRCH
  * confirms gone; EPERM confirms alive-but-foreign (a pid reused by another
- * user's process) and is dropped without being reported as a survivor.
- * Returns whatever is still alive at the timeout.
+ * user's process) and is dropped without being reported as a survivor. A
+ * pid that still answers `kill(pid, 0)` but is a zombie (`/proc` state `Z`)
+ * has already exited — it is a parent-reap race, not a survivor — and is
+ * dropped too. Returns whatever is genuinely still alive at the timeout.
  */
 async function confirmGone(pids: readonly number[]): Promise<number[]> {
   const pending = new Set(pids);
@@ -329,6 +355,9 @@ async function confirmGone(pids: readonly number[]): Promise<number[]> {
     for (const pid of [...pending]) {
       try {
         process.kill(pid, 0);
+        if (await isZombie(pid)) {
+          pending.delete(pid);
+        }
       } catch {
         pending.delete(pid);
       }
