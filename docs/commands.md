@@ -8,6 +8,8 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 
 `spur <unknown> --help` reports the unknown command, exits `1`. `spur --help <unknown>`/`spur -h <unknown>` prints root help, exits `0`.
 
+Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config. Every command exits non-zero when `<path>` doesn't exist and isn't the default `~/.spur/config.yaml`; only the default path is bootstrapped, on first boot. A missing non-default path is never created — otherwise a typo'd or stale path is seeded from defaults and targets the daemon on `4310`.
+
 ## Session tools and environment
 
 `$SPUR_SESSION_TOOL_DIR` on `PATH`, holding session-bound wrappers:
@@ -50,7 +52,7 @@ Prunable: `vendor-cache` (`~/.npm/_cacache`) — 7d, protected while npm/pnpm/np
 
 ## daemon
 
-`daemon start|stop|restart --config <path>` refuses to bootstrap when `<path>` (or `SPUR_CONFIG`) doesn't exist and isn't the default `~/.spur/config.yaml` — only the default path bootstraps first boot. All three refuse a non-default `<path>` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`, explicit/inherited); read-only check.
+`daemon start|stop|restart` additionally refuse a non-default `--config <path>` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`, explicit/inherited); read-only check.
 
 Any CLI command syncs its `--config` into the daemon's durable registry. Attached configs must agree on `server.host`, `server.port`, `dataDir`, `worktreeDir`; project ids/`sessionPrefix` stay globally unique per daemon. Registry mechanics: [config registry](configuration.md#config-registry).
 
