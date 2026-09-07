@@ -181,6 +181,10 @@ With `steps`, Spur sends "step 1/N: research" plus the prompt. Without, it sends
 
 `session.pipeline.step_sent` marks a confirmed step submission, with 1-based `details.stepIndex` and `details.totalSteps`. Spawn logs step 1 (it rides the launch message); the delivery loop logs 2..N. An unconfirmed launch send logs `session.submit.timeout` with `details.freshLaunch` and no `step_sent`.
 
+- `session.pipeline.completed` (level info) — pipeline ran every step.
+- `session.pipeline.errored` (level error) — `details.nextStepIndex`, `details.awaitingStepIndex` (0-based, or `null`).
+- `session.pipeline.stalled` (level warn) — the delivery loop exited because the session left `running` while a step was still awaited; `details.awaitingStepIndex` (0-based, or `null`), `details.nextStepIndex`, `details.sessionStatus`. Diagnostic only, delivery is not resumed.
+
 ## Desk groups
 
 ```yaml
