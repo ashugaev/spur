@@ -29,6 +29,8 @@ const T0 = 1_800_000_000_000;
 // Mirrors gh.ts's GH_POLL_CYCLE_ROLLUP_MS. Not exported: the rollup window is
 // a source constant, not a public knob, so tests pin the value instead.
 const GH_POLL_CYCLE_ROLLUP_MS = 900_000;
+// Mirrors gh.ts's GH_POLL_CYCLE_SLOW_MS. Not exported, same reasoning.
+const GH_POLL_CYCLE_SLOW_MS = 1_000;
 
 function usageEvents(window: "minute" | "hour"): Array<Record<string, unknown>> {
   return logSpurEventMock.mock.calls
@@ -548,6 +550,288 @@ describe("gh usage accounting", () => {
         .filter((entry) => entry.event === "gh.poll_cycle" && entry.sourceId === "stale");
       expect(emitted).toHaveLength(2);
       expect(emitted[1]?.details).toMatchObject({ cycles: 1, calls: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-1: emits a zero-cost window whose cycle stalled", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      // Run-opening cycle: emits standalone, opens the run with clean counters.
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+      expect(cycleEvents()).toHaveLength(1);
+
+      // Stalled, zero-cost cycle: no gh call, but the clock advances inside
+      // the task, so cycleMs measures the stall.
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        vi.setSystemTime(T0 + 15_000);
+      });
+      expect(cycleEvents()).toHaveLength(1);
+
+      // Closing cycle, past the rollup boundary.
+      vi.setSystemTime(T0 + 15_000 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+
+      expect(cycleEvents()).toHaveLength(2);
+      expect(cycleEvents()[1]).toMatchObject({
+        cycles: 2,
+        calls: 0,
+        graphqlCost: 0,
+        slowCycles: 1,
+        maxCycleMs: 15_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-2: pins the exact 1000ms slow boundary", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      // Run-opening cycles for both keys.
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "exact" },
+        async () => {},
+      );
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "under" },
+        async () => {},
+      );
+
+      // `exact` stalls for exactly the threshold; `under` stalls one ms short.
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "exact" },
+        async () => {
+          vi.setSystemTime(T0 + GH_POLL_CYCLE_SLOW_MS);
+        },
+      );
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "under" },
+        async () => {
+          vi.setSystemTime(T0 + GH_POLL_CYCLE_SLOW_MS - 1);
+        },
+      );
+
+      // Close both windows past the rollup boundary.
+      vi.setSystemTime(T0 + GH_POLL_CYCLE_SLOW_MS + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "exact" },
+        async () => {},
+      );
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "under" },
+        async () => {},
+      );
+
+      const bySourceId = (sourceId: string) =>
+        logSpurEventMock.mock.calls
+          .map((call) => call[1] as { event: string; sourceId?: string })
+          .filter((entry) => entry.event === "gh.poll_cycle" && entry.sourceId === sourceId);
+      expect(bySourceId("exact")).toHaveLength(2);
+      expect(bySourceId("under")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-3: does not re-report a stall in the next window", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        vi.setSystemTime(T0 + 15_000);
+      });
+      vi.setSystemTime(T0 + 15_000 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+      expect(cycleEvents()).toHaveLength(2);
+      expect(cycleEvents()[1]).toMatchObject({ slowCycles: 1 });
+
+      // Second full window: fast zero-cost cycles only.
+      for (let index = 0; index < 3; index += 1) {
+        await runGhPollCycle(
+          { kind: "github_source", projectId: "p", sourceId: "a" },
+          async () => {},
+        );
+      }
+      vi.setSystemTime(T0 + 15_000 + 2 * GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+
+      expect(cycleEvents()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-4: reports the current window's max, not a stale high-water", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+
+      // Window 1 stalls and closes.
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        vi.setSystemTime(T0 + 15_000);
+      });
+      vi.setSystemTime(T0 + 15_000 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+      expect(cycleEvents()).toHaveLength(2);
+
+      // Window 2: fast cycles plus one paying cycle, no stall, closed past
+      // the next boundary.
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        noteGhInvocation(["pr", "view", "1"], Date.now());
+      });
+      vi.setSystemTime(T0 + 15_000 + 2 * GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+
+      expect(cycleEvents()).toHaveLength(3);
+      expect(cycleEvents()[2]).toMatchObject({ calls: 1 });
+      expect(cycleEvents()[2]?.["maxCycleMs"]).toBeLessThan(GH_POLL_CYCLE_SLOW_MS);
+      expect(cycleEvents()[2]).toHaveProperty("maxCycleMs");
+      expect(cycleEvents()[2]).not.toHaveProperty("slowCycles");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-5: does not seed the first cycle's stall into the run", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      // The first-ever cycle on this key stalls but spends nothing: it
+      // emits standalone, carrying its own durationMs.
+      await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId: "a" }, async () => {
+        vi.setSystemTime(T0 + 15_000);
+      });
+      expect(cycleEvents()).toHaveLength(1);
+      expect(cycleEvents()[0]).toMatchObject({ durationMs: 15_000 });
+
+      // Only fast zero-cost cycles past the rollup boundary.
+      vi.setSystemTime(T0 + 15_000 + GH_POLL_CYCLE_ROLLUP_MS);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "a" },
+        async () => {},
+      );
+
+      expect(cycleEvents()).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-6: flushes a stalled zero-cost window at the idle prune", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "stale" },
+        async () => {},
+      );
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "stale" },
+        async () => {
+          vi.setSystemTime(T0 + 15_000);
+        },
+      );
+
+      vi.setSystemTime(T0 + HOUR + MINUTE);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "other" },
+        async () => {},
+      );
+
+      const emitted = logSpurEventMock.mock.calls
+        .map((call) => call[1] as { event: string; sourceId?: string; details?: unknown })
+        .filter((entry) => entry.event === "gh.poll_cycle" && entry.sourceId === "stale");
+      expect(emitted).toHaveLength(2);
+      expect(emitted[1]?.details).toMatchObject({
+        cycles: 1,
+        calls: 0,
+        slowCycles: 1,
+        maxCycleMs: 15_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-6b: flushes a stalled zero-cost window at shutdown", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "stale" },
+        async () => {},
+      );
+      await runGhPollCycle(
+        { kind: "github_source", projectId: "p", sourceId: "stale" },
+        async () => {
+          vi.setSystemTime(T0 + 15_000);
+        },
+      );
+      expect(cycleEvents()).toHaveLength(1);
+
+      flushGhPollCycles();
+
+      const emitted = logSpurEventMock.mock.calls
+        .map((call) => call[1] as { event: string; sourceId?: string; details?: unknown })
+        .filter((entry) => entry.event === "gh.poll_cycle" && entry.sourceId === "stale");
+      expect(emitted).toHaveLength(2);
+      expect(emitted[1]?.details).toMatchObject({
+        cycles: 1,
+        calls: 0,
+        slowCycles: 1,
+        maxCycleMs: 15_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC809-7: caps volume at one aggregate per key per window when every cycle stalls", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      const sourceIds = ["k1", "k2", "k3", "k4", "k5"];
+      for (let tick = 0; tick < 60; tick += 1) {
+        for (const sourceId of sourceIds) {
+          await runGhPollCycle({ kind: "github_source", projectId: "p", sourceId }, async () => {
+            vi.setSystemTime(Date.now() + GH_POLL_CYCLE_SLOW_MS);
+          });
+        }
+        vi.setSystemTime(T0 + (tick + 1) * MINUTE);
+      }
+
+      expect(cycleEvents().length).toBeLessThanOrEqual(30);
+      expect(cycleEvents().length).toBe(20);
     } finally {
       vi.useRealTimers();
     }
