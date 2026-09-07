@@ -19,6 +19,12 @@ import { createTempDir } from "../helpers/common.js";
 
 const indexReads = { count: 0 };
 
+// Armed with a prepared file path, the renameSync spy lands that file on
+// .index.json the instant our own rename returns — the foreign-writer
+// interleave (`spur gc` rewriting the index from a second process) that a
+// single-process test cannot otherwise reach.
+const foreignAfterRename: { path: string | null } = { path: null };
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
 
@@ -31,6 +37,20 @@ vi.mock("node:fs", async (importOriginal) => {
       }
       return actual.readFileSync(...args);
     }) as typeof actual.readFileSync,
+    renameSync: ((...args: Parameters<typeof actual.renameSync>) => {
+      const result = actual.renameSync(...args);
+      const dest = args[1];
+      if (
+        typeof dest === "string" &&
+        dest.endsWith(".index.json") &&
+        foreignAfterRename.path !== null
+      ) {
+        const foreign = foreignAfterRename.path;
+        foreignAfterRename.path = null;
+        actual.renameSync(foreign, dest);
+      }
+      return result;
+    }) as typeof actual.renameSync,
   };
 });
 
@@ -38,6 +58,7 @@ const tempDirs: string[] = [];
 
 beforeEach(() => {
   indexReads.count = 0;
+  foreignAfterRename.path = null;
 });
 
 afterEach(async () => {
@@ -168,6 +189,29 @@ describe("session index cache", () => {
     expect(after.ino).not.toBe(before.ino);
 
     expect(readSession(dataDir, "api-1")?.prompt).toBe("second");
+  });
+
+  it("re-reads when a foreign writer lands on the index right after our own rename", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, session("api-1", "apione", "first"));
+    writeSession(dataDir, session("api-1", "apitwo", "second"));
+
+    const path = indexPath(dataDir);
+    const foreignPath = `${path}.foreign-prepared`;
+    writeFileSync(foreignPath, indexJson({ "api-1": "sessions/apitwo/api-1.json" }), "utf-8");
+
+    // Our write maps the id at apione; the spy immediately overwrites the
+    // destination with the foreign inode mapping it at apitwo. Fingerprinting
+    // the tmp inode makes the next read a MISS. Fingerprinting the destination
+    // after the rename would pin our object to the foreign inode's stats and
+    // return the apione mapping forever.
+    foreignAfterRename.path = foreignPath;
+    writeSession(dataDir, session("api-1", "apione", "first"));
+    expect(foreignAfterRename.path).toBeNull();
+
+    indexReads.count = 0;
+    expect(readSession(dataDir, "api-1")?.prompt).toBe("second");
+    expect(indexReads.count).toBe(1);
   });
 
   it("falls back to the directory scan when .index.json is deleted", async () => {

@@ -396,7 +396,12 @@ function readSessionIndex(dataDir: string): Readonly<Record<string, string>> {
           typeof entry[0] === "string" && typeof entry[1] === "string",
       ),
     );
-    sessionIndexCache.set(path, { ...stat, index });
+    sessionIndexCache.set(path, {
+      ino: stat.ino,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      index,
+    });
     return index;
   } catch {
     // A corrupt or torn file is never cached: it must be retried, and the
@@ -445,7 +450,12 @@ function writeSessionIndexFile(dataDir: string, index: Readonly<Record<string, s
   const path = sessionIndexFilePath(dataDir);
   const fingerprint = writeJsonFile(path, index);
   if (fingerprint) {
-    sessionIndexCache.set(path, { ...fingerprint, index });
+    sessionIndexCache.set(path, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      index,
+    });
   } else {
     sessionIndexCache.delete(path);
   }
