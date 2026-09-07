@@ -608,21 +608,25 @@ describe("gh usage accounting", () => {
       );
 
       // `exact` stalls for exactly the threshold; `under` stalls one ms short.
+      // Each task advances the clock RELATIVE to its own cycle's start, not to
+      // an absolute value: the two keys share one fake clock, so an absolute
+      // `setSystemTime` in the second cycle would silently include (or negate)
+      // whatever the first cycle already advanced.
       await runGhPollCycle(
         { kind: "github_source", projectId: "p", sourceId: "exact" },
         async () => {
-          vi.setSystemTime(T0 + GH_POLL_CYCLE_SLOW_MS);
+          vi.setSystemTime(Date.now() + GH_POLL_CYCLE_SLOW_MS);
         },
       );
       await runGhPollCycle(
         { kind: "github_source", projectId: "p", sourceId: "under" },
         async () => {
-          vi.setSystemTime(T0 + GH_POLL_CYCLE_SLOW_MS - 1);
+          vi.setSystemTime(Date.now() + GH_POLL_CYCLE_SLOW_MS - 1);
         },
       );
 
       // Close both windows past the rollup boundary.
-      vi.setSystemTime(T0 + GH_POLL_CYCLE_SLOW_MS + GH_POLL_CYCLE_ROLLUP_MS);
+      vi.setSystemTime(Date.now() + GH_POLL_CYCLE_ROLLUP_MS);
       await runGhPollCycle(
         { kind: "github_source", projectId: "p", sourceId: "exact" },
         async () => {},
