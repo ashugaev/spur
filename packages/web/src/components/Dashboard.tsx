@@ -24,7 +24,6 @@ import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
-import { TodoOverrideDialog } from "@/components/TodoOverrideDialog";
 import { ToastViewport } from "@/components/Toast";
 import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
@@ -68,8 +67,6 @@ import {
   isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
-  isTodoLedgerEmptyPayload,
-  isTodoOpenWorkPayload,
   toDashboardSession,
   type AttentionLevel,
   type AvailableBacklogItem,
@@ -1069,22 +1066,6 @@ export function Dashboard() {
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
   const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] = useState(false);
-  const [todoOverride, setTodoOverride] = useState<
-    | {
-        session: DashboardSession;
-        options: { prAction?: OpenPrAction; skipPrCheck?: true };
-        empty: true;
-      }
-    | {
-        session: DashboardSession;
-        options: { prAction?: OpenPrAction; skipPrCheck?: true };
-        empty?: false;
-        openCount: number;
-        heldCount: number;
-      }
-    | null
-  >(null);
-  const [todoOverrideBusy, setTodoOverrideBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -2184,7 +2165,6 @@ export function Dashboard() {
       prAction?: OpenPrAction;
       retry?: true;
       skipPrCheck?: true;
-      todoOverrideReason?: string;
     },
   ): Promise<boolean> => {
     const prAction = options?.prAction;
@@ -2228,7 +2208,6 @@ export function Dashboard() {
         scope: "desk",
         ...(prAction ? { prAction } : {}),
         ...(options?.skipPrCheck ? { skipPrCheck: true } : {}),
-        ...(options?.todoOverrideReason ? { todoOverrideReason: options.todoOverrideReason } : {}),
       };
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
@@ -2241,10 +2220,8 @@ export function Dashboard() {
           if (previousResponse) {
             queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
           }
-          // Only one dashboard dialog is ever mounted: a PR 409 clears the todo
-          // dialog too, or a later todo-override retry could stack both.
+          // Only one dashboard dialog is ever mounted.
           setPrCheckUnavailable(null);
-          setTodoOverride(null);
           setOpenPrAction({ session, payload });
           return false;
         }
@@ -2256,36 +2233,7 @@ export function Dashboard() {
           // the sibling mounted stacks both, and the stale one survives a later
           // success and re-fires /complete on a terminal session.
           setOpenPrAction(null);
-          setTodoOverride(null);
           setPrCheckUnavailable({ session, payload });
-          return false;
-        }
-        if (isTodoOpenWorkPayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
-          setOpenPrAction(null);
-          setPrCheckUnavailable(null);
-          const { sessions } = payload;
-          setTodoOverride({
-            session,
-            options: { prAction, ...(options?.skipPrCheck ? { skipPrCheck: true } : {}) },
-            openCount: sessions.reduce((count, entry) => count + entry.openItemIds.length, 0),
-            heldCount: sessions.reduce((count, entry) => count + entry.heldItemIds.length, 0),
-          });
-          return false;
-        }
-        if (isTodoLedgerEmptyPayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
-          setOpenPrAction(null);
-          setPrCheckUnavailable(null);
-          setTodoOverride({
-            session,
-            options: { prAction, ...(options?.skipPrCheck ? { skipPrCheck: true } : {}) },
-            empty: true,
-          });
           return false;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
@@ -2336,26 +2284,6 @@ export function Dashboard() {
       // handleCompleteSession already toasted; keep the dialog reachable.
     } finally {
       setOpenPrActionBusy(false);
-    }
-  };
-
-  const handleTodoOverride = async (reason: string) => {
-    if (!todoOverride) return;
-    setTodoOverrideBusy(true);
-    try {
-      if (
-        await handleCompleteSession(todoOverride.session, {
-          ...todoOverride.options,
-          retry: true,
-          todoOverrideReason: reason,
-        })
-      ) {
-        setTodoOverride(null);
-      }
-    } catch {
-      // handleCompleteSession already toasted; keep the dialog reachable.
-    } finally {
-      setTodoOverrideBusy(false);
     }
   };
 
@@ -2461,14 +2389,7 @@ export function Dashboard() {
         !event.shiftKey &&
         ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
       if (!exactFindShortcut || event.isComposing) return;
-      if (
-        spawnOpen ||
-        newProjectOpen ||
-        terminalSession ||
-        openPrAction ||
-        prCheckUnavailable ||
-        todoOverride
-      )
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction || prCheckUnavailable)
         return;
 
       const target = event.target;
@@ -2490,7 +2411,7 @@ export function Dashboard() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [newProjectOpen, openPrAction, prCheckUnavailable, spawnOpen, terminalSession, todoOverride]);
+  }, [newProjectOpen, openPrAction, prCheckUnavailable, spawnOpen, terminalSession]);
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
@@ -3006,16 +2927,6 @@ export function Dashboard() {
               onRetry={() => void handlePrCheckUnavailable({})}
               onSkip={() => void handlePrCheckUnavailable({ skipPrCheck: true })}
               payload={prCheckUnavailable.payload}
-            />
-          ) : null}
-          {todoOverride ? (
-            <TodoOverrideDialog
-              busy={todoOverrideBusy}
-              onCancel={() => setTodoOverride(null)}
-              onSubmit={(reason) => void handleTodoOverride(reason)}
-              {...(todoOverride.empty
-                ? { empty: true }
-                : { openCount: todoOverride.openCount, heldCount: todoOverride.heldCount })}
             />
           ) : null}
         </main>

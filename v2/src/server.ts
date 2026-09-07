@@ -32,7 +32,7 @@ import {
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
-import { initializeGhPath, setGhEventSink } from "./gh.js";
+import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
@@ -139,6 +139,17 @@ export async function resolveTodoMutationActor(args: {
   }
   if (origin === "cli" || origin === "ui") return { kind: "human", origin };
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
+}
+
+// ToDo state gates the agent, never the person driving Spur: a CLI or UI
+// request that no session made on its own behalf carries a human actor, and
+// the service skips the empty/unfinished ledger block for it.
+function humanTodoOptions(
+  origin: UserActionOrigin,
+  callerHeader: string | string[] | undefined,
+): { todoActor: TodoActor } | undefined {
+  if (callerHeader || (origin !== "cli" && origin !== "ui")) return undefined;
+  return { todoActor: { kind: "human", origin } };
 }
 
 export type StartedServer = SessionService & {
@@ -316,20 +327,10 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
-  const todoOverrideReason = raw["todoOverrideReason"];
-  if (
-    todoOverrideReason !== undefined &&
-    (typeof todoOverrideReason !== "string" || !todoOverrideReason.trim())
-  ) {
-    throw new Error("todoOverrideReason must be nonblank");
-  }
   return {
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
-    ...(typeof todoOverrideReason === "string"
-      ? { todoOverrideReason: todoOverrideReason.trim() }
-      : {}),
   };
 }
 
@@ -439,6 +440,17 @@ export function armShutdownBackstop(
   }, timeoutMs);
   timer.unref();
   return () => clearTimeout(timer);
+}
+
+// The backstop's `onForceExit` calls `process.exit(0)` directly and never reaches the
+// normal shutdown path's own `flushGhPollCycles()` call in its `finally` — so this
+// is its own flush point. `logBeforeExit` runs the caller's own log write between the
+// flush and the exit; `flushGhPollCycles()` deletes each run as it flushes, so this can
+// never double-emit against a normal-path flush that also ran.
+export function forceShutdownExit(logBeforeExit: () => void): void {
+  flushGhPollCycles();
+  logBeforeExit();
+  process.exit(0);
 }
 
 export interface ReloadApplyHooks {
@@ -1590,12 +1602,7 @@ export async function startServer(
           );
           return;
         }
-        const todoOptions =
-          body.todoOverrideReason &&
-          !request.headers["x-spur-caller-session"] &&
-          (origin === "cli" || origin === "ui")
-            ? { todoActor: { kind: "human" as const, origin } }
-            : undefined;
+        const todoOptions = humanTodoOptions(origin, request.headers["x-spur-caller-session"]);
         sendJson(
           response,
           200,
@@ -1636,7 +1643,15 @@ export async function startServer(
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
-        sendJson(response, 200, await service.handoff(handoffSessionId, body));
+        sendJson(
+          response,
+          200,
+          await service.handoff(
+            handoffSessionId,
+            body,
+            humanTodoOptions(origin, request.headers["x-spur-caller-session"]),
+          ),
+        );
         return;
       }
 
@@ -2023,16 +2038,17 @@ export async function startServer(
       // Armed before the first await so a step that wedges inside its own bound still
       // ends the process well under the service manager's stop timeout.
       const disarmBackstop = exitProcess
-        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) => {
-            logEvent("daemon.shutdown.forced_exit", {
-              level: "error",
-              message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
-                activeResources,
-              )}`,
-              details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
-            });
-            process.exit(0);
-          })
+        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) =>
+            forceShutdownExit(() =>
+              logEvent("daemon.shutdown.forced_exit", {
+                level: "error",
+                message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
+                  activeResources,
+                )}`,
+                details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
+              }),
+            ),
+          )
         : null;
       try {
         // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
@@ -2078,6 +2094,20 @@ export async function startServer(
         // awaitBounded and stopTriggersBounded log and continue, because a best-effort
         // teardown must not abandon the steps behind it. Only a synchronous throw
         // (dispose(), the sync stops) escapes, and only programmatic stop() sees it.
+        //
+        // Flushed here, last, rather than before dispose(): dispose() only clears the
+        // owned intervals, it does not cancel or await an already in-flight
+        // runGhPollCycle (e.g. the attention monitor's fire-and-forget call). That
+        // call's own `finally` in gh.ts writes into pollCycleRuns whenever it settles,
+        // which can happen during any of the awaits above (sources.stop,
+        // settleBackgroundSpawns, server.close) or be skipped over entirely by an
+        // uncaught synchronous throw from backlogs?.stop() / runtimeLogs?.stop() —
+        // both unbounded, unlike the awaitBounded steps around them. A flush placed
+        // before dispose() or mid-try misses that write; finally is the one place
+        // guaranteed to run after every one of those paths. ghEventSinkDataDir is a
+        // module-level value set once at startup and never cleared during teardown, so
+        // the sink this flush writes through is still live here.
+        flushGhPollCycles();
         disarmBackstop?.();
         if (exitProcess) {
           process.exit(0);

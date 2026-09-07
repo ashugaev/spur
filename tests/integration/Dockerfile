@@ -7,7 +7,12 @@ RUN apt-get update && apt-get install -y \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g pnpm
+# corepack resolves the version from the repo's own `packageManager` field.
+# `npm install -g pnpm` pulls latest, whose native binary ships as an optional
+# dependency npm can skip, leaving pnpm installed but unrunnable.
+COPY package.json /tmp/package.json
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable && corepack prepare "$(node -p "require('/tmp/package.json').packageManager")" --activate
 
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \

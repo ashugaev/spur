@@ -1,6 +1,6 @@
 import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { jsonResponse } from "@/lib/json-response";
+import { asBody, jsonResponse } from "@/lib/json-response";
 
 const bigPayload = { items: Array.from({ length: 500 }, (_, index) => ({ index, note: "spur" })) };
 
@@ -51,13 +51,17 @@ describe("jsonResponse", () => {
     expect(response.headers.get("content-encoding")).toBe("gzip");
   });
 
-  it("does not copy the body it hands to the response", async () => {
-    // Buffer is not a valid BodyInit, so the body goes out as a view over the
-    // same memory; a copy would be a second multi-megabyte allocation.
-    const response = await jsonResponse(requestWith(), bigPayload);
-    const raw = JSON.stringify(bigPayload);
+  it("hands the response a view over the buffer, not a copy", () => {
+    // Buffer is not a valid BodyInit. A copy would be a second
+    // multi-megabyte allocation per request, so identity is the assertion —
+    // byte equality holds for the copying constructor too and pins nothing.
+    const buffer = Buffer.from(JSON.stringify(bigPayload), "utf8");
 
-    expect((await bodyOf(response)).toString("utf8")).toBe(raw);
+    const view = asBody(buffer);
+
+    expect(view.buffer).toBe(buffer.buffer);
+    expect(view.byteOffset).toBe(buffer.byteOffset);
+    expect(view.byteLength).toBe(buffer.byteLength);
   });
 
   it("falls back to identity for a malformed qvalue", async () => {

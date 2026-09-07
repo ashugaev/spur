@@ -32,7 +32,7 @@ async function gzipOrNull(body: Buffer): Promise<Buffer | null> {
 }
 
 /** A Buffer as a plain view, since Buffer is not a valid BodyInit. */
-function asBody(buffer: Buffer): Uint8Array<ArrayBuffer> {
+export function asBody(buffer: Buffer): Uint8Array<ArrayBuffer> {
   // A view over the same memory, never `new Uint8Array(buffer)` — that
   // constructor copies, which on a multi-megabyte body is a second full
   // allocation per request.

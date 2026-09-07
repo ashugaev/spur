@@ -16,15 +16,6 @@ describe("server request parsers thread skipPrCheck", () => {
     expect(parseCompleteSessionRequest({ skipPrCheck: false })).toEqual({});
   });
 
-  it("trims a nonblank ToDo override reason", () => {
-    expect(parseCompleteSessionRequest({ todoOverrideReason: "  accepted risk  " })).toEqual({
-      todoOverrideReason: "accepted risk",
-    });
-    expect(() => parseCompleteSessionRequest({ todoOverrideReason: " " })).toThrow(
-      "todoOverrideReason must be nonblank",
-    );
-  });
-
   it("keeps skipPrCheck on the kill request alongside force", () => {
     expect(parseKillSessionRequest({ force: true, skipPrCheck: true })).toEqual({
       force: true,
