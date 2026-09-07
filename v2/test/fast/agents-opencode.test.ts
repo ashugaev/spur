@@ -1,16 +1,19 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findOpenCodeSessionId,
   readOpenCodeJson,
+  readOpenCodeState,
+  resetOpenCodeExportState,
   buildOpenCodePlan,
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
   diffOpenCodeSessionIds,
   hasNewOpenCodeUserMessage,
   isSupportedOpenCodeVersion,
+  OPENCODE_EXPORT_MAX_CONCURRENCY,
   OPENCODE_RESTRICT_WRITES_CONFIG,
   parseOpenCodeExport,
   parseOpenCodeSessionListOutput,
@@ -223,6 +226,199 @@ describe("OpenCode adapter", () => {
       vi.unstubAllEnvs();
       await rm(binDir, { recursive: true, force: true });
     }
+  });
+
+  describe("state reads", () => {
+    afterEach(() => {
+      resetOpenCodeExportState();
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    // Writes one line per invocation, so the test counts spawns rather than
+    // trusting the cache's own bookkeeping.
+    async function stubCountingOpenCode(): Promise<{ dir: string; countPath: string }> {
+      const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      const countPath = join(dir, "calls.log");
+      await writeFile(
+        join(dir, "opencode"),
+        [
+          "#!/usr/bin/env node",
+          `require("node:fs").appendFileSync(${JSON.stringify(countPath)}, "x");`,
+          'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+        ].join("\n"),
+        "utf8",
+      );
+      await chmod(join(dir, "opencode"), 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+      return { dir, countPath };
+    }
+
+    async function spawnCount(countPath: string): Promise<number> {
+      try {
+        return (await readFile(countPath, "utf8")).length;
+      } catch {
+        return 0;
+      }
+    }
+
+    it("shares one export across concurrent reads of the same session", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        const results = await Promise.all([
+          readOpenCodeState("ses_a"),
+          readOpenCodeState("ses_a"),
+          readOpenCodeState("ses_a"),
+        ]);
+
+        expect(results).toEqual([
+          { state: "waiting", reason: "assistant completed" },
+          { state: "waiting", reason: "assistant completed" },
+          { state: "waiting", reason: "assistant completed" },
+        ]);
+        expect(await spawnCount(countPath)).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("serves a repeat read from cache and re-exports once the TTL passes", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        await readOpenCodeState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+        // Anchor on the clock the entry was actually stamped with: with
+        // shouldAdvanceTime the stub's own spawn cost moves the fake clock, so
+        // an absolute instant would shrink the margin by however long node took
+        // to start.
+        const cachedAt = Date.now();
+
+        vi.setSystemTime(cachedAt + 4_000);
+        await readOpenCodeState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+
+        vi.setSystemTime(cachedAt + 6_000);
+        await readOpenCodeState("ses_a");
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keys the cache per session", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        await readOpenCodeState("ses_a");
+        await readOpenCodeState("ses_b");
+
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("saturates the export ceiling and never exceeds it", async () => {
+      // Distinct ids, so neither the TTL cache nor the in-flight share applies:
+      // what bounds these is the export gate alone. The fan-out is a literal
+      // rather than a multiple of the limit — a test that sizes its own
+      // workload from the constant it asserts against passes at any value of
+      // that constant, including one high enough to bring the storm back.
+      const CONCURRENT_READS = 8;
+      // Pinned, not merely bounded: the limit is what holds the storm down, so
+      // raising it has to fail here and be changed on purpose.
+      expect(OPENCODE_EXPORT_MAX_CONCURRENCY).toBe(4);
+      expect(OPENCODE_EXPORT_MAX_CONCURRENCY).toBeLessThan(CONCURRENT_READS);
+
+      const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      const logPath = join(dir, "spans.log");
+      try {
+        await writeFile(
+          join(dir, "opencode"),
+          [
+            "#!/usr/bin/env node",
+            'const fs = require("node:fs");',
+            `const log = ${JSON.stringify(logPath)};`,
+            'fs.appendFileSync(log, "+");',
+            "setTimeout(() => {",
+            '  fs.appendFileSync(log, "-");',
+            '  process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+            // Held long enough that spawn stagger cannot decide the peak: at an
+            // 80ms hold an early export can finish before the last one starts,
+            // and the exact assertion below false-fails on a loaded host.
+            "}, 500);",
+          ].join("\n"),
+          "utf8",
+        );
+        await chmod(join(dir, "opencode"), 0o755);
+        vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+
+        const ids = Array.from({ length: CONCURRENT_READS }, (_, i) => `ses_${i}`);
+        await Promise.all(ids.map((id) => readOpenCodeState(id)));
+
+        const spans = await readFile(logPath, "utf8");
+        let live = 0;
+        let peak = 0;
+        for (const mark of spans) {
+          live += mark === "+" ? 1 : -1;
+          peak = Math.max(peak, live);
+        }
+        expect(spans.length).toBe(ids.length * 2);
+        // Equality, not an upper bound: demand exceeds the gate here, so a
+        // correct gate runs exactly the limit at once. An upper bound alone
+        // also passes when the gate never opens far enough to be useful.
+        expect(peak).toBe(OPENCODE_EXPORT_MAX_CONCURRENCY);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("releases the export slot when the export fails", async () => {
+      // A slot leaked on the throw path is invisible until the limit is used
+      // up, and then every export in the process blocks forever. Fail more
+      // times than the gate is wide, then read successfully: with a leak, the
+      // last read never resolves and this test times out instead of failing an
+      // assertion.
+      const failDir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      const okDir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
+      try {
+        await writeFile(
+          join(failDir, "opencode"),
+          ["#!/usr/bin/env node", "process.exit(1);"].join("\n"),
+          "utf8",
+        );
+        await chmod(join(failDir, "opencode"), 0o755);
+        vi.stubEnv("SPUR_OPENCODE_BIN", join(failDir, "opencode"));
+
+        for (let i = 0; i <= OPENCODE_EXPORT_MAX_CONCURRENCY; i += 1) {
+          expect(await readOpenCodeState(`ses_fail_${i}`)).toBeNull();
+        }
+
+        await writeFile(
+          join(okDir, "opencode"),
+          [
+            "#!/usr/bin/env node",
+            'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+          ].join("\n"),
+          "utf8",
+        );
+        await chmod(join(okDir, "opencode"), 0o755);
+        vi.stubEnv("SPUR_OPENCODE_BIN", join(okDir, "opencode"));
+
+        expect(await readOpenCodeState("ses_ok")).toEqual({
+          state: "waiting",
+          reason: "assistant completed",
+        });
+      } finally {
+        await rm(failDir, { recursive: true, force: true });
+        await rm(okDir, { recursive: true, force: true });
+      }
+      // Explicit, well under the runner default: a leaked slot hangs here, and
+      // the point is a fast attributable timeout rather than a 30s stall. The
+      // headroom is deliberate — this spawns six stub processes serially, and
+      // a contended run near 1s per cold start must not time out, or the
+      // timeout stops meaning "leaked slot".
+    }, 20_000);
   });
 
   it("picks the newest session from a top-level updated timestamp", async () => {
