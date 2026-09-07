@@ -388,11 +388,47 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
   return { state: "working", reason: "assistant incomplete" };
 }
 
+// Every export is a subprocess that queries the one multi-gigabyte SQLite DB
+// all opencode sessions share, so its cost scales with fleet size, not with the
+// caller. Callers that cannot tolerate stale data — the launch wait and the
+// submit-ack scan both poll for a *new* message — cannot be served from a
+// cache, so the ceiling that bounds them lives here, on the single funnel every
+// call site passes through. Measured before this gate: a 15-session fleet ran a
+// mean of 4 and a peak of 17 concurrent exports, 3.7 GB resident at the peak.
+// The limit sits at that mean; over it, callers queue rather than fan out.
+export const OPENCODE_EXPORT_MAX_CONCURRENCY = 4;
+let openCodeExportActive = 0;
+const openCodeExportQueue: Array<() => void> = [];
+
+async function acquireOpenCodeExportSlot(): Promise<void> {
+  if (openCodeExportActive < OPENCODE_EXPORT_MAX_CONCURRENCY) {
+    openCodeExportActive += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => openCodeExportQueue.push(resolve));
+}
+
+function releaseOpenCodeExportSlot(): void {
+  // Hand the slot straight to the next waiter; the count only drops when the
+  // queue is empty, so a burst never opens a gap above the limit.
+  const next = openCodeExportQueue.shift();
+  if (next) next();
+  // Clamped for the test seam only: it zeroes the counter under waiters that
+  // release afterwards. The export path releases exactly once, in `finally`,
+  // so nothing here is guarding against a double release in production.
+  else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
+}
+
 async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
-  const stdout = await readOpenCodeJson(["export", sessionId], {
-    timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
-  });
-  return JSON.parse(stdout) as unknown;
+  await acquireOpenCodeExportSlot();
+  try {
+    const stdout = await readOpenCodeJson(["export", sessionId], {
+      timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
+    });
+    return JSON.parse(stdout) as unknown;
+  } finally {
+    releaseOpenCodeExportSlot();
+  }
 }
 
 export interface OpenCodeSubmitBaseline {
@@ -462,14 +498,70 @@ export async function waitForOpenCodeLaunchMessage(
   return false;
 }
 
+// Every other agent classifies from an incremental file read; opencode has no
+// per-session file to stat — all sessions share one multi-gigabyte SQLite DB —
+// so its only state source is `opencode export`, a subprocess that queries that
+// DB and serializes the whole transcript. Left ungated, the 2s dashboard tick
+// spawned one per live opencode session faster than they finished: a
+// 15-session fleet sampled at mean 4 and peak 17 concurrent exports, 3.7 GB
+// resident at the peak, with 40% of the daemon's own CPU in system time.
+//
+// So the derived state is cached — the two-field result, never the transcript
+// that produced it — and concurrent callers share one in-flight export. A
+// session's state is at most OPENCODE_STATE_TTL_MS staler than the export it
+// came from, which was already seconds old by the time it returned.
+const OPENCODE_STATE_TTL_MS = 5_000;
+const openCodeStateCache = new Map<string, { at: number; state: OpenCodeStructuredState | null }>();
+const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredState | null>>();
+
+/** Drops every session's cached state and the export gate's counters. Test seam. */
+export function resetOpenCodeExportState(): void {
+  openCodeStateCache.clear();
+  openCodeStateInFlight.clear();
+  // The gate's counters are module state too. A slot still held when a test
+  // ends shifts the peak concurrency every later test observes, so clear them
+  // here as well — resuming queued waiters rather than dropping them, so a
+  // caller left mid-acquire cannot hang.
+  for (const resume of openCodeExportQueue.splice(0)) resume();
+  openCodeExportActive = 0;
+}
+
 export async function readOpenCodeState(
   sessionId?: string,
 ): Promise<OpenCodeStructuredState | null> {
   if (!sessionId) return null;
+
+  const now = Date.now();
+  const cached = openCodeStateCache.get(sessionId);
+  if (cached && now - cached.at < OPENCODE_STATE_TTL_MS) {
+    return cached.state;
+  }
+  const inFlight = openCodeStateInFlight.get(sessionId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const pending = (async (): Promise<OpenCodeStructuredState | null> => {
+    try {
+      return parseOpenCodeState(await exportOpenCodeSession(sessionId));
+    } catch {
+      return null;
+    }
+  })();
+  openCodeStateInFlight.set(sessionId, pending);
   try {
-    return parseOpenCodeState(await exportOpenCodeSession(sessionId));
-  } catch {
-    return null;
+    const state = await pending;
+    openCodeStateCache.set(sessionId, { at: Date.now(), state });
+    // Expired entries are evicted here rather than on a timer: the map only
+    // grows when a session is classified, so this is the one place it can.
+    for (const [id, entry] of openCodeStateCache) {
+      if (Date.now() - entry.at >= OPENCODE_STATE_TTL_MS) {
+        openCodeStateCache.delete(id);
+      }
+    }
+    return state;
+  } finally {
+    openCodeStateInFlight.delete(sessionId);
   }
 }
 
