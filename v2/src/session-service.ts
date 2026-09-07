@@ -2388,6 +2388,13 @@ export class SessionService {
   // wake after dispose. A direct request (send/deliver/flush) is the caller's
   // own call and still runs; only the autonomous poll stops.
   private deliveryStopped = false;
+  // Function-call boundary, not decoration: TS's flow analysis narrows a
+  // `this.deliveryStopped` re-check within the same function to the earlier
+  // check's literal, even across the `await` that lets dispose() flip it in
+  // between -- see the runDeliveryLoop stall-diagnostic re-check below.
+  private isDeliveryStopped(): boolean {
+    return this.deliveryStopped;
+  }
   // Symmetric marker, checked and set synchronously (before any await) by
   // every writer that drains or flushes the queue: tryDeliverQueuedMessage
   // stands down (returns false) while a flush holds it, and flushQueuedMessage
@@ -13516,6 +13523,37 @@ export class SessionService {
         ) {
           const waitOutcome = await this.waitForPipelineStep(sessionId);
           if (waitOutcome === "stopped") {
+            // deliveryStopped means daemon shutdown, not drift: stay silent so
+            // dispose() never produces a diagnostic event (see the "retires a
+            // delivery loop..." test above). Reads through isDeliveryStopped(),
+            // not the field directly: dispose() can flip the field during the
+            // wait above, so this re-check must not inherit the loop-top
+            // guard's stale `false` narrowing.
+            if (!this.isDeliveryStopped()) {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (
+                latest?.pipeline?.status === "running" &&
+                latest.status !== "running" &&
+                latest.stopReason === undefined &&
+                !isTerminalSessionStatus(latest.status)
+              ) {
+                const stepLabel =
+                  latest.pipeline.awaitingStepIndex === undefined
+                    ? "no step"
+                    : `step ${latest.pipeline.awaitingStepIndex + 1}/${latest.pipeline.steps.length}`;
+                this.logEvent("session.pipeline.stalled", {
+                  level: "warn",
+                  sessionId,
+                  projectId: latest.project,
+                  message: `Pipeline stalled for ${sessionId}: session status is ${latest.status} while ${stepLabel} is still awaiting`,
+                  details: {
+                    awaitingStepIndex: latest.pipeline.awaitingStepIndex ?? null,
+                    nextStepIndex: latest.pipeline.nextStepIndex,
+                    sessionStatus: latest.status,
+                  },
+                });
+              }
+            }
             return;
           }
           if (waitOutcome === "ready") {
