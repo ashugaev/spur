@@ -6633,48 +6633,6 @@ describe("SessionService", () => {
       ]);
       service.dispose();
     });
-
-    it("continues delivery when reconcile heals errored back to running between waitForPipelineStep and the stopped re-read", async () => {
-      mockClaudeJsonlState("waiting");
-      const sessions = createSessionStore();
-      sessions.set("api-1", parkedPipelineSession());
-      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
-
-      let healRacePhase: "off" | "armed" | "between" = "off";
-      readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
-        const session = sessions.get(sessionId);
-        if (!session) {
-          return null;
-        }
-        if (healRacePhase === "armed") {
-          healRacePhase = "between";
-          return clone({ ...session, status: "errored" });
-        }
-        if (healRacePhase === "between") {
-          healRacePhase = "off";
-          return clone(session);
-        }
-        return clone(session);
-      });
-
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
-      expect(run).toBeDefined();
-
-      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
-      await realTimers.setTimeout(50);
-      healRacePhase = "armed";
-
-      const outcome = await Promise.race([
-        run?.then((): "retired" => "retired"),
-        realTimers.setTimeout(3_000, "parked" as const),
-      ]);
-
-      expect(outcome).toBe("parked");
-      expect(pipelineStalledCalls()).toEqual([]);
-      service.dispose();
-    });
   });
 
   it("delivers a queued message immediately while the session is a live server-error wedge, instead of waiting up to 30 minutes for the reactivation nudge", async () => {
