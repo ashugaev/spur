@@ -13531,9 +13531,6 @@ export class SessionService {
             // guard's stale `false` narrowing.
             if (!this.isDeliveryStopped()) {
               const latest = readSession(this.config.dataDir, sessionId);
-              if (latest?.status === "running" && latest.pipeline?.status === "running") {
-                continue;
-              }
               if (
                 latest?.pipeline?.status === "running" &&
                 latest.status !== "running" &&
