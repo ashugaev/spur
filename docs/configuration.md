@@ -181,6 +181,10 @@ With `steps`, Spur sends "step 1/N: research" plus the prompt. Without, it sends
 
 `session.pipeline.step_sent` marks a confirmed step submission, with 1-based `details.stepIndex` and `details.totalSteps`. Spawn logs step 1 (it rides the launch message); the delivery loop logs 2..N. An unconfirmed launch send logs `session.submit.timeout` with `details.freshLaunch` and no `step_sent`.
 
+- `session.pipeline.completed` (level info) — pipeline ran every step.
+- `session.pipeline.errored` (level error) — `details.nextStepIndex`, `details.awaitingStepIndex` (0-based, or `null`).
+- `session.pipeline.stalled` (level warn) — the delivery loop exited because the session left `running` for a non-terminal status with no `stopReason` while a step was still awaited; `details.awaitingStepIndex` (0-based, or `null`), `details.nextStepIndex`, `details.sessionStatus`. Diagnostic only, delivery is not resumed.
+
 ## Desk groups
 
 ```yaml
@@ -410,7 +414,7 @@ Each pass logs `session.sidecar.reaped` per kill with the matched rule and freed
 
 The same pass also runs a detect-only step over one shared process-table snapshot: an orphaned process tree under a worktree (an unclaimed pgid the sweep predicate would call leaked) logs `session.sidecar.orphan_detected` with `rootPid`, `pgid`, `treeRssKb`, `ageSeconds`, `worktreePath`, `sidecarName`, and `reapable`. This step never signals or kills anything, and runs even when `sidecarGc.enabled` is `false` — that flag governs killing only, not detection.
 
-Every session view (`GET /sessions`, `GET /sessions/<id>`, dashboard) carries each sidecar's `ageSeconds` (omitted when unresolvable) and `ageWarn` (true at `maxAgeWarnMinutes`, the same threshold as the event). The session detail page, the dashboard sidecars row, and `spur list` ([list](commands.md#list)) render the age and mark an over-threshold one.
+`GET /sessions` (the `full` list) and `GET /sessions/<id>` carry each sidecar's `ageSeconds` (omitted when unresolvable) and `ageWarn` (true at `maxAgeWarnMinutes`, the same threshold as the event) in the `sidecars` array. The dashboard view (`GET /sessions?view=dashboard`) carries no `sidecars` array and no per-sidecar age — only `runningSidecarNames`. The session detail page and `spur list` ([list](commands.md#list)) render the age and mark an over-threshold one; the dashboard sidecars row does not.
 
 Cross-workspace port collision: a sidecar start refuses when this workspace's recorded reservation for this sidecar matches a live other workspace's recorded reservation for a non-MCP sidecar in the same project AND that port is free right now. The error names the holding workspace and sidecar; stop that sidecar or its session first — Spur reuses no pane and reaps nothing across a workspace boundary. Refuses nothing: a shared `ports` range alone, an occupied colliding port (the start scans for another free port), a same-workspace sidecar, another project, a holder with no live pane, an explicit `clearPort`.
 
@@ -445,7 +449,14 @@ A session bound to a PR number GitHub reports as nonexistent stops signal pollin
 
 With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`slowIntervalMs` since the last real poll) passed, the last cycle saw a non-terminal CI check, a tracked session is unpolled, or a session had a `send`/source-reply within `activeGraceMs`. A session gated by the permanent not-found stop or by transient poll backoff never counts as "unpolled" and never re-arms the tick. Rate-limit cooldown backoff overrides all of it, here and on plain sources. With `query` also set, discovery runs on the same gated tick; every gate reads already-tracked sessions, so an undiscovered PR cannot re-arm the tick early.
 
-GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `graphqlCost`; consecutive zero-call cycles collapse into the first event of the run, the swallowed count lands on the next emitted event as `suppressedZeroCycles`), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known), `source.poll.disabled` (signal polling stopped for one session because its bound PR number was not found; carries `prNumber`).
+GitHub poll-cost events: `gh.poll_cycle` (`gh` cost of a poll cycle or of a window of them, fields below), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known), `source.poll.disabled` (signal polling stopped for one session because its bound PR number was not found; carries `prNumber`).
+
+`gh.poll_cycle` is keyed by cycle `kind` plus `projectId`/`sourceId`, and emits two shapes in `details`:
+
+- First cycle on a key, even at zero cost: one cycle — `cycle`, `durationMs`, `calls`, `graphqlCost`, `bySubcommand`, plus `errors: 1` when that cycle threw.
+- Later cycles emit nothing and accumulate into a rollup window targeted at 15 minutes, no config key. The first cycle at or past the target emits the window — `cycle`, `windowMs`, `cycles`, `zeroCycles`, `calls`, `graphqlCost`, `bySubcommand` summed over the window, plus `errors` when a cycle in it threw. `windowMs` is the actual elapsed time since the window opened, not the 15-minute target: it reads that low only when a cycle lands right at the boundary, and can read well above it, up to the 60-minute idle ceiling below or, for a window that keeps carrying zero-cost cycles forward under the next bullet, hours.
+- Window with `calls` and `graphqlCost` both 0 and no `errors` emits nothing on close; its counts and window start carry forward, so an idle key stays silent until it spends again. A window with `errors` but no calls or cost still emits — a source that only ever fails stays visible instead of accumulating silently.
+- Key untouched for 60 minutes is dropped, its window closed under the same zero-cost gate; the next cycle on that key emits a single cycle again. Daemon shutdown closes every open window the same way, including a `dispose()` throw or the shutdown force-exit backstop; only `SIGKILL` skips this flush and drops any open window. Both shapes require an event sink; a process with none, such as the CLI, emits neither and tracks nothing for this event.
 
 Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
 

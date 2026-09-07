@@ -1133,7 +1133,7 @@ type SessionServiceInternals = {
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
-  ): Promise<{ state: SessionState }>;
+  ): Promise<{ state: SessionState; session: SessionRecord }>;
   codexMcpDialogOverrides: Map<string, number>;
   claudeCompactingOverrides: Map<string, number>;
   lastClassifiedLogStates: Map<string, SessionState>;
@@ -1142,6 +1142,8 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  scheduleHealedSidecarRestart(session: SessionRecord): void;
+  sidecarHealTasks: Map<string, Promise<void>>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -6327,6 +6329,311 @@ describe("SessionService", () => {
       nextStepIndex: 1,
       status: "running",
       awaitingStepIndex: 0,
+    });
+    // dispose() writes no record, so this fixture's status stays "running"
+    // and the record guard's `latest.status !== "running"` clause alone
+    // silences the emit here -- the flag clause is pinned separately below,
+    // by a fixture that drifts the status first and disposes second.
+    expect(
+      logSpurEventMock.mock.calls
+        .map(([, entry]) => entry.event)
+        .filter((event) => event.startsWith("session.pipeline.")),
+    ).toEqual([]);
+  });
+
+  describe("pipeline stall diagnostics", () => {
+    function parkedPipelineSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
+      return {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        // Inside MESSAGE_READY_GRACE_MS of the 10:05 clock, so the step gate
+        // parks on its poll sleep instead of advancing the pipeline (matches
+        // the dispose fixture above). Seeding pipeline.status: "completed"
+        // up front fails shouldRunDelivery before the loop ever reaches
+        // waitForPipelineStep, so the drift must land mid-wait instead.
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        pipeline: {
+          steps: ["research", "test"],
+          nextStepIndex: 1,
+          status: "running",
+          awaitingStepIndex: 0,
+        },
+        ...overrides,
+      };
+    }
+
+    function pipelineStalledCalls(): unknown[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.pipeline.stalled");
+    }
+
+    function pipelineEventNames(): string[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry.event)
+        .filter((event) => event.startsWith("session.pipeline."));
+    }
+
+    it("emits one session.pipeline.stalled when the session status drifts off running mid-wait", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Reconcile-shaped drift: status flips to "stopped" with no stopReason,
+      // the pipeline is left running untouched (matches the terminalUnavailable
+      // branch at session-service.ts's reconcile, :14520-14530).
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.pipeline).toEqual({
+        steps: ["research", "test"],
+        nextStepIndex: 1,
+        status: "running",
+        awaitingStepIndex: 0,
+      });
+      expect(pipelineStalledCalls()).toEqual([
+        expect.objectContaining({
+          event: "session.pipeline.stalled",
+          level: "warn",
+          sessionId: "api-1",
+          details: {
+            awaitingStepIndex: 0,
+            nextStepIndex: 1,
+            sessionStatus: "stopped",
+          },
+        }),
+      ]);
+      service.dispose();
+    });
+
+    it("stays silent when the service is disposed instead of the record drifting (shutdown, not a stall)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+      service.dispose();
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+    });
+
+    it("stays silent when the mid-wait shape is a restore flip, not a drift", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Restore's pre-flip shape (session-service.ts:12704-12718): status
+      // "stopped" alongside pipeline.status "completed" -- the pipeline was
+      // deliberately suppressed, not wedged.
+      const parked = sessions.get("api-1");
+      if (!parked?.pipeline) throw new Error("expected api-1 with a pipeline to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+        pipeline: { ...parked.pipeline, status: "completed" },
+      });
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+      service.dispose();
+    });
+
+    it("stays silent when the stop carries an intent marker (manual_pause)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Same "stopped" shape as the positive case, but with the marker every
+      // intentional-stop writer sets (applyManualStatusLocked, :11478).
+      // Passes on both trees -- it pins the marker gate, not the fix itself.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        stopReason: "manual_pause",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+      service.dispose();
+    });
+
+    it("stays silent when a genuine drift lands the same tick as dispose() (shutdown wins)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Same unmarked-stop shape as the positive drift test -- every record
+      // clause (pipeline still running, status off "running", no stopReason,
+      // not terminal) is satisfied here too. Only the isDeliveryStopped()
+      // flag, set by dispose() below, keeps this one quiet.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+      service.dispose();
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+    });
+
+    it("stays silent when the drift lands on a terminal completed status with no stop marker", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // applyManualStatusLocked's completed branch (session-service.ts
+      // :11482-11497) deletes stopReason and never touches record.pipeline,
+      // so `spur complete` mid-pipeline leaves this exact shape: status
+      // "completed", pipeline.status still "running", no marker. Only
+      // isTerminalSessionStatus keeps it quiet.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "completed",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+      service.dispose();
+    });
+
+    it("emits one session.pipeline.stalled for reconcile's unmarked errored sibling", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Reconcile's errored branch (session-service.ts:14531-14538): same
+      // unintended wedge, no stopReason, different status.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "errored",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineStalledCalls()).toEqual([
+        expect.objectContaining({
+          event: "session.pipeline.stalled",
+          level: "warn",
+          sessionId: "api-1",
+          details: {
+            awaitingStepIndex: 0,
+            nextStepIndex: 1,
+            sessionStatus: "errored",
+          },
+        }),
+      ]);
+      service.dispose();
     });
   });
 
@@ -15023,6 +15330,45 @@ describe("SessionService", () => {
     expect(listedWithCompleted[2]?.state).toBe("stopped");
   });
 
+  // Pins the payload-projection change: the list must not carry the six
+  // byte-heavy/walk-backed fields, and — the assertion a bytes-only check
+  // would miss — must never call the artifact walk to compute them. A
+  // single-session `get()` still gets the full detail, walk included, keyed
+  // on the same session id (no desk sibling here, so workspaceIdOf === id).
+  it("full session list omits artifacts, stateHistory, launchCommand and prompt bodies, and never walks the filesystem for them", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({ id: "api-1", prompt: "Ship the feature", originalTaskPrompt: "Ship it" }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const listed = await service.list();
+
+    expect(listed).toHaveLength(1);
+    for (const field of [
+      "artifacts",
+      "artifactsTruncated",
+      "stateHistory",
+      "launchCommand",
+      "prompt",
+      "originalTaskPrompt",
+    ]) {
+      expect(listed[0]).not.toHaveProperty(field);
+    }
+    expect(listSessionArtifactsMock).not.toHaveBeenCalled();
+
+    const detail = await service.get("api-1");
+    expect(detail.artifacts).toEqual([]);
+    expect(detail.launchCommand).toBe("claude --dangerously-skip-permissions");
+    expect(detail.prompt).toBe("Ship the feature");
+    expect(detail.originalTaskPrompt).toBe("Ship it");
+    expect(listSessionArtifactsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+  });
+
   it("splits queued manual messages from future pipeline steps in session views (G4 view split)", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -15421,6 +15767,286 @@ describe("SessionService", () => {
         event: "session.reconcile.running",
       }),
     );
+  });
+
+  it("restarts a non-mcp autoStart sidecar when it heals a stale errored session", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+
+    await vi.waitFor(() => {
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+    });
+
+    service.dispose();
+  });
+
+  it("performs no sidecar work healing a stale errored session whose only autoStart sidecar is mcp", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { mcpsvc: { command: "pnpm mcp", autoStart: true, mcp: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("excludes an mcp autoStart sidecar from a heal that also restarts a non-mcp sibling", async () => {
+    // Unlike the single-sidecar mcp test above, "dev" here makes
+    // scheduleHealedSidecarRestart's hasRestartableSidecar gate true on its
+    // own, so this exercises the mcp exclusion at the one remaining
+    // enforcement point — startSidecarWithDependencies's
+    // sidecarDependencyChainSkipped check — rather than that earlier gate.
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: true },
+            mcpsvc: { command: "pnpm mcp", autoStart: true, mcp: true },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "dev" }),
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "mcpsvc" }),
+    );
+
+    service.dispose();
+  });
+
+  it("keeps a healed session running without an error when its sidecar restart fails", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    createTmuxSidecarSessionMock.mockRejectedValueOnce(new Error("sidecar launch boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+
+    await vi.waitFor(() => {
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.sidecar.autostart.failed",
+          sessionId: "api-1",
+        }),
+      );
+    });
+
+    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
+
+    service.dispose();
+  });
+
+  it("starts the sidecar pane exactly once when two heals race for the same session", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    const record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    sessions.set("api-1", record);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = sessionServiceInternals(service);
+
+    // Both calls happen synchronously, before either task's first await —
+    // this is the concurrent-classify race the sidecarHealTasks claim
+    // guards, not the (already-impossible) two-service.get() shape.
+    internals.scheduleHealedSidecarRestart(record);
+    internals.scheduleHealedSidecarRestart(record);
+
+    await Promise.allSettled([...internals.sidecarHealTasks.values()]);
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("starts no healed sidecar restart on a disposed service", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.get("api-1");
+    expect(result.status).toBe("running");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
   });
 
   it("pauses a session without removing its worktree", async () => {
@@ -24218,9 +24844,241 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
-      "Session is not running: api-1",
+      'Cannot start sidecar "dev" for api-1: session status is killed',
     );
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("startSidecar heals a stale errored session whose agent process is still alive", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
+  });
+
+  it("startSidecar heals a stale errored session even when the agent transcript read rejects", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    // The transcript readers swallow their own read errors but not their
+    // `finally { await fd?.close() }` (claude-jsonl-state.ts, cursor-jsonl-state.ts),
+    // so a close failure rejects out of the read. Reject only inside the heal
+    // window — before the sidecar pane exists — and let the post-start enrich
+    // read normally, so this pins the heal alone. Probing decides the heal, and
+    // nothing fallible may run between the promotion write and the status
+    // guard: a heal routed through classifySessionRecord reads the transcript
+    // right after that write, loses this rejection to the fail-closed catch,
+    // and refuses on its stale `errored` snapshot while disk reads `running`.
+    readClaudeJsonlStateMock.mockImplementation(() =>
+      createTmuxSidecarSessionMock.mock.calls.length === 0
+        ? Promise.reject(new Error("EIO: i/o error, close"))
+        : Promise.resolve(null),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
+  });
+
+  it("startSidecar refuses an errored session whose agent process is gone even when the pane is usable", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+      'Cannot start sidecar "dev" for api-1: session status is errored',
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.status).toBe("errored");
+  });
+
+  it("startSidecar refuses an errored session whose tmux runtime is gone", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+      'Cannot start sidecar "dev" for api-1: session status is errored',
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.status).toBe("errored");
+  });
+
+  it("startSidecar refuses an errored session on the status when the liveness probe fails", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockRejectedValue(new Error("tmux server unreachable"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // The heal is opportunistic: a failed probe must degrade to the pre-heal
+    // refusal, never surface the tmux error to the caller.
+    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+      'Cannot start sidecar "dev" for api-1: session status is errored',
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.status).toBe("errored");
+    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
+  });
+
+  it("startSidecar refuses an errored session when the heal write fails after the probes succeed", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    writeSessionMock.mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // The promotion write is the last statement the heal can run, so a failed
+    // one leaves disk and the in-memory record on the same `errored` snapshot
+    // the guard then refuses. A heal that wrote before further fallible reads
+    // would strand disk on `running` here.
+    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+      'Cannot start sidecar "dev" for api-1: session status is errored',
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.status).toBe("errored");
+    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
   });
 
   it("startSidecar rejects when session workspace is not available", async () => {
@@ -26023,6 +26881,233 @@ describe("SessionService", () => {
       }),
     );
     expect(result.id).toBe("api-1");
+  });
+
+  it("stopSidecar reaps the pane on an errored record instead of throwing", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.stopSidecar("api-1", "dev");
+
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
+    expect(result.id).toBe("api-1");
+  });
+
+  it("does not resurrect a sidecar when stopSidecar runs after a pre-scheduled heal task", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: true },
+            other: { command: "pnpm other", autoStart: true },
+          },
+        },
+      },
+    });
+    let record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockImplementation(() => clone(record));
+    writeSessionMock.mockImplementation((_dataDir: string, updated: SessionRecord) => {
+      record = clone(updated);
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    let devAlive = true;
+    sidecarTmuxAliveMock.mockImplementation(async (_id: string, name: string) =>
+      name === "dev" ? devAlive : false,
+    );
+    killTmuxSessionMock.mockImplementation(() => {
+      devAlive = false;
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const healed = await service.get("api-1");
+    expect(healed.status).toBe("running");
+
+    await service.stopSidecar("api-1", "dev");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "other" }),
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "dev" }),
+    );
+
+    service.dispose();
+  });
+
+  it("stopSidecar on an errored record does not let the same-call heal resurrect the sidecar it just stopped", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: true },
+            other: { command: "pnpm other", autoStart: true },
+          },
+        },
+      },
+    });
+    // A bare readSession/writeSession pair (not createSessionStore, which also
+    // wires listSessionsMock): the dashboard-cache and attention-monitor
+    // background loops both enumerate via listSessions, and with a non-empty
+    // result they would classify (and independently heal) this same errored
+    // record concurrently with the stop call under test, confounding which
+    // classify pass's suppression state is actually being observed.
+    // listSessionsMock stays at its default `[]`, so stopSidecar's own
+    // trailing enrich is the only classify path touching this record.
+    let record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockImplementation(() => clone(record));
+    writeSessionMock.mockImplementation((_dataDir: string, updated: SessionRecord) => {
+      record = clone(updated);
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    // "dev" starts alive (so stop's own liveness check reaps it rather than
+    // short-circuiting as already-dead) and flips to dead once the kill
+    // actually runs — so a heal that is NOT suppressing "dev" observes it
+    // as dead and genuinely tries to restart it, instead of the mock
+    // reporting "still alive" and masking a resurrection as a no-op.
+    let devAlive = true;
+    sidecarTmuxAliveMock.mockImplementation(async (_id: string, name: string) =>
+      name === "dev" ? devAlive : false,
+    );
+    killTmuxSessionMock.mockImplementation(() => {
+      devAlive = false;
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.stopSidecar("api-1", "dev");
+
+    // Argument shape: createTmuxSidecarSession receives { sessionId,
+    // sidecarName, cwd, command, env }. "api-1--dev" (killTmuxSessionMock's
+    // argument) does not appear here.
+    await vi.waitFor(() => {
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "other" }),
+      );
+    });
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sidecarName: "dev" }),
+    );
+
+    service.dispose();
+  });
+
+  it("stopSidecar on an errored record does not let the heal restart a sibling whose stopped dependency it needs", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            db: { command: "pnpm db", autoStart: true },
+            web: { command: "pnpm web", autoStart: true, dependsOn: ["db"] },
+          },
+        },
+      },
+    });
+    // See the previous test: a bare readSession/writeSession pair, not
+    // createSessionStore, keeps listSessionsMock at its default `[]` so the
+    // background dashboard-cache and attention-monitor loops find nothing to
+    // classify and cannot confound this record's single stop-triggered heal.
+    let record: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["db", "web"],
+    };
+    readSessionMock.mockImplementation(() => clone(record));
+    writeSessionMock.mockImplementation((_dataDir: string, updated: SessionRecord) => {
+      record = clone(updated);
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+    sidecarTmuxAliveMock.mockImplementation(async (_id: string, name: string) => name === "db");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.stopSidecar("api-1", "db");
+    await service.settleBackgroundSpawns();
+
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+
+    service.dispose();
   });
 
   it("get lists sidecars from the session worktree config", async () => {
@@ -31168,6 +32253,11 @@ describe("SessionService", () => {
           stopCondition: "Stop condition",
         },
       });
+      // The agent process is gone: that is what an errored record means here.
+      // Without this the ambient live-runtime default lets
+      // reconcileStaleErroredSession promote the record back to running (it no
+      // longer exempts shepherd), and the wake then legitimately fires.
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -31267,6 +32357,11 @@ describe("SessionService", () => {
           stopCondition: "Stop condition",
         },
       });
+      // The agent process is gone: that is what an errored record means here.
+      // Without this the ambient live-runtime default lets
+      // reconcileStaleErroredSession promote the record back to running (it no
+      // longer exempts shepherd), and the wake then legitimately fires.
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -37171,6 +38266,125 @@ describe("SessionService", () => {
           .filter((entry) => entry.event === "session.wake.deferred");
         expect(deferredEvents.map((entry) => entry.sessionId).sort()).toEqual(deferredIds.sort());
         service.dispose();
+      });
+    });
+
+    describe("shepherd stale reconciliation", () => {
+      function shepherdSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
+        return {
+          id: "shp-1",
+          project: "spur-shepherd",
+          agent: "claude",
+          prompt: "shepherd the fleet",
+          branch: "shp-1",
+          worktree: false,
+          worktreePath: "/tmp/spur-worktrees/spur-shepherd/shp-1",
+          tmuxSession: "shp-1",
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "running",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+          ...overrides,
+        };
+      }
+
+      it("promotes an errored shepherd back to running while its runtime is alive", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "shp-1",
+          shepherdSession({ status: "errored", error: "Agent runtime exited unexpectedly." }),
+        );
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        mockClaudeJsonlState("working");
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("running");
+        expect(sessions.get("shp-1")?.status).toBe("running");
+        expect(sessions.get("shp-1")?.error).toBeUndefined();
+      });
+
+      it("promotes a stopped shepherd back to running while its runtime is alive", async () => {
+        const sessions = createSessionStore();
+        sessions.set("shp-1", shepherdSession({ status: "stopped" }));
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        mockClaudeJsonlState("working");
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("running");
+        expect(sessions.get("shp-1")?.status).toBe("running");
+      });
+
+      it("leaves an errored shepherd alone when its agent process is gone", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "shp-1",
+          shepherdSession({ status: "errored", error: "Agent runtime exited unexpectedly." }),
+        );
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("errored");
+        expect(result.state).toBe("error");
+        expect(sessions.get("shp-1")?.status).toBe("errored");
+      });
+
+      it("leaves a manually paused shepherd alone even with a live runtime", async () => {
+        const sessions = createSessionStore();
+        sessions.set("shp-1", shepherdSession({ status: "stopped", stopReason: "manual_pause" }));
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("stopped");
+        expect(sessions.get("shp-1")?.stopReason).toBe("manual_pause");
+      });
+
+      it("leaves an errored shepherd alone when its workspace is missing", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "shp-1",
+          shepherdSession({ status: "errored", error: "Agent worktree is missing." }),
+        );
+        listSessionsMock.mockReturnValue([]);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        probeWorkspaceMock.mockReturnValue({ exists: false, missing: true });
+
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const result = await internals.classifySessionRecord(
+          sessions.get("shp-1") as SessionRecord,
+        );
+
+        expect(result.session.status).toBe("errored");
+        expect(sessions.get("shp-1")?.status).toBe("errored");
       });
     });
 

@@ -32,7 +32,7 @@ import {
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
-import { initializeGhPath, setGhEventSink } from "./gh.js";
+import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
@@ -434,6 +434,17 @@ export function armShutdownBackstop(
   }, timeoutMs);
   timer.unref();
   return () => clearTimeout(timer);
+}
+
+// The backstop's `onForceExit` calls `process.exit(0)` directly and never reaches the
+// normal shutdown path's own `flushGhPollCycles()` call in its `finally` — so this
+// is its own flush point. `logBeforeExit` runs the caller's own log write between the
+// flush and the exit; `flushGhPollCycles()` deletes each run as it flushes, so this can
+// never double-emit against a normal-path flush that also ran.
+export function forceShutdownExit(logBeforeExit: () => void): void {
+  flushGhPollCycles();
+  logBeforeExit();
+  process.exit(0);
 }
 
 export interface ReloadApplyHooks {
@@ -2021,16 +2032,17 @@ export async function startServer(
       // Armed before the first await so a step that wedges inside its own bound still
       // ends the process well under the service manager's stop timeout.
       const disarmBackstop = exitProcess
-        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) => {
-            logEvent("daemon.shutdown.forced_exit", {
-              level: "error",
-              message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
-                activeResources,
-              )}`,
-              details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
-            });
-            process.exit(0);
-          })
+        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) =>
+            forceShutdownExit(() =>
+              logEvent("daemon.shutdown.forced_exit", {
+                level: "error",
+                message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
+                  activeResources,
+                )}`,
+                details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
+              }),
+            ),
+          )
         : null;
       try {
         // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
@@ -2076,6 +2088,20 @@ export async function startServer(
         // awaitBounded and stopTriggersBounded log and continue, because a best-effort
         // teardown must not abandon the steps behind it. Only a synchronous throw
         // (dispose(), the sync stops) escapes, and only programmatic stop() sees it.
+        //
+        // Flushed here, last, rather than before dispose(): dispose() only clears the
+        // owned intervals, it does not cancel or await an already in-flight
+        // runGhPollCycle (e.g. the attention monitor's fire-and-forget call). That
+        // call's own `finally` in gh.ts writes into pollCycleRuns whenever it settles,
+        // which can happen during any of the awaits above (sources.stop,
+        // settleBackgroundSpawns, server.close) or be skipped over entirely by an
+        // uncaught synchronous throw from backlogs?.stop() / runtimeLogs?.stop() —
+        // both unbounded, unlike the awaitBounded steps around them. A flush placed
+        // before dispose() or mid-try misses that write; finally is the one place
+        // guaranteed to run after every one of those paths. ghEventSinkDataDir is a
+        // module-level value set once at startup and never cleared during teardown, so
+        // the sink this flush writes through is still live here.
+        flushGhPollCycles();
         disarmBackstop?.();
         if (exitProcess) {
           process.exit(0);
