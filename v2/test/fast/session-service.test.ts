@@ -6430,7 +6430,6 @@ describe("SessionService", () => {
             totalSteps: 2,
             stepsPending: true,
             sessionStatus: "stopped",
-            stopReason: null,
           },
         }),
       ]);
@@ -6635,7 +6634,6 @@ describe("SessionService", () => {
             totalSteps: 2,
             stepsPending: true,
             sessionStatus: "errored",
-            stopReason: null,
           },
         }),
       ]);
@@ -6689,7 +6687,6 @@ describe("SessionService", () => {
             totalSteps: 2,
             stepsPending: false,
             sessionStatus: "stopped",
-            stopReason: null,
           },
         }),
       ]);

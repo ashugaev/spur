@@ -13701,7 +13701,6 @@ export class SessionService {
                     totalSteps: latest.pipeline.steps.length,
                     stepsPending: latest.pipeline.nextStepIndex < latest.pipeline.steps.length,
                     sessionStatus: latest.status,
-                    stopReason: null,
                   },
                 });
               }
