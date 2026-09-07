@@ -14551,7 +14551,6 @@ export class SessionService {
   ): SessionRecord {
     if (
       session.status !== "stopped" ||
-      session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
       isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
@@ -14609,7 +14608,6 @@ export class SessionService {
   ): SessionRecord {
     if (
       session.status !== "errored" ||
-      session.project === SHEPHERD_PROJECT_ID ||
       workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||

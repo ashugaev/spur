@@ -261,8 +261,71 @@ describe("detectClaudeUsageLimitMenu", () => {
     "Enter to confirm · Esc to cancel",
   ].join("\n");
 
-  it("flags the full realistic usage-limit menu", () => {
+  it("flags the full realistic 2-option usage-limit menu (stop + ask admin)", () => {
     expect(detectClaudeUsageLimitMenu(MENU_TEXT)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the 2-option usage-limit menu (stop + wait here)", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the 3-option menu format with option 1 selected", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "❯ 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the 3-option menu format with option 2 selected", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "❯ 2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the 3-option menu format with option 3 selected", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "❯ 3. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
       limited: true,
       reason: "claude usage limit menu",
     });
@@ -403,6 +466,54 @@ describe("claudeUsageMenuOptionOneSelected", () => {
     expect(claudeUsageMenuOptionOneSelected(MENU_TEXT)).toBe(true);
   });
 
+  it.each([">", "›", "❯"])(
+    "returns true when option 1 is selected with cursor glyph %s",
+    (glyph) => {
+      const paneText = [
+        "What do you want to do?",
+        "",
+        `${glyph} 1. Stop and wait for limit to reset`,
+        "  2. Wait here, then continue automatically at Sep 2, 8am",
+        "  3. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n");
+      expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
+    },
+  );
+
+  it.each([">", "›", "❯"])(
+    "returns false when option 2 is selected with cursor glyph %s",
+    (glyph) => {
+      const paneText = [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        `${glyph} 2. Wait here, then continue automatically at Sep 2, 8am`,
+        "  3. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n");
+      expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+    },
+  );
+
+  it.each([">", "›", "❯"])(
+    "returns false when option 3 is selected with cursor glyph %s",
+    (glyph) => {
+      const paneText = [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "  2. Wait here, then continue automatically at Sep 2, 8am",
+        `${glyph} 3. Ask your admin for more usage`,
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n");
+      expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+    },
+  );
+
   it("returns false when the cursor is on option 2 instead of option 1", () => {
     const paneText = [
       "What do you want to do?",
@@ -534,6 +645,53 @@ describe("scanTmuxRateLimit", () => {
       limited: true,
       reason: "tmux usage limit reached",
     });
+  });
+
+  it("flags a line starting with ⚠ warning symbol", () => {
+    const pane = [
+      "⚠ Usage limit reached · continuing automatically at Sep 2, 8am · esc to cancel",
+      "Working on the task...",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("flags a line starting with ⚠️ emoji warning symbol", () => {
+    const pane = [
+      "⚠️ Usage limit reached · continuing automatically at Sep 2, 8am · esc to cancel",
+      "Working on the task...",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("flags a line starting with ⚠ with leading indentation", () => {
+    const pane = [
+      "  ⚠ Usage limit reached · continuing automatically at Sep 2, 8am · esc to cancel",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("ignores a warning glyph on a diff-gutter line", () => {
+    const pane = ["▎ ⚠ Usage limit reached · continuing automatically"].join("\n");
+    expect(scanTmuxRateLimit(pane)).toBeNull();
+  });
+
+  it("returns null for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(scanTmuxRateLimit(source)).toBeNull();
+  });
+
+  it("returns null for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
+    expect(scanTmuxRateLimit(source)).toBeNull();
   });
 
   it("ignores rate-limit vocabulary in the real claude agent-work pane", () => {

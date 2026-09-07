@@ -254,14 +254,18 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
-// Claude Code's stop-and-wait / ask-your-admin usage-limit menu, whose
-// cursor-selected option line would be rejected by scanTmuxRateLimit's
-// gutter/anchor checks. This detector requires three distinct whole physical
-// lines — both menu options plus the confirm/cancel footer — rather than a
-// whole-buffer substring scan, so prose or fixtures that merely mention the
-// menu's wording don't bare-reproduce a matching line and can't self-trigger.
+// Claude Code's stop-and-wait / wait-here / ask-your-admin usage-limit menu,
+// whose cursor-selected option line would be rejected by scanTmuxRateLimit's
+// gutter/anchor checks. This detector requires distinct whole physical lines:
+// option 1 (stop and wait), at least one alternative option (wait here or ask
+// admin), plus the confirm/cancel footer — rather than a whole-buffer substring
+// scan, so prose or fixtures that merely mention the menu's wording don't
+// bare-reproduce a matching line and can't self-trigger.
 const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
-const CLAUDE_USAGE_MENU_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*ask your admin for more usage$/i;
+const CLAUDE_USAGE_MENU_OPTION_WAIT_HERE =
+  /^[^0-9a-z]{0,3}[23]\.\s*wait here,\s*then continue automatically(?:\s+at\s+.+)?$/i;
+const CLAUDE_USAGE_MENU_OPTION_ASK_ADMIN =
+  /^[^0-9a-z]{0,3}[23]\.\s*ask your admin for more usage$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
 // captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
@@ -280,21 +284,22 @@ export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection
   while (end > 0 && allLines[end - 1] === "") end--;
   const lines = allLines.slice(Math.max(0, end - CLAUDE_USAGE_MENU_TAIL_LINES), end);
   const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
-  const hasOptionTwo = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_TWO.test(line));
+  const hasOptionWaitHere = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_WAIT_HERE.test(line));
+  const hasOptionAskAdmin = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ASK_ADMIN.test(line));
   const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
-  if (hasOptionOne && hasOptionTwo && hasFooter) {
+  if (hasOptionOne && (hasOptionWaitHere || hasOptionAskAdmin) && hasFooter) {
     return { limited: true, reason: "claude usage limit menu" };
   }
   return null;
 }
 
-const CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED = /^>\s*1\.\s*stop and wait for limit to reset$/i;
+const CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED = /^[>›❯]\s*1\.\s*stop and wait for limit to reset$/i;
 
 // True only when the pane's cursor is on "Stop and wait for limit to reset"
-// (option 1), not "Ask your admin for more usage" (option 2). Confirming via
+// (option 1), not "Ask your admin for more usage" or "Wait here". Confirming via
 // Enter must be gated on this specifically — detectClaudeUsageLimitMenu only
 // proves the menu is showing, not which option is currently highlighted, so
-// blindly sending Enter could otherwise select "Ask your admin" instead.
+// blindly sending Enter could otherwise select another option instead.
 export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
   return paneText
     .split("\n")
@@ -355,11 +360,15 @@ export function detectCodexMcpPermissionDialog(paneText: string): boolean {
   return hasHeader && hasOptionOne && hasOptionTwo && hasOptionThree && hasOptionFour;
 }
 
+const TMUX_STATUS_PREFIX_RE =
+  /^(?:[\p{Extended_Pictographic}\u25A0\u26A0]|\uFE0E|\uFE0F|\u200D|\s)+/u;
+
 // Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
 // banner line. Iterates physical lines and accepts a marker only on a real
-// banner — a ■-prefixed banner or a line-leading status banner — rejecting
-// diff/quote gutters and quoted code tokens. This keeps an agent whose pane
-// merely contains rate-limit vocabulary from being misclassified rate_limited.
+// banner — a ■-prefixed banner or a line-leading status banner (tolerating
+// leading status glyphs/emoji like '⚠') — rejecting diff/quote gutters and
+// quoted code tokens. This keeps an agent whose pane merely contains
+// rate-limit vocabulary from being misclassified rate_limited.
 export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
   for (const line of paneText.split("\n")) {
     const content = line.replace(/^\s+/, "");
@@ -384,7 +393,8 @@ export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
     ) {
       continue;
     }
-    if (content.startsWith("■") || lower.startsWith(marker)) {
+    const stripped = lower.replace(TMUX_STATUS_PREFIX_RE, "");
+    if (content.startsWith("■") || lower.startsWith(marker) || stripped.startsWith(marker)) {
       return { limited: true, reason: `tmux ${marker}` };
     }
   }
