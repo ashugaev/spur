@@ -264,6 +264,17 @@ interface CachedSessionFile extends FileFingerprint {
 
 const sessionFileCache = new Map<string, CachedSessionFile>();
 
+interface CachedSessionIndex extends FileFingerprint {
+  index: Readonly<Record<string, string>>;
+}
+
+// Keyed on sessionIndexFilePath(dataDir). The .index.json of a live fleet is
+// hundreds of KB and every readSession() parses it, so the parsed AND filtered
+// projection is cached together — a hit must rebuild nothing.
+const sessionIndexCache = new Map<string, CachedSessionIndex>();
+
+const EMPTY_INDEX: Readonly<Record<string, string>> = Object.freeze({});
+
 function statFingerprint(path: string): FileFingerprint | null {
   try {
     return statSync(path);
@@ -359,10 +370,19 @@ function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
   return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
 }
 
-function readSessionIndex(dataDir: string): Record<string, string> {
+function readSessionIndex(dataDir: string): Readonly<Record<string, string>> {
   const path = sessionIndexFilePath(dataDir);
-  if (!existsSync(path)) {
-    return {};
+  // One stat replaces the existsSync + read pair: it both proves the file is
+  // there and carries the fingerprint the cache is keyed on.
+  const stat = statFingerprint(path);
+  if (!stat) {
+    sessionIndexCache.delete(path);
+    return EMPTY_INDEX;
+  }
+
+  const cached = sessionIndexCache.get(path);
+  if (cached && sameFingerprint(cached, stat)) {
+    return cached.index;
   }
 
   try {
@@ -370,13 +390,17 @@ function readSessionIndex(dataDir: string): Record<string, string> {
     if (!isRecord(parsed)) {
       return {};
     }
-    return Object.fromEntries(
+    const index = Object.fromEntries(
       Object.entries(parsed).filter(
         (entry): entry is [string, string] =>
           typeof entry[0] === "string" && typeof entry[1] === "string",
       ),
     );
+    sessionIndexCache.set(path, { ...stat, index });
+    return index;
   } catch {
+    // A corrupt or torn file is never cached: it must be retried, and the
+    // caller must keep seeing an empty index until it parses again.
     return {};
   }
 }
@@ -414,10 +438,24 @@ function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogIte
   }
 }
 
+// Sole writer of .index.json. Caches the object it wrote against the
+// fingerprint of the tmp inode that carries those bytes, so a foreign writer
+// landing on the destination afterwards reads as a mismatch, never as a hit.
+function writeSessionIndexFile(dataDir: string, index: Readonly<Record<string, string>>): void {
+  const path = sessionIndexFilePath(dataDir);
+  const fingerprint = writeJsonFile(path, index);
+  if (fingerprint) {
+    sessionIndexCache.set(path, { ...fingerprint, index });
+  } else {
+    sessionIndexCache.delete(path);
+  }
+}
+
 function writeSessionIndexEntry(dataDir: string, sessionId: string, filePath: string): void {
   const index = readSessionIndex(dataDir);
-  index[sessionId] = relative(dataDir, filePath);
-  writeJsonFile(sessionIndexFilePath(dataDir), index);
+  // Copy, never mutate: the object may be the one every other reader is holding.
+  const next = { ...index, [sessionId]: relative(dataDir, filePath) };
+  writeSessionIndexFile(dataDir, next);
 }
 
 function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
@@ -426,7 +464,7 @@ function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
     return;
   }
   const { [sessionId]: _removed, ...nextIndex } = index;
-  writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+  writeSessionIndexFile(dataDir, nextIndex);
 }
 
 function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleRecord> {
@@ -551,11 +589,18 @@ function findSessionFilePath(dataDir: string, sessionId: string): string | null 
   return null;
 }
 
-function writeJsonFile(path: string, value: unknown): void {
+// Returns the fingerprint of the bytes just written, taken on the tmp path
+// BEFORE the rename. tmpPath sits in the destination's own directory, so the
+// rename is never a cross-device copy: ino, mtimeMs and size all survive it.
+// Fingerprinting the tmp inode instead of the destination is what keeps a
+// foreign writer from pinning our object to their fingerprint forever.
+function writeJsonFile(path: string, value: unknown): FileFingerprint | null {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", "utf-8");
+  const fingerprint = statFingerprint(tmpPath);
   renameSync(tmpPath, path);
+  return fingerprint;
 }
 
 // Discriminates the current envelope (`{prNumber, signals}`) from the legacy
@@ -845,7 +890,7 @@ export function archiveSessions(
     const nextIndex = Object.fromEntries(
       Object.entries(index).filter(([id]) => !archivedIdSet.has(id)),
     );
-    writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+    writeSessionIndexFile(dataDir, nextIndex);
   }
 
   return { archivedIds, archiveDir };
