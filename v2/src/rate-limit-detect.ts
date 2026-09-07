@@ -25,6 +25,9 @@ export const RATE_LIMIT_MARKERS: readonly string[] = [
   "credit balance is too low",
   "rate_limit_reached",
   "resource_exhausted",
+  "reached its usage limit",
+  "spendlimithit",
+  "team has reached its usage limit",
 ];
 
 // Rendered human banner phrases (lowercase) that appear as ■-prefixed banners
@@ -46,6 +49,9 @@ const TMUX_BANNER_MARKERS: readonly string[] = [
   "credit balance is too low",
   "temporarily limiting requests",
   "request rejected (429)",
+  "reached its usage limit",
+  "spendlimithit",
+  "team has reached its usage limit",
 ];
 
 // Diff / quote / code-gutter glyphs that mark a line as agent-rendered content

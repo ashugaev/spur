@@ -242,6 +242,17 @@ describe("detectCursorRateLimit", () => {
     });
   });
 
+  it("flags team rate limit errors", () => {
+    expect(detectCursorRateLimit("Error: Your team has reached its usage limit")).toEqual({
+      limited: true,
+      reason: "cursor reached its usage limit",
+    });
+    expect(detectCursorRateLimit("spendLimitHit: true")).toEqual({
+      limited: true,
+      reason: "cursor spendlimithit",
+    });
+  });
+
   it("is not limited for benign assistant text", () => {
     expect(detectCursorRateLimit("Patched the rate limiter middleware.")).toBeNull();
   });
