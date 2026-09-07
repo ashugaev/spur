@@ -88,6 +88,8 @@ Fires only while status is restorable (`running`, `stopped`, `paused`); dropped 
 
 TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit, `Ctrl+G` back. The selected session's details pane shows a `queued <N>` field when it holds real queued messages, never a per-row column. Non-TTY prints a one-shot summary, hides `completed`/`killed` by default, and adds a `queued <N>` fact beside the sidecar-age fact for a session holding real queued messages. Neither surface counts a pipeline's own auto-steps. A resolvable-age sidecar shows `sidecar <name> <age>` (oldest, `+N more`); `!` marks one past [`sidecarGc.maxAgeWarnMinutes`](configuration.md#sidecar-reaping).
 
+`spur list --json` (and the non-TTY list row set) comes from `GET /sessions` — the projected list item ([daemon-api.md](daemon-api.md#session-routes)). The interactive selector's details pane (`prompt`/`launch` rows) fetches the full record from `GET /sessions/:id` for the currently selected session, on selection change and on each 2s refresh tick — the pane shows a loading line until that fetch resolves.
+
 `pause` keeps the worktree; `complete`/`kill` tear down the pane, remove an owned worktree (`kill` needs `--force` on dirty/unpushed). Both check for an open PR first: `--pr-action leave_open|close` answers it, `--skip-pr-check` skips it; a failed check fails with retry hint. Shared-workspace sessions keep the project path on `kill`.
 
 `spur restore <sessionId> [--force] [--json]` needs an existing workspace plus: `running`+state `stopped`; `stopped`+state `stopped`/`error`/`stale`; `paused`+state `stopped`/`error`; `errored`+state `error` (`killed`/`completed` never restore). `restore`/`reopen` refuse over a live agent process still carrying the id, or an unreadable process table (skipped off Linux); a first `r` surfaces refusal, a second `r`/`--force` bypasses only the foreign-process refusal. `restore` resumes the session's existing conversation.
@@ -142,7 +144,7 @@ A `stopped`/`paused` subscriber resumes to receive delivery (native resume, then
 
 ## Sidecars
 
-Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`, never bare — starts a configured sidecar from `projects.<id>.sidecars`. `autoStart` sidecars return on spawn, restore, or recover. A sidecar starting another is manual-only; nesting stops after one level.
+Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`, never bare — starts a configured sidecar from `projects.<id>.sidecars`. `autoStart` sidecars return on spawn, restore, recover, or a stale-`errored` session healing back to `running` — the last case skips a sidecar the same call just stopped, and its dependents. A sidecar starting another is manual-only; nesting stops after one level.
 
 Ports reserve/probe on the host at start, inject into the sidecar env only — pane env freezes first, no session variable carries it. Read with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (`--name <name>`, `--json`): `<sidecar> <portId> <env> <port> alive|dead` per line. A non-MCP sidecar is desk-shared: one tmux pane/port per [desk group](configuration.md#desk-groups).
 
@@ -156,7 +158,7 @@ Stop/restart reap the sidecar's whole tmux pane process tree, not just the direc
 
 ### Built-in MCP sidecars
 
-A sidecar entry can carry MCP wiring, injecting its port into the launching agent's MCP config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright` is the one built-in: an HTTP playwright MCP sidecar for claude/codex, never cursor, off by default: `sidecars: { playwright: { autoStart: true } }`. YAML only overrides `autoStart`, rejects any other key incl. `dependsOn` (MCP sidecars start before the agent, ahead of the dependency-aware autostart pass). Re-resolved every spawn/restore/recover, no per-session toggle.
+A sidecar entry can carry MCP wiring, injecting its port into the launching agent's MCP config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright` is the one built-in: an HTTP playwright MCP sidecar for claude/codex, never cursor, off by default: `sidecars: { playwright: { autoStart: true } }`. YAML only overrides `autoStart`, rejects any other key incl. `dependsOn` (MCP sidecars start before the agent, ahead of the dependency-aware autostart pass). Re-resolved every spawn/restore/recover, no per-session toggle; the errored-session heal above never restarts one — its MCP config is frozen at launch.
 
 Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
 with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated
