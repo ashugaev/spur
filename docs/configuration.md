@@ -183,7 +183,7 @@ With `steps`, Spur sends "step 1/N: research" plus the prompt. Without, it sends
 
 - `session.pipeline.completed` (level info) — pipeline ran every step.
 - `session.pipeline.errored` (level error) — `details.nextStepIndex`, `details.awaitingStepIndex` (0-based, or `null`).
-- `session.pipeline.stalled` (level warn) — the delivery loop exited because the session left `running` for a non-terminal status with no `stopReason` while a step was still awaited; `details.awaitingStepIndex` (0-based, or `null`), `details.nextStepIndex`, `details.sessionStatus`. Diagnostic only, delivery is not resumed.
+- `session.pipeline.stalled` (level warn) — the delivery loop exited because the session left `running` for a non-terminal status with no `stopReason` while a step was still awaited; `details.awaitingStepIndex` (0-based, or `null`), `details.nextStepIndex`, `details.sessionStatus`. Diagnostic only, delivery is not resumed. A daemon restart alone does not clear it — run `spur restore <sessionId>` to bring the session back to `running` and re-arm delivery; queued messages survive the restore.
 
 ## Desk groups
 
