@@ -6328,8 +6328,10 @@ describe("SessionService", () => {
       status: "running",
       awaitingStepIndex: 0,
     });
-    // Daemon shutdown is not a stall: this is the discriminator the guard
-    // reads (`this.deliveryStopped`) that keeps the diagnostic silent here.
+    // dispose() writes no record, so this fixture's status stays "running"
+    // and the record guard's `latest.status !== "running"` clause alone
+    // silences the emit here -- the flag clause is pinned separately below,
+    // by a fixture that drifts the status first and disposes second.
     expect(
       logSpurEventMock.mock.calls
         .map(([, entry]) => entry.event)
@@ -6395,10 +6397,13 @@ describe("SessionService", () => {
       // branch at session-service.ts's reconcile, :14520-14530).
       const parked = sessions.get("api-1");
       if (!parked) throw new Error("expected api-1 to exist");
-      sessions.set("api-1", { ...parked, status: "stopped", updatedAt: "2026-03-18T10:05:05.000Z" });
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
 
-      const realTimers =
-        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       const outcome = await Promise.race([
         run?.then((): "retired" => "retired"),
         realTimers.setTimeout(3_000, "parked" as const),
@@ -6439,8 +6444,7 @@ describe("SessionService", () => {
       expect(run).toBeDefined();
       service.dispose();
 
-      const realTimers =
-        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       const outcome = await Promise.race([
         run?.then((): "retired" => "retired"),
         realTimers.setTimeout(3_000, "parked" as const),
@@ -6473,8 +6477,7 @@ describe("SessionService", () => {
         pipeline: { ...parked.pipeline, status: "completed" },
       });
 
-      const realTimers =
-        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       const outcome = await Promise.race([
         run?.then((): "retired" => "retired"),
         realTimers.setTimeout(3_000, "parked" as const),
@@ -6508,8 +6511,76 @@ describe("SessionService", () => {
         updatedAt: "2026-03-18T10:05:05.000Z",
       });
 
-      const realTimers =
-        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+      service.dispose();
+    });
+
+    it("stays silent when a genuine drift lands the same tick as dispose() (shutdown wins)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Same unmarked-stop shape as the positive drift test -- every record
+      // clause (pipeline still running, status off "running", no stopReason,
+      // not terminal) is satisfied here too. Only the isDeliveryStopped()
+      // flag, set by dispose() below, keeps this one quiet.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+      service.dispose();
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+    });
+
+    it("stays silent when the drift lands on a terminal completed status with no stop marker", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // applyManualStatusLocked's completed branch (session-service.ts
+      // :11482-11497) deletes stopReason and never touches record.pipeline,
+      // so `spur complete` mid-pipeline leaves this exact shape: status
+      // "completed", pipeline.status still "running", no marker. Only
+      // isTerminalSessionStatus keeps it quiet.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "completed",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       const outcome = await Promise.race([
         run?.then((): "retired" => "retired"),
         realTimers.setTimeout(3_000, "parked" as const),
@@ -6535,10 +6606,13 @@ describe("SessionService", () => {
       // unintended wedge, no stopReason, different status.
       const parked = sessions.get("api-1");
       if (!parked) throw new Error("expected api-1 to exist");
-      sessions.set("api-1", { ...parked, status: "errored", updatedAt: "2026-03-18T10:05:05.000Z" });
+      sessions.set("api-1", {
+        ...parked,
+        status: "errored",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
 
-      const realTimers =
-        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       const outcome = await Promise.race([
         run?.then((): "retired" => "retired"),
         realTimers.setTimeout(3_000, "parked" as const),
