@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as AutoUpdateConfigModule from "../../src/auto-update-config.js";
 import { startServer } from "../../src/server.js";
-import { findFreePort } from "../helpers/common.js";
+import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 async function setupConfig(port: number, autoUpdate?: boolean): Promise<string> {
   return (await setupInstance(port, autoUpdate)).configPath;
@@ -245,12 +245,11 @@ describe("POST /deploy/auto-update", () => {
         });
 
         const { startServer: mockedStartServer } = await import("../../src/server.js");
-        const port = await findFreePort();
-        const configPath = await setupConfig(port);
-        const server = await mockedStartServer(configPath, {
-          info: () => undefined,
-          warn: () => undefined,
-        });
+        const { server, port } = await startOnFreePort(
+          (_port, configPath) =>
+            mockedStartServer(configPath, { info: () => undefined, warn: () => undefined }),
+          (port) => setupConfig(port),
+        );
         try {
           const response = await fetch(`http://127.0.0.1:${port}/deploy/auto-update`, {
             method: "POST",

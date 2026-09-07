@@ -418,6 +418,7 @@ import {
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
+  type SessionListItemView,
   type SessionStateTransition,
   type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
@@ -2395,6 +2396,13 @@ export class SessionService {
   // wake after dispose. A direct request (send/deliver/flush) is the caller's
   // own call and still runs; only the autonomous poll stops.
   private deliveryStopped = false;
+  // Function-call boundary, not decoration: TS's flow analysis narrows a
+  // `this.deliveryStopped` re-check within the same function to the earlier
+  // check's literal, even across the `await` that lets dispose() flip it in
+  // between -- see the runDeliveryLoop stall-diagnostic re-check below.
+  private isDeliveryStopped(): boolean {
+    return this.deliveryStopped;
+  }
   // Symmetric marker, checked and set synchronously (before any await) by
   // every writer that drains or flushes the queue: tryDeliverQueuedMessage
   // stands down (returns false) while a flush holds it, and flushQueuedMessage
@@ -2542,6 +2550,24 @@ export class SessionService {
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
   private readonly reopensInFlight = new Set<string>();
+  // Session ids with a scheduleHealedSidecarRestart task currently queued or
+  // running, mapped to that task. Claimed synchronously (`has`, before any
+  // await) so two classify passes that both observe the same
+  // errored->running transition schedule at most one restart task; the same
+  // map's values() let settleBackgroundSpawns drain every in-flight task
+  // alongside the other fire-and-forget work it already awaits.
+  private readonly sidecarHealTasks = new Map<string, Promise<void>>();
+  // Sidecar names a stopSidecar call is actively stopping, keyed by session
+  // id. scheduleHealedSidecarRestart reads this synchronously before it
+  // fires, so a heal triggered by stopSidecar's own trailing enrich never
+  // restarts the sidecar that call just stopped. Emptied (and the session
+  // key deleted) in stopSidecarLocked's finally.
+  private readonly suppressedSidecarHeals = new Map<string, Set<string>>();
+  // Mutable skip set for a pending scheduleHealedSidecarRestart task, keyed
+  // by session id. stopSidecar adds to this when a heal task is already
+  // queued so a sidecar killed after schedule time stays excluded even after
+  // suppressedSidecarHeals clears in stopSidecarLocked's finally.
+  private readonly healTaskSkipNames = new Map<string, Set<string>>();
   // Serializes lifecycle mutations that can kill, relaunch, write to, or
   // snapshot one session's agent and sidecar panes. Distinct from the pane
   // write lock: callers acquire lifecycle first, then pane-write. Helpers
@@ -2644,14 +2670,16 @@ export class SessionService {
 
   /**
    * Resolves once every in-flight fire-and-forget run has settled: background
-   * spawns, PR auto-detect checks, and the dashboard cache tick. Lets teardown
-   * drain async work whose writes and `gh` calls would otherwise land after the
+   * spawns, PR auto-detect checks, healed-sidecar restarts, and the dashboard
+   * cache tick. Lets teardown drain async work whose writes and `gh` calls
+   * would otherwise land after the
    * caller is gone.
    */
   async settleBackgroundSpawns(): Promise<void> {
     await Promise.allSettled([
       ...this.backgroundSpawnRuns,
       ...this.prCheckRuns,
+      ...this.sidecarHealTasks.values(),
       ...(this.dashboardCacheReady ? [this.dashboardCacheReady] : []),
     ]);
   }
@@ -4739,11 +4767,11 @@ export class SessionService {
   // attention-monitor sweep, off a `view` that can be up to
   // ATTENTION_POLL_INTERVAL_MS stale, so the record is re-read and
   // re-asserted "running" before anything is torn down.
-  private async parkStaleSession(view: SessionView): Promise<void> {
+  private async parkStaleSession(view: Pick<SessionView, "id">): Promise<void> {
     return this.withWorkspaceLifecycleLocks(view.id, () => this.parkStaleSessionLocked(view));
   }
 
-  private async parkStaleSessionLocked(view: SessionView): Promise<void> {
+  private async parkStaleSessionLocked(view: Pick<SessionView, "id">): Promise<void> {
     const candidate = readSession(this.config.dataDir, view.id);
     if (!candidate) {
       return;
@@ -5914,7 +5942,9 @@ export class SessionService {
     return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
   }
 
-  private async maybeNudgeForgottenReply(view: SessionView): Promise<void> {
+  private async maybeNudgeForgottenReply(
+    view: Pick<SessionView, "id" | "agent" | "state" | "slots">,
+  ): Promise<void> {
     try {
       const resolved = this.resolveTelegramNotice(view.id);
       if (!resolved) return;
@@ -6838,14 +6868,40 @@ export class SessionService {
     return sidecar ? sidecarOwnerId(session, sidecar) : session.id;
   }
 
+  // True when sidecarName or any sidecar it (transitively) dependsOn is in
+  // skipNames. Used to decide the fate of a dependent whose dependency the
+  // caller asked to skip (see startSidecarWithDependencies): the dependent
+  // is skipped too rather than started against a dependency the operator
+  // just stopped.
+  private sidecarDependencyChainSkipped(
+    sidecarName: string,
+    project: ProjectConfig,
+    skipNames: ReadonlySet<string> | undefined,
+    visited: Set<string> = new Set(),
+  ): boolean {
+    if (!skipNames || skipNames.size === 0) return false;
+    if (skipNames.has(sidecarName)) return true;
+    if (visited.has(sidecarName)) return false;
+    visited.add(sidecarName);
+    const sidecar = project.sidecars[sidecarName];
+    if (!sidecar) return false;
+    return (sidecar.dependsOn ?? []).some((dependency) =>
+      this.sidecarDependencyChainSkipped(dependency, project, skipNames, visited),
+    );
+  }
+
   private async startSidecarWithDependencies(args: {
     session: SessionRecord;
     project: ProjectConfig;
     sidecarName: string;
     sidecarDepth: number;
     clearPort?: number;
+    skipNames?: ReadonlySet<string>;
     onStarted: (name: string, sidecar: ProjectConfig["sidecars"][string]) => void;
   }): Promise<SessionRecord> {
+    if (this.sidecarDependencyChainSkipped(args.sidecarName, args.project, args.skipNames)) {
+      return args.session;
+    }
     let currentSession = args.session;
     const visited = new Set<string>();
 
@@ -7077,8 +7133,16 @@ export class SessionService {
       ? await snapshotProcesses()
       : undefined;
     const views = await Promise.all(
-      sessions.map((session) =>
-        this.enrich(session, claudeAccounts, allSessions, sidecarProcSnapshot),
+      sessions.map(
+        async (session) =>
+          (
+            await this.enrichWithClassified(
+              session,
+              claudeAccounts,
+              allSessions,
+              sidecarProcSnapshot,
+            )
+          ).view,
       ),
     );
     return views;
@@ -7525,6 +7589,7 @@ export class SessionService {
   private async startAutoStartSidecars(
     session: SessionRecord,
     project: ProjectConfig,
+    skipNames?: ReadonlySet<string>,
   ): Promise<SessionRecord> {
     let updatedRecord = session;
     for (const [name, sidecar] of Object.entries(resolveSessionSidecars(session, project))) {
@@ -7536,6 +7601,7 @@ export class SessionService {
           project,
           sidecarName: name,
           sidecarDepth,
+          ...(skipNames ? { skipNames } : {}),
           onStarted: (startedName, startedSidecar) => {
             this.logEvent("session.sidecar.started", {
               level: "info",
@@ -7567,6 +7633,75 @@ export class SessionService {
       }
     }
     return updatedRecord;
+  }
+
+  // Called by reconcileStaleErroredSession right after it promotes a record
+  // errored -> running: that write undid an errored flip that may have torn
+  // down the session's non-mcp autoStart sidecars (teardownSessionSidecars),
+  // so this restarts them. Fire-and-forget by design: reconcileStaleErroredSession
+  // stays synchronous and its only caller (classifySessionRecord) can already
+  // be running under withWorkspaceLifecycleLocks (park, delivery, and after
+  // #844 also startSidecarLocked) — awaiting the restart here would reenter
+  // that non-reentrant lock. The task instead takes its own
+  // withWorkspaceLifecycleLocks call, which simply queues behind the
+  // holder's release.
+  //
+  // Writes no SessionRecord itself: startSidecarInternal persists its own
+  // reservations inline, and a whole-record write built from this function's
+  // pre-start snapshot would be the teardown-snapshot-clobber bug shape.
+  private healedSidecarRestartSkipNames(
+    session: SessionRecord,
+    project: ProjectConfig,
+  ): Set<string> {
+    const skipNames = new Set<string>();
+    for (const [name, sidecar] of Object.entries(resolveSessionSidecars(session, project))) {
+      if (sidecar.mcp) skipNames.add(name);
+    }
+    for (const name of this.suppressedSidecarHeals.get(session.id) ?? []) {
+      skipNames.add(name);
+    }
+    return skipNames;
+  }
+
+  private scheduleHealedSidecarRestart(session: SessionRecord): void {
+    if (this.deliveryStopped) return;
+    const project = this.resolveProjectForSession(session);
+    if (!project) return;
+
+    const skipNames = this.healedSidecarRestartSkipNames(session, project);
+
+    const hasRestartableSidecar = Object.entries(resolveSessionSidecars(session, project)).some(
+      ([name, sidecar]) => sidecar.autoStart && !skipNames.has(name),
+    );
+    if (!hasRestartableSidecar) return;
+
+    if (this.sidecarHealTasks.has(session.id)) return;
+
+    this.healTaskSkipNames.set(session.id, skipNames);
+
+    const task = (async () => {
+      await this.withWorkspaceLifecycleLocks(session.id, async () => {
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest || latest.status !== "running") return;
+        const executionSkipNames = this.healTaskSkipNames.get(session.id);
+        if (!executionSkipNames) return;
+        await this.startAutoStartSidecars(latest, project, executionSkipNames);
+      });
+    })()
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.sidecar.autostart.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Healed-session sidecar restart failed for ${session.id}: ${message}`,
+        });
+      })
+      .finally(() => {
+        this.sidecarHealTasks.delete(session.id);
+        this.healTaskSkipNames.delete(session.id);
+      });
+    this.sidecarHealTasks.set(session.id, task);
   }
 
   // The single place both wake entry points (relaunchSessionInPlace, reached
@@ -10873,12 +11008,39 @@ export class SessionService {
   ): Promise<SessionView> {
     const caller = sidecarCallerContextFromRequest(request);
     const sidecarDepth = nextSidecarDepth(caller);
-    const session = readSession(this.config.dataDir, sessionId);
+    let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    // An `errored` record can outlive the blip that wrote it while the agent
+    // keeps working, and this path otherwise never reconciles. Probe the
+    // runtime, then let reconcileStaleErroredSession promote the record back
+    // to running before the guard reads the status. Promotion still requires
+    // processAlive, so a genuinely dead agent stays errored and stays refused.
+    // Probe first, commit last — same order as reconcileStoppedSessions: the
+    // reconcile's writeSession is the last statement here that can run, so a
+    // failed probe can never leave disk on `running` while this frame refuses
+    // on an in-memory `errored` snapshot. Going through classifySessionRecord
+    // instead would put the write ahead of the agent-transcript reads, whose
+    // fail-closed contract this frame would then depend on forever.
+    if (session.status === "errored") {
+      try {
+        const runtime = await this.readRuntimeSnapshot(session);
+        session = this.reconcileStaleErroredSession(
+          session,
+          runtime,
+          probeWorkspace(session.worktreePath).missing,
+        );
+      } catch {
+        // Fail closed, same as memoryShedCandidates: the heal is opportunistic
+        // and nothing above it has written, so an unprobeable session keeps the
+        // record as read and the guard below refuses on it.
+      }
+    }
     if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
+      throw new Error(
+        `Cannot start sidecar "${sidecarName}" for ${sessionId}: session status is ${session.status}`,
+      );
     }
     if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session workspace is not available: ${sessionId}`);
@@ -11059,9 +11221,6 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
-    }
     const project = this.resolveProjectForSession(session);
     const sidecarNames = sessionSidecarNames(session, project);
     if (!sidecarNames.includes(sidecarName)) {
@@ -11071,32 +11230,56 @@ export class SessionService {
     const sidecar = project?.sidecars[sidecarName];
     const clearsWorkspaceReplay = sidecar !== undefined && !sidecar.mcp;
 
-    // A dead pane or an absent tmux session with no recorded identity means
-    // there is genuinely nothing left to reap.
-    const owner = readSession(this.config.dataDir, ownerId);
-    const alive = await sidecarTmuxAlive(ownerId, sidecarName);
-    if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
+    // Claimed synchronously before any await, and released in the finally
+    // below (which wraps the terminal `enrich` too): that enrich reclassifies
+    // the record and can heal-and-schedule an autoStart restart of the very
+    // sidecar this call is stopping (see scheduleHealedSidecarRestart). The
+    // claim has to still be live when that snapshot is taken, not merely
+    // when the kill happens, so the release cannot happen before the awaited
+    // enrich completes.
+    let suppressed = this.suppressedSidecarHeals.get(sessionId);
+    if (!suppressed) {
+      suppressed = new Set<string>();
+      this.suppressedSidecarHeals.set(sessionId, suppressed);
+    }
+    suppressed.add(sidecarName);
+    this.healTaskSkipNames.get(sessionId)?.add(sidecarName);
+    try {
+      // A dead pane or an absent tmux session with no recorded identity means
+      // there is genuinely nothing left to reap.
+      const owner = readSession(this.config.dataDir, ownerId);
+      const alive = await sidecarTmuxAlive(ownerId, sidecarName);
+      if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
+        if (clearsWorkspaceReplay) {
+          this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
+        }
+        return await this.enrich(session);
+      }
+
+      await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
       if (clearsWorkspaceReplay) {
         this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
       }
-      return this.enrich(session);
+      this.logEvent("session.sidecar.stopped", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+        details: {
+          sidecarName,
+          tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
+        },
+      });
+      return await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+    } finally {
+      const current = this.suppressedSidecarHeals.get(sessionId);
+      if (current) {
+        current.delete(sidecarName);
+        if (current.size === 0) {
+          this.suppressedSidecarHeals.delete(sessionId);
+        }
+      }
     }
-
-    await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
-    if (clearsWorkspaceReplay) {
-      this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
-    }
-    this.logEvent("session.sidecar.stopped", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
-      details: {
-        sidecarName,
-        tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
-      },
-    });
-    return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
   }
 
   // Report-first sweep for sidecar process trees no live session claims.
@@ -13563,6 +13746,37 @@ export class SessionService {
         ) {
           const waitOutcome = await this.waitForPipelineStep(sessionId);
           if (waitOutcome === "stopped") {
+            // deliveryStopped means daemon shutdown, not drift: stay silent so
+            // dispose() never produces a diagnostic event (see the "retires a
+            // delivery loop..." test above). Reads through isDeliveryStopped(),
+            // not the field directly: dispose() can flip the field during the
+            // wait above, so this re-check must not inherit the loop-top
+            // guard's stale `false` narrowing.
+            if (!this.isDeliveryStopped()) {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (
+                latest?.pipeline?.status === "running" &&
+                latest.status !== "running" &&
+                latest.stopReason === undefined &&
+                !isTerminalSessionStatus(latest.status)
+              ) {
+                const stepLabel =
+                  latest.pipeline.awaitingStepIndex === undefined
+                    ? "no step"
+                    : `step ${latest.pipeline.awaitingStepIndex + 1}/${latest.pipeline.steps.length}`;
+                this.logEvent("session.pipeline.stalled", {
+                  level: "warn",
+                  sessionId,
+                  projectId: latest.project,
+                  message: `Pipeline stalled for ${sessionId}: session status is ${latest.status} while ${stepLabel} is still awaiting`,
+                  details: {
+                    awaitingStepIndex: latest.pipeline.awaitingStepIndex ?? null,
+                    nextStepIndex: latest.pipeline.nextStepIndex,
+                    sessionStatus: latest.status,
+                  },
+                });
+              }
+            }
             return;
           }
           if (waitOutcome === "ready") {
@@ -14666,9 +14880,13 @@ export class SessionService {
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
   ): SessionRecord {
+    // Shepherd is not exempt: its own terminal exits are "completed" (self
+    // destruct) or "killed", and it is never stale-parked, so a stopped or
+    // errored shepherd whose tmux, pane, and agent process are all alive is
+    // the same drift as any other session's — leaving it alone kept the one
+    // session that heals the fleet stuck under a status the runtime refutes.
     if (
       session.status !== "stopped" ||
-      session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
       isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
@@ -14724,9 +14942,10 @@ export class SessionService {
     runtime: SessionRuntimeSnapshot,
     workspaceMissing: boolean,
   ): SessionRecord {
+    // Shepherd included, for the reason spelled out in
+    // reconcileStaleStoppedSession above.
     if (
       session.status !== "errored" ||
-      session.project === SHEPHERD_PROJECT_ID ||
       workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
@@ -14763,6 +14982,7 @@ export class SessionService {
         processAlive: runtime.processAlive,
       },
     });
+    this.scheduleHealedSidecarRestart(updated);
     return updated;
   }
 
@@ -15249,15 +15469,45 @@ export class SessionService {
     }));
   }
 
+  // Full single-session detail: the projected list view plus the six fields
+  // the list drops (artifact manifest, state history, launch command, and
+  // the two prompt bodies). Used by `get()` and every mutation route — all
+  // 30 existing `enrich()` callers keep getting a full SessionView.
   private async enrich(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<SessionView> {
-    return (
-      await this.enrichWithClassified(session, claudeAccounts, sessionBatch, sidecarProcSnapshot)
-    ).view;
+    const { view, classified } = await this.enrichWithClassified(
+      session,
+      claudeAccounts,
+      sessionBatch,
+      sidecarProcSnapshot,
+    );
+    return this.withSessionDetail(view, classified.session);
+  }
+
+  // Re-attaches the six fields the list projection drops. The artifact walk
+  // MUST key on workspaceIdOf(session), not session.id — a desk sibling
+  // shares its anchor's artifacts (v2/test/fast/session-service.test.ts
+  // "lists and reads an artifact written by one desk sibling from another
+  // sibling"). Kept as the single detail-assembly path so `enrich()` and
+  // any future single-session reader never duplicate this walk elsewhere.
+  private withSessionDetail(view: SessionListItemView, session: SessionRecord): SessionView {
+    const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
+    const history = this.stateHistory.get(session.id) ?? [];
+    return {
+      ...view,
+      launchCommand: session.launchCommand,
+      prompt: session.prompt,
+      ...(session.originalTaskPrompt !== undefined
+        ? { originalTaskPrompt: session.originalTaskPrompt }
+        : {}),
+      artifacts: artifactWalk.artifacts,
+      ...(artifactWalk.truncated ? { artifactsTruncated: true } : {}),
+      ...(history.length > 0 ? { stateHistory: history } : {}),
+    };
   }
 
   // Same work as enrich(), plus the raw classified result — needed by the
@@ -15267,18 +15517,28 @@ export class SessionService {
   // agent activity AND every routine record write). A second call would
   // mean a second classifySessionRecord pass (JSONL read) per session per
   // sweep tick; this split keeps it to exactly one.
+  //
+  // Returns the PROJECTED list view (SessionListItemView), not the full
+  // SessionView: this is also the builder the list path and the attention
+  // sweep use, and neither needs the artifact walk or the prompt bodies.
+  // `enrich()` re-attaches those six fields itself via withSessionDetail.
   private async enrichWithClassified(
     session: SessionRecord,
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
-  ): Promise<{ view: SessionView; classified: SessionStateResult }> {
+  ): Promise<{ view: SessionListItemView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
-    const history = await this.updateStateHistory(
+    // Still runs on every enrich — it drives the state machine (the
+    // rateLimitedAt write, the serverErrorAt marker), not just a view field.
+    // The list projection drops the `stateHistory` VIEW FIELD only;
+    // `withSessionDetail` re-reads the same in-memory history for the
+    // single-session view.
+    await this.updateStateHistory(
       session,
       state,
       classified.source,
@@ -15345,10 +15605,15 @@ export class SessionService {
     );
     const resolvedClaudeAccounts =
       session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
-    const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
+    const {
+      launchCommand: _launchCommand,
+      prompt: _prompt,
+      originalTaskPrompt: _originalTaskPrompt,
+      ...sessionWithoutDetailFields
+    } = session;
 
-    const view: SessionView = {
-      ...session,
+    const view: SessionListItemView = {
+      ...sessionWithoutDetailFields,
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
       workspaceId: workspaceIdOf(session),
@@ -15359,11 +15624,8 @@ export class SessionService {
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
       state,
-      ...(history.length > 0 ? { stateHistory: history } : {}),
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
-      artifacts: artifactWalk.artifacts,
-      ...(artifactWalk.truncated ? { artifactsTruncated: true } : {}),
       services,
       sidecars,
       ...(workspaceAccess ? { workspaceAccess } : {}),
