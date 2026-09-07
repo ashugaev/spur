@@ -6328,6 +6328,237 @@ describe("SessionService", () => {
       status: "running",
       awaitingStepIndex: 0,
     });
+    // Daemon shutdown is not a stall: this is the discriminator the guard
+    // reads (`this.deliveryStopped`) that keeps the diagnostic silent here.
+    expect(
+      logSpurEventMock.mock.calls
+        .map(([, entry]) => entry.event)
+        .filter((event) => event.startsWith("session.pipeline.")),
+    ).toEqual([]);
+  });
+
+  describe("pipeline stall diagnostics", () => {
+    function parkedPipelineSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
+      return {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        // Inside MESSAGE_READY_GRACE_MS of the 10:05 clock, so the step gate
+        // parks on its poll sleep instead of advancing the pipeline (matches
+        // the dispose fixture above). Seeding pipeline.status: "completed"
+        // up front fails shouldRunDelivery before the loop ever reaches
+        // waitForPipelineStep, so the drift must land mid-wait instead.
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        pipeline: {
+          steps: ["research", "test"],
+          nextStepIndex: 1,
+          status: "running",
+          awaitingStepIndex: 0,
+        },
+        ...overrides,
+      };
+    }
+
+    function pipelineStalledCalls(): unknown[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.pipeline.stalled");
+    }
+
+    function pipelineEventNames(): string[] {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry.event)
+        .filter((event) => event.startsWith("session.pipeline."));
+    }
+
+    it("emits one session.pipeline.stalled when the session status drifts off running mid-wait", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Reconcile-shaped drift: status flips to "stopped" with no stopReason,
+      // the pipeline is left running untouched (matches the terminalUnavailable
+      // branch at session-service.ts's reconcile, :14520-14530).
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", { ...parked, status: "stopped", updatedAt: "2026-03-18T10:05:05.000Z" });
+
+      const realTimers =
+        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.pipeline).toEqual({
+        steps: ["research", "test"],
+        nextStepIndex: 1,
+        status: "running",
+        awaitingStepIndex: 0,
+      });
+      expect(pipelineStalledCalls()).toEqual([
+        expect.objectContaining({
+          event: "session.pipeline.stalled",
+          level: "warn",
+          sessionId: "api-1",
+          details: {
+            awaitingStepIndex: 0,
+            nextStepIndex: 1,
+            sessionStatus: "stopped",
+          },
+        }),
+      ]);
+      service.dispose();
+    });
+
+    it("stays silent when the service is disposed instead of the record drifting (shutdown, not a stall)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+      service.dispose();
+
+      const realTimers =
+        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+    });
+
+    it("stays silent when the mid-wait shape is a restore flip, not a drift", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Restore's pre-flip shape (session-service.ts:12704-12718): status
+      // "stopped" alongside pipeline.status "completed" -- the pipeline was
+      // deliberately suppressed, not wedged.
+      const parked = sessions.get("api-1");
+      if (!parked?.pipeline) throw new Error("expected api-1 with a pipeline to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+        pipeline: { ...parked.pipeline, status: "completed" },
+      });
+
+      const realTimers =
+        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+      service.dispose();
+    });
+
+    it("stays silent when the stop carries an intent marker (manual_pause)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Same "stopped" shape as the positive case, but with the marker every
+      // intentional-stop writer sets (applyManualStatusLocked, :11478).
+      // Passes on both trees -- it pins the marker gate, not the fix itself.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        stopReason: "manual_pause",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+
+      const realTimers =
+        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineEventNames()).toEqual([]);
+      service.dispose();
+    });
+
+    it("emits one session.pipeline.stalled for reconcile's unmarked errored sibling", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", parkedPipelineSession());
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      // Reconcile's errored branch (session-service.ts:14531-14538): same
+      // unintended wedge, no stopReason, different status.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", { ...parked, status: "errored", updatedAt: "2026-03-18T10:05:05.000Z" });
+
+      const realTimers =
+        await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineStalledCalls()).toEqual([
+        expect.objectContaining({
+          event: "session.pipeline.stalled",
+          level: "warn",
+          sessionId: "api-1",
+          details: {
+            awaitingStepIndex: 0,
+            nextStepIndex: 1,
+            sessionStatus: "errored",
+          },
+        }),
+      ]);
+      service.dispose();
+    });
   });
 
   it("delivers a queued message immediately while the session is a live server-error wedge, instead of waiting up to 30 minutes for the reactivation nudge", async () => {
