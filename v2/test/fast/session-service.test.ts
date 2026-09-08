@@ -20757,7 +20757,103 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("AC6: reaps a non-builtin sidecar whose owner is errored with no running workspace member", async () => {
+    it("keeps a non-builtin sidecar whose owner is stopped and within the idle TTL", async () => {
+      // AC1: a stopped (non-manual_pause) owner with no running sibling and
+      // recent activity is non-terminal — workspaceRunning stays true and
+      // rule 8 (workspace_not_running) never fires for it.
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "stopped",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
+          updatedAt: "2026-03-18T10:04:59.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      const reapedEvent = logSpurEventMock.mock.calls.find(
+        ([, entry]) =>
+          entry.event === "session.sidecar.reaped" &&
+          entry.sessionId === "api-1" &&
+          entry.details?.reason === "workspace_not_running",
+      );
+      expect(reapedEvent).toBeUndefined();
+      service.dispose();
+    });
+
+    it("AC8: does not reap a sidecar started on a long-idle stopped owner (dashboard-cache staleness race)", async () => {
+      // CHANGE 1b: the producer must take the newer of the cached
+      // lastActivityAt and the record's own updatedAt. A naturally enriched
+      // cache entry is already >= updatedAt (buildLastActivityAt, :1872-1880),
+      // so only a hand-seeded stale entry can separate `??` (old code) from
+      // `max` (this change) — seed one directly to reproduce the race.
+      loadConfigMock.mockReturnValue(frontLocalConfig());
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          status: "stopped",
+          worktreePath: TEST_DATA_DIR,
+          sidecarNames: ["front-local"],
+          sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
+          // Inside the idle TTL relative to the service clock below — the
+          // post-sidecar-start value written by startSidecarInternal.
+          updatedAt: "2026-03-18T09:58:00.000Z",
+        }),
+      );
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["api-1--front-local"]));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        reapDeadSessionSidecars(): Promise<void>;
+        dashboardCacheReady: Promise<void> | null;
+        dashboardCache: Map<string, { lastActivityAt: string }>;
+        dispose(): void;
+      };
+      await service.dashboardCacheReady;
+
+      const existing = service.dashboardCache.get("api-1");
+      service.dashboardCache.set("api-1", {
+        ...existing,
+        // Hours before updatedAt — a value the constructor's own dashboard
+        // tick could never produce naturally.
+        lastActivityAt: "2026-03-17T00:00:00.000Z",
+      });
+
+      await service.reapDeadSessionSidecars();
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
+      service.dispose();
+    });
+
+    it("keeps a non-builtin sidecar whose owner is errored (non-terminal) and within the idle TTL", async () => {
+      // Re-baselined AC6: errored is not a terminal status
+      // (isTerminalSessionStatus), so workspaceRunning stays true for this
+      // owner and the sidecar is kept, bounded only by idle_ttl.
       loadConfigMock.mockReturnValue(frontLocalConfig());
       const sessions = createSessionStore();
       sessions.set(
@@ -20768,9 +20864,8 @@ describe("SessionService", () => {
           worktreePath: TEST_DATA_DIR,
           sidecarNames: ["front-local"],
           sidecarPorts: { "front-local": { SPUR_RESERVED_PORT_FRONT_LOCAL: 3000 } },
-          // Recent activity — reaped on ownership (workspace_not_running),
-          // not on idle time, and without touching REAPABLE_SESSION_STATUSES
-          // (errored is not in that set).
+          // Recent activity — within idle_ttl too, so the keep is not
+          // ambiguous with a lucky idle-window escape.
           updatedAt: "2026-03-18T10:04:59.000Z",
         }),
       );
@@ -20790,11 +20885,14 @@ describe("SessionService", () => {
 
       await service.reapDeadSessionSidecars();
 
-      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
       service.dispose();
     });
 
-    it("AC6: reaps a non-builtin sidecar stopped with stopReason manual_pause and no running workspace member", async () => {
+    it("keeps a non-builtin sidecar stopped with stopReason manual_pause and within the idle TTL", async () => {
+      // Re-baselined AC6: manual_pause plus a plain stopped status are both
+      // non-terminal, so the workspace still reads as "running" here and
+      // the sidecar is kept.
       loadConfigMock.mockReturnValue(frontLocalConfig());
       const sessions = createSessionStore();
       sessions.set(
@@ -20822,7 +20920,7 @@ describe("SessionService", () => {
 
       await service.reapDeadSessionSidecars();
 
-      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--front-local");
       service.dispose();
     });
 
@@ -38124,12 +38222,18 @@ describe("SessionService", () => {
     });
 
     describe("reapOrphanedTmux", () => {
-      it("reaps a stale_timeout record's orphaned sidecar tmux left behind by a failed park teardown (GAP 2)", async () => {
-        // parkStaleSession's own teardownSessionSidecars is best-effort: a
-        // throw there leaves a live sidecar pane with no retry. This is the
-        // only unconditional safety net for it (reapDeadSessionSidecars'
-        // project-sidecar pass is config-gated on sidecarGc.enabled and
-        // idle-TTL, not an immediate guarantee).
+      it("leaves a stale_timeout record's sidecar pane alive (idle TTL owns it now)", async () => {
+        // Re-baselined GAP 2: this loop's sidecar half is now gated on
+        // isTerminalSessionStatus, and "stopped" (any stopReason, including
+        // stale_timeout) is not terminal. A leaked sidecar pane from a
+        // parkStaleSession teardown that threw mid-park is deliberately no
+        // longer caught by this loop's unconditional safety net — its new
+        // (and only) reaper is the idle-TTL policy pass, bounded by
+        // sidecarGc.idleTtlMinutes (accepted consequence C1/C4). Only the
+        // sidecar-not-killed assertion is pinned here: the fixture sets
+        // tmuxSessionExists to false, so there is no agent pane to kill and
+        // this case was never about the agent-pane branch (see AC6b below
+        // for that).
         const sessions = createSessionStore();
         sessions.set(
           "api-1",
@@ -38150,8 +38254,42 @@ describe("SessionService", () => {
 
         await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
-        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--proxy");
         expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1");
+        service.dispose();
+      });
+
+      it("AC6b: still kills a completed owner's orphaned agent AND sidecar tmux", async () => {
+        // Pins that a genuinely terminal owner (completed/killed) still
+        // loses both its agent AND sidecar panes exactly as before — the new
+        // guard only carves out non-terminal owners, it does not weaken the
+        // terminal case. The guard's PLACEMENT (after the agent-pane branch,
+        // not around it) is pinned separately by "still never kills a
+        // stale_timeout record's agent pane while its agent process is
+        // confirmed alive" below (:38290 area): that fixture is non-terminal
+        // (stopped/stale_timeout) with a live agent, so it would stay green
+        // even under a guard hoisted to the top of the loop.
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            status: "completed",
+            sidecarNames: ["proxy"],
+          }),
+        );
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        isProcessRunningInTmuxMock.mockResolvedValue(false);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--proxy");
         service.dispose();
       });
 
@@ -38183,7 +38321,17 @@ describe("SessionService", () => {
         service.dispose();
       });
 
-      it("does not tear down a stale_timeout desk member's shared sidecar pane while a live sibling still uses it", async () => {
+      it("does not tear down a stale_timeout desk member's shared sidecar pane while a live sibling still uses it, because its owner is non-terminal, before the sibling guard is even reached", async () => {
+        // Under CHANGE 2 this fixture's assertion is VACUOUS on its old
+        // grounds: api-1 is "stopped" (non-terminal), so the new
+        // isTerminalSessionStatus short-circuit returns before
+        // deskSiblingsAlive is even computed here. Kept anyway, retitled, to
+        // continue exercising the surrounding wiring (config, desk lookup) at
+        // this call site. The one case that still pins deskSiblingsAlive
+        // itself is the terminal-anchor fixture at the "reaps an orphaned
+        // sidecar tmux under a completed session" sibling,
+        // "leaves a desk-shared sidecar alone under a terminal anchor with a
+        // live sibling" (:30412 area, describe "orphaned tmux reaper").
         loadConfigMock.mockReturnValue({
           ...baseConfig(),
           projects: {

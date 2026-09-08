@@ -212,7 +212,7 @@ A desk group is any set of sessions sharing one workspace: the children of a `sp
 
 Shared per desk: slots (title/links/tags/PR), session artifacts, non-MCP project sidecars (`isolated-daemon`, `isolated-ui`) — one instance, addressable by any member. Per member: transcript, agent process, status, MCP sidecar (`playwright`), session tool dir.
 
-Worktree and shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. A shared sidecar and its ports are released once no member has a running agent; restoring a member starts it again.
+Worktree and shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. The shared sidecar pane survives the same way — kept until [idle TTL](#sidecar-reaping) reaps it, not tied to a running agent. Its ports are released once no member has a running agent; restoring a member starts it again.
 
 ## Modes
 
@@ -390,9 +390,9 @@ A reap kills the sidecar's tmux pane process tree, drops its recorded process, a
 
 A non-MCP sidecar is shared by its whole [desk group](#desk-groups) workspace. Every rule below reads the workspace, not one session.
 
-Active workspace: some member is `running`, `spawning`, or in restore warmup. `stopped`, `paused`, `errored`, `completed`, `killed` count as inactive.
+Active workspace: some member is not `completed`/`killed`, or is in restore warmup. Only an all-`completed`/`killed` workspace counts as inactive — `stopped`, `paused`, `errored` count as active.
 
-Idle time: now minus the newest activity over all members, per member `lastActivityAt` falling back to record `updatedAt`. One active member holds the shared sidecar for the rest.
+Idle time: now minus the newest activity over all members, per member the newer of the cached `lastActivityAt` and record `updatedAt`. One active member holds the shared sidecar for the rest.
 
 Decision per sidecar, first match wins:
 
