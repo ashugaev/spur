@@ -16117,6 +16117,72 @@ describe("SessionService", () => {
     );
   });
 
+  it("clears startupAttachmentIds after completing a solo session whose artifacts dir was deleted", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      startupAttachmentIds: ["1788182593277-image.webp"],
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    const finalWrite = writeSessionMock.mock.calls
+      .map(([, record]) => record as SessionRecord)
+      .filter((record) => record.id === "api-1" && record.status === "completed")
+      .at(-1);
+    expect(finalWrite?.startupAttachmentIds).toBeUndefined();
+  });
+
+  it("keeps startupAttachmentIds after completing a desk member with a live sibling (artifacts preserved)", async () => {
+    const closing = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      startupAttachmentIds: ["1788182593277-image.webp"],
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const sibling = { ...closing, id: "api-2", tmuxSession: "api-2", status: "running" as const };
+    readSessionMock.mockReturnValue(closing);
+    listSessionsMock.mockReturnValue([closing, sibling]);
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    const finalWrite = writeSessionMock.mock.calls
+      .map(([, record]) => record as SessionRecord)
+      .filter((record) => record.id === "api-1" && record.status === "completed")
+      .at(-1);
+    expect(finalWrite?.startupAttachmentIds).toEqual(["1788182593277-image.webp"]);
+  });
+
   it("sends a farewell and closes the topic before unbinding on complete", async () => {
     const { config, telegramSource } = telegramProjectConfig();
     loadConfigMock.mockReturnValue(config);
@@ -28263,6 +28329,42 @@ describe("SessionService", () => {
         }),
       ).rejects.toThrow("Unknown startup attachment id: unknown.png");
     });
+
+    it("respawns successfully when a record-listed startup attachment has no file on disk", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionArtifactMock.mockReturnValue(null);
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        startupAttachmentIds: ["1788182593277-image.webp"],
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.id).toBe("api-1");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.respawn.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1788182593277-image.webp"] },
+        }),
+      );
+    });
   });
 
   describe("handoff", () => {
@@ -28942,6 +29044,46 @@ describe("SessionService", () => {
       const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
       expect(launchPrompt).toContain(
         "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-source.png]",
+      );
+    });
+
+    it("hands off successfully when the source's startup attachment file is missing on disk", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionArtifactMock.mockReturnValue(null);
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1788182593277-image.webp"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(spawned.id).toBe("api-2");
+      expect(sessions.get("api-2")?.startupAttachmentIds ?? []).not.toContain(
+        "1788182593277-image.webp",
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1788182593277-image.webp"] },
+        }),
       );
     });
 
