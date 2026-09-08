@@ -32,7 +32,7 @@ async function post(port: number): Promise<number> {
         path: "/events",
         method: "POST",
         headers: {
-          Authorization: "Bearer 0123456789abcdef",
+          Authorization: "Bearer test-webhook-key",
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(body),
         },
@@ -72,7 +72,7 @@ projects:
         type: webhook
         port: ${port}
         path: /events
-        secret: 0123456789abcdef
+        secret: test-webhook-key
     triggers:
       receive:
         source: incoming

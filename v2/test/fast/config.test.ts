@@ -89,7 +89,7 @@ projects:
         spawn:
           prompt: "Handle {{body}} received at {{receivedAt}}"
 `);
-    await writeProjectEnv(configPath, "WEBHOOK_SECRET=0123456789abcdef\n");
+    await writeProjectEnv(configPath, "WEBHOOK_SECRET=test-webhook-key\n");
 
     const config = loadConfig(configPath);
 
@@ -98,7 +98,7 @@ projects:
       host: "127.0.0.1",
       port: 8456,
       path: "/events/provider",
-      secret: "0123456789abcdef",
+      secret: "test-webhook-key",
     });
     expect(config.projects.backend?.triggers.receive).toMatchObject({
       source: "incoming",
@@ -109,22 +109,22 @@ projects:
   it.each([
     [
       "host",
-      "host: localhost\n        port: 8456\n        path: /events\n        secret: 0123456789abcdef",
+      "host: localhost\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
       "host must be an IPv4 or IPv6 literal without a zone id",
     ],
     [
       "zone-scoped host",
-      "host: fe80::1%lo\n        port: 8456\n        path: /events\n        secret: 0123456789abcdef",
+      "host: fe80::1%lo\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
       "host must be an IPv4 or IPv6 literal without a zone id",
     ],
     [
       "port",
-      "port: 0\n        path: /events\n        secret: 0123456789abcdef",
+      "port: 0\n        path: /events\n        secret: test-webhook-key",
       "port must be an integer between 1 and 65535",
     ],
     [
       "path",
-      "port: 8456\n        path: //events\n        secret: 0123456789abcdef",
+      "port: 8456\n        path: //events\n        secret: test-webhook-key",
       "path must be 1 through 2048 visible ASCII bytes",
     ],
     [
@@ -134,7 +134,7 @@ projects:
     ],
     [
       "unknown key",
-      "port: 8456\n        path: /events\n        secret: 0123456789abcdef\n        extra: true",
+      "port: 8456\n        path: /events\n        secret: test-webhook-key\n        extra: true",
       "extra is not supported for webhook sources",
     ],
   ])("rejects invalid webhook %s", async (_name, fields, message) => {
@@ -161,12 +161,12 @@ projects:
         type: webhook
         port: 8456
         path: /first
-        secret: 0123456789abcdef
+        secret: test-webhook-key
       second:
         type: webhook
         port: 8456
         path: /second
-        secret: fedcba9876543210
+        secret: second-webhook-key
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
@@ -184,7 +184,7 @@ projects:
         type: webhook
         port: 8456
         path: /events
-        secret: 0123456789abcdef
+        secret: test-webhook-key
     triggers:
       receive:
         source: incoming

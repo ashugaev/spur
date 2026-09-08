@@ -28,10 +28,6 @@ regexes = [
   "your-token-here",
   "example\\.com",
 
-  # Deterministic webhook test fixture, not a credential
-  "0123456789abcdef",
-  "fedcba9876543210",
-
   # RFC 6455 example WebSocket handshake nonce (docs handshake sample, not a secret)
   "dGhlIHNhbXBsZSBub25jZQ==",
 ]

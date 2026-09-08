@@ -90,6 +90,7 @@ async function startWebhookSource(
     .digest();
   const sockets = new Set<Socket>();
   const seenRequestSockets = new WeakSet<Socket>();
+  const headerTimers = new Map<Socket, NodeJS.Timeout>();
   const bodyTimers = new Set<NodeJS.Timeout>();
   const responseTimers = new Set<NodeJS.Timeout>();
   const rateWindows = new Map<string, RateWindow>();
@@ -106,6 +107,13 @@ async function startWebhookSource(
   function clearTrackedTimer(timer: NodeJS.Timeout, timers: Set<NodeJS.Timeout>): void {
     clearTimeout(timer);
     timers.delete(timer);
+  }
+
+  function clearHeaderTimer(socket: Socket): void {
+    const timer = headerTimers.get(socket);
+    if (!timer) return;
+    clearTimeout(timer);
+    headerTimers.delete(socket);
   }
 
   function closeResponse(
@@ -231,6 +239,7 @@ async function startWebhookSource(
     response: ServerResponse,
     mode: RequestMode,
   ): Promise<void> {
+    clearHeaderTimer(request.socket);
     const receivedAt = new Date().toISOString();
     const peer = request.socket.remoteAddress ?? "unknown";
     if (seenRequestSockets.has(request.socket)) {
@@ -359,13 +368,20 @@ async function startWebhookSource(
   });
   server.on("connection", (socket) => {
     sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
+    const timer = setTimeout(() => socket.destroy(), WEBHOOK_HEADERS_TIMEOUT_MS);
+    headerTimers.set(socket, timer);
+    socket.once("close", () => {
+      clearHeaderTimer(socket);
+      sockets.delete(socket);
+    });
   });
 
   const stop = (): Promise<void> => {
     if (stopPromise) return stopPromise;
     stopping = true;
     deps.signal.removeEventListener("abort", abortHandler);
+    for (const timer of headerTimers.values()) clearTimeout(timer);
+    headerTimers.clear();
     for (const timer of bodyTimers) clearTimeout(timer);
     bodyTimers.clear();
     for (const timer of responseTimers) clearTimeout(timer);

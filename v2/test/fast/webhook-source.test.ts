@@ -1,7 +1,10 @@
+import type * as Crypto from "node:crypto";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
-import { connect } from "node:net";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { connect, type Socket } from "node:net";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  WEBHOOK_BODY_TIMEOUT_MS,
+  WEBHOOK_HEADERS_TIMEOUT_MS,
   WEBHOOK_MAX_BODY_BYTES,
   WEBHOOK_MAX_CONNECTIONS,
   WEBHOOK_MAX_IN_FLIGHT,
@@ -10,12 +13,29 @@ import {
   WEBHOOK_MAX_REQUESTS_PER_PEER,
   WEBHOOK_MAX_TRACKED_PEERS,
   WEBHOOK_RATE_WINDOW_MS,
+  WEBHOOK_RESPONSE_FLUSH_TIMEOUT_MS,
   webhookSourceModule,
 } from "../../src/event-sources/webhook.js";
 import type { SourceHandle } from "../../src/event-sources/types.js";
 
-const SECRET = "0123456789abcdef";
+const SECRET = "test-webhook-key";
 const handles: SourceHandle[] = [];
+const cryptoSpies = vi.hoisted(() => ({ createHash: vi.fn(), timingSafeEqual: vi.fn() }));
+
+vi.mock("node:crypto", async (importOriginal) => {
+  const crypto = await importOriginal<typeof Crypto>();
+  return {
+    ...crypto,
+    createHash: (algorithm: string) => {
+      cryptoSpies.createHash(algorithm);
+      return crypto.createHash(algorithm);
+    },
+    timingSafeEqual: (left: NodeJS.ArrayBufferView, right: NodeJS.ArrayBufferView) => {
+      cryptoSpies.timingSafeEqual(left, right);
+      return crypto.timingSafeEqual(left, right);
+    },
+  };
+});
 
 async function freePort(): Promise<number> {
   const server = createHttpServer();
@@ -61,6 +81,7 @@ async function request(options: {
   method?: string;
   body?: string | Buffer;
   headers?: Record<string, string | string[]>;
+  localAddress?: string;
 }): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
   const body = options.body ?? "{}";
   return new Promise((resolve, reject) => {
@@ -70,6 +91,7 @@ async function request(options: {
         port: options.port,
         path: options.path ?? "/hook",
         method: options.method ?? "POST",
+        localAddress: options.localAddress,
         headers: {
           Authorization: `Bearer ${SECRET}`,
           "Content-Type": "application/json",
@@ -92,6 +114,23 @@ async function request(options: {
     req.end(body);
   });
 }
+
+async function heldRequest(port: number, localAddress = "127.0.0.1"): Promise<Socket> {
+  const socket = connect({ host: "127.0.0.1", port, localAddress });
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  socket.write(
+    `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+  );
+  return socket;
+}
+
+beforeEach(() => {
+  cryptoSpies.createHash.mockClear();
+  cryptoSpies.timingSafeEqual.mockClear();
+});
 
 async function rawRequest(port: number, raw: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -151,6 +190,49 @@ describe("webhookSourceModule", () => {
       body: JSON.stringify(JSON.parse(body)),
       receivedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     });
+  });
+
+  it("preserves parsed key order and duplicate-key semantics", async () => {
+    const emit = vi.fn();
+    const { port } = await startSource({ emit });
+    const first = '{"β":1,"α":2,"dup":"first","dup":"last","nested":{"β":1,"α":2}}';
+    const second = '{"α":2,"β":1,"nested":{"α":2,"β":1},"dup":"last"}';
+
+    await expect(request({ port, body: first })).resolves.toMatchObject({ status: 202 });
+    await expect(request({ port, body: second })).resolves.toMatchObject({ status: 202 });
+
+    expect(emit.mock.calls.map((call) => (call[1] as { body: string }).body)).toEqual([
+      JSON.stringify(JSON.parse(first)),
+      JSON.stringify(JSON.parse(second)),
+    ]);
+  });
+
+  it("hashes every supplied bearer value before fixed-length comparison", async () => {
+    const { port } = await startSource();
+    const values = [
+      `Bearer ${SECRET}`,
+      `Bearer ${SECRET.slice(0, -1)}x`,
+      "Bearer short",
+      `Bearer ${SECRET}-longer`,
+    ];
+
+    const statuses = await Promise.all(
+      values.map(
+        async (authorization) =>
+          (await request({ port, headers: { Authorization: authorization } })).status,
+      ),
+    );
+
+    expect(statuses).toEqual([202, 404, 404, 404]);
+    expect(cryptoSpies.createHash).toHaveBeenCalledTimes(1 + values.length);
+    expect(cryptoSpies.createHash.mock.calls.every(([algorithm]) => algorithm === "sha256")).toBe(
+      true,
+    );
+    expect(cryptoSpies.timingSafeEqual).toHaveBeenCalledTimes(values.length);
+    for (const [expected, received] of cryptoSpies.timingSafeEqual.mock.calls) {
+      expect(Buffer.byteLength(expected)).toBe(32);
+      expect(Buffer.byteLength(received)).toBe(32);
+    }
   });
 
   it.each([
@@ -234,6 +316,24 @@ describe("webhookSourceModule", () => {
     expect(emit).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects malformed lengths and streamed bodies over the byte limit", async () => {
+    const emit = vi.fn();
+    const { port } = await startSource({ emit });
+    const headers = `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\n`;
+    const nonNumeric = await rawRequest(port, `${headers}Content-Length: nope\r\n\r\n`);
+    const negative = await rawRequest(port, `${headers}Content-Length: -1\r\n\r\n`);
+    const chunk = "a".repeat(WEBHOOK_MAX_BODY_BYTES + 1);
+    const streamed = await rawRequest(
+      port,
+      `${headers}Transfer-Encoding: chunked\r\n\r\n${chunk.length.toString(16)}\r\n${chunk}\r\n0\r\n\r\n`,
+    );
+
+    expect(nonNumeric).toContain("400 Bad Request");
+    expect(negative).toContain("400 Bad Request");
+    expect(streamed).toContain("413 Payload Too Large");
+    expect(emit).not.toHaveBeenCalled();
+  });
+
   it("rejects duplicate authorization and never accepts a pipelined second request", async () => {
     const emit = vi.fn();
     const { port } = await startSource({ emit });
@@ -270,6 +370,49 @@ describe("webhookSourceModule", () => {
     expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
   });
 
+  it("caps concurrent requests per peer", async () => {
+    const { port } = await startSource();
+    const sockets: Socket[] = [];
+    try {
+      for (let count = 0; count < WEBHOOK_MAX_IN_FLIGHT_PER_PEER; count += 1) {
+        sockets.push(await heldRequest(port));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await expect(request({ port })).resolves.toMatchObject({ status: 429 });
+    } finally {
+      for (const socket of sockets) socket.destroy();
+    }
+  });
+
+  it("caps concurrent requests across peers", async () => {
+    const { port } = await startSource();
+    const sockets: Socket[] = [];
+    try {
+      for (let count = 0; count < WEBHOOK_MAX_IN_FLIGHT; count += 1) {
+        const peer = `127.1.${Math.floor(count / 8)}.${(count % 8) + 1}`;
+        sockets.push(await heldRequest(port, peer));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await expect(request({ port, localAddress: "127.2.0.1" })).resolves.toMatchObject({
+        status: 429,
+      });
+    } finally {
+      for (const socket of sockets) socket.destroy();
+    }
+  });
+
+  it("caps tracked peers", async () => {
+    const { port } = await startSource();
+    for (let count = 0; count < WEBHOOK_MAX_TRACKED_PEERS; count += 1) {
+      const peer = `127.3.${Math.floor(count / 254)}.${(count % 254) + 1}`;
+      const response = await request({ port, localAddress: peer });
+      expect(response.status).toBe(202);
+    }
+    await expect(request({ port, localAddress: "127.4.0.1" })).resolves.toMatchObject({
+      status: 429,
+    });
+  }, 30_000);
+
   it("rejects occupied ports and releases its bind on idempotent stop", async () => {
     const port = await freePort();
     const first = await startSource({ port });
@@ -293,6 +436,88 @@ describe("webhookSourceModule", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
+    const output = await pending;
+    expect(output).not.toContain("202 Accepted");
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("destroys an incomplete header at the fixed deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const { port } = await startSource();
+      const socket = connect({ host: "127.0.0.1", port });
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+      let closed = false;
+      const close = new Promise<void>((resolve) =>
+        socket.once("close", () => {
+          closed = true;
+          resolve();
+        }),
+      );
+      socket.write("POST /hook HTTP/1.1\r\nHost: localhost\r\n");
+
+      await vi.advanceTimersByTimeAsync(WEBHOOK_HEADERS_TIMEOUT_MS - 1);
+      expect(closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await close;
+      expect(closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 408 when an admitted body reaches the fixed deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const emit = vi.fn();
+      const { port } = await startSource({ emit });
+      const socket = await heldRequest(port);
+      socket.setEncoding("utf8");
+      let output = "";
+      socket.on("data", (chunk: string) => {
+        output += chunk;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(WEBHOOK_BODY_TIMEOUT_MS - 1);
+      expect(output).not.toContain("408 Request Timeout");
+      await vi.advanceTimersByTimeAsync(1);
+      await new Promise<void>((resolve) => socket.once("close", resolve));
+      expect(output).toContain("408 Request Timeout");
+      expect(emit).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes early rejections within the flush bound", async () => {
+    const { port } = await startSource();
+    const cases = [
+      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+      `GET /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\n{`,
+      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: ${WEBHOOK_MAX_BODY_BYTES + 1}\r\n\r\n`,
+    ];
+    for (const raw of cases) {
+      const startedAt = Date.now();
+      const output = await rawRequest(port, raw);
+      expect(output).toMatch(/4(?:04|05|13|15)/);
+      expect(Date.now() - startedAt).toBeLessThan(WEBHOOK_RESPONSE_FLUSH_TIMEOUT_MS);
+    }
+  });
+
+  it("stops a held body without emission or success", async () => {
+    const emit = vi.fn();
+    const { port, handle } = await startSource({ emit });
+    const pending = rawRequest(
+      port,
+      `POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${SECRET}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await handle.stop();
     const output = await pending;
     expect(output).not.toContain("202 Accepted");
     expect(emit).not.toHaveBeenCalled();
