@@ -27,7 +27,7 @@ SAFETY
   Never run `gc --execute` against a data dir you do not own; a bare `gc` is the dry run.
   Never run `cache --prune --yes` on a host running agents you do not own; a bare `cache` or `cache --prune` is a dry run.
   `--expose-web` binds `0.0.0.0`, public.
-  Agents run full-access — any untrusted prompt from Telegram, GitHub, or Jira runs arbitrary commands as the daemon user.
+  Agents run full-access — any untrusted prompt from Telegram, GitHub, Jira, or webhook runs arbitrary commands as the daemon user.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
   Read a sidecar's port with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`, never by grepping `/proc` or session state.
 
@@ -41,5 +41,5 @@ DOCS
 
 EDITING THIS FILE
 
-  Reader has no checkout; resolve every doc path through the rule above, never a relative link.
+  Reader has no checkout; resolve all doc paths through the rule above, never a relative link.
   Context only, never mechanism, repo internals, or a command/config field/workflow another doc owns.

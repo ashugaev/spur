@@ -10,6 +10,7 @@ import { gitlabSourceModule } from "./gitlab.js";
 import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
+import { webhookSourceModule } from "./webhook.js";
 import type {
   SourceGroupController,
   SourceHandle,
@@ -43,6 +44,7 @@ const SOURCE_MODULES = {
   sentry: sentrySourceModule,
   service: serviceSourceModule,
   telegram: telegramSourceModule,
+  webhook: webhookSourceModule,
 } satisfies Record<Exclude<SourceType, "jira">, SourceModule>;
 
 // Connection-only source types are consumed by the backlog subsystem, not

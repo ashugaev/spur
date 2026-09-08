@@ -38,6 +38,7 @@ function configYaml(args: {
   sessionPrefix: string;
   instanceDefaultAgent?: "claude" | "codex";
   projectDefaultAgent?: "claude" | "codex";
+  webhookPort?: number;
 }): string {
   return `server:
   host: 127.0.0.1
@@ -49,7 +50,11 @@ ${args.instanceDefaultAgent ? `defaultAgent: ${args.instanceDefaultAgent}\n` : "
     path: ${args.projectPath}
     defaultBranch: main
     sessionPrefix: ${args.sessionPrefix}
-${args.projectDefaultAgent ? `    defaultAgent: ${args.projectDefaultAgent}\n` : ""}`;
+${args.projectDefaultAgent ? `    defaultAgent: ${args.projectDefaultAgent}\n` : ""}${
+    args.webhookPort === undefined
+      ? ""
+      : `    sources:\n      incoming:\n        type: webhook\n        port: ${args.webhookPort}\n        path: /events\n        secret: 0123456789abcdef\n`
+  }`;
 }
 
 afterEach(async () => {
@@ -57,6 +62,86 @@ afterEach(async () => {
 });
 
 describe("registry.buildMergedConfig", () => {
+  it("rejects duplicate webhook binds across registered configs", async () => {
+    const rootDir = await createTempDir("spur-registry-webhook-dup-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const basePath = await writeConfig(
+      rootDir,
+      "base.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "api",
+        projectPath: join(rootDir, "repo-a"),
+        sessionPrefix: "api",
+        webhookPort: 8456,
+      }),
+    );
+    const extraPath = await writeConfig(
+      rootDir,
+      "extra.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "web",
+        projectPath: join(rootDir, "repo-b"),
+        sessionPrefix: "web",
+        webhookPort: 8456,
+      }),
+    );
+
+    expect(() => buildMergedConfig(basePath, [basePath, extraPath])).toThrow(
+      "projects.web.sources.incoming duplicates webhook bind 127.0.0.1:8456 owned by projects.api.sources.incoming",
+    );
+  });
+
+  it("skips a later duplicate webhook bind and preserves the earlier project", async () => {
+    const rootDir = await createTempDir("spur-registry-webhook-skip-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const warnings: string[] = [];
+    const basePath = await writeConfig(
+      rootDir,
+      "base.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "api",
+        projectPath: join(rootDir, "repo-a"),
+        sessionPrefix: "api",
+        webhookPort: 8456,
+      }),
+    );
+    const extraPath = await writeConfig(
+      rootDir,
+      "extra.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "web",
+        projectPath: join(rootDir, "repo-b"),
+        sessionPrefix: "web",
+        webhookPort: 8456,
+      }),
+    );
+
+    const merged = buildMergedConfig(basePath, [basePath, extraPath], {
+      skipInvalid: true,
+      warn: (message) => warnings.push(message),
+    });
+
+    expect(Object.keys(merged.config.projects)).toEqual(["api"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("duplicates webhook bind");
+  });
+
   it("merges registered configs into one daemon project set", async () => {
     const rootDir = await createTempDir("spur-registry-fast-");
     tempDirs.push(rootDir);
@@ -310,6 +395,50 @@ async function setupScannerFixture(rootDir: string): Promise<{
 }
 
 describe("registry.ConfigRegistryScanner", () => {
+  it("diagnoses a later duplicate webhook bind and preserves the earlier project", async () => {
+    const rootDir = await createTempDir("spur-scanner-webhook-dup-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const basePath = await writeConfig(
+      rootDir,
+      "base.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "api",
+        projectPath: join(rootDir, "repo-a"),
+        sessionPrefix: "api",
+        webhookPort: 8456,
+      }),
+    );
+    const extraPath = await writeConfig(
+      rootDir,
+      "extra.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "web",
+        projectPath: join(rootDir, "repo-b"),
+        sessionPrefix: "web",
+        webhookPort: 8456,
+      }),
+    );
+    const scanner = new ConfigRegistryScanner();
+
+    const result = scanner.scan({
+      bootstrapConfigPath: basePath,
+      configPaths: [basePath, extraPath],
+      protectedPaths: [basePath, extraPath],
+    });
+
+    expect(Object.keys(result.config.projects)).toEqual(["api"]);
+    expect(result.newDiagnostics).toHaveLength(1);
+    expect(result.newDiagnostics[0]?.message).toContain("duplicates webhook bind");
+  });
+
   it("collapses path aliases into one persisted, protected, warning identity", async () => {
     const rootDir = await createTempDir("spur-scanner-alias-");
     tempDirs.push(rootDir);

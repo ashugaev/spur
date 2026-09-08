@@ -6,6 +6,7 @@ import { EventBus } from "../../src/event-bus.js";
 
 const logSpurEventMock = vi.fn();
 const cronStartMock = vi.fn();
+const webhookStartMock = vi.fn();
 
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
@@ -15,6 +16,13 @@ vi.mock("../../src/event-sources/cron.js", () => ({
   cronSourceModule: {
     type: "cron",
     start: cronStartMock,
+  },
+}));
+
+vi.mock("../../src/event-sources/webhook.js", () => ({
+  webhookSourceModule: {
+    type: "webhook",
+    start: webhookStartMock,
   },
 }));
 
@@ -43,7 +51,9 @@ describe("startConfiguredSources", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "spur-event-sources-"));
     logSpurEventMock.mockReset();
     cronStartMock.mockReset();
+    webhookStartMock.mockReset();
     cronStartMock.mockResolvedValue({ stop: vi.fn() });
+    webhookStartMock.mockResolvedValue({ stop: vi.fn() });
   });
 
   afterEach(() => {
@@ -138,5 +148,32 @@ describe("startConfiguredSources", () => {
     expect((missingEvents[0]?.[1] as { projectId: string }).projectId).toBe("gone");
 
     await controller.stop();
+  });
+
+  it("registers webhook and stops earlier sources after a later start failure", async () => {
+    const cronStop = vi.fn();
+    cronStartMock.mockResolvedValue({ stop: cronStop });
+    webhookStartMock.mockRejectedValue(new Error("bind failed"));
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: {
+          nightly: { type: "cron" },
+          incoming: { type: "webhook" },
+        },
+      },
+    });
+
+    await expect(
+      startConfiguredSources({
+        config: config as never,
+        bus: new EventBus(),
+        listSessions: vi.fn().mockResolvedValue([]),
+      }),
+    ).rejects.toThrow("bind failed");
+
+    expect(webhookStartMock).toHaveBeenCalledTimes(1);
+    expect(cronStop).toHaveBeenCalledTimes(1);
   });
 });
