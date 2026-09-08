@@ -12482,9 +12482,15 @@ export class SessionService {
           // The fallback relaunched the agent instead of resuming it, so this is a
           // launch send with no transcript behind it, same as a spawn's. A resume
           // send keeps the mid-session pacing and its own timeout handling below.
-          const restoreSendOutcome = await this.sendAgentMessage(current, restoreInitialMessage, {
-            freshLaunch: freshLaunchFallback,
-          });
+          // launchCommand is overridden to restoreLaunchCommand: an unacked send's
+          // liveness probe (agentProcessAlive) gates on the pane's ACTUAL launch
+          // command, not current's stale recorded one, same as the two fresh
+          // liveness checks above this block.
+          const restoreSendOutcome = await this.sendAgentMessage(
+            { ...current, launchCommand: restoreLaunchCommand },
+            restoreInitialMessage,
+            { freshLaunch: freshLaunchFallback },
+          );
           if (restoreSendOutcome === "submit_unconfirmed") {
             // Same degraded state the catch below reports for a resume send that
             // timed out on a live pane: the agent is up, its prompt is not
