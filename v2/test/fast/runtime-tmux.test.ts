@@ -769,7 +769,7 @@ describe("runtime-tmux", () => {
         return { stdout: "api-1 1 1 0 1234 /dev/pts/0", stderr: "" };
       }
       if (file === "ps") {
-        return { stdout: "1234 1 pts/0 node agent", stderr: "" };
+        return { stdout: "1234 1 1234 1234 pts/0 512 agent", stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
@@ -794,9 +794,9 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 1 pts/8 4200 -zsh",
-            "2301303 2300788 pts/8 512000 /home/vershinin/.local/bin/codex --enable hooks --model gpt-5.6-sol",
-            "2302772 2300788 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 512000 /home/vershinin/.local/bin/codex --enable hooks --model gpt-5.6-sol",
+            "2302772 2300788 2301303 2301303 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
           ].join("\n"),
           stderr: "",
         };
@@ -839,11 +839,13 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 1 pts/8 4200 -zsh",
-            // After codex exits, this helper is reparented to init (ppid 1),
-            // NOT to the pane shell (2300788) — it is not a pane descendant,
-            // so the pane-child fallback must not resurrect it either.
-            "2302772 1 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+            // codex exited, so the tty's foreground job reverted to the pane
+            // shell itself: tpgid == the shell's own pgid.
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            // Reparented to init (ppid 1) with its own leftover pgid, neither
+            // of which is the pane shell's foreground pgid — the pane-child
+            // fallback's fgPgid check must not resurrect it either.
+            "2302772 1 2302772 2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
           ].join("\n"),
           stderr: "",
         };
@@ -867,8 +869,10 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 1 pts/8 4200 -zsh",
-            "2301303 2300788 pts/8 512000 /opt/codex-0.147.0 --model x",
+            // The wrapper-exec'd codex is the tty's foreground job: the
+            // shell's own tpgid is the codex process's pgid, not the shell's.
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 512000 /opt/codex-0.147.0 --model x",
           ].join("\n"),
           stderr: "",
         };
@@ -893,8 +897,8 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 1 pts/8 4200 -zsh",
-            "2301303 2300788 pts/8 512000 /home/u/.claude/versions/2.1.251 --resume",
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 512000 /home/u/.claude/versions/2.1.251 --resume",
           ].join("\n"),
           stderr: "",
         };
@@ -916,7 +920,7 @@ describe("runtime-tmux", () => {
         return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
       }
       if (file === "ps") {
-        return { stdout: "2300788 1 pts/8 4200 -zsh", stderr: "" };
+        return { stdout: "2300788 1 2300788 2300788 pts/8 4200 -zsh", stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
@@ -943,7 +947,10 @@ describe("runtime-tmux", () => {
         // 2300900's ppid IS a pane pid (2300788), but 2300900 is ITSELF also
         // a pane pid, so it must not be counted as a pane-shell child.
         return {
-          stdout: ["2300788 1 pts/8 4200 -zsh", "2300900 2300788 pts/9 4200 -zsh"].join("\n"),
+          stdout: [
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            "2300900 2300788 2300900 2300900 pts/9 4200 -zsh",
+          ].join("\n"),
           stderr: "",
         };
       }
@@ -968,9 +975,10 @@ describe("runtime-tmux", () => {
         // session's pane, or a stale/reused pid — so it must not count as
         // this session's pane-shell child even though the ppid matches.
         return {
-          stdout: ["2300788 1 pts/8 4200 -zsh", "9999 2300788 pts/99 128000 rogue-child"].join(
-            "\n",
-          ),
+          stdout: [
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            "9999 2300788 2300788 2300788 pts/99 128000 rogue-child",
+          ].join("\n"),
           stderr: "",
         };
       }
@@ -982,5 +990,64 @@ describe("runtime-tmux", () => {
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
     ).toBe(false);
+  });
+
+  it("reads DEAD when a persistent shell helper outlives the agent (issue #857 P1 repro)", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The agent exited; the tty's foreground job reverted to the
+            // pane shell itself.
+            "100 1 100 100 pts/1 4200 -zsh",
+            // A persistent shell helper (gitstatusd, a `sleep 300 &` job)
+            // started before the agent exited and was never reaped: same
+            // tty, direct child of the pane shell, but NOT the tty's
+            // foreground process group. The old "any direct child" rule read
+            // this ALIVE forever; the fgPgid rule must read it DEAD.
+            "101 100 101 100 pts/1 2048 gitstatusd",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("falls back to the direct-child rule (fail SAFE toward ALIVE) when the pane pid's own ps row is unreadable", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The pane pid's own row is short — a truncated/malformed ps
+            // line. getPsSnapshot's < 7 column guard drops it entirely, so
+            // fgPgid is unresolvable for this tty: this row never reaches
+            // `panePids.has(row.pid)` in the fgPgidByTty pass.
+            "100 1 pts/1",
+            "101 100 101 100 pts/1 2048 codex-wrapper-child",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(true);
   });
 });

@@ -154,8 +154,9 @@ export const _parsePsOutputForTests = parsePsOutput;
 /**
  * ONE uncached `ps` fork. Strictly not memoized — a stale row means signaling
  * a pid that already died and may have been reused. Never reuse
- * runtime-tmux.ts's TTL-cached `getPsSnapshot`; its format has no pgid, rss,
- * or etimes.
+ * runtime-tmux.ts's TTL-cached `getPsSnapshot`; its format has no etimes (and,
+ * being TTL-cached, cannot answer a "is this pid still alive right now"
+ * question this module needs before signaling).
  */
 export async function snapshotProcesses(): Promise<ProcSnapshot> {
   let stdout: string;

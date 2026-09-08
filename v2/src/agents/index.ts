@@ -271,12 +271,20 @@ function defaultProcessMatchers(agent: AgentName, launchCommand: string): string
 // binary whose basename IS canonical, and opening the fallback there trades zero gain
 // for a possible hang (see RESIDUAL 2).
 // RESIDUAL 2: when this gate is open, isProcessRunningInTmux's pane-child fallback
-// reports ALIVE for ANY direct child of the pane shell, since createTmuxSession types
-// the launch command into a default-shell pane rather than execing the agent as
-// pane_pid. A transient child delays reconcileUnexpectedStop by one tick; a long-lived
-// shell worker (gitstatusd, zsh-async, powerlevel10k instant-prompt) can block the
-// terminal write for that session indefinitely. Accepted because it is confined to
-// hosts that are otherwise 100% destructively false-DEAD today.
+// gates on the tty's foreground process group (tpgid), not "any direct child of the
+// pane shell" (#857 P1: that wider rule kept reading ALIVE off a persistent shell
+// helper — gitstatusd, a `sleep 300 &` job — left behind after the agent exited).
+// Two narrower residuals remain:
+//   - A SIGTSTP-suspended agent is not the tty's foreground job (job control hands
+//     the foreground back to the shell while it is stopped), so this now reads DEAD
+//     even though the agent is alive and resumable: keystrokes still buffer on the
+//     tty and the agent consumes them on resume. This matches main's existing
+//     behavior for a suspended agent — not a regression introduced by the fgPgid gate.
+//   - With job control disabled in the pane shell (`set +m`), a lingering child
+//     shares the shell's own process group, so `row.pgid === fgPgid` still matches
+//     it and it reads false-ALIVE, same as before.
+// Accepted because it is confined to hosts that are otherwise 100% destructively
+// false-DEAD today.
 export function agentLaunchUsesForeignBinary(agent: AgentName, launchCommand: string): boolean {
   return !agentProcessNames(agent).includes(derivedLaunchBinaryName(agent, launchCommand));
 }
