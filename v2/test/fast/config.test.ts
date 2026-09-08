@@ -110,7 +110,12 @@ projects:
     [
       "host",
       "host: localhost\n        port: 8456\n        path: /events\n        secret: 0123456789abcdef",
-      "host must be an IPv4 or IPv6 literal",
+      "host must be an IPv4 or IPv6 literal without a zone id",
+    ],
+    [
+      "zone-scoped host",
+      "host: fe80::1%lo\n        port: 8456\n        path: /events\n        secret: 0123456789abcdef",
+      "host must be an IPv4 or IPv6 literal without a zone id",
     ],
     [
       "port",

@@ -283,7 +283,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.modes.<name>.skill`: required, non-empty; the skill a session in this mode loads.
 - `projects.<id>.modes.<name>.default`: optional boolean; at most one mode per project may set it `true`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram|webhook`.
-- `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
+- `projects.<id>.sources.<sourceId>.runOnStart`: optional for `cron|github|github-ci|gitlab|sentry|service|telegram`, default `false`. Unsupported for `jira` and `webhook`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
 - `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.

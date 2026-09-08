@@ -949,8 +949,8 @@ function parseWebhookSource(
   }
 
   const host = asOptionalString(raw["host"], `${label}.host`) ?? "127.0.0.1";
-  if (isIP(host) === 0) {
-    throw new Error(`${label}.host must be an IPv4 or IPv6 literal`);
+  if (isIP(host) === 0 || host.includes("%")) {
+    throw new Error(`${label}.host must be an IPv4 or IPv6 literal without a zone id`);
   }
 
   const path = asString(raw["path"], `${label}.path`);
