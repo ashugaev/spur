@@ -11613,7 +11613,7 @@ export class SessionService {
         // files and must be cleared, or a later respawn/handoff reports them
         // missing forever. A skipped cleanup (a still-live desk sibling)
         // means the files are untouched, so the ids stay.
-        startupAttachmentsCleaned = ranCleanup && (session.startupAttachmentIds?.length ?? 0) > 0;
+        startupAttachmentsCleaned = ranCleanup;
         const replyTargetProjectId =
           readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
         await this.pushTelegramNotice(
