@@ -692,15 +692,16 @@ export async function isProcessRunningInTmux(
         }
         const fgPgid = fgPgidByTty.get(row.tty);
         // Fail CLOSED on an unresolvable foreground group. Reaching this needs
-        // the pane pid's own row absent from this ps snapshot, i.e. the tty's
-        // controlling process is gone — and the kernel then dissociates that
-        // tty from every surviving session member, so their tty reads `?` and
-        // they never pass the ttySet guard above. A live agent therefore
-        // cannot be one of these rows. Admitting one on parentage alone
-        // re-admits the leftover-helper class this gate exists to exclude
-        // (#806 -> #857 P1), and a false ALIVE here send-keys the user's
-        // prose into a shell prompt. Excludes THIS ROW only; other rows and
-        // the session's other ttys still evaluate.
+        // either the pane pid's own row absent from this ps snapshot, or an
+        // unparseable tpgid (getPsSnapshot normalizes it to -1). Row-absent
+        // means the tty's controlling process is gone — and the kernel then
+        // dissociates that tty from every surviving session member, so their
+        // tty reads `?` and they never pass the ttySet guard above. A live
+        // agent therefore cannot be one of these rows. Admitting one on
+        // parentage alone re-admits the leftover-helper class this gate
+        // exists to exclude (#806 -> #857 P1), and a false ALIVE here
+        // send-keys the user's prose into a shell prompt. Excludes THIS ROW
+        // only; other rows and the session's other ttys still evaluate.
         if (fgPgid === undefined || fgPgid <= 0) {
           continue;
         }

@@ -1082,4 +1082,38 @@ describe("runtime-tmux", () => {
 
     expect(await isProcessRunningInTmux("s", ["codex"], { paneChildFallback: true })).toBe(true);
   });
+
+  it("fails closed on a -1 (no-controlling-terminal) foreground group instead of matching it against an unparseable -1 pgid", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The pane pid's own row parses fine but its tpgid is the
+            // literal no-controlling-terminal marker (-1), not merely
+            // absent.
+            "100 1 100 -1 pts/1 4200 -zsh",
+            // This child's pgid column is unparseable; getPsSnapshot
+            // normalizes it to -1 too. Without the `fgPgid <= 0` guard,
+            // -1 === -1 would read this row alive.
+            "101 100 abc 100 pts/1 2048 codex-wrapper-child",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    // Pass 1 must miss this row too, or the test would prove nothing about
+    // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher
+    // (no `/` or whitespace boundary after "codex").
+    expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
 });
