@@ -50,6 +50,7 @@ import {
   type SessionStateTransition,
   type SessionView,
   type StateSource,
+  type TodoProjection,
 } from "../../src/types.js";
 // Type-only, so it never bypasses the mocked module registry below.
 import type { AgentSendOutcome } from "../../src/session-service.js";
@@ -1113,6 +1114,8 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 type SessionServiceInternals = {
   captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
   agentSessionIdPersistBackoffUntil: Map<string, number>;
+  lastHumanHeldNudgeRevisions: Map<string, string>;
+  pruneSessionScopedState(liveIds: ReadonlySet<string>): void;
   waitForSubmitAck(
     binding: { scan(text: string): Promise<{ found: boolean; lastScannedFile: string | null }> },
     messageText: string,
@@ -1161,6 +1164,39 @@ async function createDisposedSessionService() {
   const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
   service.dispose();
   return service;
+}
+
+// Only `revision`, `items[].status` and `items[].latestTransition.blocker` are
+// read by maybeNudgeTodo's human-held branch; the rest is shape filler.
+function heldProjection(revision: string, requiredAction: string): TodoProjection {
+  const actor = { kind: "agent", agent: "claude", sessionId: "api-1" } as const;
+  return {
+    revision,
+    status: "held",
+    counts: { total: 1, open: 0, held: 1, completed: 0, cancelled: 0 },
+    items: [
+      {
+        id: "item-held",
+        text: "Ship it",
+        status: "held",
+        added: { reason: "Session objective", actor, at: "2026-03-18T10:00:00.000Z" },
+        latestTransition: {
+          type: "held",
+          reason: "Need operator input",
+          blocker: { kind: "human", requiredAction },
+          actor,
+          at: "2026-03-18T10:01:00.000Z",
+        },
+        history: [],
+      },
+    ],
+    finishOverrides: [],
+  };
+}
+
+async function mockTodoLedger(projection: TodoProjection): Promise<void> {
+  const todo = await import("../../src/todo.js");
+  vi.mocked(todo.ensureTodoLedger).mockReturnValue(projection);
 }
 
 async function useRealTodoLedger(): Promise<void> {
@@ -2078,6 +2114,93 @@ describe("SessionService", () => {
         code: "todo_ledger_empty",
       });
       expect(sessions.get(source.id)?.status).toBe("running");
+      service.dispose();
+    });
+
+    it("nudges a human-held ledger once per revision", async () => {
+      const session = runningSession();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      await mockTodoLedger(heldProjection("r1", "Choose the release window"));
+
+      await internals.maybeNudgeTodo(session);
+      for (let call = 1; call <= 4; call += 1) {
+        vi.setSystemTime(new Date(Date.now() + 61_000));
+        await internals.maybeNudgeTodo(session);
+      }
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[1]).toContain("Choose the release window");
+      service.dispose();
+    });
+
+    it("re-arms the human-held nudge when the ledger revision changes", async () => {
+      const session = runningSession();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      await mockTodoLedger(heldProjection("r1", "Choose the release window"));
+
+      await internals.maybeNudgeTodo(session);
+      vi.setSystemTime(new Date(Date.now() + 61_000));
+      await mockTodoLedger(heldProjection("r2", "Choose the release window"));
+      await internals.maybeNudgeTodo(session);
+
+      expect(send).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("keeps nudging open work while a human-held item is suppressed", async () => {
+      const session = runningSession();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const held = heldProjection("r1", "Choose the release window");
+      await mockTodoLedger({
+        ...held,
+        status: "active",
+        counts: { total: 2, open: 1, held: 1, completed: 0, cancelled: 0 },
+        items: [
+          {
+            id: "item-open",
+            text: "Ship it",
+            status: "open",
+            added: {
+              reason: "Session objective",
+              actor: { kind: "agent", agent: "claude", sessionId: session.id },
+              at: "2026-03-18T10:00:00.000Z",
+            },
+            history: [],
+          },
+          ...held.items,
+        ],
+      });
+
+      for (let call = 0; call < 3; call += 1) {
+        await internals.maybeNudgeTodo(session);
+        vi.setSystemTime(new Date(Date.now() + 61_000));
+      }
+
+      expect(send).toHaveBeenCalledTimes(3);
+      for (const call of send.mock.calls) {
+        expect(call[1]).toContain("Spur ToDo still has open work");
+      }
+      service.dispose();
+    });
+
+    it("prunes human-held nudge revisions for dead sessions and keeps live ones", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      internals.lastHumanHeldNudgeRevisions.set("api-1", "r1");
+      internals.lastHumanHeldNudgeRevisions.set("api-2", "r2");
+
+      internals.pruneSessionScopedState(new Set(["api-2"]));
+
+      // Both directions: dropping a dead id stops the leak, keeping a live id
+      // is what makes the suppression last past one attention sweep.
+      expect(internals.lastHumanHeldNudgeRevisions.has("api-1")).toBe(false);
+      expect(internals.lastHumanHeldNudgeRevisions.get("api-2")).toBe("r2");
       service.dispose();
     });
   });

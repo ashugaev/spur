@@ -2599,6 +2599,9 @@ export class SessionService {
   private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarUrlProbeControllers = new Map<string, AbortController>();
+  // sessionId -> the ToDo projection revision whose human-held items were last
+  // nudged, so a static human-blocked ledger is nudged once, not once a sweep.
+  private readonly lastHumanHeldNudgeRevisions = new Map<string, string>();
   // Serializes sendAgentMessage per tmux pane so two trigger batches on one
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
@@ -5119,6 +5122,11 @@ export class SessionService {
         this.queuedMessageDeliveryLastFailure.delete(sessionId);
       }
     }
+    for (const sessionId of this.lastHumanHeldNudgeRevisions.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.lastHumanHeldNudgeRevisions.delete(sessionId);
+      }
+    }
   }
 
   private startDashboardCacheLoop(): void {
@@ -5970,7 +5978,14 @@ export class SessionService {
           .join(
             "\n",
           )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
-      } else if (humanHeld.length > 0) {
+      } else if (
+        humanHeld.length > 0 &&
+        this.lastHumanHeldNudgeRevisions.get(session.id) !== projection.revision
+      ) {
+        // A human blocker cannot be advanced by the agent, so repeating this
+        // nudge every sweep manufactures work. One per ledger revision: any
+        // append (resume, add, re-hold) re-arms it, a frozen ledger does not.
+        this.lastHumanHeldNudgeRevisions.set(session.id, projection.revision);
         message = `Spur ToDo needs human input:\n${humanHeld
           .map((item) => {
             const blocker = item.latestTransition?.blocker;
