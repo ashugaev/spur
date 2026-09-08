@@ -982,7 +982,24 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   queuedMessages?: SessionQueuedMessagesView;
 }
 
-export interface DashboardSessionView extends SessionRecord {
+/**
+ * Fields enrichDashboard strips: the runtime detail the dashboard listing never
+ * renders. `launchCommand`, `stateSubscriptions`, `allowedTriggers`,
+ * `agentSessionId` and `branchSource` are read only from the single-session
+ * views, and together they were ~14% of the listing payload.
+ */
+export type DashboardOmittedField =
+  | "queuedMessages"
+  | "pipeline"
+  | "sidecarNames"
+  | "sidecarPorts"
+  | "launchCommand"
+  | "stateSubscriptions"
+  | "allowedTriggers"
+  | "agentSessionId"
+  | "branchSource";
+
+export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
