@@ -536,14 +536,15 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
-// RESIDUAL (#857 P1 fail-safe, scoped): the fgPgid fail-safe in
-// isProcessRunningInTmux only covers a PER-ROW tpgid we can't resolve. It does
-// not cover `ps` rejecting the `-eo` column spec outright — that exits
-// nonzero, the catch below returns [], and pass 1 above reads the WHOLE fleet
-// DEAD, not just the pane-child fallback. `pgid`/`tpgid` are Linux
-// procps/BSD ps fields, not POSIX; this repo already assumes a Linux `ps` at
-// runtime (see also process-tree.ts), so this is an existing exposure shape,
-// not a new one — documented here, not solved.
+// RESIDUAL (#857 P1, scoped): isProcessRunningInTmux's pane-child fallback
+// fails CLOSED, per row, when a candidate row's tty has no resolvable
+// foreground process group — see the fgPgid check there. This residual is
+// about a DIFFERENT failure mode: `ps` rejecting the `-eo` column spec
+// outright. That exits nonzero, the catch below returns [], and pass 1 above
+// reads the WHOLE fleet DEAD, not just the pane-child fallback. `pgid`/`tpgid`
+// are Linux procps/BSD ps fields, not POSIX; this repo already assumes a
+// Linux `ps` at runtime (see also process-tree.ts), so this is an existing
+// exposure shape, not a new one — documented here, not solved.
 function getPsSnapshot(): Promise<PsRow[]> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
@@ -690,14 +691,17 @@ export async function isProcessRunningInTmux(
           continue;
         }
         const fgPgid = fgPgidByTty.get(row.tty);
+        // Fail CLOSED on an unresolvable foreground group. Reaching this needs
+        // the pane pid's own row absent from this ps snapshot, i.e. the tty's
+        // controlling process is gone — and the kernel then dissociates that
+        // tty from every surviving session member, so their tty reads `?` and
+        // they never pass the ttySet guard above. A live agent therefore
+        // cannot be one of these rows. Admitting one on parentage alone
+        // re-admits the leftover-helper class this gate exists to exclude
+        // (#806 -> #857 P1), and a false ALIVE here send-keys the user's
+        // prose into a shell prompt. Excludes THIS ROW only; other rows and
+        // the session's other ttys still evaluate.
         if (fgPgid === undefined || fgPgid <= 0) {
-          // Fail SAFE toward ALIVE: a per-row tpgid we can't resolve (the
-          // pane pid's own row absent, or an unparseable tpgid) must not
-          // manufacture a false-DEAD verdict — fall back to the shipped
-          // direct-child rule for this row instead of excluding it.
-          if (panePids.has(row.ppid)) {
-            return true;
-          }
           continue;
         }
         if (row.pgid === fgPgid) {

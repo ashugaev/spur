@@ -1023,7 +1023,7 @@ describe("runtime-tmux", () => {
     ).toBe(false);
   });
 
-  it("falls back to the direct-child rule (fail SAFE toward ALIVE) when the pane pid's own ps row is unreadable", async () => {
+  it("fails CLOSED when the pane pid's own ps row is unreadable, so a helper-only pane is not read alive", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
         return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
@@ -1048,6 +1048,38 @@ describe("runtime-tmux", () => {
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it("fails closed on ONE tty's unresolvable foreground group without blinding a different tty's live agent in the same session", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return {
+          stdout: ["s 1 1 0 100 /dev/pts/1", "s 0 0 0 200 /dev/pts/2"].join("\n"),
+          stderr: "",
+        };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // pane A (pts/1): the pane pid's own row is short and dropped,
+            // so fgPgid is unresolvable for pts/1 — a helper child alone
+            // must not read alive here.
+            "100 1 pts/1",
+            "101 100 101 100 pts/1 2048 codex-wrapper-child",
+            // pane B (pts/2): the pane pid's own row is intact and the
+            // wrapper-exec'd agent IS pts/2's foreground job.
+            "200 1 200 201 pts/2 4200 -zsh",
+            "201 200 201 201 pts/2 512000 /opt/codex-0.147.0 --model x",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("s", ["codex"], { paneChildFallback: true })).toBe(true);
   });
 });
