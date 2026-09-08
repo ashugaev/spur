@@ -29119,10 +29119,7 @@ describe("SessionService", () => {
           worktree: true,
           worktreePath: "/tmp/spur-worktrees/api/api-1",
           launchCommand: "codex",
-          startupAttachmentIds: [
-            "1788182593277-image.webp",
-            "1773828300000-resolved.png",
-          ],
+          startupAttachmentIds: ["1788182593277-image.webp", "1773828300000-resolved.png"],
         }),
       );
       workspaceExistsMock.mockReturnValue(true);
