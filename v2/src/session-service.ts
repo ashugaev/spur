@@ -11100,8 +11100,9 @@ export class SessionService {
   // slot-unlink/URL-probe-abort logic. Returns the signal outcome (or null
   // when there was nothing to signal) so a caller that logs its own
   // survivors/rss event, like the reap pass, does not need a second probe;
-  // stopSidecar itself still just logs its own fixed-shape event and ignores
-  // the return. Never gates on sidecarTmuxAlive alone (a dead pane and an
+  // stopSidecar itself maps the return into its own `sidecarStop` outcome
+  // (nothing-to-stop/reaped/partial) rather than logging a fixed-shape
+  // event. Never gates on sidecarTmuxAlive alone (a dead pane and an
   // absent tmux session are exactly the states a leaked tree lives in):
   // falls through to the recorded `sidecarProcs` identity when the tmux
   // session is gone.
