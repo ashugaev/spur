@@ -14,6 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
   agentHasLaunchSubmitAck,
+  agentLaunchUsesForeignBinary,
   agentProcessMatchers,
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
@@ -966,7 +967,11 @@ async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverab
   if (session.project === SHEPHERD_PROJECT_ID) return "deliverable";
   if (session.worktreePath && workspaceExists(session.worktreePath)) return "deliverable";
   if (!(await tmuxSessionExists(session.tmuxSession))) return "workspace_missing";
-  return (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)))
+  return (await agentProcessAlive({
+    tmuxSession: session.tmuxSession,
+    agent: session.agent,
+    launchCommand: session.launchCommand,
+  }))
     ? "deliverable"
     : "workspace_missing";
 }
@@ -1327,6 +1332,23 @@ function withAgentModeOptions(
 
 function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCommand">): string[] {
   return agentProcessMatchers(session.agent, session.launchCommand);
+}
+
+// Single point through which every liveness read of isProcessRunningInTmux
+// passes, so the pane-child fallback gate (issue #806) cannot drift from the
+// matcher list: it depends on the SAME (agent, launchCommand) pair used to
+// build the matchers, which varies per call site (record vs. a recovery/
+// restore plan's launch command).
+async function agentProcessAlive(
+  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
+  options?: { fresh?: boolean },
+): Promise<boolean> {
+  const matchers = agentProcessMatchers(input.agent, input.launchCommand);
+  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  return isProcessRunningInTmux(input.tmuxSession, matchers, {
+    ...(options?.fresh ? { fresh: true } : {}),
+    ...(foreign ? { paneChildFallback: true } : {}),
+  });
 }
 
 function withProjectAgentOptions(
@@ -4883,7 +4905,13 @@ export class SessionService {
         }
         return;
       }
-      if (await isProcessRunningInTmux(cleaned.tmuxSession, sessionProcessMatchers(cleaned))) {
+      if (
+        await agentProcessAlive({
+          tmuxSession: cleaned.tmuxSession,
+          agent: cleaned.agent,
+          launchCommand: cleaned.launchCommand,
+        })
+      ) {
         abandonPark();
         return;
       }
@@ -10639,9 +10667,12 @@ export class SessionService {
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const processAlive = await isProcessRunningInTmux(
-      session.tmuxSession,
-      sessionProcessMatchers(session),
+    const processAlive = await agentProcessAlive(
+      {
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: session.launchCommand,
+      },
       { fresh: true },
     );
     const elapsedMs = Date.now() - startedAt;
@@ -11949,10 +11980,11 @@ export class SessionService {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
     let processAlive = false;
     if (runtimeAlive) {
-      processAlive = await isProcessRunningInTmux(
-        session.tmuxSession,
-        sessionProcessMatchers(session),
-      );
+      processAlive = await agentProcessAlive({
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: session.launchCommand,
+      });
       if (processAlive) {
         return this.captureAgentSessionId(session, 0);
       }
@@ -12171,9 +12203,12 @@ export class SessionService {
       // snapshot, which would otherwise wrongly see it as absent and abort a
       // genuinely successful recovery.
       if (
-        !(await isProcessRunningInTmux(
-          session.tmuxSession,
-          agentProcessMatchers(session.agent, recoveryPlan?.launchCommand ?? baseLaunchCommand),
+        !(await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+          },
           { fresh: true },
         ))
       ) {
@@ -12226,9 +12261,12 @@ export class SessionService {
       // fresh:true — same rationale as the resume-plan check above: this
       // pane was just (re)created and may postdate the last fleet snapshot.
       if (
-        !(await isProcessRunningInTmux(
-          session.tmuxSession,
-          agentProcessMatchers(session.agent, freshLaunchCommand),
+        !(await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: freshLaunchCommand,
+          },
           { fresh: true },
         ))
       ) {
@@ -12590,9 +12628,12 @@ export class SessionService {
         }
         // fresh:true — this pane was just created by createTmuxSession above.
         if (
-          !(await isProcessRunningInTmux(
-            current.tmuxSession,
-            agentProcessMatchers(current.agent, restoreLaunchCommand),
+          !(await agentProcessAlive(
+            {
+              tmuxSession: current.tmuxSession,
+              agent: current.agent,
+              launchCommand: restoreLaunchCommand,
+            },
             { fresh: true },
           ))
         ) {
@@ -12614,9 +12655,12 @@ export class SessionService {
       // fresh:true — this pane was just created by createTmuxSession above
       // and may postdate the last fleet-pane snapshot.
       if (
-        !(await isProcessRunningInTmux(
-          current.tmuxSession,
-          agentProcessMatchers(current.agent, restoreLaunchCommand),
+        !(await agentProcessAlive(
+          {
+            tmuxSession: current.tmuxSession,
+            agent: current.agent,
+            launchCommand: restoreLaunchCommand,
+          },
           { fresh: true },
         ))
       ) {
@@ -12638,9 +12682,15 @@ export class SessionService {
           // The fallback relaunched the agent instead of resuming it, so this is a
           // launch send with no transcript behind it, same as a spawn's. A resume
           // send keeps the mid-session pacing and its own timeout handling below.
-          const restoreSendOutcome = await this.sendAgentMessage(current, restoreInitialMessage, {
-            freshLaunch: freshLaunchFallback,
-          });
+          // launchCommand is overridden to restoreLaunchCommand: an unacked send's
+          // liveness probe (agentProcessAlive) gates on the pane's ACTUAL launch
+          // command, not current's stale recorded one, same as the two fresh
+          // liveness checks above this block.
+          const restoreSendOutcome = await this.sendAgentMessage(
+            { ...current, launchCommand: restoreLaunchCommand },
+            restoreInitialMessage,
+            { freshLaunch: freshLaunchFallback },
+          );
           if (restoreSendOutcome === "submit_unconfirmed") {
             // Same degraded state the catch below reports for a resume send that
             // timed out on a live pane: the agent is up, its prompt is not
@@ -14002,7 +14052,13 @@ export class SessionService {
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
     if (await tmuxSessionExists(session.tmuxSession)) {
-      if (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))) {
+      if (
+        await agentProcessAlive({
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        })
+      ) {
         return false;
       }
     }
@@ -14013,9 +14069,14 @@ export class SessionService {
     // and erroring a still-live pipeline.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
     if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
-      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
-        fresh: true,
-      }));
+      return !(await agentProcessAlive(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      ));
     }
     return true;
   }
@@ -14161,9 +14222,14 @@ export class SessionService {
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
-        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
-            fresh,
-          })
+        ? await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: session.launchCommand,
+            },
+            { fresh },
+          )
         : false;
     return {
       runtimeAlive,
