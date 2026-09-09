@@ -920,8 +920,12 @@ describe("reapRecordedPortDaemon", () => {
   // A `confirmGone` last-mile check (859/N7) probes every never-signaled
   // candidate with `kill(pid, 0)` before reporting it — that is a liveness
   // probe, not a kill, so asserting "no signal was issued" must ignore
-  // signal-0 calls and only fail on a real terminating signal.
-  const realSignalCalls = (killSpy: ReturnType<typeof vi.spyOn>) =>
+  // signal-0 calls and only fail on a real terminating signal. Typed
+  // structurally over just `.mock.calls` (not `ReturnType<typeof vi.spyOn>`)
+  // so every concretely-typed `vi.spyOn(process, "kill")` instance at the
+  // call sites below is assignable regardless of its inferred signal
+  // parameter type — matching by shape, not by the spy's own generic.
+  const realSignalCalls = (killSpy: { mock: { calls: readonly unknown[][] } }) =>
     killSpy.mock.calls.filter((call) => call[1] !== 0 && call[1] !== undefined);
 
   it("859/AC2: the same listener with cli.js OUTSIDE worktreePath is not signaled and is a survivor", async () => {
