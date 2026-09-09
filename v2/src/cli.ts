@@ -1202,9 +1202,14 @@ function renderSidecarStopMessage(name: string, session: SidecarStopView): strin
     return `Sidecar ${name} on ${session.id} was not running; nothing to stop.`;
   }
   if (sidecarStop.outcome === "partial") {
+    // ND-2: unverifiedPorts has two distinct causes (a probe that could not
+    // run, or a port excluded as ambiguous against a non-terminal sibling —
+    // see docs/daemon-api.md's sidecar-stop route entry) — this message
+    // names neither, rather than misattributing an ambiguous-ownership
+    // exclusion to a missing OS tool.
     const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
     if (sidecarStop.survivors.length === 0 && unverifiedPorts.length > 0) {
-      return `Stopped sidecar ${name} for ${session.id}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear (lsof/ss unavailable). Report them: spur sidecar sweep`;
+      return `Stopped sidecar ${name} for ${session.id}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Report them: spur sidecar sweep`;
     }
     return `Stopped sidecar ${name} for ${session.id}, but ${sidecarStop.survivors.length} process(es) survived: ${sidecarStop.survivors.join(",")}. Report them: spur sidecar sweep`;
   }

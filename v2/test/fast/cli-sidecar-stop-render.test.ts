@@ -52,8 +52,8 @@ describe("renderSidecarStopMessage", () => {
   });
 
   // D1: a zero-survivor partial means the port itself could not be
-  // confirmed clear (no lsof/ss), never "0 process(es) survived: " — name
-  // the unverifiable port instead of the empty survivor list.
+  // confirmed clear, never "0 process(es) survived: " — name the
+  // unverifiable port instead of the empty survivor list.
   it("names the unverified port for a zero-survivor partial reap", () => {
     const message = renderSidecarStopMessage(
       "dev",
@@ -62,6 +62,22 @@ describe("renderSidecarStopMessage", () => {
     expect(message).not.toContain("0 process(es) survived");
     expect(message).toContain("port(s) 4355 could not be confirmed clear");
     expect(message).toContain("spur sidecar sweep");
+  });
+
+  // ND-2: unverifiedPorts has two producers — a probe that could not run,
+  // and a port excluded as ambiguous against a non-terminal sibling — the
+  // message must not blame the second on a missing OS tool (6444eaf9 fixed
+  // that exact misattribution for the first producer one commit earlier).
+  it("never blames a missing OS tool for an unverified port", () => {
+    const message = renderSidecarStopMessage(
+      "dev",
+      stopView({ outcome: "partial", survivors: [], unverifiedPorts: [4355] }),
+    );
+    expect(message).not.toContain("lsof");
+    expect(message).not.toContain("ss unavailable");
+    expect(message).toBe(
+      "Stopped sidecar dev for api-1, but port(s) 4355 could not be confirmed clear. Report them: spur sidecar sweep",
+    );
   });
 });
 
