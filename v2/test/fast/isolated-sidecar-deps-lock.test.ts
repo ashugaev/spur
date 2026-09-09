@@ -37,6 +37,7 @@ type FakeWorktree = {
   pathDir: string;
   repoDir: string;
   toolDir: string;
+  tmpDir: string;
 };
 
 function makeExecutable(path: string, source: string): void {
@@ -143,6 +144,7 @@ function createFixture(): FakeWorktree {
   const webDir = join(repoDir, "packages", "web");
   const toolDir = join(repoDir, "tool");
   const pathDir = join(repoDir, "path");
+  const tmpDir = join(repoDir, "tmp");
   mkdirSync(scriptDir, { recursive: true });
   mkdirSync(join(repoDir, "v2", "bin"), { recursive: true });
   mkdirSync(join(repoDir, "v2", "src"), { recursive: true });
@@ -150,6 +152,7 @@ function createFixture(): FakeWorktree {
   mkdirSync(toolDir, { recursive: true });
   mkdirSync(join(repoDir, "home"), { recursive: true });
   mkdirSync(pathDir, { recursive: true });
+  mkdirSync(tmpDir, { recursive: true });
 
   for (const script of [
     "spur-isolated-ui.sh",
@@ -174,9 +177,13 @@ function createFixture(): FakeWorktree {
   makeExecutable(join(pathDir, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   makeExecutable(join(pathDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
 
-  return { logPath, pathDir, repoDir, toolDir };
+  return { logPath, pathDir, repoDir, toolDir, tmpDir };
 }
 
+// MANDATORY: without an injected TMPDIR, spur-isolated-daemon.sh's own
+// stale-config-dir prune resolves `${TMPDIR:-/tmp}` to this host's real /tmp
+// and prunes its stale spur-isolated-daemon.* dirs. `worktree.tmpDir` is a
+// fresh, per-fixture directory the test owns exclusively.
 function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     HOME: join(worktree.repoDir, "home"),
@@ -189,6 +196,7 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     SPUR_TEST_LOG: worktree.logPath,
     SPUR_TEST_REAL_NODE: process.execPath,
     SPUR_TEST_REPO: worktree.repoDir,
+    TMPDIR: worktree.tmpDir,
     ...extraEnv,
   };
 }
