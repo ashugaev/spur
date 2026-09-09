@@ -696,6 +696,10 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     provider === "github"
       ? parseGitHubAdaptivePoll(raw["adaptivePoll"], label, intervalMs)
       : undefined;
+  const maxReviewBatchTargets =
+    provider === "github"
+      ? asOptionalPositiveInteger(raw["maxReviewBatchTargets"], `${label}.maxReviewBatchTargets`)
+      : undefined;
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
@@ -704,6 +708,7 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(query !== undefined ? { query } : {}),
     ...(draft !== undefined ? { draft } : {}),
     ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
+    ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
