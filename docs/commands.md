@@ -136,6 +136,12 @@ Friction an agent hits operating Spur itself: a sidecar that won't start, an unc
 
 `log` needs `SPUR_PROJECT` set to a known project (a live session), stamps the running session id, appends to `<dataDir>/agent-issues.jsonl` (mode `0600`, rotates at 50 MB, keeps 5 archives). `list` prints newest first; `--limit` default `200`.
 
+## comment-seen
+
+`spur comment-seen record <id...>`.
+
+Records inline-review-reply ids as seen so they never re-trigger the GitHub review-comment poll loop. Needs `SPUR_PROJECT` set to a known project (a live session); errors and exits 1 without it or on an unknown project. Ids are raw numeric review-comment ids. Stores each as `review-comment:<id>` in every `github`-type source's registry under `<dataDir>/source-state/github-comment-seen/<projectId>/<sourceId>.json`.
+
 ## subscribe
 
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`.
