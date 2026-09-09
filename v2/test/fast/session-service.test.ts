@@ -26755,7 +26755,7 @@ describe("SessionService", () => {
     expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
   });
 
-  it("859/N2: a paneless-but-live sibling (escaped daemon, no pane) is still excluded — pane-dead is not sibling-dead", async () => {
+  it("859/N2+D3: a paneless-but-live sibling (escaped daemon, no pane) is excluded from the kill term but reported as unverified, not silently dropped", async () => {
     // Same shape as AC-item2, except api-2's PANE is gone too
     // (sidecarTmuxAlive false for it) — the exact #811/859 shape where an
     // isolated-daemon escaped its pane onto the recorded port. Pane
@@ -26764,7 +26764,10 @@ describe("SessionService", () => {
     // daemon. api-2's session record stays non-terminal ("running") and the
     // shared port is occupied (isHostPortFreeMock -> false for it): the
     // only two facts stopSidecar can actually observe, and they must be
-    // enough to keep the port excluded.
+    // enough to keep the port excluded from the kill term. D3: the port is
+    // PROVEN occupied, so this must report a `partial` naming the port as
+    // unverified, never a clean "nothing-to-stop" that leaves the port
+    // bound with no trace in the response.
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -26822,7 +26825,11 @@ describe("SessionService", () => {
     const result = await service.stopSidecar("api-1", "dev");
 
     expect(findListenerPidsMock).not.toHaveBeenCalledWith(sharedPort);
-    expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
+    expect(result.sidecarStop).toEqual({
+      outcome: "partial",
+      survivors: [],
+      unverifiedPorts: [sharedPort],
+    });
   });
 
   it("stopSidecar kills the sidecar tmux session and logs the stop event", async () => {
