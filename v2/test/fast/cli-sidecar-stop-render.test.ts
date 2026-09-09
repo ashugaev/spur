@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { _renderSidecarStopMessageForTests as renderSidecarStopMessage } from "../../src/cli.js";
+import {
+  _renderSidecarStopMessageForTests as renderSidecarStopMessage,
+  _sidecarStopExitCodeForTests as sidecarStopExitCode,
+} from "../../src/cli.js";
 import type { SidecarStopView } from "../../src/types.js";
 
 function stopView(sidecarStop: SidecarStopView["sidecarStop"]): SidecarStopView {
@@ -46,5 +49,16 @@ describe("renderSidecarStopMessage", () => {
     );
     expect(message).toContain("but 2 process(es) survived: 501,502");
     expect(message).toContain("spur sidecar sweep");
+  });
+});
+
+describe("sidecarStopExitCode", () => {
+  it("exits nonzero on a partial reap", () => {
+    expect(sidecarStopExitCode(stopView({ outcome: "partial", survivors: [501] }))).toBe(1);
+  });
+
+  it("exits zero (unset) on a clean reap or nothing-to-stop", () => {
+    expect(sidecarStopExitCode(stopView({ outcome: "reaped" }))).toBeUndefined();
+    expect(sidecarStopExitCode(stopView({ outcome: "nothing-to-stop" }))).toBeUndefined();
   });
 });

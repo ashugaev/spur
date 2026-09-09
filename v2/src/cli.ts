@@ -1207,6 +1207,16 @@ function renderSidecarStopMessage(name: string, session: SidecarStopView): strin
 // live CLI command or the daemon route it calls.
 export const _renderSidecarStopMessageForTests = renderSidecarStopMessage;
 
+// `sidecar stop`'s process exit code, per real outcome — only a `partial`
+// reap (survivors left behind) is operator-actionable failure.
+function sidecarStopExitCode(session: SidecarStopView): number | undefined {
+  return session.sidecarStop.outcome === "partial" ? 1 : undefined;
+}
+
+// Test-only: exercises the stop exit-code mapping without a live CLI
+// command or the daemon route it calls.
+export const _sidecarStopExitCodeForTests = sidecarStopExitCode;
+
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
 const DEFAULT_GC_CLI_LIMIT = 100;
@@ -3867,7 +3877,7 @@ export function createProgram(cliEntrypoint: string): Command {
             configPath,
           ),
         success: (session) => renderSidecarStopMessage(options.name as string, session),
-        exitCode: (session) => (session.sidecarStop.outcome === "partial" ? 1 : undefined),
+        exitCode: sidecarStopExitCode,
         render: renderSessionCard,
       });
     });
