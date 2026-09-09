@@ -2151,9 +2151,13 @@ projects:
     const config = loadConfig(configPath);
     expect(config.projects["backend"]?.sources["jira"]).toEqual({
       type: "jira",
+      runOnStart: false,
       baseUrl: "https://jira.example.com/",
       email: "bot@example.com",
       token: "secret",
+      intervalMs: 60_000,
+      emitExisting: false,
+      maxResults: 50,
     });
   });
 
@@ -2322,7 +2326,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new",
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new or github-ci:run.completed or jira:work_item.new",
     );
   });
 
@@ -2566,6 +2570,147 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(
       'projects.backend: source "ci-green" has 2 triggers subscribed to a work-item event; at most one is allowed',
     );
+  });
+
+  it("parses a jira poller source with defaults and registers jira:work_item.new", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take {{key}}"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira"]).toEqual({
+      type: "jira",
+      runOnStart: false,
+      baseUrl: "https://jira.example.com/",
+      email: "bot@example.com",
+      token: "secret",
+      query: "project = WEBDEV AND statusCategory != Done",
+      intervalMs: 60_000,
+      emitExisting: false,
+      maxResults: 50,
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "jira",
+      event: "jira:work_item.new",
+      spawn: {
+        blocks: [{ prompt: "Take {{key}}" }],
+      },
+    });
+  });
+
+  it("rejects jira:work_item.new triggers when the source has no query", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take this work item."
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.pick-up.event uses unsupported event "jira:work_item.new"',
+    );
+  });
+
+  it("rejects multiple work-item triggers on the same jira source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV"
+    triggers:
+      one:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "first"
+      two:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "second"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend: source "jira" has 2 triggers subscribed to a work-item event; at most one is allowed',
+    );
+  });
+
+  it("parses a backlog spawn block as parsed-and-ignored", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    backlog:
+      my-sprint:
+        source: jira
+        query: "project = WEBDEV AND statusCategory != Done"
+        spawn:
+          prompt: "Take {{key}} {{title}} {{url}}"
+          agent: claude
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.backlog["my-sprint"]).toEqual({
+      source: "jira",
+      provider: "jira",
+      query: "project = WEBDEV AND statusCategory != Done",
+      intervalMs: 60_000,
+      runOnStart: false,
+    });
   });
 
   it("parses spawn.restrictWrites on trigger spawn configs", async () => {
