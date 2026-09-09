@@ -50,6 +50,19 @@ describe("renderSidecarStopMessage", () => {
     expect(message).toContain("but 2 process(es) survived: 501,502");
     expect(message).toContain("spur sidecar sweep");
   });
+
+  // D1: a zero-survivor partial means the port itself could not be
+  // confirmed clear (no lsof/ss), never "0 process(es) survived: " — name
+  // the unverifiable port instead of the empty survivor list.
+  it("names the unverified port for a zero-survivor partial reap", () => {
+    const message = renderSidecarStopMessage(
+      "dev",
+      stopView({ outcome: "partial", survivors: [], unverifiedPorts: [4355] }),
+    );
+    expect(message).not.toContain("0 process(es) survived");
+    expect(message).toContain("port(s) 4355 could not be confirmed clear");
+    expect(message).toContain("spur sidecar sweep");
+  });
 });
 
 describe("sidecarStopExitCode", () => {

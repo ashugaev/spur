@@ -2286,8 +2286,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
       if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        const { survivors, unverifiedPorts = [] } = payload.sidecarStop;
         showErrorToast(
-          `Stopped sidecar ${sidecarName}, but ${payload.sidecarStop.survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+          survivors.length === 0 && unverifiedPorts.length > 0
+            ? `Stopped sidecar ${sidecarName}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Run \`spur sidecar sweep\`.`
+            : `Stopped sidecar ${sidecarName}, but ${survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
         );
       }
     } catch (sidecarError) {

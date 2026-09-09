@@ -2219,6 +2219,45 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("names the unverified port instead of '0 process(es) survived' on a zero-survivor partial stop", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: true }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/stop" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: false }],
+            sidecarStop: { outcome: "partial", survivors: [], unverifiedPorts: [4355] },
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const button = await screen.findByRole("button", { name: "Stop sidecar dev" });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByText(/port\(s\) 4355 could not be confirmed clear/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/0 process\(es\) survived/)).not.toBeInTheDocument();
+  });
+
   it("shows a pending assistant bubble and promotes the header state to working", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

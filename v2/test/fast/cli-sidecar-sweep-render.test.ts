@@ -96,6 +96,7 @@ describe("renderSidecarSweepResult", () => {
           rootPid: 700,
           configPath: "/tmp/spur-isolated-daemon.abc/config.yaml",
           cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+          liveness: "not-serving",
         }),
       ],
       reaped: [],
@@ -104,6 +105,29 @@ describe("renderSidecarSweepResult", () => {
     expect(output).toContain("[report-only] pid 700");
     expect(output).toContain("daemon /tmp/spur-isolated-daemon.abc/config.yaml");
     expect(output).toContain("verify it is genuinely dead before killing");
+  });
+
+  // N3 residual: a port probe that never ran ("unknown") is not proof of
+  // death — it must never share the "genuinely dead"/"before killing"
+  // phrasing with a probe that ran and found nothing (host-install.ts's
+  // doctor check already makes this split; the sweep renderer must match).
+  it("859/AC13: an orphan-daemon row with unresolved liveness never says genuinely dead, and flags itself as unconfirmed", () => {
+    const result: SidecarSweepResult = {
+      supported: true,
+      leaked: [
+        orphanDaemonTree({
+          rootPid: 702,
+          configPath: "/tmp/spur-isolated-daemon.ghi/config.yaml",
+          cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+          liveness: "unknown",
+        }),
+      ],
+      reaped: [],
+    };
+    const output = renderSidecarSweepResult(result);
+    expect(output).not.toContain("genuinely dead");
+    expect(output).toContain("liveness unknown");
+    expect(output).toContain("verify manually before killing");
   });
 
   it("859/AC13: a serving orphan-daemon row never says genuinely dead / before killing, and names daemon stop", () => {

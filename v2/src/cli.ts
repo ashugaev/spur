@@ -1179,7 +1179,9 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
       tree.kind === "orphan-daemon"
         ? tree.liveness === "serving"
           ? `daemon ${tree.configPath} — serving on ${tree.port} — stop it with 'spur --config ${tree.configPath} daemon stop'`
-          : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
+          : tree.liveness === "unknown"
+            ? `daemon ${tree.configPath} — liveness unknown — verify manually before killing`
+            : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
         : (tree.sidecarName ?? "unattributed");
     return dimText(
       `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,
@@ -1200,6 +1202,10 @@ function renderSidecarStopMessage(name: string, session: SidecarStopView): strin
     return `Sidecar ${name} on ${session.id} was not running; nothing to stop.`;
   }
   if (sidecarStop.outcome === "partial") {
+    const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
+    if (sidecarStop.survivors.length === 0 && unverifiedPorts.length > 0) {
+      return `Stopped sidecar ${name} for ${session.id}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear (lsof/ss unavailable). Report them: spur sidecar sweep`;
+    }
     return `Stopped sidecar ${name} for ${session.id}, but ${sidecarStop.survivors.length} process(es) survived: ${sidecarStop.survivors.join(",")}. Report them: spur sidecar sweep`;
   }
   return `Stopped sidecar ${name} for ${session.id}.`;

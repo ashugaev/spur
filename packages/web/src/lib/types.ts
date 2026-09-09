@@ -300,7 +300,7 @@ export interface SessionDailyWakeState {
 }
 export type SpurSidecarStopReport =
   | { outcome: "reaped" }
-  | { outcome: "partial"; survivors: readonly number[] }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
   | { outcome: "nothing-to-stop" };
 
 export interface SpurSessionView {

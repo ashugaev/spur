@@ -11345,7 +11345,11 @@ export class SessionService {
           ? { outcome: "nothing-to-stop" }
           : survivors.length === 0 && unverifiedPorts.length === 0
             ? { outcome: "reaped" }
-            : { outcome: "partial", survivors };
+            : {
+                outcome: "partial",
+                survivors,
+                ...(unverifiedPorts.length > 0 ? { unverifiedPorts } : {}),
+              };
       if (sidecarStop.outcome !== "nothing-to-stop") {
         this.logEvent("session.sidecar.stopped", {
           level: "info",

@@ -996,7 +996,7 @@ export interface DashboardSessionView extends SessionRecord {
 
 export type SidecarStopReport =
   | { outcome: "reaped" }
-  | { outcome: "partial"; survivors: readonly number[] }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
   | { outcome: "nothing-to-stop" };
 
 export type SidecarStopView = SessionView & { sidecarStop: SidecarStopReport };
