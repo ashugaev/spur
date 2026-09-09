@@ -1177,7 +1177,9 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
     // the measured 863333/863351 leak by 17x.
     const attribution =
       tree.kind === "orphan-daemon"
-        ? `daemon ${tree.configPath} — verify it is genuinely dead before killing`
+        ? tree.liveness === "serving"
+          ? `daemon ${tree.configPath} — serving on ${tree.port} — stop it with 'spur --config ${tree.configPath} daemon stop'`
+          : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
         : (tree.sidecarName ?? "unattributed");
     return dimText(
       `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,

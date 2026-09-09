@@ -6,7 +6,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getTmuxPanePid, killTmuxSession } from "../runtime-tmux.js";
 import { readProcessCwd } from "../process-tree.js";
-import { isDefaultInstanceConfigPath } from "../config.js";
+import {
+  isDefaultInstanceConfigPath,
+  isSameInstanceConfigPath,
+  loadInstanceConfigReadOnly,
+} from "../config.js";
+import { findListenerPids } from "../port-probe.js";
 import {
   isTerminalSessionStatus,
   type SessionRecord,
@@ -114,6 +119,10 @@ export type LeakedSidecarTree =
       configPath: string;
       /** the `cli.js` path from its argv (confirmed absent from disk). */
       cliEntryPath: string;
+      /** `server.port` from its own instance config, or null when unreadable/invalid. */
+      port: number | null;
+      /** whether the row's own pid is the one actually listening on `port`. */
+      liveness: "serving" | "not-serving" | "unknown";
     });
 
 export interface SidecarSweepResult {
@@ -644,6 +653,150 @@ export async function reapRecordedIdentity(
   return outcome ?? null;
 }
 
+export interface RecordedPortDaemonInput {
+  /** `owner.sidecarPorts[sidecarName]` values, captured before the pane kill. */
+  ports: readonly number[];
+  /** `owner.worktreePath`; may be `""` or point at a deleted directory. */
+  worktreePath: string;
+  /** Injectable for tests; defaults to the real `lsof`/`ss` port probe. */
+  findListeners?: (port: number) => Promise<number[]>;
+  /** Injectable for tests; defaults to a real `/proc/<pid>/cmdline` read. */
+  readArgv?: (pid: number) => Promise<string[] | null>;
+}
+
+/**
+ * The explicit-stop-only kill term for a detached daemon that took over a
+ * sidecar's recorded port (spur#859): `signalSidecarPane` only ever finds a
+ * tmux-pane-rooted tree, so a `spawn(detached: true)` daemon reparented onto
+ * pid 1 is invisible to it and stop would otherwise report `reaped` or
+ * `nothing-to-stop` with the port still bound.
+ *
+ * Report-only is the DEFAULT: every listener on a recorded port is a
+ * survivor with no signal UNLESS it clears every match term (T1-T5 below).
+ * Two, and only two, exceptions to "survivor":
+ *   - argv reads, parses, and does NOT match a Spur non-default daemon:
+ *     dropped entirely (neither signaled nor reported) — positive evidence
+ *     of non-membership.
+ *   - argv reads, parses, matches, and T3+T4+T5 hold: signaled, then only
+ *     reported if it outlives `confirmReaps`' confirmation window.
+ * Everything else — an unreadable argv, an empty/unresolvable
+ * `worktreePath`, an unusable snapshot, a T5 re-read failure — is a
+ * survivor with no signal. Cannot-prove is never proof-of-absence, the same
+ * direction as `defaultPathExists` above.
+ *
+ * Per-pid signal only, by construction: `collectTree`/`computeOwnedGroups`
+ * are called with NO `byPgid` union (contrast `reapRecordedIdentity`'s
+ * `tree` above, whose union makes `computeOwnedGroups`' containment test
+ * vacuously true). A `nohup ... &` from an agent's non-interactive bash
+ * inherits the shell's pgid — job control is off, so no new group forms —
+ * and a group signal from this new caller would reach the whole shell.
+ */
+export async function reapRecordedPortDaemon(
+  input: RecordedPortDaemonInput,
+): Promise<ReapOutcome | null> {
+  const { ports, worktreePath, findListeners = findListenerPids, readArgv = readProcArgv } = input;
+  const uniquePorts = [...new Set(ports)].filter(
+    (port) => Number.isInteger(port) && port > 0 && port <= 65_535,
+  );
+  const survivorPids = new Set<number>();
+  const proven: { pid: number; parsed: { cliEntryPath: string; configPath: string } }[] = [];
+  let realpathBound: string | undefined;
+  try {
+    realpathBound = worktreePath ? realpathSync(worktreePath) : undefined;
+  } catch {
+    realpathBound = undefined;
+  }
+  const bounds = [worktreePath, realpathBound].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  for (const port of uniquePorts) {
+    let pids: number[];
+    try {
+      pids = await findListeners(port);
+    } catch {
+      continue;
+    }
+    for (const pid of pids) {
+      const argv = await readArgv(pid);
+      if (argv === null) {
+        survivorPids.add(pid);
+        continue;
+      }
+      const parsed = parseDaemonArgv(argv);
+      if (!parsed || isDefaultInstanceConfigPath(parsed.configPath)) {
+        // Positive evidence of non-membership: dropped entirely.
+        continue;
+      }
+      const t4 = bounds.some((bound) => isPathInside(parsed.cliEntryPath, bound));
+      if (!t4) {
+        survivorPids.add(pid);
+        continue;
+      }
+      proven.push({ pid, parsed });
+    }
+  }
+  if (proven.length === 0) {
+    return survivorPids.size === 0
+      ? null
+      : { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+  }
+  const snapshot = await snapshotProcesses();
+  if (!snapshot.ok) {
+    for (const candidate of proven) {
+      survivorPids.add(candidate.pid);
+    }
+    return { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+  }
+  const pendings: PendingReap[] = [];
+  for (const candidate of proven) {
+    const info = snapshot.byPid.get(candidate.pid);
+    if (!info) {
+      survivorPids.add(candidate.pid);
+      continue;
+    }
+    // T5: re-read immediately before signaling, must still match.
+    const reArgv = await readArgv(candidate.pid);
+    const reparsed = reArgv ? parseDaemonArgv(reArgv) : null;
+    if (
+      !reparsed ||
+      reparsed.cliEntryPath !== candidate.parsed.cliEntryPath ||
+      reparsed.configPath !== candidate.parsed.configPath
+    ) {
+      survivorPids.add(candidate.pid);
+      continue;
+    }
+    const tree = collectTree(candidate.pid, snapshot);
+    const ownedGroups = computeOwnedGroups(tree, snapshot, info.pgid === candidate.pid);
+    signalOwnedThenTree(tree, ownedGroups, snapshot, "SIGTERM");
+    pendings.push({
+      sessionName: `sidecar-recorded-port:${candidate.pid}`,
+      panePid: candidate.pid,
+      tree,
+      ownedGroups,
+      snapshot,
+    });
+  }
+  if (pendings.length === 0) {
+    // No signal was ever issued for any candidate (every one failed the T5
+    // re-read or vanished from the snapshot) — report whatever survivors
+    // that leaves, or null if none.
+    return survivorPids.size === 0
+      ? null
+      : { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+  }
+  const outcomes = await confirmReaps(pendings);
+  for (const outcome of outcomes) {
+    for (const survivor of outcome.survivors) {
+      survivorPids.add(survivor);
+    }
+  }
+  // A signal WAS issued: always report a real outcome, even with zero
+  // survivors — collapsing a clean reap to `null` here would make
+  // `stopSidecarLocked`'s "both null -> nothing-to-stop" check misreport a
+  // daemon that was actually found and killed.
+  return { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+}
+
 /**
  * Builds the live-claim set from every non-terminal session, keyed by
  * realpath'd worktreePath. Desk siblings share `worktreePath`
@@ -743,6 +896,18 @@ export interface FindLeakedSidecarTreesInput {
   readCwd?: (pid: number) => Promise<string | null>;
   /** Injectable for tests; defaults to a real filesystem existence check. */
   pathExists?: (path: string) => Promise<boolean>;
+  /**
+   * The reading process's own instance config path. An `orphan-daemon` row
+   * whose `--config` is the same file on disk (`isSameInstanceConfigPath`)
+   * is never emitted — a live check must never name the daemon serving it.
+   * Optional so every existing worktree-tree-only test keeps compiling
+   * unchanged; absent means no self-exclusion is applied.
+   */
+  selfConfigPath?: string;
+  /** Injectable for tests; defaults to a real `/proc/<pid>/cmdline` read. */
+  readArgv?: (pid: number) => Promise<string[] | null>;
+  /** Injectable for tests; defaults to the real `lsof`/`ss` port probe. */
+  findListeners?: (port: number) => Promise<number[]>;
 }
 
 /**
@@ -763,6 +928,9 @@ export async function findLeakedSidecarTrees(
     worktreeDirRealpath,
     readCwd = readProcessCwd,
     pathExists = defaultPathExists,
+    selfConfigPath = "",
+    readArgv = readProcArgv,
+    findListeners = findListenerPids,
   } = input;
   if (!snapshot.ok) {
     return { supported: false, leaked: [] };
@@ -822,33 +990,72 @@ export async function findLeakedSidecarTrees(
     });
   }
   const claimedPids = new Set(leaked.map((tree) => tree.rootPid));
-  leaked.push(...(await findOrphanDaemonTrees(snapshot, pathExists, claimedPids)));
+  leaked.push(
+    ...(await findOrphanDaemonTrees(
+      snapshot,
+      pathExists,
+      claimedPids,
+      selfConfigPath,
+      readArgv,
+      findListeners,
+    )),
+  );
   return { supported: true, leaked };
 }
 
 /**
- * Parses a snapshot row's `args` for an isolated-daemon-shaped invocation:
- * `<node> <path ending in cli.js> ... daemon start ... --config <path>`.
- * A substring/token scan, matching the rest of this module's `ps args`
- * parsing (e.g. the sidecar-name attribution above) rather than a strict
- * argv model — `ps -eo args=` already collapses argv to one string.
+ * `/proc/<pid>/cmdline`, NUL-delimited, empty entries dropped. The
+ * authoritative argv source — a `--config` value containing a space
+ * truncates under `ps -eo args=`'s whitespace split, so nothing that acts
+ * on `--config` (kill authority, orphan attribution) may parse `ps args`
+ * instead. Returns null on any read failure (ENOENT, EACCES, cross-uid,
+ * a dead pid) — callers must treat null as "cannot tell", never "absent".
  */
-function parseDaemonArgs(args: string): { cliEntryPath: string; configPath: string } | null {
-  const tokens = args.trim().split(/\s+/);
-  const cliEntryPath = tokens[1];
+async function readProcArgv(pid: number): Promise<string[] | null> {
+  let content: Buffer;
+  try {
+    content = await readFile(`/proc/${pid}/cmdline`);
+  } catch {
+    return null;
+  }
+  const argv = content
+    .toString("utf8")
+    .split("\0")
+    .filter((token) => token.length > 0);
+  return argv.length > 0 ? argv : null;
+}
+
+// Test-only: exercises the NUL-split/empty-entry rules without a real
+// `/proc/<pid>/cmdline` read.
+export const _readProcArgvForTests = readProcArgv;
+
+/**
+ * Parses a NUL-split argv for an isolated-daemon-shaped invocation:
+ * `<node> <path ending in cli.js> ... daemon start ... --config <path>`.
+ * Never `ps` — `ps -eo args=` collapses argv to one whitespace-joined
+ * string and truncates a `--config` value containing a space.
+ */
+function parseDaemonArgv(
+  argv: readonly string[],
+): { cliEntryPath: string; configPath: string } | null {
+  const cliEntryPath = argv[1];
   if (!cliEntryPath || !cliEntryPath.endsWith("cli.js")) {
     return null;
   }
-  if (!/\bdaemon\s+start\b/.test(args)) {
+  const daemonIndex = argv.indexOf("daemon");
+  if (daemonIndex === -1 || argv[daemonIndex + 1] !== "start") {
     return null;
   }
-  const configMatch = /--config\s+(\S+)/.exec(args);
-  const configPath = configMatch?.[1];
+  const configIndex = argv.indexOf("--config");
+  const configPath = configIndex === -1 ? undefined : argv[configIndex + 1];
   if (!configPath) {
     return null;
   }
   return { cliEntryPath, configPath };
 }
+
+// Test-only: exercises the daemon-shaped-argv parse directly.
+export const _parseDaemonArgvForTests = parseDaemonArgv;
 
 // Only ENOENT proves the checkout is genuinely gone. Any other failure
 // (EACCES on a cross-uid checkout, ELOOP, ...) means "cannot tell" — fail
@@ -884,10 +1091,44 @@ export const _defaultPathExistsForTests = defaultPathExists;
  * twice — once `[reapable]`, once `[report-only]` — and `--reap` would
  * silently signal a row the operator read as report-only.
  */
+// Read-only liveness for one orphan row: which port its own (never
+// bootstrap-written) instance config claims, and whether the row's own pid
+// is the one actually listening on it. `findListeners` failing, the config
+// being absent/invalid, or `server.port` not a valid 1..65535 integer all
+// collapse to `"unknown"` — never a throw (`findListenerPids` throws on an
+// invalid port, so the range guard here runs BEFORE it is called).
+async function resolveOrphanLiveness(
+  configPath: string,
+  rootPid: number,
+  findListeners: (port: number) => Promise<number[]>,
+): Promise<{ port: number | null; liveness: "serving" | "not-serving" | "unknown" }> {
+  const result = loadInstanceConfigReadOnly(configPath);
+  if (result.status !== "ok") {
+    return { port: null, liveness: "unknown" };
+  }
+  const port = result.config.server.port;
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    return { port, liveness: "unknown" };
+  }
+  let pids: number[];
+  try {
+    pids = await findListeners(port);
+  } catch {
+    return { port, liveness: "unknown" };
+  }
+  if (pids.length === 0) {
+    return { port, liveness: "unknown" };
+  }
+  return { port, liveness: pids.includes(rootPid) ? "serving" : "not-serving" };
+}
+
 async function findOrphanDaemonTrees(
   snapshot: ProcSnapshot,
   pathExists: (path: string) => Promise<boolean>,
   claimedPids: ReadonlySet<number>,
+  selfConfigPath: string,
+  readArgv: (pid: number) => Promise<string[] | null>,
+  findListeners: (port: number) => Promise<number[]>,
 ): Promise<LeakedSidecarTree[]> {
   const rows: LeakedSidecarTree[] = [];
   for (const info of snapshot.byPid.values()) {
@@ -900,11 +1141,27 @@ async function findOrphanDaemonTrees(
     if (!isReparented) {
       continue;
     }
-    const parsed = parseDaemonArgs(info.args);
+    // Cheap prefilter on the already-taken `ps` snapshot row, bounding the
+    // per-candidate `/proc/<pid>/cmdline` reads below to a handful of pids.
+    if (!info.args.includes("cli.js")) {
+      continue;
+    }
+    // Authoritative parse from NUL-delimited argv, never `ps args`. An
+    // unreadable cmdline SKIPS the row here (report path: cannot-prove
+    // means do not accuse) — the deliberate asymmetry with the kill path,
+    // where cannot-prove means report as a survivor.
+    const argv = await readArgv(info.pid);
+    if (argv === null) {
+      continue;
+    }
+    const parsed = parseDaemonArgv(argv);
     if (!parsed) {
       continue;
     }
     if (isDefaultInstanceConfigPath(parsed.configPath)) {
+      continue;
+    }
+    if (selfConfigPath && isSameInstanceConfigPath(parsed.configPath, selfConfigPath)) {
       continue;
     }
     if (await pathExists(parsed.cliEntryPath)) {
@@ -912,6 +1169,11 @@ async function findOrphanDaemonTrees(
     }
     const tree = collectTree(info.pid, snapshot);
     const treeRssKb = tree.reduce((sum, pid) => sum + (snapshot.byPid.get(pid)?.rssKb ?? 0), 0);
+    const { port, liveness } = await resolveOrphanLiveness(
+      parsed.configPath,
+      info.pid,
+      findListeners,
+    );
     rows.push({
       kind: "orphan-daemon",
       rootPid: info.pid,
@@ -927,6 +1189,8 @@ async function findOrphanDaemonTrees(
       reapable: false,
       configPath: parsed.configPath,
       cliEntryPath: parsed.cliEntryPath,
+      port,
+      liveness,
     });
   }
   return rows;

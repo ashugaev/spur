@@ -12,11 +12,14 @@ import {
   confirmReaps,
   findLeakedSidecarTrees,
   reapRecordedIdentity,
+  reapRecordedPortDaemon,
   snapshotProcesses,
   _computeSurvivorCandidatesForTests,
   _defaultPathExistsForTests,
   _isPathInsideForTests,
+  _parseDaemonArgvForTests,
   _parsePsOutputForTests,
+  _readProcArgvForTests,
   type LeakedSidecarTree,
   type ProcSnapshot,
   type ProcessInfo,
@@ -341,6 +344,17 @@ describe("findLeakedSidecarTrees", () => {
   });
 });
 
+// Authoritative-argv test seam: every fixture in this file sets a
+// snapshot row's `args` to the exact daemon invocation NUL-split parsing
+// would see, so splitting that same string on whitespace reproduces the
+// real argv for a pid the snapshot knows about.
+function argvFromSnapshot(snapshot: ProcSnapshot): (pid: number) => Promise<string[] | null> {
+  return async (pid: number) => {
+    const argsField = snapshot.byPid.get(pid)?.args;
+    return argsField ? argsField.trim().split(/\s+/) : null;
+  };
+}
+
 describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
   const nonDefaultConfigPath = "/tmp/spur-isolated-daemon.abc123/config.yaml";
   const cliEntryPath = "/tmp/spur-worktrees-checkout/v2/dist/cli.js";
@@ -358,6 +372,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       worktreeDirRealpath: "/tmp/spur-worktrees",
       readCwd: async () => null,
       pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
     });
     expect(result.leaked).toHaveLength(1);
     const leaked = mustKind(
@@ -379,6 +394,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       worktreeDirRealpath: "/tmp/spur-worktrees",
       readCwd: async () => null,
       pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
     });
     expect(result.leaked).toHaveLength(1);
     expect(must(result.leaked[0], "expected one row").kind).toBe("orphan-daemon");
@@ -396,6 +412,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       worktreeDirRealpath: "/tmp/spur-worktrees",
       readCwd: async () => null,
       pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
     });
     // The daemon at 902 qualifies; the systemd --user process itself at 1415
     // (ppid 1, no daemon-shaped argv) never does.
@@ -413,6 +430,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       worktreeDirRealpath: "/tmp/spur-worktrees",
       readCwd: async () => null,
       pathExists: async () => true,
+      readArgv: argvFromSnapshot(snapshot),
     });
     expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
   });
@@ -433,6 +451,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       worktreeDirRealpath: "/tmp/spur-worktrees",
       readCwd: async () => null,
       pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
     });
     expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
   });
@@ -453,6 +472,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       worktreeDirRealpath: "/tmp/spur-worktrees",
       readCwd: async () => null,
       pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
     });
     expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
   });
@@ -475,6 +495,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       worktreeDirRealpath: dedupeWorktreeDir,
       readCwd: async () => dedupeWorktreePath,
       pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
     });
     expect(result.leaked).toHaveLength(1);
     const leaked = mustKind(
@@ -483,6 +504,93 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       "expected exactly one row, not a double count",
     );
     expect(leaked.rootPid).toBe(950);
+  });
+
+  it("859/AC10: never emits a row whose configPath matches selfConfigPath under samePathOnDisk", async () => {
+    const dir = await createTempDir("spur-reap-self-config-");
+    const configPath = join(dir, "config.yaml");
+    writeFileSync(configPath, "server:\n  port: 4399\n");
+    const selfArgs = `/usr/bin/node ${cliEntryPath} --config ${configPath} daemon start`;
+    const snapshot = snapshotFrom([info({ pid: 906, ppid: 1, pgid: 906, args: selfArgs })]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
+      selfConfigPath: configPath,
+    });
+    expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
+  });
+
+  it("859/AC12: reports port from its own instance config and liveness serving/not-serving/unknown", async () => {
+    const dir = await createTempDir("spur-reap-liveness-");
+    const servingConfigPath = join(dir, "serving.yaml");
+    writeFileSync(servingConfigPath, "server:\n  port: 4321\n");
+    const notServingConfigPath = join(dir, "not-serving.yaml");
+    writeFileSync(notServingConfigPath, "server:\n  port: 4322\n");
+    const emptyListenersConfigPath = join(dir, "empty-listeners.yaml");
+    writeFileSync(emptyListenersConfigPath, "server:\n  port: 4323\n");
+    // 0 is rejected by asOptionalNumber's own positive-number check, so a
+    // config claiming it never parses to "ok" at all — the reachable
+    // out-of-range case is one that PARSES (no upper-bound check in
+    // asOptionalNumber) but still fails findListenerPids' 1..65535 guard.
+    const invalidPortConfigPath = join(dir, "invalid-port.yaml");
+    writeFileSync(invalidPortConfigPath, "server:\n  port: 70000\n");
+    const argsFor = (configPath: string) =>
+      `/usr/bin/node ${cliEntryPath} --config ${configPath} daemon start`;
+    const snapshot = snapshotFrom([
+      info({ pid: 910, ppid: 1, pgid: 910, args: argsFor(servingConfigPath) }),
+      info({ pid: 911, ppid: 1, pgid: 911, args: argsFor(notServingConfigPath) }),
+      info({ pid: 912, ppid: 1, pgid: 912, args: argsFor(emptyListenersConfigPath) }),
+      info({ pid: 913, ppid: 1, pgid: 913, args: argsFor(invalidPortConfigPath) }),
+      info({ pid: 914, ppid: 1, pgid: 914, args: argsFor("/nonexistent/absent.yaml") }),
+    ]);
+    const findListenersCalls: number[] = [];
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
+      findListeners: async (port: number) => {
+        findListenersCalls.push(port);
+        if (port === 4321) return [910];
+        if (port === 4322) return [99999];
+        if (port === 4323) return [];
+        throw new Error("must not be called for an invalid or absent-config port");
+      },
+    });
+    const orphanRows = result.leaked.filter(
+      (tree): tree is Extract<LeakedSidecarTree, { kind: "orphan-daemon" }> =>
+        tree.kind === "orphan-daemon",
+    );
+    expect(orphanRows).toHaveLength(5);
+    const byPid = new Map(orphanRows.map((row) => [row.rootPid, row]));
+    expect(must(byPid.get(910), "serving row")).toMatchObject({ port: 4321, liveness: "serving" });
+    expect(must(byPid.get(911), "not-serving row")).toMatchObject({
+      port: 4322,
+      liveness: "not-serving",
+    });
+    expect(must(byPid.get(912), "empty-listeners row")).toMatchObject({
+      port: 4323,
+      liveness: "unknown",
+    });
+    expect(must(byPid.get(913), "invalid-port row")).toMatchObject({
+      port: 70000,
+      liveness: "unknown",
+    });
+    expect(must(byPid.get(914), "absent-config row")).toMatchObject({
+      port: null,
+      liveness: "unknown",
+    });
+    // The invalid-port and absent-config rows never call findListeners —
+    // AC12's "must not throw" half, proven by the seam's own guard above.
+    expect(findListenersCalls.sort((a, b) => a - b)).toEqual([4321, 4322, 4323]);
   });
 });
 
@@ -753,5 +861,194 @@ describe("reapRecordedIdentity", () => {
     } finally {
       killGroupSafely(pid);
     }
+  });
+});
+
+describe("_readProcArgvForTests / _parseDaemonArgvForTests", () => {
+  it("859/AC9: parseDaemonArgv keeps a --config value containing a space, which the ps-args whitespace path would truncate", () => {
+    const argv = [
+      "/usr/bin/node",
+      "/tmp/checkout/v2/dist/cli.js",
+      "--config",
+      "/tmp/spur isolated/config.yaml",
+      "daemon",
+      "start",
+    ];
+    expect(_parseDaemonArgvForTests(argv)).toEqual({
+      cliEntryPath: "/tmp/checkout/v2/dist/cli.js",
+      configPath: "/tmp/spur isolated/config.yaml",
+    });
+  });
+
+  it("returns null when readProcArgv's own cmdline read fails (unreadable/nonexistent pid)", async () => {
+    await expect(_readProcArgvForTests(999_999_999)).resolves.toBeNull();
+  });
+});
+
+describe("reapRecordedPortDaemon", () => {
+  const cliEntryPath = (worktreePath: string) => join(worktreePath, "v2", "dist", "cli.js");
+  const nonDefaultConfigPath = "/tmp/spur-isolated-daemon.recorded-port/config.yaml";
+  const daemonArgv = (configPath: string, entryPath: string) => [
+    "/usr/bin/node",
+    entryPath,
+    "--config",
+    configPath,
+    "daemon",
+    "start",
+  ];
+
+  it("859/AC1: signals and confirms a listener whose argv parses to a non-default config and a cli.js inside worktreePath", async () => {
+    const worktreePath = await createTempDir("spur-reap-port-ac1-");
+    const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
+    const pid = must(child.pid, "expected a spawned pid");
+    try {
+      const argv = daemonArgv(nonDefaultConfigPath, cliEntryPath(worktreePath));
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43210],
+        worktreePath,
+        findListeners: async (port) => (port === 43210 ? [pid] : []),
+        readArgv: async (candidate) => (candidate === pid ? argv : null),
+      });
+      expect(outcome?.survivors).toEqual([]);
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      killGroupSafely(pid);
+    }
+  });
+
+  it("859/AC2: the same listener with cli.js OUTSIDE worktreePath is not signaled and is a survivor", async () => {
+    // A REAL spawned pid, not a fake number: a T4 regression that lets this
+    // candidate through would actually try to signal it, which the killSpy
+    // assertion below must catch — a fake nonexistent pid would let a
+    // removed T4 gate pass vacuously (snapshot.byPid.get would already
+    // return undefined for it, "surviving" for an unrelated reason).
+    const worktreePath = await createTempDir("spur-reap-port-ac2-");
+    const outsidePath = "/tmp/spur-elsewhere/v2/dist/cli.js";
+    const argv = daemonArgv(nonDefaultConfigPath, outsidePath);
+    const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
+    const pid = must(child.pid, "expected a spawned pid");
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43211],
+        worktreePath,
+        findListeners: async (port) => (port === 43211 ? [pid] : []),
+        readArgv: async (candidate) => (candidate === pid ? argv : null),
+      });
+      expect(outcome?.survivors).toEqual([pid]);
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(() => process.kill(pid, 0)).not.toThrow();
+    } finally {
+      killSpy.mockRestore();
+      killGroupSafely(pid);
+    }
+  });
+
+  it("859/AC3a: a listener whose argv reads and parses but is not a Spur daemon is dropped — no signal, no survivor", async () => {
+    const worktreePath = await createTempDir("spur-reap-port-ac3a-");
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43212],
+        worktreePath,
+        findListeners: async (port) => (port === 43212 ? [777_002] : []),
+        readArgv: async () => ["/usr/bin/some-other-server", "--port", "43212"],
+      });
+      expect(outcome).toBeNull();
+      expect(killSpy).not.toHaveBeenCalled();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("859/AC3b: a listener whose argv cannot be read is a survivor with no signal — distinct from AC3a", async () => {
+    const worktreePath = await createTempDir("spur-reap-port-ac3b-");
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43213],
+        worktreePath,
+        findListeners: async (port) => (port === 43213 ? [777_003] : []),
+        readArgv: async () => null,
+      });
+      expect(outcome?.survivors).toEqual([777_003]);
+      expect(killSpy).not.toHaveBeenCalled();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("859/AC4: a listener whose --config is the default instance config is dropped regardless of the recorded port", async () => {
+    const worktreePath = await createTempDir("spur-reap-port-ac4-");
+    const argv = daemonArgv(`${homedir()}/.spur/config.yaml`, cliEntryPath(worktreePath));
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43214],
+        worktreePath,
+        findListeners: async (port) => (port === 43214 ? [777_004] : []),
+        readArgv: async () => argv,
+      });
+      expect(outcome).toBeNull();
+      expect(killSpy).not.toHaveBeenCalled();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("859/AC5: a proven daemon whose pgid is not its own is signaled per-pid only — no negative-pid group signal", async () => {
+    // `spawn` with no `detached` shares THIS process's own pgid, not its
+    // own — info.pgid === pid is false, so computeOwnedGroups must return
+    // [] without even reaching the containment check.
+    const worktreePath = await createTempDir("spur-reap-port-ac5-");
+    const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore" });
+    const pid = must(child.pid, "expected a spawned pid");
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      const argv = daemonArgv(nonDefaultConfigPath, cliEntryPath(worktreePath));
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43215],
+        worktreePath,
+        findListeners: async (port) => (port === 43215 ? [pid] : []),
+        readArgv: async (candidate) => (candidate === pid ? argv : null),
+      });
+      expect(outcome?.survivors).toEqual([]);
+      for (const call of killSpy.mock.calls) {
+        const target = call[0];
+        expect(typeof target === "number" ? target : 1).toBeGreaterThan(0);
+      }
+    } finally {
+      killSpy.mockRestore();
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  });
+
+  it("859/AC6: a deleted worktreePath does not throw, and stays a plain, non-throwing outcome", async () => {
+    const worktreePath = await createTempDir("spur-reap-port-ac6-");
+    await rm(worktreePath, { recursive: true, force: true });
+    const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
+    const pid = must(child.pid, "expected a spawned pid");
+    try {
+      const argv = daemonArgv(nonDefaultConfigPath, cliEntryPath(worktreePath));
+      await expect(
+        reapRecordedPortDaemon({
+          ports: [43216],
+          worktreePath,
+          findListeners: async (port) => (port === 43216 ? [pid] : []),
+          readArgv: async (candidate) => (candidate === pid ? argv : null),
+        }),
+      ).resolves.not.toThrow();
+    } finally {
+      killGroupSafely(pid);
+    }
+  });
+
+  it("returns null when no port is recorded at all", async () => {
+    const outcome = await reapRecordedPortDaemon({ ports: [], worktreePath: "/tmp/whatever" });
+    expect(outcome).toBeNull();
   });
 });

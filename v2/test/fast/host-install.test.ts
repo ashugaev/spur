@@ -117,6 +117,7 @@ import {
   satisfiesNodeEngineRange,
   type SystemdScope,
 } from "../../src/host-install.js";
+import type { LeakedSidecarTree } from "../../src/sidecars/reap.js";
 import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
 import { createProgram } from "../../src/cli.js";
@@ -1818,6 +1819,13 @@ describe("collectHostInstallChecks: reclaimable-caches", () => {
 });
 
 describe("collectHostInstallChecks: sidecar-orphans", () => {
+  // 859/AC18: this fixture's worktreeDir is deliberately empty — the
+  // worktree-tree pass can never produce a row — so the assertion is
+  // meaningful only when nothing ELSE can produce one either. Without an
+  // injected empty snapshot, `checkLeakedSidecars` scans the REAL host
+  // process table, and any leftover orphan isolated daemon (the exact
+  // population #811 exists to surface — measured present on this host,
+  // 2026-09-09) turns this into a false failure unrelated to the fixture.
   it("reports ok:true when no leaked sidecar process trees exist", async () => {
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
     const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
@@ -1835,7 +1843,11 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
     );
     execState.systemctlAvailable = true;
 
-    const checks = await collectHostInstallChecks(fakeHome);
+    const checks = await collectHostInstallChecks(fakeHome, async () => ({
+      ok: true,
+      byPid: new Map(),
+      byPgid: new Map(),
+    }));
 
     expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
       ok: true,
@@ -1882,11 +1894,61 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
         reapable: false,
         configPath: "/tmp/spur-isolated-daemon.xyz/config.yaml",
         cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: null,
+        liveness: "unknown",
       },
     ]);
     expect(detail).toContain("1 orphan daemon(s)");
     expect(detail).not.toContain("leaked sidecar process tree");
     expect(fix).not.toContain("--reap");
+  });
+
+  it("859/AC13: a serving orphan row never carries 'genuinely dead' or 'before killing', and fix names daemon stop with its config path", () => {
+    const { detail, fix } = formatLeakedSidecarsCheck([
+      {
+        kind: "orphan-daemon",
+        rootPid: 900,
+        pgid: 900,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.xyz/config.yaml daemon start",
+        tree: [900],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.xyz/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: 4342,
+        liveness: "serving",
+      },
+    ]);
+    expect(detail).not.toContain("genuinely dead");
+    expect(detail).not.toContain("before killing");
+    expect(detail).toContain("SERVING on 4342");
+    expect(fix).toContain("daemon stop");
+    expect(fix).toContain("/tmp/spur-isolated-daemon.xyz/config.yaml");
+  });
+
+  it("859/AC13: with no serving row, both the detail and fix stay byte-identical to today", () => {
+    const notServingLeaked: LeakedSidecarTree[] = [
+      {
+        kind: "orphan-daemon",
+        rootPid: 901,
+        pgid: 901,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.abc/config.yaml daemon start",
+        tree: [901],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.abc/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: null,
+        liveness: "unknown",
+      },
+    ];
+    const { detail, fix } = formatLeakedSidecarsCheck(notServingLeaked);
+    expect(detail).toContain("[report-only, verify before killing]");
+    expect(fix).toBe("verify each row is genuinely dead, then `kill <pid>` by hand");
   });
 
   it("never writes or signals — collectHostInstallChecks stays read-only", async () => {

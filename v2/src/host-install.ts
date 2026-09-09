@@ -44,6 +44,7 @@ import {
   snapshotProcesses,
   SWEEP_DETAIL_MAX_TREES,
   type LeakedSidecarTree,
+  type ProcSnapshot,
 } from "./sidecars/reap.js";
 import type { AppConfig } from "./types.js";
 import {
@@ -1202,7 +1203,12 @@ export function checkVersionDrift(daemonVersion: string | undefined): HostInstal
   };
 }
 
-export async function collectHostInstallChecks(home = homedir()): Promise<HostInstallCheck[]> {
+export async function collectHostInstallChecks(
+  home = homedir(),
+  // Test seam for `checkLeakedSidecars`'s process-table read only (859/
+  // AC18) — real doctor runs never pass this and get the live `ps` table.
+  sidecarSnapshot: () => Promise<ProcSnapshot> = snapshotProcesses,
+): Promise<HostInstallCheck[]> {
   const checks: HostInstallCheck[] = [];
   const scope = resolveSystemdScope(home);
   const expectedPrefix = npmGlobalPrefix(home);
@@ -1474,7 +1480,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
         : {}),
     });
 
-    checks.push(await checkLeakedSidecars(instanceConfig.config));
+    checks.push(await checkLeakedSidecars(instanceConfig.config, sidecarSnapshot));
   }
 
   const daemonHost =
@@ -1502,14 +1508,29 @@ function formatSweepTreeLine(tree: LeakedSidecarTree): string {
   const rssMb = Math.round(tree.treeRssKb / 1024);
   const age = `age ${hours}h${minutes}m`;
   if (tree.kind === "orphan-daemon") {
-    return `  [report-only, verify before killing] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  daemon ${tree.configPath}  ${tree.worktreePath}`;
+    // Serving is a per-row fact, never suppressed: a node process whose
+    // checkout was deleted keeps serving from already-loaded code (859/B3),
+    // so this label must never carry the kill-verb phrasing on that row.
+    const prefix =
+      tree.liveness === "serving"
+        ? `[report-only, SERVING on ${tree.port}]`
+        : "[report-only, verify before killing]";
+    return `  ${prefix} pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  daemon ${tree.configPath}  ${tree.worktreePath}`;
   }
   return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
 }
 
 // Read-only doctor check: calls findLeakedSidecarTrees only, never
 // sweepSidecars(reap: true) — doctor performs zero writes and zero signals.
-async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck> {
+// `takeSnapshot` is a test seam (859/AC18): a fixture that expects zero
+// leaks must control the process table it scans, never the real host's —
+// a bare-metal `ps` snapshot on a host with even one leftover orphan daemon
+// (any developer box, any CI runner that ran this suite before) makes this
+// check see rows a fixture pinning an empty worktreeDir never intended.
+async function checkLeakedSidecars(
+  config: AppConfig,
+  takeSnapshot: () => Promise<ProcSnapshot> = snapshotProcesses,
+): Promise<HostInstallCheck> {
   const sessions = listSessions(config.dataDir);
   const assembled = assembleSidecarSweepClaims(sessions, config.worktreeDir);
   if (!assembled) {
@@ -1520,12 +1541,13 @@ async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck>
       detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
     };
   }
-  const snapshot = await snapshotProcesses();
+  const snapshot = await takeSnapshot();
   const { supported, leaked } = await findLeakedSidecarTrees({
     snapshot,
     claims: assembled.claims,
     worktreePaths: assembled.worktreePaths,
     worktreeDirRealpath: assembled.worktreeDirRealpath,
+    selfConfigPath: config.configPath,
   });
   if (!supported) {
     return {
@@ -1569,11 +1591,17 @@ function formatLeakedSidecarsCheck(leaked: LeakedSidecarTree[]): { detail: strin
     ...(remaining > 0 ? [`  +${remaining} more`] : []),
   ].join("\n");
   const hasReapable = leaked.some((tree) => tree.reapable);
+  const servingRow = leaked.find(
+    (tree): tree is Extract<LeakedSidecarTree, { kind: "orphan-daemon" }> =>
+      tree.kind === "orphan-daemon" && tree.liveness === "serving",
+  );
   return {
     detail,
-    fix: hasReapable
-      ? "spur sidecar sweep --reap"
-      : "verify each row is genuinely dead, then `kill <pid>` by hand",
+    fix: servingRow
+      ? `stop each serving orphan daemon with 'spur --config ${servingRow.configPath} daemon stop'; never kill a serving pid blind`
+      : hasReapable
+        ? "spur sidecar sweep --reap"
+        : "verify each row is genuinely dead, then `kill <pid>` by hand",
   };
 }
 
