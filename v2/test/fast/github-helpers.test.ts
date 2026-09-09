@@ -1897,6 +1897,8 @@ describe("GitHub review batching", () => {
     const s1 = result.get("s1");
     const s2 = result.get("s2");
     expect(s0?.status).toBe("ok");
+    if (s0?.status !== "ok") throw new Error("s0 not ok");
+    expect(s0.collected).not.toBeNull();
     expect(s2?.status).toBe("ok");
     expect(s1?.status).toBe("error");
     if (s1?.status !== "error") throw new Error("s1 not error");
@@ -2156,7 +2158,10 @@ describe("GitHub review batching", () => {
     const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
 
     expect(ghMock).toHaveBeenCalledTimes(2);
-    expect(result.get("s1")?.status).toBe("ok");
+    const s1 = result.get("s1");
+    expect(s1?.status).toBe("ok");
+    if (s1?.status !== "ok") throw new Error("s1 not ok");
+    expect(s1.collected).not.toBeNull();
     expect(result.get("s0")?.status).toBe("error");
   });
 
@@ -2183,6 +2188,54 @@ describe("GitHub review batching", () => {
 
     expect(ghMock).toHaveBeenCalledTimes(1);
     expect(ghMock.mock.calls[0]?.[0]).toBe(liveDir);
+    expect(result.get("s0")?.status).toBe("ok");
+    expect(result.get("s1")?.status).toBe("ok");
+  });
+
+  it("resolves a paginating member's cwd from a live sibling when targets[0]'s worktree is dead", async () => {
+    const dataDir = await makeDataDir();
+    const deadDir = await mkdtemp(join(tmpdir(), "spur-dead-wt-"));
+    await rm(deadDir, { recursive: true, force: true });
+    const liveDir = await mkdtemp(join(tmpdir(), "spur-live-wt-"));
+    tempDirs.push(liveDir);
+    // s0 (targets[0], dead worktree) needs a pagination call; s1 (live worktree) does
+    // not. Both the main batch call and the pagination call must use the live cwd.
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: {
+            a0: fullPrNode(1, {
+              reviewThreads: { nodes: [], pageInfo: { hasPreviousPage: true, startCursor: "c1" } },
+            }),
+            a1: fullPrNode(2),
+          },
+        },
+      }),
+    );
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          p0: {
+            reviewThreads: {
+              nodes: [],
+              pageInfo: { hasPreviousPage: false, startCursor: null },
+            },
+          },
+        },
+      }),
+    );
+    const sessions = [
+      { ...boundSession("s0", 1), worktreePath: deadDir },
+      { ...boundSession("s1", 2), worktreePath: liveDir },
+    ];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[0]?.[0]).toBe(liveDir);
+    expect(ghMock.mock.calls[1]?.[0]).toBe(liveDir);
     expect(result.get("s0")?.status).toBe("ok");
     expect(result.get("s1")?.status).toBe("ok");
   });
