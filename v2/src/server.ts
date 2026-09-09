@@ -356,14 +356,6 @@ function parseSessionWakeRequest(raw: unknown): ParsedSessionWakeRequest {
   return { mode: "schedule", request };
 }
 
-function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
-  const parsed = parseSessionWakeRequest(raw);
-  if (parsed.mode === "update") {
-    throw new InvalidWakeRequestError("schedule wake body cannot include target");
-  }
-  return parsed.request;
-}
-
 export function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
