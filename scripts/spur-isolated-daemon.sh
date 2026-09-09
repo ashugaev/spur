@@ -23,6 +23,130 @@ CURRENT_WORKTREE="$REPO_ROOT"
 V2_DIR="$REPO_ROOT/v2"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
+
+# Reclaims stale spur-isolated-daemon.* dirs this same script leaks on every
+# successful start (the trailing `exec` at the bottom of this file replaces
+# the shell, so the EXIT `cleanup` trap never runs on that path — see
+# spur#811). Fail-safe throughout: any gate that cannot be evaluated prunes
+# nothing, and only a nonzero `ps` exit aborts the whole pass. Never touches
+# $ISOLATED_WRAPPER (lives in $TOOL_DIR, outside ${TMPDIR:-/tmp}) or
+# $CONFIG_DIR itself.
+prune_stale_config_dirs() {
+  local tmp_root ps_output own_pids pid cwd dir matched candidate_cwd
+
+  tmp_root="${TMPDIR:-/tmp}"
+
+  # GATE C: refuses to prune a dir whose worktrees/<project>/<session> holds
+  # unsaved or unevaluable work — uncommitted changes, unpushed commits,
+  # non-repo content, or a git/find call that failed outright. Semantics
+  # mirror workspace.ts's hasUncommittedChanges/hasUnpushedCommits, without
+  # `:(exclude)` pathspecs: bash has no access to project.symlinks here (the
+  # project config is written only after this prune runs, at
+  # $PROJECT_CONFIG_RUNTIME_PATH below) — bounded and one-directional, since
+  # `git status --short` never lists a gitignored path, so this only ever
+  # keeps a dir it could have safely removed, never removes one it should
+  # have kept. Every unevaluable path returns 0 (keep) — GATE A/B's own
+  # `mmin +60` floor is not a protection on its own (a dir's mtime freezes
+  # at its `mktemp -d` above; work inside it bumps `worktrees/`, not `$dir`),
+  # so this is what makes that floor survivable.
+  dir_has_unsaved_work() { # returns 0 = keep the dir
+    local root="$1/worktrees" wt status entries upstream list_file
+    [[ -d "$root" ]] || return 1
+    [[ -r "$root" && -x "$root" ]] || return 0 # unreadable root -> keep
+    # `done < <(find ...) || return 0` does NOT work here: bash gives that
+    # construct the exit status of the LOOP BODY (or 0 on zero iterations),
+    # never the process substitution's — a failing `find` (e.g. an
+    # unreadable worktrees/<project> subdir) would silently yield `found=()`
+    # and fall through to "no unsaved work found", pruning a dir GATE C was
+    # supposed to keep. Capture find's own exit status directly by writing
+    # to a real file first, never through a pipe or process substitution.
+    list_file="$(mktemp "${tmp_root}/spur-prune-find.XXXXXX" 2>/dev/null)" || return 0
+    if ! find "$root" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null >"$list_file"; then
+      rm -f "$list_file"
+      return 0 # find failed -> keep
+    fi
+    local -a found=()
+    while IFS= read -r -d '' wt; do
+      found+=("$wt")
+    done <"$list_file"
+    rm -f "$list_file"
+    for wt in "${found[@]:-}"; do
+      [[ -n "$wt" ]] || continue
+      if [[ ! -e "$wt/.git" ]]; then
+        entries="$(find "$wt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return 0
+        [[ -n "$entries" ]] && return 0 # non-repo but non-empty -> keep
+        continue
+      fi
+      status="$(git -C "$wt" status --short 2>/dev/null)" || return 0
+      [[ -n "$status" ]] && return 0
+      if upstream="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
+        git -C "$wt" merge-base --is-ancestor HEAD "$upstream" 2>/dev/null || return 0
+      else
+        [[ -z "$(git -C "$wt" branch -r --contains HEAD 2>/dev/null)" ]] && return 0
+      fi
+    done
+    return 1
+  }
+
+  # GATE A source: a live isolated daemon always names its own CONFIG_DIR in
+  # argv (this script's own `exec "$NODE_BIN" "$CLI_PATH" --config
+  # "$CONFIG_DIR/config.yaml" ...` below) — a sound liveness proof for that
+  # daemon, but not for an agent merely working inside `<dir>/worktrees`,
+  # hence GATE B.
+  if ! ps_output="$(ps -eo args= 2>/dev/null)"; then
+    return 0
+  fi
+
+  # GATE B source: own-uid pids' cwds. `-o pid= -u "$(id -u)"` — NEVER `-e`,
+  # which overrides `-u` and returns the whole table. An unreadable own-uid
+  # /proc/<pid>/cwd SKIPS that one pid and the scan continues; it does NOT
+  # abort the prune (a non-dumpable own-uid process, e.g. `(sd-pam)` or a
+  # `gpg-agent --supervised`, is permanent on any linger-enabled host and
+  # would otherwise make this prune a silent no-op forever).
+  if ! own_pids="$(ps -o pid= -u "$(id -u)" 2>/dev/null)"; then
+    return 0
+  fi
+  local -a live_cwds=()
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    if cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)"; then
+      live_cwds+=("$cwd")
+    fi
+  done <<<"$own_pids"
+
+  while IFS= read -r -d '' dir; do
+    [[ "$dir" == "$CONFIG_DIR" ]] && continue
+
+    if printf '%s' "$ps_output" | grep -qF -- "$dir"; then
+      continue
+    fi
+
+    matched=0
+    for candidate_cwd in "${live_cwds[@]:-}"; do
+      if [[ "$candidate_cwd" == "$dir" || "$candidate_cwd" == "$dir"/* ]]; then
+        matched=1
+        break
+      fi
+    done
+    if [[ "$matched" -eq 1 ]]; then
+      continue
+    fi
+
+    dir_has_unsaved_work "$dir" && continue
+
+    # `|| true`: under `set -euo pipefail`, an unremovable candidate (another
+    # uid's leftover in sticky /tmp, a partially-unwritable tree) must never
+    # abort the whole script — this prune runs before TOOL_DIR is resolved
+    # and before `trap cleanup EXIT`, so an abort here would block the
+    # isolated daemon from starting at all and leak its own fresh
+    # $CONFIG_DIR with no reclaimer.
+    rm -rf "$dir" || true
+  done < <(
+    find "$tmp_root" -maxdepth 1 -type d -name 'spur-isolated-daemon.*' -mmin +60 -print0 2>/dev/null
+  )
+}
+prune_stale_config_dirs
+
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 ISOLATED_WRAPPER="$TOOL_DIR/spur-isolated"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"

@@ -167,19 +167,129 @@ let budget: GraphqlBudgetLedger = {
   blockedUntilMs: null,
 };
 let lastPausedEventKey: string | null = null;
-// Poll-cycle keys currently inside a run of zero-cost cycles, and how many of
-// those each run has swallowed since its one emitted event. A key whose source
-// is removed from the config stops polling and would otherwise sit here for the
-// daemon's lifetime, so an entry untouched for this long is dropped; the next
-// cycle on that key simply opens a fresh run.
-const ZERO_CYCLE_RUN_MAX_IDLE_MS = 60 * 60_000;
-const zeroCycleRuns = new Map<string, { suppressed: number; touchedAtMs: number }>();
+// A key whose source is removed from the config stops polling and would
+// otherwise sit in pollCycleRuns for the daemon's lifetime, so an entry
+// untouched for this long is flushed and dropped; the next cycle on that key
+// simply opens a fresh run.
+const POLL_CYCLE_RUN_MAX_IDLE_MS = 60 * 60_000;
+// Rollup window for gh.poll_cycle. Deliberately not a config key and
+// deliberately not equal to any configured poll interval (60_000 or 600_000
+// on the live host) — an interval-sized window makes emission cadence
+// drift-dependent on the source's own tick.
+const GH_POLL_CYCLE_ROLLUP_MS = 900_000;
 
-function pruneZeroCycleRuns(nowMs: number): void {
-  for (const [key, run] of zeroCycleRuns) {
-    if (nowMs - run.touchedAtMs > ZERO_CYCLE_RUN_MAX_IDLE_MS) {
-      zeroCycleRuns.delete(key);
+interface GhPollCycleRun {
+  kind: GhPollCycleKind;
+  projectId?: string;
+  sourceId?: string;
+  windowStartedAtMs: number;
+  touchedAtMs: number;
+  cycles: number;
+  zeroCycles: number;
+  calls: number;
+  graphqlCost: number;
+  bySubcommand: Map<string, number>;
+  errors: number;
+}
+
+const pollCycleRuns = new Map<string, GhPollCycleRun>();
+
+function emptyPollCycleRun(
+  kind: GhPollCycleKind,
+  projectId: string | undefined,
+  sourceId: string | undefined,
+  nowMs: number,
+): GhPollCycleRun {
+  return {
+    kind,
+    ...(projectId ? { projectId } : {}),
+    ...(sourceId ? { sourceId } : {}),
+    windowStartedAtMs: nowMs,
+    touchedAtMs: nowMs,
+    cycles: 0,
+    zeroCycles: 0,
+    calls: 0,
+    graphqlCost: 0,
+    bySubcommand: new Map(),
+    errors: 0,
+  };
+}
+
+/**
+ * Closes a run's current window: emits an aggregate only if the window spent
+ * something (calls > 0, graphqlCost > 0, or a cycle in it threw) then resets
+ * the accumulators and stamps a fresh windowStartedAtMs. A window that spent
+ * nothing AND threw nothing emits nothing and leaves the run's counters
+ * untouched, so they carry into the next window — this is what keeps PR
+ * 729's idle-host suppression intact under rollup: window expiry alone must
+ * never produce an event. Errors are in the gate, not just the payload —
+ * NOT for a failing `gh` call itself: `noteGhInvocation` runs before the
+ * call executes, so any `gh()` failure already sets calls > 0 and is
+ * already covered by that leg. The `errors` leg covers a cycle whose task
+ * throws before ever invoking `gh` (e.g. a local read failing while
+ * building the poll's session list) — rare, but such a cycle would
+ * otherwise be invisible: zero calls, zero cost, yet it did something that
+ * failed and is worth surfacing once per window instead of silently.
+ */
+function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number): void {
+  const spentSomething = run.calls > 0 || run.graphqlCost > 0 || run.errors > 0;
+  if (!spentSomething) {
+    return;
+  }
+  logSpurEvent(dataDir, {
+    event: "gh.poll_cycle",
+    level: "info",
+    ...(run.projectId ? { projectId: run.projectId } : {}),
+    ...(run.sourceId ? { sourceId: run.sourceId } : {}),
+    message: `gh invoked ${run.calls} times across ${run.cycles} ${run.kind} poll cycles`,
+    details: {
+      cycle: run.kind,
+      windowMs: nowMs - run.windowStartedAtMs,
+      cycles: run.cycles,
+      zeroCycles: run.zeroCycles,
+      calls: run.calls,
+      graphqlCost: run.graphqlCost,
+      bySubcommand: Object.fromEntries(run.bySubcommand),
+      ...(run.errors > 0 ? { errors: run.errors } : {}),
+    },
+  });
+  run.cycles = 0;
+  run.zeroCycles = 0;
+  run.calls = 0;
+  run.graphqlCost = 0;
+  run.bySubcommand = new Map();
+  run.errors = 0;
+  run.windowStartedAtMs = nowMs;
+}
+
+/**
+ * Flushes and drops every run untouched for longer than the idle ceiling. A
+ * paying window is flushed through the same zero-cost gate as any other close
+ * (so its cost is never dropped); a zero-cost window emits nothing, matching
+ * today's zeroCycleRuns idle-drop behavior.
+ */
+function prunePollCycleRuns(nowMs: number): void {
+  const dataDir = ghEventSinkDataDir;
+  for (const [key, run] of pollCycleRuns) {
+    if (nowMs - run.touchedAtMs > POLL_CYCLE_RUN_MAX_IDLE_MS) {
+      if (dataDir) flushPollCycleRun(dataDir, run, nowMs);
+      pollCycleRuns.delete(key);
     }
+  }
+}
+
+/**
+ * Flushes every open run at shutdown, so a paying window mid-rollup is never
+ * lost. Deletes each entry after flushing — mirrors flushCollapseEntry
+ * (event-log.ts) and rules out a double-emit if the process somehow polled
+ * again after this ran.
+ */
+export function flushGhPollCycles(): void {
+  const dataDir = ghEventSinkDataDir;
+  const nowMs = Date.now();
+  for (const [key, run] of pollCycleRuns) {
+    if (dataDir) flushPollCycleRun(dataDir, run, nowMs);
+    pollCycleRuns.delete(key);
   }
 }
 const ghPollCycleStorage = new AsyncLocalStorage<GhPollCycleContext>();
@@ -201,7 +311,7 @@ export function _resetGhUsageForTests(): void {
     blockedUntilMs: null,
   };
   lastPausedEventKey = null;
-  zeroCycleRuns.clear();
+  pollCycleRuns.clear();
   ghEventSinkDataDir = null;
   ghPollAdmissionTail = Promise.resolve();
 }
@@ -319,13 +429,17 @@ function pollCycleKey(cycle: GhPollCycleContext): string {
 }
 
 /**
- * Runs one daemon poll boundary and emits its exact gh cost.
+ * Runs one daemon poll boundary and accounts its exact gh cost.
  *
- * A cycle that spent nothing carries no cost information, and the attention
- * monitor runs one every 5s whether or not a session needs GitHub — emitting
- * each of those buried the event log. So a zero-cost cycle emits only when it
- * is the first of its run for that key; the rest are counted and reported as
- * `suppressedZeroCycles` on the next emission, so no cycle is lost silently.
+ * The first cycle ever seen for a key emits immediately (unconditionally,
+ * whether or not it spent anything) and opens a rollup window. Every later
+ * cycle inside GH_POLL_CYCLE_ROLLUP_MS accumulates into that window without
+ * writing anything; the first cycle at or past the window boundary closes it
+ * through flushPollCycleRun, which emits one aggregate event summing the
+ * window IF it spent something, or emits nothing and carries the counters
+ * forward if the whole window was zero-cost. That gate is what keeps PR 729's
+ * idle-host suppression intact under rollup — window expiry alone never
+ * produces an event.
  */
 export async function runGhPollCycle<T>(
   input: { kind: GhPollCycleKind; projectId?: string; sourceId?: string },
@@ -340,40 +454,69 @@ export async function runGhPollCycle<T>(
     ...(input.projectId ? { projectId: input.projectId } : {}),
     ...(input.sourceId ? { sourceId: input.sourceId } : {}),
   };
+  let cycleFailed = false;
   try {
     return await ghPollCycleStorage.run(cycle, task);
+  } catch (error) {
+    cycleFailed = true;
+    throw error;
   } finally {
     const dataDir = ghEventSinkDataDir;
     const endedAtMs = Date.now();
     const key = pollCycleKey(cycle);
-    const spentNothing = cycle.calls === 0 && cycle.graphqlCost === 0;
-    pruneZeroCycleRuns(endedAtMs);
-    const openRun = zeroCycleRuns.get(key);
-    const suppressed = openRun?.suppressed ?? 0;
-    if (spentNothing && openRun) {
-      openRun.suppressed = suppressed + 1;
-      openRun.touchedAtMs = endedAtMs;
-    } else if (dataDir) {
-      if (spentNothing) {
-        zeroCycleRuns.set(key, { suppressed: 0, touchedAtMs: endedAtMs });
-      } else {
-        zeroCycleRuns.delete(key);
+    prunePollCycleRuns(endedAtMs);
+    const existingRun = pollCycleRuns.get(key);
+    if (!existingRun) {
+      // Without a sink there is nowhere to ever flush a run to, so no run is
+      // opened: registering one anyway would start its windowStartedAtMs
+      // clock on a cycle nobody logged (a phantom span once a sink is later
+      // set) and, in a process that never sets one at all (e.g. the CLI),
+      // would accumulate an entry per key for the life of the process. This
+      // standalone event is the only window this cycle ever belongs to, so a
+      // failure is reported on it directly via the details.errors field.
+      if (dataDir) {
+        logSpurEvent(dataDir, {
+          event: "gh.poll_cycle",
+          level: "info",
+          ...(cycle.projectId ? { projectId: cycle.projectId } : {}),
+          ...(cycle.sourceId ? { sourceId: cycle.sourceId } : {}),
+          message: `gh invoked ${cycle.calls} times in ${cycle.kind} poll cycle`,
+          details: {
+            cycle: cycle.kind,
+            durationMs: endedAtMs - cycle.startedAt,
+            calls: cycle.calls,
+            graphqlCost: cycle.graphqlCost,
+            bySubcommand: Object.fromEntries(cycle.bySubcommand),
+            ...(cycleFailed ? { errors: 1 } : {}),
+          },
+        });
+        // The run's own cycles/errors counters start clean: this first cycle
+        // was just emitted standalone above (already carrying its own
+        // failure, if any), so seeding it into the run would attribute it to
+        // a window that never actually counted this cycle as one of its own.
+        pollCycleRuns.set(
+          key,
+          emptyPollCycleRun(cycle.kind, cycle.projectId, cycle.sourceId, endedAtMs),
+        );
       }
-      logSpurEvent(dataDir, {
-        event: "gh.poll_cycle",
-        level: "info",
-        ...(cycle.projectId ? { projectId: cycle.projectId } : {}),
-        ...(cycle.sourceId ? { sourceId: cycle.sourceId } : {}),
-        message: `gh invoked ${cycle.calls} times in ${cycle.kind} poll cycle`,
-        details: {
-          cycle: cycle.kind,
-          durationMs: endedAtMs - cycle.startedAt,
-          calls: cycle.calls,
-          graphqlCost: cycle.graphqlCost,
-          bySubcommand: Object.fromEntries(cycle.bySubcommand),
-          ...(suppressed > 0 ? { suppressedZeroCycles: suppressed } : {}),
-        },
-      });
+    } else {
+      existingRun.touchedAtMs = endedAtMs;
+      existingRun.cycles += 1;
+      if (cycle.calls === 0 && cycle.graphqlCost === 0) {
+        existingRun.zeroCycles += 1;
+      }
+      existingRun.calls += cycle.calls;
+      existingRun.graphqlCost += cycle.graphqlCost;
+      for (const [subcommand, count] of cycle.bySubcommand) {
+        existingRun.bySubcommand.set(
+          subcommand,
+          (existingRun.bySubcommand.get(subcommand) ?? 0) + count,
+        );
+      }
+      if (cycleFailed) existingRun.errors += 1;
+      if (dataDir && endedAtMs - existingRun.windowStartedAtMs >= GH_POLL_CYCLE_ROLLUP_MS) {
+        flushPollCycleRun(dataDir, existingRun, endedAtMs);
+      }
     }
   }
 }

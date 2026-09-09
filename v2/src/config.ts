@@ -2226,6 +2226,14 @@ export function isDefaultInstanceConfigPath(configPath: string): boolean {
   return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
 }
 
+// Wraps the same tolerant-of-symlinks comparison `isDefaultInstanceConfigPath`
+// uses, for the self-exclusion check in `findOrphanDaemonTrees`: an
+// orphan-daemon row must never name the instance config the check itself is
+// running against. Keeps every configPath-on-disk comparison in this module.
+export function isSameInstanceConfigPath(a: string, b: string): boolean {
+  return samePathOnDisk(a, b);
+}
+
 // Pure guard, no writes: `daemon start`/`stop`/`restart` (and any other
 // `startServer` caller) must neither bootstrap a prod-default config
 // template at an arbitrary path, nor bind or target the production slot
