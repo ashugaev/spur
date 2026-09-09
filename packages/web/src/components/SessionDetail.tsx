@@ -115,6 +115,7 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarStopResponse,
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
@@ -2280,10 +2281,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
         );
       }
-      const payload = (await response.json()) as SpurSessionView;
+      const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
+      if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        showErrorToast(
+          `Stopped sidecar ${sidecarName}, but ${payload.sidecarStop.survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+        );
+      }
     } catch (sidecarError) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
