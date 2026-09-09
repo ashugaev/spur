@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -271,6 +272,49 @@ afterEach(() => {
   }
 });
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// AC2's proof that the daemon is genuinely PARKED on the workspace-deps
+// flock — not merely slow to reach it (spur-6128's prune_stale_config_dirs
+// alone can cost >1s of wall clock on a loaded host) — has to come from the
+// kernel's own lock table, not a wall-clock window. /proc/locks lists every
+// advisory flock(2) as one line, plus one "-> " prefixed line per blocked
+// contender for that same lock (verified against a throwaway flock/flock
+// pair on this host before writing this test). Matching on inode alone
+// (rather than the full major:minor:inode device triple `/proc/locks`
+// prints) is deliberate: converting Node's raw `stat().dev` into the kernel's
+// hex major:minor encoding is itself version-fragile, and inode reuse across
+// devices within this test's few-second window is not a real risk in an
+// isolated per-test tmp dir.
+function hasPendingFlockWaiter(inode: number): boolean {
+  let content: string;
+  try {
+    content = readFileSync("/proc/locks", "utf8");
+  } catch {
+    return false;
+  }
+  for (const line of content.split("\n")) {
+    const tokens = line.trim().split(/\s+/);
+    // Pending (blocked) entries insert a literal "->" as the second token;
+    // held entries never do, so this alone tells the two apart.
+    if (tokens[1] !== "->") {
+      continue;
+    }
+    const devInode = tokens[6];
+    if (!devInode) {
+      continue;
+    }
+    const parts = devInode.split(":");
+    const candidateInode = Number(parts[parts.length - 1]);
+    if (candidateInode === inode) {
+      return true;
+    }
+  }
+  return false;
+}
+
 describe("isolated sidecar workspace dependency lock (#823)", () => {
   it("AC1: isolated-ui repairs the tree before it waits for isolated-env.sh", async () => {
     const worktree = createFixture();
@@ -308,7 +352,41 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
 
     const daemonPromise = runIsolatedDaemon(worktree);
 
-    await new Promise((r) => setTimeout(r, 1000));
+    // The UI's flock subshell redirect (`) 9>"$lock_file"`) already created
+    // the lock file when it entered the install branch above.
+    const lockPath = join(worktree.toolDir, "workspace-deps.lock");
+    expect(existsSync(lockPath)).toBe(true);
+    const lockInode = statSync(lockPath).ino;
+
+    // Race two mutually exclusive, host-load-independent outcomes: either the
+    // daemon's own ensure_workspace_deps call registers as a kernel-level
+    // waiter on the UI's held lock (the gate is live), or the daemon reaches
+    // build/probe/start without ever registering as a waiter (the gate was
+    // skipped — this is exactly what the mutation check below must catch).
+    // No wall-clock budget is asserted here; only which of the two happens
+    // first, checked as fast as the loop can spin.
+    let daemonParked = false;
+    let daemonSkippedGate = false;
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if (hasPendingFlockWaiter(lockInode)) {
+        daemonParked = true;
+        break;
+      }
+      const log = readLog(worktree);
+      if (log.includes("build") || log.includes("cli-probe") || log.includes("daemon-start")) {
+        daemonSkippedGate = true;
+        break;
+      }
+      await sleep(10);
+    }
+
+    expect(daemonSkippedGate).toBe(false);
+    expect(daemonParked).toBe(true);
+
+    // Now backed by direct kernel-lock evidence (not elapsed time) that the
+    // daemon is blocked before build/probe/start, so this snapshot cannot
+    // pass "by accident" the way a fixed wall-clock window could.
     const duringWindow = readLog(worktree);
     expect(duringWindow).not.toContain("build");
     expect(duringWindow).not.toContain("cli-probe");
