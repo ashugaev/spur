@@ -652,8 +652,13 @@ describe("BackendConnectionProvider", () => {
     vi.useFakeTimers();
     const { result } = renderProvider();
     await flushMicrotasks();
+    // Step well past FAILURE_THRESHOLD heartbeats: two probes against a
+    // threshold of four would pass this assertion even if an empty version
+    // were miscounted as a failure. This window is long enough for
+    // consecutive failures to accumulate and flip the phase if that ever
+    // happens, so the assertion can actually fail.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * (FAILURE_THRESHOLD + 1));
     });
 
     expect(result.current.phase).toBe("connected");
