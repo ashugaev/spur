@@ -957,8 +957,12 @@ describe("reapRecordedPortDaemon", () => {
   // so every concretely-typed `vi.spyOn(process, "kill")` instance at the
   // call sites below is assignable regardless of its inferred signal
   // parameter type — matching by shape, not by the spy's own generic.
+  // D7/859: `call[1] === undefined` is `process.kill(pid)` with no signal
+  // argument, which Node defaults to SIGTERM — a real terminating signal,
+  // not a probe. Excluding it would let a future regressed call site pass
+  // this assertion vacuously; only signal 0 (the liveness probe) is exempt.
   const realSignalCalls = (killSpy: { mock: { calls: readonly unknown[][] } }) =>
-    killSpy.mock.calls.filter((call) => call[1] !== 0 && call[1] !== undefined);
+    killSpy.mock.calls.filter((call) => call[1] !== 0);
 
   it("859/AC2: the same listener with cli.js OUTSIDE worktreePath is not signaled and is a survivor", async () => {
     // A REAL spawned pid, not a fake number: a T4 regression that lets this
