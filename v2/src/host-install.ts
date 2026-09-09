@@ -1028,7 +1028,7 @@ async function portConflictCheck(
     return {
       id: `${id}-port-conflict`,
       ok: false,
-      severity: "warn",
+      severity: "error",
       detail: `port ${port} expected for ${unit} appears occupied, but the pid holding it could not be determined (lsof/ss unavailable)`,
     };
   }

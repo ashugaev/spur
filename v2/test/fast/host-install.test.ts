@@ -1171,6 +1171,19 @@ describe("checkServiceHealth", () => {
     expect(conflict?.detail).toContain("9999");
   });
 
+  // D2: isHostPortFree already proved the port occupied before this branch
+  // runs — losing the pid probe (no lsof/ss) must not downgrade a proven
+  // conflict to a check that leaves doctor's exit code green.
+  it("still reports a port-conflict as an error when the pid probe itself fails (no lsof/ss)", async () => {
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+    isHostPortFreeMock.mockResolvedValue(false);
+    findListenerPidsMock.mockRejectedValue(new Error("neither lsof nor ss is available"));
+    const result = await checkServiceHealth(scope, false, false, false);
+    const conflict = result.checks.find((check) => check.id === "daemon-port-conflict");
+    expect(conflict).toMatchObject({ ok: false, severity: "error" });
+    expect(conflict?.detail).toContain("lsof/ss unavailable");
+  });
+
   it("reports warn severity when the service simply has not started yet", async () => {
     probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
     isHostPortFreeMock.mockResolvedValue(true);
