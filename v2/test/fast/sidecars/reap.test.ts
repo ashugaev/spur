@@ -1026,6 +1026,37 @@ describe("reapRecordedPortDaemon", () => {
     }
   });
 
+  it("D5/859: a never-signaled candidate that answers kill(pid, 0) with EPERM proves it EXISTS and stays a survivor, not silently dropped", async () => {
+    // EPERM means the pid exists but belongs to another uid — the opposite
+    // of ESRCH. Only ESRCH (the process is actually gone) may drop a
+    // never-signaled candidate out of the survivor list; every other
+    // kill(pid, 0) outcome, including EPERM, is cannot-prove-absence and
+    // must stay a survivor.
+    const worktreePath = await createTempDir("spur-reap-port-d5-");
+    const outsidePath = "/tmp/spur-elsewhere/v2/dist/cli.js";
+    const argv = daemonArgv(nonDefaultConfigPath, outsidePath);
+    const foreignPid = 777_009;
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((pid: number) => {
+      if (pid === foreignPid) {
+        const error = new Error("EPERM") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+      return true;
+    });
+    try {
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43219],
+        worktreePath,
+        findListeners: async (port) => (port === 43219 ? [foreignPid] : []),
+        readArgv: async (candidate) => (candidate === foreignPid ? argv : null),
+      });
+      expect(outcome?.survivors).toEqual([foreignPid]);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
   it("859/N7: a listed pid that exits before the T4 mismatch is checked is dropped, never named as a survivor", async () => {
     // The confirmGone last-mile check must actually strip a pid that is
     // already gone by the time reapRecordedPortDaemon gets around to

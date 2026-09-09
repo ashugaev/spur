@@ -359,12 +359,14 @@ async function isZombie(pid: number): Promise<boolean> {
 
 /**
  * Bounded confirmation loop: probe each pid with `process.kill(pid, 0)`
- * every REAP_CONFIRM_INTERVAL_MS up to REAP_CONFIRM_TIMEOUT_MS. ESRCH
- * confirms gone; EPERM confirms alive-but-foreign (a pid reused by another
- * user's process) and is dropped without being reported as a survivor. A
- * pid that still answers `kill(pid, 0)` but is a zombie (`/proc` state `Z`)
- * has already exited — it is a parent-reap race, not a survivor — and is
- * dropped too. Returns whatever is genuinely still alive at the timeout.
+ * every REAP_CONFIRM_INTERVAL_MS up to REAP_CONFIRM_TIMEOUT_MS. ESRCH is the
+ * only error that confirms gone. EPERM (and any other `kill(pid, 0)` error)
+ * proves the opposite — the pid EXISTS and is merely unsignalable by us
+ * (a foreign-uid process, most often) — so it stays pending and is reported
+ * as a survivor, never silently dropped (D5/859). A pid that still answers
+ * `kill(pid, 0)` but is a zombie (`/proc` state `Z`) has already exited — it
+ * is a parent-reap race, not a survivor — and is dropped too. Returns
+ * whatever is genuinely still alive (or unconfirmable) at the timeout.
  */
 async function confirmGone(pids: readonly number[]): Promise<number[]> {
   const pending = new Set(pids);
@@ -376,8 +378,10 @@ async function confirmGone(pids: readonly number[]): Promise<number[]> {
         if (await isZombie(pid)) {
           pending.delete(pid);
         }
-      } catch {
-        pending.delete(pid);
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+          pending.delete(pid);
+        }
       }
     }
     if (pending.size === 0 || Date.now() >= deadline) {
