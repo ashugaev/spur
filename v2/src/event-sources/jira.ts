@@ -20,7 +20,11 @@ async function pollIssues(
   deps: SourceStartDeps<JiraSourceConfig>,
   seenIssues: Set<string>,
 ): Promise<void> {
-  if (deps.config.query === undefined) return;
+  if (deps.config.query === undefined) {
+    throw new Error(
+      `jira source ${deps.projectId}/${deps.sourceId} has no query; it should have been skipped as connection-only`,
+    );
+  }
   const issues = await fetchJiraIssues({
     baseUrl: deps.config.baseUrl,
     email: deps.config.email,

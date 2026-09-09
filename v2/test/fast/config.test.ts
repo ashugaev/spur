@@ -2713,6 +2713,44 @@ projects:
     });
   });
 
+  it("keeps a jira source's own poll query and its backlog binding's query independent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+    backlog:
+      my-sprint:
+        source: jira
+        query: "project = WEBDEV ORDER BY Rank ASC"
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take {{key}}"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira"]).toMatchObject({
+      query: "project = WEBDEV AND statusCategory != Done",
+    });
+    expect(config.projects["backend"]?.backlog["my-sprint"]).toMatchObject({
+      query: "project = WEBDEV ORDER BY Rank ASC",
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]?.event).toBe("jira:work_item.new");
+  });
+
   it("parses spawn.restrictWrites on trigger spawn configs", async () => {
     const configPath = await writeConfig(`
 projects:
