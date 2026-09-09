@@ -61,9 +61,10 @@ type LivenessState = Pick<BackendConnectionState, "phase" | "attempts">;
 
 const CONNECTED_STATE: LivenessState = { phase: "connected", attempts: 0 };
 
-const DEFAULT_STATE: BackendConnectionState = { ...CONNECTED_STATE, version: null };
-
-const BackendConnectionContext = createContext<BackendConnectionState>(DEFAULT_STATE);
+const BackendConnectionContext = createContext<BackendConnectionState>({
+  ...CONNECTED_STATE,
+  version: null,
+});
 
 export function useBackendConnection(): BackendConnectionState {
   return useContext(BackendConnectionContext);
