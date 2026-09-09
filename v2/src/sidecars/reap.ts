@@ -73,6 +73,15 @@ export interface ReapOutcome {
   panePid: number | null;
   /** Pids still alive after SIGKILL and the confirmation window. */
   survivors: readonly number[];
+  /**
+   * Recorded ports whose listener probe itself could not run (both `lsof`
+   * and `ss` unavailable or timed out) — never proof the port is free.
+   * Present only from the recorded-port-daemon kill term, and only
+   * non-empty when at least one recorded port could not be probed at all:
+   * `stop` must not collapse this to a clean `reaped`/`nothing-to-stop`
+   * report just because no pid was ever identified.
+   */
+  unverifiedPorts?: readonly number[];
 }
 
 export interface SidecarClaim {
@@ -698,7 +707,19 @@ export async function reapRecordedPortDaemon(
   const uniquePorts = [...new Set(ports)].filter(
     (port) => Number.isInteger(port) && port > 0 && port <= 65_535,
   );
-  const survivorPids = new Set<number>();
+  // Pids added here were NEVER signaled — an unreadable argv, a T4/T5
+  // mismatch, or an unusable snapshot all report "cannot prove this is ours,
+  // so leave it alone", not "this is a confirmed survivor". Before any of
+  // them is reported, `confirmGone` gets the final say: the gap between
+  // `findListeners` listing a pid and this function noticing it can't be
+  // signaled is a real race, and reporting an already-exited pid as a
+  // survivor would name a dead pid (859/N7).
+  const unconfirmedSurvivorPids = new Set<number>();
+  // Recorded ports whose listener probe itself never produced a usable
+  // result (both `lsof` and `ss` unavailable/timed out) — see
+  // `findListenerPids`. Distinct from "probed, found nothing": this is
+  // "never got an answer", which must not collapse into a clean outcome.
+  const unverifiedPorts = new Set<number>();
   const proven: { pid: number; parsed: { cliEntryPath: string; configPath: string } }[] = [];
   let realpathBound: string | undefined;
   try {
@@ -714,12 +735,13 @@ export async function reapRecordedPortDaemon(
     try {
       pids = await findListeners(port);
     } catch {
+      unverifiedPorts.add(port);
       continue;
     }
     for (const pid of pids) {
       const argv = await readArgv(pid);
       if (argv === null) {
-        survivorPids.add(pid);
+        unconfirmedSurvivorPids.add(pid);
         continue;
       }
       const parsed = parseDaemonArgv(argv);
@@ -737,29 +759,48 @@ export async function reapRecordedPortDaemon(
       const normalizedCliEntryPath = resolvePath(parsed.cliEntryPath);
       const t4 = bounds.some((bound) => isPathInside(normalizedCliEntryPath, resolvePath(bound)));
       if (!t4) {
-        survivorPids.add(pid);
+        unconfirmedSurvivorPids.add(pid);
         continue;
       }
       proven.push({ pid, parsed });
     }
   }
+  // Assembles the final outcome from whatever `confirmedSurvivorPids` a
+  // signal pass already produced (authoritative — `confirmReaps` ran its own
+  // `confirmGone`), plus one last-mile `confirmGone` pass over every pid
+  // that was NEVER signaled, dropping any that turn out to have already
+  // exited.
+  const finish = async (
+    confirmedSurvivorPids: readonly number[] = [],
+    forceReport = false,
+  ): Promise<ReapOutcome | null> => {
+    const stillUnconfirmed = await confirmGone([...unconfirmedSurvivorPids]);
+    const survivors = [...new Set([...stillUnconfirmed, ...confirmedSurvivorPids])];
+    if (!forceReport && survivors.length === 0 && unverifiedPorts.size === 0) {
+      return null;
+    }
+    return {
+      sessionName: "sidecar-recorded-port",
+      panePid: null,
+      survivors,
+      ...(unverifiedPorts.size > 0 ? { unverifiedPorts: [...unverifiedPorts] } : {}),
+    };
+  };
   if (proven.length === 0) {
-    return survivorPids.size === 0
-      ? null
-      : { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+    return finish();
   }
   const snapshot = await snapshotProcesses();
   if (!snapshot.ok) {
     for (const candidate of proven) {
-      survivorPids.add(candidate.pid);
+      unconfirmedSurvivorPids.add(candidate.pid);
     }
-    return { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+    return finish();
   }
   const pendings: PendingReap[] = [];
   for (const candidate of proven) {
     const info = snapshot.byPid.get(candidate.pid);
     if (!info) {
-      survivorPids.add(candidate.pid);
+      unconfirmedSurvivorPids.add(candidate.pid);
       continue;
     }
     // T5: re-read immediately before signaling, must still match.
@@ -770,7 +811,7 @@ export async function reapRecordedPortDaemon(
       reparsed.cliEntryPath !== candidate.parsed.cliEntryPath ||
       reparsed.configPath !== candidate.parsed.configPath
     ) {
-      survivorPids.add(candidate.pid);
+      unconfirmedSurvivorPids.add(candidate.pid);
       continue;
     }
     const tree = collectTree(candidate.pid, snapshot);
@@ -788,21 +829,15 @@ export async function reapRecordedPortDaemon(
     // No signal was ever issued for any candidate (every one failed the T5
     // re-read or vanished from the snapshot) — report whatever survivors
     // that leaves, or null if none.
-    return survivorPids.size === 0
-      ? null
-      : { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+    return finish();
   }
   const outcomes = await confirmReaps(pendings);
-  for (const outcome of outcomes) {
-    for (const survivor of outcome.survivors) {
-      survivorPids.add(survivor);
-    }
-  }
+  const confirmedSurvivorPids = outcomes.flatMap((outcome) => outcome.survivors);
   // A signal WAS issued: always report a real outcome, even with zero
   // survivors — collapsing a clean reap to `null` here would make
   // `stopSidecarLocked`'s "both null -> nothing-to-stop" check misreport a
   // daemon that was actually found and killed.
-  return { sessionName: "sidecar-recorded-port", panePid: null, survivors: [...survivorPids] };
+  return finish(confirmedSurvivorPids, true);
 }
 
 /**

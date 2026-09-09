@@ -26496,7 +26496,7 @@ describe("SessionService", () => {
     expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
   });
 
-  it("859/AC7: reports partial, not nothing-to-stop, when a detached daemon still holds the recorded port with no pane and no sidecarProcs", async () => {
+  it("859/AC7: always probes the recorded port even with no pane and no sidecarProcs, and reports its real result", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -26522,11 +26522,15 @@ describe("SessionService", () => {
       sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 43333 } },
     });
     sidecarTmuxAliveMock.mockResolvedValue(false);
-    // A pid that certainly does not exist: readProcArgv's own real
-    // /proc/<pid>/cmdline read fails, which reapRecordedPortDaemon treats
-    // as a survivor with no signal — cannot-prove is never proof-of-
-    // absence. This is what proves stopSidecar actually PROBED the
-    // recorded port instead of reaching the early return unconditionally.
+    // A pid that certainly does not exist. Before 859/N7 this was reported
+    // as an unconfirmed survivor purely because readProcArgv's real
+    // /proc/<pid>/cmdline read failed; N7's confirmGone last-mile check now
+    // correctly proves it is genuinely gone (never existed) and drops it —
+    // "partial" is no longer the right outcome for THIS pid. What this test
+    // still pins is that stopSidecar actually PROBED the recorded port
+    // (findListenerPidsMock called with it) instead of reaching the early
+    // return unconditionally; 859/AC2/AC2b/AC3b (reap.test.ts) cover the
+    // genuinely-unprovable-survivor case with a real, still-alive pid.
     findListenerPidsMock.mockImplementation(async (port: number) =>
       port === 43333 ? [999_999_998] : [],
     );
@@ -26537,7 +26541,52 @@ describe("SessionService", () => {
     const result = await service.stopSidecar("api-1", "dev");
 
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
-    expect(result.sidecarStop).toEqual({ outcome: "partial", survivors: [999_999_998] });
+    expect(findListenerPidsMock).toHaveBeenCalledWith(43333);
+    expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
+  });
+
+  it("859/N1: reports partial, not a clean reap, when the recorded port's listener probe itself is unavailable (no lsof/ss)", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 43338 } },
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(false);
+    // Neither lsof nor ss produced anything usable: findListenerPids
+    // (the real implementation, not this mock) throws in production. This
+    // rejection is what that throw looks like from the caller's side.
+    findListenerPidsMock.mockRejectedValue(
+      Object.assign(new Error("probe unavailable"), { code: "ENOENT" }),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.stopSidecar("api-1", "dev");
+
+    // Cannot-prove is never proof-of-absence: stop must not claim "reaped"
+    // or "nothing-to-stop" when it never even got an answer for the
+    // recorded port.
+    expect(result.sidecarStop.outcome).toBe("partial");
   });
 
   it("859/AC7: still reports nothing-to-stop when the recorded port has no listener at all", async () => {
@@ -26706,6 +26755,76 @@ describe("SessionService", () => {
     expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
   });
 
+  it("859/N2: a paneless-but-live sibling (escaped daemon, no pane) is still excluded — pane-dead is not sibling-dead", async () => {
+    // Same shape as AC-item2, except api-2's PANE is gone too
+    // (sidecarTmuxAlive false for it) — the exact #811/859 shape where an
+    // isolated-daemon escaped its pane onto the recorded port. Pane
+    // liveness alone would wrongly treat api-2 as dead and let api-1's stop
+    // probe (and potentially signal) api-2's still-genuinely-serving
+    // daemon. api-2's session record stays non-terminal ("running") and the
+    // shared port is occupied (isHostPortFreeMock -> false for it): the
+    // only two facts stopSidecar can actually observe, and they must be
+    // enough to keep the port excluded.
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sharedPort = 43339;
+    const apiOne = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: sharedPort } },
+    };
+    const apiTwo = {
+      id: "api-2",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-2",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/api",
+      tmuxSession: "api-2",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: sharedPort } },
+    };
+    listSessionsMock.mockReturnValue([apiOne, apiTwo]);
+    readSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
+      sessionId === "api-2" ? apiTwo : apiOne,
+    );
+    // Both panes are gone — api-2's daemon has escaped it.
+    sidecarTmuxAliveMock.mockResolvedValue(false);
+    isHostPortFreeMock.mockImplementation(async (port: number) => port !== sharedPort);
+    findListenerPidsMock.mockImplementation(async (port: number) =>
+      port === sharedPort ? [999_999_995] : [],
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.stopSidecar("api-1", "dev");
+
+    expect(findListenerPidsMock).not.toHaveBeenCalledWith(sharedPort);
+    expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
+  });
+
   it("stopSidecar kills the sidecar tmux session and logs the stop event", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -26793,6 +26912,15 @@ describe("SessionService", () => {
     const result = await service.stopSidecar("api-1", "dev");
 
     expect(result.sidecarStop).toEqual({ outcome: "partial", survivors: [777] });
+    // 859/N10: a partial outcome must never log the clean "Stopped sidecar"
+    // line — that phrasing is a lie when a survivor is still alive.
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.sidecar.stopped",
+        message: expect.not.stringContaining("Stopped sidecar"),
+      }),
+    );
     reapSpy.mockRestore();
   });
 

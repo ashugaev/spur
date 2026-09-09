@@ -6258,6 +6258,25 @@ export class SessionService {
           for (const port of collidingPorts) {
             candidatePorts.delete(port);
           }
+          continue;
+        }
+        // 859/N2: the sibling's pane can be gone while its own
+        // isolated-daemon has escaped it and is still genuinely serving on
+        // the recorded port — sidecarTmuxAlive alone can't see that (the
+        // very #811 shape this whole PR exists to close). Pane-dead is not
+        // proof the sibling is dead: if the sibling session record is still
+        // non-terminal AND the port is actually occupied by something, we
+        // cannot tell whether that's the sibling's escaped daemon or this
+        // owner's own — exclude it either way rather than risk this stop
+        // signaling a live sibling's daemon it can never distinguish from
+        // its own (T4 alone does not separate `worktree:false` siblings,
+        // which share `project.path`).
+        if (!isTerminalSessionStatus(otherOwner.status)) {
+          for (const port of collidingPorts) {
+            if (!(await isHostPortFree(port))) {
+              candidatePorts.delete(port);
+            }
+          }
         }
       }
     }
@@ -11316,10 +11335,15 @@ export class SessionService {
       const survivors = [
         ...new Set([...(paneOutcome?.survivors ?? []), ...(portOutcome?.survivors ?? [])]),
       ];
+      // A recorded port whose listener probe itself could not run (859/N1:
+      // neither `lsof` nor `ss` produced a usable result) is never proof
+      // the port is clear — it must never collapse into "reaped", even when
+      // no pid was ever identified to name as a survivor.
+      const unverifiedPorts = portOutcome?.unverifiedPorts ?? [];
       const sidecarStop: SidecarStopReport =
         paneOutcome === null && portOutcome === null
           ? { outcome: "nothing-to-stop" }
-          : survivors.length === 0
+          : survivors.length === 0 && unverifiedPorts.length === 0
             ? { outcome: "reaped" }
             : { outcome: "partial", survivors };
       if (sidecarStop.outcome !== "nothing-to-stop") {
@@ -11327,7 +11351,10 @@ export class SessionService {
           level: "info",
           sessionId,
           projectId: session.project,
-          message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+          message:
+            sidecarStop.outcome === "partial"
+              ? `Sidecar ${sidecarName} for ${sessionId} did not fully stop`
+              : `Stopped sidecar ${sidecarName} for ${sessionId}`,
           details: {
             sidecarName,
             tmuxSession: sidecarTmuxSession(ownerId, sidecarName),

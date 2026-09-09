@@ -917,6 +917,13 @@ describe("reapRecordedPortDaemon", () => {
     }
   });
 
+  // A `confirmGone` last-mile check (859/N7) probes every never-signaled
+  // candidate with `kill(pid, 0)` before reporting it — that is a liveness
+  // probe, not a kill, so asserting "no signal was issued" must ignore
+  // signal-0 calls and only fail on a real terminating signal.
+  const realSignalCalls = (killSpy: ReturnType<typeof vi.spyOn>) =>
+    killSpy.mock.calls.filter((call) => call[1] !== 0 && call[1] !== undefined);
+
   it("859/AC2: the same listener with cli.js OUTSIDE worktreePath is not signaled and is a survivor", async () => {
     // A REAL spawned pid, not a fake number: a T4 regression that lets this
     // candidate through would actually try to signal it, which the killSpy
@@ -937,7 +944,7 @@ describe("reapRecordedPortDaemon", () => {
         readArgv: async (candidate) => (candidate === pid ? argv : null),
       });
       expect(outcome?.survivors).toEqual([pid]);
-      expect(killSpy).not.toHaveBeenCalled();
+      expect(realSignalCalls(killSpy)).toEqual([]);
       expect(() => process.kill(pid, 0)).not.toThrow();
     } finally {
       killSpy.mockRestore();
@@ -965,7 +972,7 @@ describe("reapRecordedPortDaemon", () => {
         readArgv: async (candidate) => (candidate === pid ? argv : null),
       });
       expect(outcome?.survivors).toEqual([pid]);
-      expect(killSpy).not.toHaveBeenCalled();
+      expect(realSignalCalls(killSpy)).toEqual([]);
       expect(() => process.kill(pid, 0)).not.toThrow();
     } finally {
       killSpy.mockRestore();
@@ -991,20 +998,47 @@ describe("reapRecordedPortDaemon", () => {
   });
 
   it("859/AC3b: a listener whose argv cannot be read is a survivor with no signal — distinct from AC3a", async () => {
+    // A REAL spawned pid, not a fake number: 859/N7 routes every
+    // never-signaled candidate through `confirmGone` before reporting it, so
+    // a genuinely nonexistent pid would now be dropped (correctly) as
+    // already-gone, never reaching the survivor list this test pins.
     const worktreePath = await createTempDir("spur-reap-port-ac3b-");
+    const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
+    const pid = must(child.pid, "expected a spawned pid");
     const killSpy = vi.spyOn(process, "kill");
     try {
       const outcome = await reapRecordedPortDaemon({
         ports: [43213],
         worktreePath,
-        findListeners: async (port) => (port === 43213 ? [777_003] : []),
+        findListeners: async (port) => (port === 43213 ? [pid] : []),
         readArgv: async () => null,
       });
-      expect(outcome?.survivors).toEqual([777_003]);
-      expect(killSpy).not.toHaveBeenCalled();
+      expect(outcome?.survivors).toEqual([pid]);
+      expect(realSignalCalls(killSpy)).toEqual([]);
+      expect(() => process.kill(pid, 0)).not.toThrow();
     } finally {
       killSpy.mockRestore();
+      killGroupSafely(pid);
     }
+  });
+
+  it("859/N7: a listed pid that exits before the T4 mismatch is checked is dropped, never named as a survivor", async () => {
+    // The confirmGone last-mile check must actually strip a pid that is
+    // already gone by the time reapRecordedPortDaemon gets around to
+    // deciding it can't prove membership — otherwise stop names a dead pid.
+    const worktreePath = await createTempDir("spur-reap-port-ac-n7-");
+    const outsidePath = "/tmp/spur-elsewhere/v2/dist/cli.js";
+    const argv = daemonArgv(nonDefaultConfigPath, outsidePath);
+    const child = spawn("bash", ["-c", "true"], { stdio: "ignore", detached: true });
+    const pid = must(child.pid, "expected a spawned pid");
+    await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
+    const outcome = await reapRecordedPortDaemon({
+      ports: [43217],
+      worktreePath,
+      findListeners: async (port) => (port === 43217 ? [pid] : []),
+      readArgv: async (candidate) => (candidate === pid ? argv : null),
+    });
+    expect(outcome).toBeNull();
   });
 
   it("859/AC4: a listener whose --config is the default instance config is dropped regardless of the recorded port", async () => {

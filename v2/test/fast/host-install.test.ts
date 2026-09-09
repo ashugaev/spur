@@ -1928,7 +1928,7 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
     expect(fix).toContain("/tmp/spur-isolated-daemon.xyz/config.yaml");
   });
 
-  it("859/AC13: with no serving row, both the detail and fix stay byte-identical to today", () => {
+  it("859/AC13: with no serving row and unresolved liveness, the row and fix both flag the probe as unconfirmed, not genuinely dead", () => {
     const notServingLeaked: LeakedSidecarTree[] = [
       {
         kind: "orphan-daemon",
@@ -1944,6 +1944,34 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
         cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
         port: null,
         liveness: "unknown",
+      },
+    ];
+    const { detail, fix } = formatLeakedSidecarsCheck(notServingLeaked);
+    // "unknown" (the probe itself could not run) must never render like a
+    // completed, negative liveness check — that would tell an operator to
+    // kill a pid that could actually still be serving.
+    expect(detail).toContain("[report-only, liveness unknown — verify manually before killing]");
+    expect(detail).not.toContain("[report-only, verify before killing]");
+    expect(fix).not.toBe("verify each row is genuinely dead, then `kill <pid>` by hand");
+    expect(fix).toContain("could not be confirmed");
+  });
+
+  it("859/AC13: a genuinely not-serving row (probe ran, no match) keeps the byte-identical original wording", () => {
+    const notServingLeaked: LeakedSidecarTree[] = [
+      {
+        kind: "orphan-daemon",
+        rootPid: 902,
+        pgid: 902,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.def/config.yaml daemon start",
+        tree: [902],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.def/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: 4343,
+        liveness: "not-serving",
       },
     ];
     const { detail, fix } = formatLeakedSidecarsCheck(notServingLeaked);

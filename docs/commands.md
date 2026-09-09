@@ -59,7 +59,7 @@ Implicit auto-start (any command that reaches an unreachable daemon outside `dae
 
 A resolved `--config` that isn't the default instance config no longer blocks autostart — a plain host shell running against a non-default config path forks a daemon like any other unreachable-daemon case.
 
-`daemon restart` itself is exempt from the first two terms.
+`daemon restart` itself is exempt from the first term.
 
 ## spawn
 
@@ -153,9 +153,9 @@ Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubunt
 
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
 
-`sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path, `port`, and `liveness`; never signaled by `--reap`, no matter what). A `serving` row still keeps loading and answering from memory — it prints `[report-only, SERVING on <port>]` and a `daemon stop` pointer instead of the verify-before-killing note.
+`sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path, `port`, and `liveness`; never signaled by `--reap`, no matter what). A `serving` row still keeps loading and answering from memory — it prints `[report-only, SERVING on <port>]` and a `daemon stop` pointer instead of the verify-before-killing note. A `liveness: "unknown"` row (the row's own port listener probe could not run, or its instance config didn't resolve) prints `[report-only, liveness unknown — verify manually before killing]` and never shares the plain not-serving row's "genuinely dead" fix text.
 
-`sidecar stop` prints the real outcome, never a claimed stop that did not happen, per `sidecarStop.outcome` ([daemon-api.md](daemon-api.md)): `reaped` (exit `0`), `partial` — names the survivor pids and points at `spur sidecar sweep` (exit `1`), `nothing-to-stop` (exit `0`). `partial`'s survivors can include a detached daemon still holding the sidecar's reserved port, not just a surviving pane process — `stop` always probes the recorded port even when the pane is already gone.
+`sidecar stop` prints the real outcome, never a claimed stop that did not happen, per `sidecarStop.outcome` ([daemon-api.md](daemon-api.md)): `reaped` (exit `0`), `partial` — names the survivor pids and points at `spur sidecar sweep` (exit `1`), `nothing-to-stop` (exit `0`). `partial`'s survivors can include a detached daemon still holding the sidecar's reserved port, not just a surviving pane process — `stop` always probes the recorded port even when the pane is already gone. `partial` with zero named survivors means that port's listener probe itself could not run (neither `lsof` nor `ss` produced a usable result) — never reported as `reaped`.
 
 ### Built-in MCP sidecars
 

@@ -1017,7 +1017,21 @@ async function portConflictCheck(
   ctl: string[],
 ): Promise<HostInstallCheck> {
   const ownPid = getUnitMainPid(ctl, unit);
-  const pids = await findListenerPids(port);
+  // findListenerPids throws when the probe itself is unavailable (neither
+  // `lsof` nor `ss` produced a usable result) — doctor never crashes or
+  // hangs on a missing OS tool, so that case reports "unknown" rather than
+  // taking down the whole check run.
+  let pids: number[];
+  try {
+    pids = await findListenerPids(port);
+  } catch {
+    return {
+      id: `${id}-port-conflict`,
+      ok: false,
+      severity: "warn",
+      detail: `port ${port} expected for ${unit} appears occupied, but the pid holding it could not be determined (lsof/ss unavailable)`,
+    };
+  }
   if (ownPid !== undefined && pids.includes(ownPid)) {
     return {
       id: `${id}-reachable`,
@@ -1511,10 +1525,17 @@ function formatSweepTreeLine(tree: LeakedSidecarTree): string {
     // Serving is a per-row fact, never suppressed: a node process whose
     // checkout was deleted keeps serving from already-loaded code (859/B3),
     // so this label must never carry the kill-verb phrasing on that row.
+    // "unknown" (the port probe itself could not run, or the row's own
+    // instance config didn't resolve) must render distinctly from
+    // "not-serving" — a probe that could not run is not evidence of death,
+    // so it must not share the "verify [...] then kill" phrasing that
+    // implies a completed, negative liveness check.
     const prefix =
       tree.liveness === "serving"
         ? `[report-only, SERVING on ${tree.port}]`
-        : "[report-only, verify before killing]";
+        : tree.liveness === "unknown"
+          ? "[report-only, liveness unknown — verify manually before killing]"
+          : "[report-only, verify before killing]";
     return `  ${prefix} pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  daemon ${tree.configPath}  ${tree.worktreePath}`;
   }
   return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
@@ -1595,13 +1616,22 @@ function formatLeakedSidecarsCheck(leaked: LeakedSidecarTree[]): { detail: strin
     (tree): tree is Extract<LeakedSidecarTree, { kind: "orphan-daemon" }> =>
       tree.kind === "orphan-daemon" && tree.liveness === "serving",
   );
+  // A probe that could not run is not proof of death: "unknown" must never
+  // share the "genuinely dead" fix text with a real not-serving result, or
+  // an operator following it could `kill` a daemon that is actually still
+  // serving but whose port probe merely failed (missing/timed-out lsof/ss).
+  const hasUnknownLiveness = leaked.some(
+    (tree) => tree.kind === "orphan-daemon" && tree.liveness === "unknown",
+  );
   return {
     detail,
     fix: servingRow
       ? `stop each serving orphan daemon with 'spur --config ${servingRow.configPath} daemon stop'; never kill a serving pid blind`
       : hasReapable
         ? "spur sidecar sweep --reap"
-        : "verify each row is genuinely dead, then `kill <pid>` by hand",
+        : hasUnknownLiveness
+          ? "liveness could not be confirmed for at least one row (lsof/ss unavailable) — verify manually before touching it; only `kill <pid>` a row confirmed genuinely dead"
+          : "verify each row is genuinely dead, then `kill <pid>` by hand",
   };
 }
 
