@@ -268,11 +268,12 @@ describe("github source", () => {
     expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
     // Message shape now wraps the classified cause in a GitHubReviewBatchError
     // (batch key + member count), so the raw "gh offline" is a substring, not the
-    // whole tail.
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("failed to poll api-a1b2: GitHub review batch"),
-    );
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("gh offline"));
+    // whole tail. Pin both substrings to the SAME call rather than asserting each
+    // independently, which any warn call could satisfy.
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const warnMessage = logger.warn.mock.calls[0]?.[0] as string;
+    expect(warnMessage).toContain("failed to poll api-a1b2: GitHub review batch");
+    expect(warnMessage).toContain("gh offline");
 
     handle.stop();
   });
@@ -3346,6 +3347,47 @@ describe("github source", () => {
             r: { a0: null },
           },
           errors: [{ message: "Something went wrong while executing your query." }],
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => (entry as { event?: string }).event === "source.poll.error",
+        ),
+      ).toBe(true);
+
+      handle.stop();
+    });
+
+    it.each([
+      ["a bare-string envelope error", () => ["boom"]],
+      ["a pathed error with no message", () => [{ type: "NOT_FOUND", path: ["r", "a0"] }]],
+    ])("keeps the review snapshot when the batch fails on %s", async (_name, buildErrors) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null },
+          },
+          errors: buildErrors(),
         }),
       );
 

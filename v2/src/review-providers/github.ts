@@ -152,17 +152,32 @@ function classifyGhBatchFailure(error: unknown): string {
   return code !== null ? `gh call failed (${code})` : "gh call failed";
 }
 
-// Mirrors gqlErrorsByAlias's own walk (pr-lookup.ts:260-287) but counts the entries
-// that walk drops: an envelope error with a message and either no `path` at all or a
-// `path` that names none of this batch's aliases. Either shape can't be attributed to
-// one member, so it must trigger the batch-level branch rather than vanish silently.
+// Mirrors gqlErrorsByAlias's own walk (pr-lookup.ts:260-287) but counts every entry
+// that walk drops without attributing to an alias: a non-record entry, an entry with
+// no message or an empty one, an entry with no `path` at all, or a `path` that names
+// none of this batch's aliases. Every one of those shapes can't be attributed to one
+// member, so it must trigger the batch-level branch rather than vanish silently.
 function unattributedGraphqlErrorCount(errorsRaw: unknown, aliases: Set<string>): number {
   if (!Array.isArray(errorsRaw)) return 0;
   let count = 0;
   for (const entry of errorsRaw) {
-    if (!isRecord(entry)) continue;
+    // gqlErrorsByAlias's own walk (pr-lookup.ts:266-272) drops a non-record entry and
+    // an entry with an empty/missing message the same way it drops a pathless or
+    // unmatched-path entry: by `continue`ing without attributing it to any alias. All
+    // four shapes are equally unattributable, so the count must catch all four or an
+    // envelope like `errors: ["boom"]` or `{type:"NOT_FOUND", path:["r","a1"]}` with no
+    // message falls through to the per-alias loop and can settle an absent alias
+    // ok/collected:null — the exact silent snapshot-deletion hole this count exists to
+    // close (I2).
+    if (!isRecord(entry)) {
+      count += 1;
+      continue;
+    }
     const message = typeof entry.message === "string" ? entry.message.trim() : "";
-    if (!message) continue;
+    if (!message) {
+      count += 1;
+      continue;
+    }
     const path = entry.path;
     if (!Array.isArray(path)) {
       count += 1;
@@ -191,6 +206,20 @@ function settleBatchAsError(
     results.set(target.session.id, { status: "error", error });
   }
   return results;
+}
+
+// One dead worktree cannot fail the batch: prefer the first member whose worktree
+// still exists on disk over blindly trusting targets[0]. Falls back to targets[0]'s
+// path (possibly "") when none exist. Shared by the main batch call AND the three
+// pagination legs below — a dead targets[0] worktree must not fail the paginating
+// member's requests either, once the batch call itself already resolved a live one.
+function resolveBatchWorktreeCwd(targets: GitHubBatchTarget[]): string {
+  return (
+    targets.find((target) => target.session.worktreePath && existsSync(target.session.worktreePath))
+      ?.session.worktreePath ??
+    targets[0]?.session.worktreePath ??
+    ""
+  );
 }
 
 export function reviewCommentSeenKey(id: number | string): string {
@@ -906,6 +935,7 @@ async function paginateReviewThreads(
   repository: Record<string, unknown>,
   cursors: Map<string, string>,
   failures: Map<string, string>,
+  cwd: string,
 ): Promise<void> {
   const resumedPullRequests = new Set(
     [...cursors.keys()].filter((key) => key.startsWith("pull-request:")),
@@ -964,7 +994,7 @@ async function paginateReviewThreads(
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
     try {
-      const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+      const envelope = await requestGraphqlEnvelope(cwd, args);
       assertGraphqlEnvelopeSucceeded(envelope, "GitHub review thread pagination");
       const data = isRecord(envelope.data) ? envelope.data : null;
       if (!data) throw new Error("invalid GitHub review thread pagination response");
@@ -1036,6 +1066,7 @@ async function paginateReviewThreadComments(
   sourceId: string,
   cursors: Map<string, string>,
   failures: Map<string, string>,
+  cwd: string,
 ): Promise<void> {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const pullRequests = new Map<string, Record<string, unknown>>();
@@ -1128,7 +1159,7 @@ async function paginateReviewThreadComments(
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
     try {
-      const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+      const envelope = await requestGraphqlEnvelope(cwd, args);
       assertGraphqlEnvelopeSucceeded(envelope, "GitHub review comment pagination");
       const data = isRecord(envelope.data) ? envelope.data : null;
       if (!data) throw new Error("invalid GitHub review comment pagination response");
@@ -1218,6 +1249,7 @@ async function paginatePullRequestSignals(
   repository: Record<string, unknown>,
   cursors: Map<string, string>,
   failures: Map<string, string>,
+  cwd: string,
 ): Promise<void> {
   const pending: PullRequestSignalPage[] = [];
   for (const { alias, target } of aliases) {
@@ -1267,7 +1299,7 @@ async function paginatePullRequestSignals(
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
     try {
-      const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+      const envelope = await requestGraphqlEnvelope(cwd, args);
       assertGraphqlEnvelopeSucceeded(envelope, "GitHub pull request signal pagination");
       const data = isRecord(envelope.data) ? envelope.data : null;
       if (!data) throw new Error("invalid GitHub pull request signal pagination response");
@@ -1368,15 +1400,10 @@ async function runReviewRepoBatch(
 
   const batchKey = `${slug.host}/${slug.owner}/${slug.name}`;
   const dedupeKey = `${batchKey}:${bound ? "bound" : "unbound"}`;
-  // One dead worktree cannot fail the batch: prefer the first member whose
-  // worktree still exists on disk over blindly trusting targets[0]. Falls back to
-  // targets[0]'s path (possibly "") when none exist — unchanged behavior, now
-  // classified and reported once instead of smeared.
-  const cwd =
-    targets.find((target) => target.session.worktreePath && existsSync(target.session.worktreePath))
-      ?.session.worktreePath ??
-    targets[0]?.session.worktreePath ??
-    "";
+  // Resolved once and reused for the main batch call AND every pagination leg below,
+  // so a dead targets[0] worktree can't fail pagination even after the batch call
+  // itself already succeeded against a live sibling's cwd.
+  const cwd = resolveBatchWorktreeCwd(targets);
 
   let envelope: Record<string, unknown>;
   try {
@@ -1425,7 +1452,7 @@ async function runReviewRepoBatch(
   if (invalidAliases.size === 0) {
     const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
     const paginationFailures = new Map<string, string>();
-    await paginateReviewThreads(targets, aliases, repository, cursors, paginationFailures);
+    await paginateReviewThreads(targets, aliases, repository, cursors, paginationFailures, cwd);
     await paginateReviewThreadComments(
       targets,
       aliases,
@@ -1435,8 +1462,16 @@ async function runReviewRepoBatch(
       sourceId,
       cursors,
       paginationFailures,
+      cwd,
     );
-    await paginatePullRequestSignals(targets, aliases, repository, cursors, paginationFailures);
+    await paginatePullRequestSignals(
+      targets,
+      aliases,
+      repository,
+      cursors,
+      paginationFailures,
+      cwd,
+    );
     // Commit cursors atomically: a failure partway through leaves later legs (or a
     // resumed page within the failing leg) with progress the failed leg's caller
     // never confirmed landed. Only a clean pass (no failures at all) persists —
@@ -1445,8 +1480,7 @@ async function runReviewRepoBatch(
     // functions no longer throw.
     if (paginationFailures.size === 0) {
       writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
-    }
-    if (paginationFailures.size > 0) {
+    } else {
       const idToAlias = new Map<string, string>();
       for (const { alias, target } of aliases) {
         const selected = selectSummaryAndNode(repository[alias], target.number !== null);
