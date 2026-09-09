@@ -8,6 +8,9 @@ import {
   SLOT_TOOL_NAME,
   AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
+  applySlotsUpdateWithResult,
+  applyNormalizedSlotsUpdate,
+  MANUAL_TITLE_LOCK_MESSAGE,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
   TODO_TOOL_NAME,
@@ -53,6 +56,7 @@ describe("session slots", () => {
       }),
     ).toEqual({
       clearTitle: false,
+      source: "agent",
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
       unlinkLabels: [],
       tags: [],
@@ -60,7 +64,7 @@ describe("session slots", () => {
     });
   });
 
-  it("removes title and links when explicitly cleared", () => {
+  it("removes title and links when explicitly cleared, recording the clearing source", () => {
     const updated = applySlotsUpdate(
       {
         title: "Current task",
@@ -72,7 +76,7 @@ describe("session slots", () => {
       },
     );
 
-    expect(updated).toBeUndefined();
+    expect(updated).toEqual({ titleSource: "agent", links: [] });
   });
 
   it("rejects invalid link labels and empty updates", () => {
@@ -100,7 +104,101 @@ describe("session slots", () => {
 
   it("overwrites title without setTitleIfAbsent", () => {
     const updated = applySlotsUpdate({ title: "Old", links: [] }, { title: "New" });
-    expect(updated?.title).toBe("New");
+    expect(updated).toMatchObject({ title: "New", titleSource: "agent" });
+  });
+
+  it("manual title updates lock title and can overwrite a locked manual title", () => {
+    const first = applySlotsUpdate(undefined, { title: "Manual title", source: "manual" });
+    expect(first).toEqual({
+      title: "Manual title",
+      titleSource: "manual",
+      links: [],
+    });
+
+    const second = applySlotsUpdate(first, { title: "Manual title revised", source: "manual" });
+    expect(second).toEqual({
+      title: "Manual title revised",
+      titleSource: "manual",
+      links: [],
+    });
+  });
+
+  it("manual title clear keeps an empty locked slot", () => {
+    const updated = applySlotsUpdate(
+      {
+        title: "Manual title",
+        titleSource: "manual",
+        links: [],
+      },
+      { clearTitle: true, source: "manual" },
+    );
+
+    expect(updated).toEqual({
+      titleSource: "manual",
+      links: [],
+    });
+  });
+
+  it("agent clear keeps titleSource agent", () => {
+    const updated = applySlotsUpdate(
+      {
+        title: "Agent title",
+        titleSource: "agent",
+        links: [],
+      },
+      { clearTitle: true },
+    );
+
+    expect(updated).toEqual({
+      titleSource: "agent",
+      links: [],
+    });
+  });
+
+  it("blocks default agent title edits on manually locked titles while applying links", () => {
+    const applied = applySlotsUpdateWithResult(
+      {
+        title: "Manual title",
+        titleSource: "manual",
+        links: [{ label: "tracker", url: "https://tracker.example.com/TASK-1" }],
+      },
+      {
+        title: "Agent title",
+        links: [{ label: "pr", url: "https://github.com/org/repo/pull/10" }],
+      },
+    );
+
+    expect(applied.result).toEqual({
+      titleResult: "blocked",
+      message: MANUAL_TITLE_LOCK_MESSAGE,
+    });
+    expect(applied.slots).toEqual({
+      title: "Manual title",
+      titleSource: "manual",
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/TASK-1" },
+        { label: "pr", url: "https://github.com/org/repo/pull/10" },
+      ],
+    });
+  });
+
+  it("blocks title-if-absent and clear-title on manually locked titles", () => {
+    const current = {
+      title: "Manual title",
+      titleSource: "manual" as const,
+      links: [],
+    };
+
+    expect(
+      applySlotsUpdateWithResult(current, {
+        title: "Agent title",
+        setTitleIfAbsent: true,
+      }).result,
+    ).toEqual({ titleResult: "blocked", message: MANUAL_TITLE_LOCK_MESSAGE });
+    expect(applySlotsUpdateWithResult(current, { clearTitle: true }).result).toEqual({
+      titleResult: "blocked",
+      message: MANUAL_TITLE_LOCK_MESSAGE,
+    });
   });
 
   it("treats empty current title as absent for setTitleIfAbsent", () => {
@@ -117,12 +215,36 @@ describe("session slots", () => {
     );
   });
 
+  it("setTitleIfAbsent is a once-only initializer, even after a clear leaves no title", () => {
+    const cleared = { titleSource: "agent" as const, links: [] };
+    const updated = applySlotsUpdate(cleared, { title: "Second", setTitleIfAbsent: true });
+    expect(updated).toEqual({ titleSource: "agent", links: [] });
+  });
+
+  it("applyNormalizedSlotsUpdate does not re-validate", () => {
+    const applied = applyNormalizedSlotsUpdate(undefined, {
+      title: "Not a valid raw label but pre-normalized already",
+      clearTitle: false,
+      source: "manual",
+      links: [{ label: "not valid raw", url: "https://example.com" }],
+      unlinkLabels: [],
+      tags: [],
+      untags: [],
+    });
+    expect(applied.slots).toEqual({
+      title: "Not a valid raw label but pre-normalized already",
+      titleSource: "manual",
+      links: [{ label: "not valid raw", url: "https://example.com" }],
+    });
+  });
+
   it("injects helper instructions only once", () => {
     const prompt = withSessionSlotInstructions("Fix the build");
     expect(prompt).toContain(SLOT_TOOL_NAME);
-    expect(prompt).toContain("Set the session title once at task start");
+    expect(prompt).toContain("Suggest a session title once at task start");
     expect(prompt).toContain("--title-if-absent");
     expect(prompt).toContain("describe the whole task end-to-end");
+    expect(prompt).toContain("do not attempt title edits again");
     expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(prompt).toContain("spur agent-issue log");

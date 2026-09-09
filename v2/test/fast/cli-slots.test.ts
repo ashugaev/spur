@@ -134,4 +134,27 @@ describe("slots --list-tags CLI", () => {
     );
     expect(postJsonMock).not.toHaveBeenCalled();
   });
+
+  it("falls back to a generic success line when the daemon reply carries no slotUpdate (T8)", async () => {
+    postJsonMock.mockResolvedValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      branch: "spur/api-1",
+      status: "running",
+      state: "waiting",
+      worktree: true,
+      workspaceExists: true,
+      runtimeAlive: true,
+      lastActivityAt: "2026-06-15T10:00:00.000Z",
+      services: [],
+      sidecars: [],
+      // No slotUpdate: simulates an older daemon that predates the field.
+    });
+
+    await parseCli(["slots", "--session", "api-1", "--title", "New title"]);
+
+    const output = writeStdoutMock.mock.calls.map((call) => call[0] as string).join("\n");
+    expect(output).toContain("Updated slots for api-1.");
+  });
 });

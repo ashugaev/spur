@@ -487,6 +487,67 @@ test.describe("S1: Session detail header", () => {
     await expect(page).toHaveTitle("Detail task title");
   });
 
+  test("manual title edit and clear update the session title", async ({ page }) => {
+    let currentSession = makeWorkingSession({
+      id: "detail-s1-manual-title",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    const titleRequests: unknown[] = [];
+
+    await page.route(`**/api/sessions/${currentSession.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(currentSession),
+      });
+    });
+    await page.route(`**/api/sessions/${currentSession.id}/title`, async (route) => {
+      const payload = route.request().postDataJSON() as { title: string | null };
+      titleRequests.push(payload);
+      currentSession = {
+        ...currentSession,
+        slots:
+          payload.title === null
+            ? { titleSource: "manual", links: [] }
+            : { title: payload.title, titleSource: "manual", links: [] },
+      };
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(currentSession),
+      });
+    });
+
+    await page.goto(`/sessions/${currentSession.id}`);
+    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByLabel("Session title").fill("Manual title");
+    await page.getByRole("button", { name: /^save$/i }).click();
+
+    await expect(page.locator("h1")).toContainText("Manual title");
+    expect(titleRequests).toContainEqual({ title: "Manual title" });
+    await expect(page.getByText("Set manually — agents cannot change it.")).toBeVisible();
+
+    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByRole("button", { name: /^clear$/i }).click();
+
+    await expect(page.locator("h1")).toContainText("Implement the feature");
+    expect(titleRequests).toContainEqual({ title: null });
+  });
+
+  test("edit title opens empty on a derived title", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-derived-title",
+      prompt: "Implement the derived-title feature end to end",
+    });
+    await mockSessionDetail(page, session);
+
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.locator("h1")).toContainText("Implement the derived-title feature");
+
+    await page.getByRole("button", { name: /edit title/i }).click();
+    await expect(page.getByLabel("Session title")).toHaveValue("");
+  });
+
   test("activity dot visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-4" });
     await mockSessionDetail(page, session);

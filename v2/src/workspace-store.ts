@@ -15,7 +15,6 @@ import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from 
 export interface WorkspaceState {
   slots?: SessionSlots;
   pr?: SessionPrBinding;
-  manualTitleOverride?: true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -36,9 +35,11 @@ function parseSlots(value: unknown): SessionSlots | undefined {
   );
   const title = value["title"];
   const tags = value["tags"];
+  const titleSource = value["titleSource"];
   return {
     ...(typeof title === "string" ? { title } : {}),
     links,
+    ...(titleSource === "manual" || titleSource === "agent" ? { titleSource } : {}),
     ...(Array.isArray(tags)
       ? { tags: tags.filter((tag): tag is string => typeof tag === "string") }
       : {}),
@@ -66,13 +67,17 @@ function readWorkspaceStateFile(path: string): WorkspaceState | null {
     return null;
   }
   if (!isRecord(parsed)) return null;
-  const slots = parseSlots(parsed["slots"]);
+  let slots = parseSlots(parsed["slots"]);
   const pr = parsePrBinding(parsed["pr"]);
-  const manualTitleOverride = parsed["manualTitleOverride"] === true;
+  // Read-path upgrade for records written before `ac484aa0f` (the standalone
+  // `manualTitleOverride` marker) was folded into `slots.titleSource`. A live
+  // workspace file may still carry the legacy marker with no `titleSource`.
+  if (parsed["manualTitleOverride"] === true && !slots?.titleSource) {
+    slots = { ...(slots ?? { links: [] }), titleSource: "agent" };
+  }
   return {
     ...(slots ? { slots } : {}),
     ...(pr ? { pr } : {}),
-    ...(manualTitleOverride ? { manualTitleOverride: true } : {}),
   };
 }
 
@@ -96,7 +101,6 @@ export function writeWorkspaceState(
   const payload: WorkspaceState = {
     ...(state.slots ? { slots: state.slots } : {}),
     ...(state.pr ? { pr: state.pr } : {}),
-    ...(state.manualTitleOverride ? { manualTitleOverride: true } : {}),
   };
   writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + "\n", "utf-8");
   renameSync(tmpPath, path);
