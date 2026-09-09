@@ -664,4 +664,53 @@ describe("BackendConnectionProvider", () => {
     expect(result.current.phase).toBe("connected");
     expect(result.current.version).toBeNull();
   });
+
+  it("keeps a single heartbeat interval across a version change", async () => {
+    // reportedVersion is deliberately not a dependency of the heartbeat
+    // effect (see BackendConnectionProvider): a version change must not tear
+    // the interval down and recreate it.
+    let version = "1.4.2";
+    mockFetchResults(
+      () => true,
+      () => version,
+    );
+
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    const clearIntervalSpy = vi.spyOn(global, "clearInterval");
+    const { result } = renderProvider();
+    await flushMicrotasks();
+    expect(result.current.version).toBe("1.4.2");
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+
+    version = "1.5.0";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    expect(result.current.version).toBe("1.5.0");
+
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    expect(clearIntervalSpy).not.toHaveBeenCalled();
+  });
+
+  it("clears the heartbeat interval on unmount and probes no further", async () => {
+    const fetchSpy = mockFetchResults(
+      () => true,
+      () => "1.4.2",
+    );
+
+    vi.useFakeTimers();
+    const clearIntervalSpy = vi.spyOn(global, "clearInterval");
+    const { unmount } = renderProvider();
+    await flushMicrotasks();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 3);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
 });
