@@ -345,6 +345,7 @@ import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  isRespawnableStatus,
   isStaleParked,
   isTerminalSessionStatus,
   type AdmissionCapSource,
@@ -1584,6 +1585,25 @@ export function isRestorableSession(
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
+}
+
+// Pure: restore's refusal hint (session-service.ts's only
+// SessionNotRestorableError throw site), derived from the two gates it must
+// not contradict rather than the inverted !isTerminalSessionStatus check
+// that shipped both actions for the wrong statuses. force_kill is
+// meaningless exactly where isTerminalSessionStatus is true (kill throws on
+// "completed", no-ops on "killed"); respawn is exactly isRespawnableStatus.
+export function restoreRecoveryActions(
+  status: SessionRecord["status"],
+): SessionNotRestorablePayload["availableActions"] {
+  const availableActions: SessionNotRestorablePayload["availableActions"] = [];
+  if (!isTerminalSessionStatus(status)) {
+    availableActions.push("force_kill");
+  }
+  if (isRespawnableStatus(status)) {
+    availableActions.push("respawn");
+  }
+  return availableActions;
 }
 
 // Pure park predicate, exported for direct unit coverage the same way
@@ -12368,10 +12388,7 @@ export class SessionService {
           workspaceExists: current.workspaceExists,
         },
       });
-      const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
-      if (!isTerminalSessionStatus(current.status)) {
-        availableActions.push("respawn");
-      }
+      const availableActions = restoreRecoveryActions(current.status);
       throw new SessionNotRestorableError(
         sessionId,
         `Session ${sessionId} is not restorable`,
@@ -12792,8 +12809,31 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (session.status !== "completed") {
+      // enrich() can persist a write here via three reconcilers it calls
+      // unconditionally (classifySessionRecord, ~14743-14753 below):
+      // reconcileUnexpectedStop (running/spawning), reconcileStaleStoppedSession
+      // (stopped), reconcileStaleErroredSession (errored) — each fires only
+      // when the live-pane evidence contradicts the persisted status. This is
+      // the same enrich() restore()'s own refusal (12175) and the dashboard
+      // cache tick already call. Accepted so the message never names
+      // restore/respawn for a status their own gates would reject (the bug
+      // this refusal exists to avoid); the happy path above never reaches
+      // here, so it costs nothing extra.
+      const view = await this.enrich(session);
+      const restorable = isRestorableSession(view);
+      const respawnable = isRespawnableStatus(view.status);
+      const restoreClause = `\`spur restore ${sessionId}\` resumes it with its conversation`;
+      const respawnClause = `\`spur respawn ${sessionId}\` starts a fresh session (conversation not carried over)`;
+      const guidance =
+        restorable && respawnable
+          ? `${restoreClause}; ${respawnClause}`
+          : restorable
+            ? restoreClause
+            : respawnable
+              ? respawnClause
+              : `\`spur kill ${sessionId} --force\`, then \`spur respawn ${sessionId}\``;
       throw new SessionNotReopenableError(
-        `Session ${sessionId} is ${session.status}, not completed — \`spur restore ${sessionId}\` resumes it with its conversation; \`spur respawn ${sessionId}\` starts a fresh session (conversation not carried over)`,
+        `Session ${sessionId} is ${session.status}, not completed — ${guidance}`,
       );
     }
 
@@ -13169,11 +13209,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (
-      session.status !== "completed" &&
-      session.status !== "killed" &&
-      session.status !== "errored"
-    ) {
+    if (!isRespawnableStatus(session.status)) {
       throw new Error(
         `Session ${sessionId} is not in a terminal state (status: ${session.status})`,
       );

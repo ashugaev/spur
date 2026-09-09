@@ -916,6 +916,15 @@ export function isTerminalSessionStatus(
   return status === "completed" || status === "killed";
 }
 
+// respawn()'s own gate. One definition consumed by the hint builders in
+// session-service.ts and cli.ts so a hint can never name respawn for a
+// status respawn's own throw would reject.
+export function isRespawnableStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" | "errored" {
+  return status === "completed" || status === "killed" || status === "errored";
+}
+
 export interface ServiceInstanceRecord {
   sessionId: string;
   project: string;

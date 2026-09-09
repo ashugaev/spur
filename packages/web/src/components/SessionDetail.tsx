@@ -3682,6 +3682,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {recoverPayload ? (
             <RecoverActionDialog
               busy={busyAction !== null}
+              canForceKill={!isTerminalSession(session)}
               onCancel={() => setRecoverPayload(null)}
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
