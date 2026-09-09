@@ -115,6 +115,7 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarStopResponse,
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
@@ -2280,10 +2281,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
         );
       }
-      const payload = (await response.json()) as SpurSessionView;
+      const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
+      if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        const { survivors, unverifiedPorts = [] } = payload.sidecarStop;
+        showErrorToast(
+          survivors.length === 0 && unverifiedPorts.length > 0
+            ? `Stopped sidecar ${sidecarName}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Run \`spur sidecar sweep\`.`
+            : `Stopped sidecar ${sidecarName}, but ${survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+        );
+      }
     } catch (sidecarError) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {

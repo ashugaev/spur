@@ -1023,6 +1023,13 @@ export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmitt
   deskGroupMembers?: SessionDeskMember[];
 }
 
+export type SidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
+export type SidecarStopView = SessionView & { sidecarStop: SidecarStopReport };
+
 // Dropped from the list projection because they are the byte-heavy or
 // filesystem-walk-backed fields: `artifacts`/`artifactsTruncated` require a
 // per-session recursive readdir+stat walk, `stateHistory` and the prompt

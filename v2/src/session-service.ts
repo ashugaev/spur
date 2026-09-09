@@ -57,6 +57,7 @@ import {
   collectTree,
   confirmReaps,
   reapRecordedIdentity,
+  reapRecordedPortDaemon,
   reapSidecarPane,
   readProcessStarttime,
   signalSidecarPane,
@@ -418,6 +419,8 @@ import {
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
+  type SidecarStopReport,
+  type SidecarStopView,
   type SessionListItemView,
   type SessionStateTransition,
   type SubscribeSessionStatesRequest,
@@ -2625,16 +2628,28 @@ export class SessionService {
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
   private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
+  // process trees" over the real HTTP /sidecars/sweep route would
+  // otherwise scan the real host process table — on a host with even one
+  // leftover orphan isolated daemon, that turns an unrelated empty-sandbox
+  // assertion host-state-dependent, the exact defect class B4 exists to
+  // remove. Never set outside a test; a production `startServer` never
+  // passes it.
+  private readonly sidecarSnapshotOverride: (() => Promise<ProcSnapshot>) | undefined;
 
   constructor(
     configPath?: string,
     startedAt = nowIso(),
-    options: { deferBackgroundLoops?: boolean } = {},
+    options: {
+      deferBackgroundLoops?: boolean;
+      sidecarSnapshot?: () => Promise<ProcSnapshot>;
+    } = {},
   ) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
       skipInvalid: false,
     });
     this.bootstrapConfigPath = bootstrap.config.configPath;
+    this.sidecarSnapshotOverride = options.sidecarSnapshot;
     this.startedAt = startedAt;
     mkdirSync(bootstrap.config.dataDir, { recursive: true });
     mkdirSync(bootstrap.config.worktreeDir, { recursive: true });
@@ -6229,6 +6244,108 @@ export class SessionService {
         );
       }
     }
+  }
+
+  // spur#859 B1's recorded-port kill term (stopSidecarLocked, below) assumes
+  // T1 — the recorded port — uniquely identifies this owner's own
+  // reservation. `refuseOverlappingCrossWorkspaceSidecar` above proves that
+  // premise false: it deliberately TOLERATES a stale cross-workspace
+  // duplicate port recording (measured 29 on this host) whenever the other
+  // holder isn't live or the port is free, to preserve a legitimate
+  // self-heal. So a stop against a stale record CAN find a live sibling
+  // workspace's real daemon still listening on the same recorded port
+  // number — sharpest for two `worktree:false` siblings, where T4 also
+  // collapses to the shared `project.path` and admits it.
+  //
+  // Excludes any port a DIFFERENT, currently-live sibling sidecar also
+  // records, before that port ever reaches the kill term. An ambiguous
+  // port is treated as unprovable — not signaled, not even probed for a
+  // survivor — the same "report-only is the default" direction pushed one
+  // step earlier: safer to say nothing about a port than to name a pid
+  // that may belong to a live sibling's own daemon.
+  //
+  // D3: excluding a port is not the same as knowing it is clear. A port
+  // excluded because the sibling's own pane is confirmed alive is genuinely
+  // accounted for — no ambiguity to report. A port excluded because the
+  // sibling is merely non-terminal (not proven alive via a live pane) is
+  // returned separately as `ambiguousPorts`: whether it is worth reporting
+  // depends on whether it is STILL occupied after this owner's own kill
+  // runs, which this method cannot know — it runs before that kill. ND-1:
+  // sampling isHostPortFree here, before the caller's own reap, mistakes
+  // this owner's own live sidecar (still holding its own recorded port at
+  // the moment of this call) for the ambiguous sibling's occupant, turning
+  // every fully-successful stop that also has a stale non-terminal sibling
+  // recording into a false `partial`. The caller re-checks `ambiguousPorts`
+  // for real occupancy AFTER the reap, when the owner's own hold (if any)
+  // is already gone.
+  private async excludeAmbiguousCrossWorkspacePorts(
+    owner: SessionRecord,
+    ownerId: string,
+    ports: readonly number[],
+  ): Promise<{ ports: number[]; ambiguousPorts: number[] }> {
+    if (ports.length === 0) {
+      return { ports: [], ambiguousPorts: [] };
+    }
+    const candidatePorts = new Set(ports);
+    const ambiguousPorts = new Set<number>();
+    for (const other of listSessions(this.config.dataDir)) {
+      if (candidatePorts.size === 0) {
+        break;
+      }
+      if (other.project !== owner.project) {
+        continue;
+      }
+      let otherProject: ProjectConfig | undefined;
+      try {
+        otherProject = this.resolveProjectForSession(other);
+      } catch {
+        continue;
+      }
+      for (const otherSidecarName of sessionSidecarNames(other, otherProject)) {
+        const otherOwnerId = this.sidecarOwnerIdForName(other, otherProject, otherSidecarName);
+        if (otherOwnerId === ownerId) {
+          continue;
+        }
+        const otherOwner =
+          otherOwnerId === other.id ? other : readSession(this.config.dataDir, otherOwnerId);
+        const otherRecordedPorts = otherOwner?.sidecarPorts?.[otherSidecarName];
+        if (!otherRecordedPorts) {
+          continue;
+        }
+        const collidingPorts = Object.values(otherRecordedPorts).filter((port) =>
+          candidatePorts.has(port),
+        );
+        if (collidingPorts.length === 0) {
+          continue;
+        }
+        if (await sidecarTmuxAlive(otherOwnerId, otherSidecarName)) {
+          for (const port of collidingPorts) {
+            candidatePorts.delete(port);
+          }
+          continue;
+        }
+        // 859/N2: the sibling's pane can be gone while its own
+        // isolated-daemon has escaped it and is still genuinely serving on
+        // the recorded port — sidecarTmuxAlive alone can't see that (the
+        // very #811 shape this whole PR exists to close). Pane-dead is not
+        // proof the sibling is dead: if the sibling session record is still
+        // non-terminal AND the port is actually occupied by something, we
+        // cannot tell whether that's the sibling's escaped daemon or this
+        // owner's own — exclude it either way rather than risk this stop
+        // signaling a live sibling's daemon it can never distinguish from
+        // its own (T4 alone does not separate `worktree:false` siblings,
+        // which share `project.path`).
+        if (!isTerminalSessionStatus(otherOwner.status)) {
+          for (const port of collidingPorts) {
+            if (!(await isHostPortFree(port))) {
+              candidatePorts.delete(port);
+              ambiguousPorts.add(port);
+            }
+          }
+        }
+      }
+    }
+    return { ports: [...candidatePorts], ambiguousPorts: [...ambiguousPorts] };
   }
 
   private async ensureSidecarReservation(
@@ -11149,8 +11266,9 @@ export class SessionService {
   // slot-unlink/URL-probe-abort logic. Returns the signal outcome (or null
   // when there was nothing to signal) so a caller that logs its own
   // survivors/rss event, like the reap pass, does not need a second probe;
-  // stopSidecar itself still just logs its own fixed-shape event and ignores
-  // the return. Never gates on sidecarTmuxAlive alone (a dead pane and an
+  // stopSidecar itself maps the return into its own `sidecarStop` outcome
+  // (nothing-to-stop/reaped/partial) rather than logging a fixed-shape
+  // event. Never gates on sidecarTmuxAlive alone (a dead pane and an
   // absent tmux session are exactly the states a leaked tree lives in):
   // falls through to the recorded `sidecarProcs` identity when the tmux
   // session is gone.
@@ -11217,13 +11335,16 @@ export class SessionService {
     }
   }
 
-  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async stopSidecar(sessionId: string, sidecarName: string): Promise<SidecarStopView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.stopSidecarLocked(sessionId, sidecarName),
     );
   }
 
-  private async stopSidecarLocked(sessionId: string, sidecarName: string): Promise<SessionView> {
+  private async stopSidecarLocked(
+    sessionId: string,
+    sidecarName: string,
+  ): Promise<SidecarStopView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -11252,32 +11373,87 @@ export class SessionService {
     suppressed.add(sidecarName);
     this.healTaskSkipNames.get(sessionId)?.add(sidecarName);
     try {
-      // A dead pane or an absent tmux session with no recorded identity means
-      // there is genuinely nothing left to reap.
+      // Captured BEFORE any kill: killSidecarAndUnlinkSlot can unlink this
+      // sidecar's slot/identity, and the recorded-port term below (spur#859
+      // B1) is the ONLY thing that can see a detached daemon that already
+      // took over this port — the isolated-daemon sidecar's own pane
+      // `exec`s into its daemon, so once a forked daemon takes the port the
+      // pane is gone and the old early-return here reported a lie
+      // (`nothing-to-stop`) without ever probing the port.
       const owner = readSession(this.config.dataDir, ownerId);
+      const recordedPortsRaw = Object.values(owner?.sidecarPorts?.[sidecarName] ?? {});
+      // T1 (the recorded port) is not proof of exclusive ownership on its
+      // own — see excludeAmbiguousCrossWorkspacePorts. Never signal, or
+      // even probe, a port a live sibling workspace also records.
+      const { ports: recordedPorts, ambiguousPorts } = owner
+        ? await this.excludeAmbiguousCrossWorkspacePorts(owner, ownerId, recordedPortsRaw)
+        : { ports: recordedPortsRaw, ambiguousPorts: [] as number[] };
       const alive = await sidecarTmuxAlive(ownerId, sidecarName);
-      if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
-        if (clearsWorkspaceReplay) {
-          this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
-        }
-        return await this.enrich(session);
-      }
-
-      await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
+      const paneOutcome =
+        alive || owner?.sidecarProcs?.[sidecarName]
+          ? await this.killSidecarAndUnlinkSlot(ownerId, sidecarName)
+          : null;
+      const portOutcome = await reapRecordedPortDaemon({
+        ports: recordedPorts,
+        worktreePath: owner?.worktreePath ?? "",
+      });
       if (clearsWorkspaceReplay) {
         this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
       }
-      this.logEvent("session.sidecar.stopped", {
-        level: "info",
-        sessionId,
-        projectId: session.project,
-        message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
-        details: {
-          sidecarName,
-          tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
-        },
-      });
-      return await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+      // ND-1: `ambiguousPorts` was excluded from the reap above purely on
+      // recorded-ownership ambiguity, before this owner's own kill could run
+      // — occupancy is re-checked only now, after the kill, so a port this
+      // owner's own sidecar was holding at the time of the earlier exclusion
+      // reads as free here and never gets reported. Only a port still
+      // occupied AFTER this owner's own reap is genuine evidence of a
+      // sibling's daemon.
+      const excludedOccupied: number[] = [];
+      for (const port of ambiguousPorts) {
+        if (!(await isHostPortFree(port))) {
+          excludedOccupied.push(port);
+        }
+      }
+      const survivors = [
+        ...new Set([...(paneOutcome?.survivors ?? []), ...(portOutcome?.survivors ?? [])]),
+      ];
+      // A recorded port whose listener probe itself could not run (859/N1:
+      // neither `lsof` nor `ss` produced a usable result), or that was
+      // excluded from the probe entirely because a non-terminal sibling
+      // makes ownership ambiguous and the port is still proven occupied
+      // after this owner's own reap (D3/859/N2/ND-1 follow-up), is never
+      // proof the port is clear — it must never collapse into "reaped", nor
+      // disappear into "nothing-to-stop", even when no pid was ever
+      // identified to name as a survivor.
+      const unverifiedPorts = [
+        ...new Set([...(portOutcome?.unverifiedPorts ?? []), ...excludedOccupied]),
+      ];
+      const sidecarStop: SidecarStopReport =
+        paneOutcome === null && portOutcome === null && unverifiedPorts.length === 0
+          ? { outcome: "nothing-to-stop" }
+          : survivors.length === 0 && unverifiedPorts.length === 0
+            ? { outcome: "reaped" }
+            : {
+                outcome: "partial",
+                survivors,
+                ...(unverifiedPorts.length > 0 ? { unverifiedPorts } : {}),
+              };
+      if (sidecarStop.outcome !== "nothing-to-stop") {
+        this.logEvent("session.sidecar.stopped", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message:
+            sidecarStop.outcome === "partial"
+              ? `Sidecar ${sidecarName} for ${sessionId} did not fully stop`
+              : `Stopped sidecar ${sidecarName} for ${sessionId}`,
+          details: {
+            sidecarName,
+            tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
+          },
+        });
+      }
+      const view = await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+      return { ...view, sidecarStop };
     } finally {
       const current = this.suppressedSidecarHeals.get(sessionId);
       if (current) {
@@ -11299,7 +11475,12 @@ export class SessionService {
     if (!assembled) {
       return { supported: false, leaked: [], reaped: [] };
     }
-    return sweepSidecars({ ...assembled, reap });
+    return sweepSidecars({
+      ...assembled,
+      reap,
+      selfConfigPath: this.bootstrapConfigPath,
+      ...(this.sidecarSnapshotOverride ? { takeSnapshot: this.sidecarSnapshotOverride } : {}),
+    });
   }
 
   // Signals every torn-down sidecar's pane first, then confirms the whole
