@@ -526,7 +526,7 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
     expect(result.leaked.filter((tree) => tree.kind === "orphan-daemon")).toEqual([]);
   });
 
-  it("859/AC12: reports port from its own instance config and liveness serving/not-serving/unknown", async () => {
+  it("859/AC12+D4: reports port from its own instance config and liveness serving/not-serving/unknown, distinguishing zero-listeners from probe-unavailable", async () => {
     const dir = await createTempDir("spur-reap-liveness-");
     const servingConfigPath = join(dir, "serving.yaml");
     writeFileSync(servingConfigPath, "server:\n  port: 4321\n");
@@ -577,9 +577,13 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
       port: 4322,
       liveness: "not-serving",
     });
+    // D4/859: the probe RAN and returned a definitive empty answer — that is
+    // proof the row's own pid is not serving this port, not an unresolved
+    // probe. Must read "not-serving", never share "unknown" with the
+    // invalid-port/absent-config rows below where the probe never ran.
     expect(must(byPid.get(912), "empty-listeners row")).toMatchObject({
       port: 4323,
-      liveness: "unknown",
+      liveness: "not-serving",
     });
     expect(must(byPid.get(913), "invalid-port row")).toMatchObject({
       port: 70000,
@@ -592,6 +596,34 @@ describe("findLeakedSidecarTrees: orphan-daemon detection", () => {
     // The invalid-port and absent-config rows never call findListeners —
     // AC12's "must not throw" half, proven by the seam's own guard above.
     expect(findListenersCalls.sort((a, b) => a - b)).toEqual([4321, 4322, 4323]);
+  });
+
+  it("D4/859: a probe that cannot run at all (lsof/ss unavailable) still reads 'unknown', distinct from a probe that ran and found zero listeners", async () => {
+    const dir = await createTempDir("spur-reap-liveness-probe-unavailable-");
+    const unavailableConfigPath = join(dir, "probe-unavailable.yaml");
+    writeFileSync(unavailableConfigPath, "server:\n  port: 4324\n");
+    const argsFor = (configPath: string) =>
+      `/usr/bin/node ${cliEntryPath} --config ${configPath} daemon start`;
+    const snapshot = snapshotFrom([
+      info({ pid: 915, ppid: 1, pgid: 915, args: argsFor(unavailableConfigPath) }),
+    ]);
+    const result = await findLeakedSidecarTrees({
+      snapshot,
+      claims: new Map(),
+      worktreePaths: [],
+      worktreeDirRealpath: "/tmp/spur-worktrees",
+      readCwd: async () => null,
+      pathExists: async () => false,
+      readArgv: argvFromSnapshot(snapshot),
+      findListeners: async () => {
+        throw new Error("neither lsof nor ss is available");
+      },
+    });
+    const row = result.leaked.find(
+      (tree): tree is Extract<LeakedSidecarTree, { kind: "orphan-daemon" }> =>
+        tree.kind === "orphan-daemon" && tree.rootPid === 915,
+    );
+    expect(must(row, "probe-unavailable row")).toMatchObject({ port: 4324, liveness: "unknown" });
   });
 });
 

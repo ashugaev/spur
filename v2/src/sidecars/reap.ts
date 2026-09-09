@@ -1161,11 +1161,16 @@ async function resolveOrphanLiveness(
   try {
     pids = await findListeners(port);
   } catch {
+    // The probe itself could not run (neither lsof nor ss produced a usable
+    // result) — cannot-prove-absence, distinct from a probe that ran and
+    // found nothing (D4/859).
     return { port, liveness: "unknown" };
   }
-  if (pids.length === 0) {
-    return { port, liveness: "unknown" };
-  }
+  // The probe ran and produced a definitive answer, even when that answer is
+  // an empty list — zero listeners on this port IS proof the row's own pid
+  // is not serving it, not an unresolved probe (D4/859: this must not share
+  // "unknown" with the actual probe-unavailable branch above, or doctor's
+  // "lsof/ss unavailable" fix text gets blamed on a host where lsof ran fine).
   return { port, liveness: pids.includes(rootPid) ? "serving" : "not-serving" };
 }
 
