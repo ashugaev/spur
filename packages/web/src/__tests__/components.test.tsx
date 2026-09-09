@@ -301,6 +301,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         expect(JSON.parse(String(init?.body))).toEqual({
