@@ -49,6 +49,7 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentResumePlan: vi.fn(),
   findAgentSessionId: vi.fn(),
   agentProcessMatchers: agentProcessMatchersMock,
+  agentLaunchUsesForeignBinary: vi.fn(() => false),
   agentSessionConfig: vi.fn(() => ({})),
   agentStateStrategy: agentStateStrategyMock,
   agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
