@@ -2086,6 +2086,56 @@ projects:
     expect("adaptivePoll" in (parsed ?? {})).toBe(false);
   });
 
+  it("omits maxReviewBatchTargets when unset", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["pr-watch"];
+    expect(parsed).toBeDefined();
+    expect("maxReviewBatchTargets" in (parsed ?? {})).toBe(false);
+  });
+
+  it.each([0, 2.5, "8"])("rejects maxReviewBatchTargets %s", async (value) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        maxReviewBatchTargets: ${JSON.stringify(value)}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /maxReviewBatchTargets must be a positive integer/,
+    );
+  });
+
+  it("passes an in-range maxReviewBatchTargets value through", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        maxReviewBatchTargets: 16
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      maxReviewBatchTargets: 16,
+    });
+  });
+
   it("parses a sentry source with a resolved token and defaults", async () => {
     const configPath = await writeConfig(`
 projects:

@@ -292,6 +292,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.adaptivePoll`: optional for `github`. Enables slow-window polling; omitted entirely by default, which keeps the existing poll-every-tick cadence.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.slowIntervalMs`: optional, default `5 × intervalMs`. Must be greater than `intervalMs`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.activeGraceMs`: optional, default `600000`.
+- `projects.<id>.sources.<sourceId>.maxReviewBatchTargets`: optional for `github`, positive integer, default unset. Caps how many sessions one review poll batches into a single GraphQL call, clamped by the query's node budget (48 bound / 9 unbound targets per call) so it can only lower it.
 - `projects.<id>.sources.<sourceId>.service`: required for `service`; logical id used by `spur service run <serviceId>`.
 - `projects.<id>.sources.<sourceId>.tailLines`: optional for `service`, default `200`.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.match`: required regex for `service`.

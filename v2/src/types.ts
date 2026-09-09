@@ -254,6 +254,10 @@ export interface GitHubAdaptivePollConfig {
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   adaptivePoll?: GitHubAdaptivePollConfig;
+  // Caps how many sessions one review poll batches into a single GraphQL call.
+  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+  maxReviewBatchTargets?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
