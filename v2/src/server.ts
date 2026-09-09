@@ -6,6 +6,7 @@ import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
   deploySwitchStatePath,
@@ -225,8 +226,14 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
-  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-  response.end(JSON.stringify(payload, null, 2) + "\n");
+  // Compact, not pretty-printed: the listing payloads run to megabytes and the
+  // 2-space indent was ~10% of every one of them, re-serialized on each poll.
+  const body = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(body.byteLength),
+  });
+  response.end(body);
 }
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
@@ -554,6 +561,11 @@ function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRe
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
+  // Test-only (spur#859 B4): overrides the sidecar sweep's process-table
+  // read so a fixture can control it instead of scanning the real host —
+  // never set by a real caller (cli.ts's `daemon start` passes only the
+  // first two args). Kept off the wire: nothing over HTTP can reach this.
+  testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
   if (ghPathState.status === "unavailable") {
@@ -562,7 +574,10 @@ export async function startServer(
     );
   }
   assertConfigMayUseProdSlot(configPath);
-  const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
+  const service = new SessionService(configPath, undefined, {
+    deferBackgroundLoops: true,
+    ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
+  });
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);

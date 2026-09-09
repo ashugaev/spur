@@ -19,7 +19,7 @@ import {
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
-import type { SessionRecord, SessionView } from "../../src/types.js";
+import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
@@ -141,10 +141,18 @@ describe("startServer", () => {
       "utf8",
     );
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
+    // `findOrphanDaemonTrees` scans the whole host process table, unscoped
+    // by worktreeDir (spur#859 B4) — hitting the real `/sidecars/sweep`
+    // route on a host with even one leftover orphan daemon makes this
+    // empty-sandbox assertion host-state-dependent. Inject the same
+    // snapshot seam B4 added for the doctor check (collectHostInstallChecks)
+    // here too, via startServer's test-only override, instead of masking
+    // the symptom by stripping a volatile field from the comparison.
+    const server = await startServer(
+      configPath,
+      { info: () => undefined, warn: () => undefined },
+      { sidecarSnapshot: async () => ({ ok: true, byPid: new Map(), byPgid: new Map() }) },
+    );
 
     try {
       const defaultResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
@@ -159,6 +167,7 @@ describe("startServer", () => {
         reaped: unknown[];
       };
       expect(defaultResult.reaped).toEqual([]);
+      expect(defaultResult.leaked).toEqual([]);
 
       const reapResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
         method: "POST",
@@ -171,9 +180,6 @@ describe("startServer", () => {
         leaked: unknown[];
         reaped: unknown[];
       };
-      // Nothing leaked in this empty sandbox, so both calls report the same
-      // shape either way — the important assertion is the default omits any
-      // reaping regardless of what `leaked` ends up containing.
       expect(reapResult.leaked).toEqual(defaultResult.leaked);
     } finally {
       await server.stop();
@@ -804,6 +810,44 @@ describe("startServer", () => {
     }
   });
 
+  it("serves compact JSON with a content-length instead of a pretty-printed body", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/info`);
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      // The listing payloads run to megabytes; the 2-space indent was ~10% of
+      // every one of them, re-serialized on each poll.
+      expect(body).not.toMatch(/\n\s+"/);
+      expect(JSON.parse(body)).toMatchObject({ version: expect.any(String) });
+      expect(response.headers.get("content-length")).toBe(String(Buffer.byteLength(body)));
+    } finally {
+      await server.stop();
+    }
+  });
   it("forwards clearPort to sidecar start", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -936,6 +980,79 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  it("passes the sidecarStop outcome through the stop route's 200 body alongside id and sidecars", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalStopSidecar = SessionService.prototype.stopSidecar;
+    SessionService.prototype.stopSidecar = async function mockStopSidecar() {
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        artifacts: [],
+        services: [],
+        sidecars: [{ name: "dev", alive: false, ports: [], tmuxSession: "demo-1--dev" }],
+        sidecarStop: { outcome: "partial", survivors: [777] },
+      } satisfies SidecarStopView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/sidecars/dev/stop`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as SidecarStopView;
+      expect(body.id).toBe("demo-1");
+      expect(body.sidecars).toEqual([
+        { name: "dev", alive: false, ports: [], tmuxSession: "demo-1--dev" },
+      ]);
+      expect(body.sidecarStop).toEqual({ outcome: "partial", survivors: [777] });
+    } finally {
+      SessionService.prototype.stopSidecar = originalStopSidecar;
       await server.stop();
     }
   });

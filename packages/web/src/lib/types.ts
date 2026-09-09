@@ -116,6 +116,9 @@ export interface SpurSessionSidecarView {
   ageSeconds?: number;
   /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
   ageWarn?: boolean;
+  /** True when the sidecar's tmux session exists but its pane has exited
+   * (remain-on-exit); absent otherwise. */
+  deadPane?: boolean;
 }
 
 export interface SpurSidecarPortConflictCandidate {
@@ -298,6 +301,11 @@ export interface SessionDailyWakeState {
   message: string;
   stopCondition: string;
 }
+export type SpurSidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -354,6 +362,11 @@ export interface SpurSessionView {
     conditions?: string;
   };
 }
+
+/** `POST /sessions/:id/sidecars/:name/stop`'s response: the session view
+ * plus the real stop outcome (`sidecarStop`), never claiming a clean reap
+ * when survivors were left behind. */
+export type SpurSidecarStopResponse = SpurSessionView & { sidecarStop: SpurSidecarStopReport };
 
 export type SpurTodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
