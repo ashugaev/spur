@@ -65,6 +65,12 @@ function makeProbeStepper() {
 describe("BackendConnectionProvider", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // "stays dormant ... while a version switch is in flight" below calls
+    // startSwitch, which persists a target to sessionStorage. Without a
+    // clear, VersionSwitchProvider's mount effect in the next test would
+    // resume that leftover switch and dormant would keep the probe from
+    // ever running.
+    window.sessionStorage.clear();
     Object.defineProperty(window, "location", {
       value: { ...window.location, reload: vi.fn() },
       writable: true,
@@ -503,5 +509,145 @@ describe("BackendConnectionProvider", () => {
 
     expect(result.current.backend.phase).toBe("connected");
     expect(window.location.reload).not.toHaveBeenCalled();
+  });
+
+  it("publishes the version each healthy heartbeat reports", async () => {
+    let version = "1.4.2";
+    mockFetchResults(() => true, () => version);
+
+    vi.useFakeTimers();
+    const { result } = renderProvider();
+    await flushMicrotasks();
+    expect(result.current.version).toBe("1.4.2");
+
+    version = "1.5.0";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    expect(result.current.version).toBe("1.5.0");
+  });
+
+  it("keeps the last known version while disconnected", async () => {
+    let ok = true;
+    mockFetchResults(
+      () => ok,
+      () => "1.4.2",
+    );
+
+    vi.useFakeTimers();
+    const { result } = renderProvider();
+    await flushMicrotasks();
+    expect(result.current.version).toBe("1.4.2");
+
+    ok = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    for (let f = 1; f < FAILURE_THRESHOLD; f++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(f));
+      });
+    }
+
+    expect(result.current.phase).toBe("disconnected");
+    expect(result.current.version).toBe("1.4.2");
+  });
+
+  it("adopts the version the backend comes back on", async () => {
+    let ok = true;
+    let version = "1.4.2";
+    mockFetchResults(
+      () => ok,
+      () => version,
+    );
+
+    vi.useFakeTimers();
+    const { result } = renderProvider();
+    await flushMicrotasks(); // establishes the "1.4.2" baseline via a healthy mount probe
+
+    ok = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    for (let f = 1; f < FAILURE_THRESHOLD; f++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(f));
+      });
+    }
+    expect(result.current.phase).toBe("disconnected");
+
+    version = "1.5.0";
+    ok = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RECONNECT_INTERVAL_MS);
+    });
+
+    expect(result.current.phase).toBe("connected");
+    expect(result.current.version).toBe("1.5.0");
+    expect(window.location.reload).not.toHaveBeenCalled();
+  });
+
+  // Falsifies the useMemo composing BackendConnectionState. The counter must
+  // sit on a component that consumes ONLY useBackendConnection: a component
+  // that also reads useVersionSwitch would re-render on startSwitch no
+  // matter what the memo does (it's a VersionSwitchContext consumer itself),
+  // making the assertion either fail on the correct tree or pass vacuously.
+  // BackendProbe is instead created as an element inside the wrapper, so a
+  // re-rendering VersionSwitchProvider keeps `children`'s identity and React
+  // bails on the whole subtree when the memo holds.
+  it("does not re-render a backend-only consumer when an unrelated provider render cascades in", async () => {
+    let backendRenders = 0;
+    function BackendProbe() {
+      backendRenders += 1;
+      useBackendConnection();
+      return null;
+    }
+    function memoWrapper({ children }: { children: ReactNode }) {
+      return (
+        <VersionSwitchProvider>
+          <BackendConnectionProvider>
+            <BackendProbe />
+            {children}
+          </BackendConnectionProvider>
+        </VersionSwitchProvider>
+      );
+    }
+
+    mockFetchResults(() => true, () => "1.4.2");
+
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useVersionSwitch(), { wrapper: memoWrapper });
+    await flushMicrotasks();
+    const baseline = backendRenders;
+
+    // Same-version probes change nothing on the context value.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 3);
+    });
+    expect(backendRenders).toBe(baseline);
+
+    // A fresh VersionSwitchProvider state object re-renders
+    // BackendConnectionProvider with its own liveness state unchanged
+    // (setState(CONNECTED_STATE) at the dormant-entry effect is the same
+    // reference, so it bails) — without the memo, BackendProbe would
+    // re-render here too.
+    act(() => {
+      result.current.startSwitch("1.5.0");
+    });
+    expect(backendRenders).toBe(baseline);
+  });
+
+  it("ignores an empty version string from a healthy probe", async () => {
+    mockFetchResults(() => true, () => "");
+
+    vi.useFakeTimers();
+    const { result } = renderProvider();
+    await flushMicrotasks();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+
+    expect(result.current.phase).toBe("connected");
+    expect(result.current.version).toBeNull();
   });
 });
