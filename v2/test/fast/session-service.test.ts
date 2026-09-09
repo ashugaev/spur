@@ -17539,6 +17539,123 @@ describe("SessionService", () => {
       expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-2", "playwright");
     });
 
+    it("#822: enrich reports alive:false and deadPane:true when the tmux session exists but the pane is dead", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", sidecarNames: ["dev"] }));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxPaneDeadMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.get("api-1");
+
+      const dev = result.sidecars.find((sc) => sc.name === "dev");
+      expect(dev?.alive).toBe(false);
+      expect(dev?.deadPane).toBe(true);
+    });
+
+    it("#822: enrich reports alive:true and no deadPane key when the pane is running", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", sidecarNames: ["dev"] }));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxPaneDeadMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.get("api-1");
+
+      const dev = result.sidecars.find((sc) => sc.name === "dev");
+      expect(dev?.alive).toBe(true);
+      expect(dev).not.toHaveProperty("deadPane");
+    });
+
+    it("#822: dashboard runningSidecarNames omits a dead-pane sidecar", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", sidecarNames: ["dev"] }));
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      tmuxPaneDeadMock.mockResolvedValue(true);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const listed = await service.list({ includeCompleted: true, view: "dashboard" });
+
+      expect(listed).toHaveLength(1);
+      expect(listed[0]).not.toHaveProperty("runningSidecarNames");
+    });
+
+    it("#822: readout never passes fresh to tmuxPaneDead and calls it once per existing sidecar", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              dev: { command: "pnpm dev", autoStart: false },
+              preview: { command: "pnpm preview", autoStart: false },
+            },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", sidecarNames: ["dev", "preview"] }));
+      sidecarTmuxAliveMock.mockImplementation(
+        async (_ownerId: string, name: string) => name === "dev",
+      );
+      tmuxPaneDeadMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+
+      const sidecarPaneDeadCalls = tmuxPaneDeadMock.mock.calls.filter(
+        (call) => typeof call[0] === "string" && call[0].includes("--dev"),
+      );
+      expect(sidecarPaneDeadCalls.length).toBeGreaterThanOrEqual(1);
+      for (const call of sidecarPaneDeadCalls) {
+        expect(call).toHaveLength(1);
+      }
+      expect(
+        tmuxPaneDeadMock.mock.calls.some(
+          (call) => typeof call[0] === "string" && call[0].includes("--preview"),
+        ),
+      ).toBe(false);
+    });
+
     it("AC11: adds ageSeconds to a sidecar view from a live recorded identity", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),

@@ -961,6 +961,9 @@ export interface SessionSidecarView {
   ageSeconds?: number;
   /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
   ageWarn?: boolean;
+  /** True when the sidecar's tmux session exists but its pane has exited
+   * (remain-on-exit); omitted otherwise. */
+  deadPane?: boolean;
 }
 
 export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
