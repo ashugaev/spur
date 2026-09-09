@@ -356,6 +356,7 @@ describe("SessionDetail wake markers", () => {
   });
 
   it("opens wake controls, saves a message, and wakes now without touching composer state", async () => {
+    let intervalWakeMessage = "Check CI";
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       const method = init?.method ?? "GET";
@@ -367,7 +368,7 @@ describe("SessionDetail wake markers", () => {
               intervalWake: {
                 nextDueAt: new Date(Date.now() + 300_000).toISOString(),
                 intervalMs: 300_000,
-                message: "Check CI",
+                message: intervalWakeMessage,
                 stopCondition: "CI is green",
               },
             }),
@@ -382,13 +383,14 @@ describe("SessionDetail wake markers", () => {
 
       if (url === "/api/sessions/api-a1/wake" && method === "POST") {
         const body = JSON.parse(String(init?.body)) as { target: string; message: string };
+        intervalWakeMessage = body.message;
         return new Response(
           JSON.stringify(
             sessionFixture({
               intervalWake: {
                 nextDueAt: new Date(Date.now() + 300_000).toISOString(),
                 intervalMs: 300_000,
-                message: body.message,
+                message: intervalWakeMessage,
                 stopCondition: "CI is green",
               },
             }),
@@ -427,6 +429,9 @@ describe("SessionDetail wake markers", () => {
       );
     });
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Wake now" })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Wake now" }));
 
     await waitFor(() => {
