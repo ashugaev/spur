@@ -945,6 +945,34 @@ describe("reapRecordedPortDaemon", () => {
     }
   });
 
+  it("859/AC2b: a `../../` traversal out of worktreePath fails T4 on the resolved path, not the raw string prefix", async () => {
+    // isPathInside is a raw string startsWith: without normalizing first,
+    // `<worktreePath>/../../elsewhere/v2/dist/cli.js` literally starts with
+    // `<worktreePath>/`, which would pass containment despite resolving
+    // outside it. A REAL spawned pid, same reasoning as AC2 above: a
+    // regressed (unnormalized) T4 would actually try to signal it.
+    const worktreePath = await createTempDir("spur-reap-port-ac2b-");
+    const traversalPath = `${worktreePath}/../../elsewhere/v2/dist/cli.js`;
+    const argv = daemonArgv(nonDefaultConfigPath, traversalPath);
+    const child = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
+    const pid = must(child.pid, "expected a spawned pid");
+    const killSpy = vi.spyOn(process, "kill");
+    try {
+      const outcome = await reapRecordedPortDaemon({
+        ports: [43220],
+        worktreePath,
+        findListeners: async (port) => (port === 43220 ? [pid] : []),
+        readArgv: async (candidate) => (candidate === pid ? argv : null),
+      });
+      expect(outcome?.survivors).toEqual([pid]);
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(() => process.kill(pid, 0)).not.toThrow();
+    } finally {
+      killSpy.mockRestore();
+      killGroupSafely(pid);
+    }
+  });
+
   it("859/AC3a: a listener whose argv reads and parses but is not a Spur daemon is dropped — no signal, no survivor", async () => {
     const worktreePath = await createTempDir("spur-reap-port-ac3a-");
     const killSpy = vi.spyOn(process, "kill");
@@ -1087,5 +1115,46 @@ describe("859/AC16 GUARD: reapRecordedPortDaemon reachability", () => {
     // callLine is 1-indexed from grep; sessionServiceLines is 0-indexed.
     expect(callLine - 1).toBeGreaterThan(stopSidecarLockedStart);
     expect(callLine - 1).toBeLessThan(nextMethodStart);
+  });
+});
+
+describe("859/AC-item3 GUARD: every production findLeakedSidecarTrees/sweepSidecars call site pins selfConfigPath", () => {
+  // selfConfigPath is optional on FindLeakedSidecarTreesInput/
+  // SweepSidecarsInput (a required field would force ~15 unrelated
+  // worktree-tree-only test call sites in this file to pass a dummy value
+  // for no behavioral gain — both real production callers already always
+  // pass it). This guard is the compile-time-adjacent substitute: it pins,
+  // by source inspection, that every CURRENT production call site
+  // constructs its input object with selfConfigPath present, so a future
+  // caller that copies one of these call sites verbatim but drops the
+  // field reds here instead of silently shipping with no self-exclusion.
+  const CALL_SITES: { file: string; marker: string }[] = [
+    { file: "../../../src/host-install.ts", marker: "findLeakedSidecarTrees({" },
+    { file: "../../../src/sidecars/reap.ts", marker: "findLeakedSidecarTrees({" },
+    { file: "../../../src/session-service.ts", marker: "sweepSidecars({" },
+  ];
+
+  it.each(CALL_SITES)("$file's $marker call passes selfConfigPath", async ({ file, marker }) => {
+    const path = resolve(dirname(fileURLToPath(import.meta.url)), file);
+    const source = await readFile(path, "utf8");
+    const lines = source.split("\n");
+    const startIndex = lines.findIndex((line) => line.includes(marker));
+    if (startIndex === -1) {
+      throw new Error(`expected to find a "${marker}" call site in ${file}`);
+    }
+    // The call site is either a single line (session-service.ts's
+    // `return sweepSidecars({ ...assembled, reap, selfConfigPath: ... });`)
+    // or a multi-line object literal closed by a bare "});" a few lines
+    // down — scan forward only when the marker line itself isn't already
+    // self-contained.
+    const markerLine = lines[startIndex] ?? "";
+    const endIndex = markerLine.includes("});")
+      ? startIndex
+      : lines.findIndex((line, index) => index > startIndex && line.trim() === "});");
+    if (endIndex === -1) {
+      throw new Error(`could not find the closing "});" for the ${marker} call site in ${file}`);
+    }
+    const block = lines.slice(startIndex, endIndex + 1);
+    expect(block.join("\n")).toContain("selfConfigPath");
   });
 });

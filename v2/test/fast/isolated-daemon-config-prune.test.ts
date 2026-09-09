@@ -36,6 +36,39 @@ function extractPruneFunctionSource(): string {
   return lines.slice(start, end + 1).join("\n");
 }
 
+// Extracts dir_has_unsaved_work() alone (nested 2-space closing brace, per
+// its own placement rule), so its return code can be pinned directly
+// without going through prune_stale_config_dirs' GATE A/B and the
+// subsequent `rm -rf`. That decoupling matters here specifically: a
+// directory find must open to enumerate is, by POSIX permission symmetry,
+// also a directory `rm -rf` cannot descend into — so a find-failure
+// mutation can leave the on-disk dir "surviving" by an unrelated rm
+// permission error even when dir_has_unsaved_work itself wrongly decided
+// to prune. The exit code is the only unambiguous signal.
+function extractDirHasUnsavedWorkSource(): string {
+  const lines = readFileSync(SCRIPT_PATH, "utf8").split("\n");
+  const start = lines.findIndex((line) => line.trim().startsWith("dir_has_unsaved_work() {"));
+  if (start === -1) {
+    throw new Error("dir_has_unsaved_work() not found in spur-isolated-daemon.sh");
+  }
+  const end = lines.findIndex((line, index) => index > start && line === "  }");
+  if (end === -1) {
+    throw new Error("dir_has_unsaved_work()'s closing brace not found");
+  }
+  return lines.slice(start, end + 1).join("\n");
+}
+
+// Runs dir_has_unsaved_work(dir) in isolation and returns its exit code:
+// 0 = keep, 1 = safe to prune. `tmp_root` is a dynamically-scoped local
+// the real function reads from its caller (prune_stale_config_dirs) for
+// its own find-results temp file; this harness sets it directly since
+// there is no outer function invocation here.
+async function runDirHasUnsavedWork(dir: string, tmpRootForList: string): Promise<number> {
+  const script = `set -uo pipefail\ntmp_root="${tmpRootForList}"\n${extractDirHasUnsavedWorkSource()}\ndir_has_unsaved_work "$1"\necho $?\n`;
+  const { stdout } = await execFileAsync("bash", ["-c", script, "_", dir]);
+  return Number.parseInt(stdout.trim(), 10);
+}
+
 const cleanupPaths: string[] = [];
 
 afterEach(async () => {
@@ -501,6 +534,42 @@ describe("spur-isolated-daemon.sh prune_stale_config_dirs: GATE C", () => {
       expect(existsSync(stale)).toBe(true);
     } finally {
       chmodSync(worktreesRoot, 0o700);
+    }
+  });
+
+  it("859/AC15: dir_has_unsaved_work keeps (returns 0) when a subdirectory under worktrees/ is unreadable (find failure, not the root)", async () => {
+    // `worktrees/` itself is readable here (unlike the case above) — the
+    // failure is one level down, at worktrees/<project>, which
+    // `find -mindepth 2 -maxdepth 2` must open to enumerate the
+    // worktrees/<project>/<session> dirs beneath it. A mode-000 <project>
+    // dir makes `find` exit nonzero while printing nothing from inside it —
+    // the exact "found=() -> return 1 -> rm -rf" data-loss path a reviewer
+    // reproduced against an earlier draft of this gate, where
+    // `done < <(find ...) || return 0` silently discarded find's own exit
+    // status (bash attaches that `||` to the loop body, never the process
+    // substitution).
+    //
+    // Asserts dir_has_unsaved_work's OWN exit code directly, not the
+    // survival of the on-disk dir afterward: the same permission bit that
+    // blocks `find` from enumerating `<project>` also blocks `rm -rf` from
+    // descending into it (POSIX symmetry — both need read+execute on the
+    // same directory to see its children), so `rm -rf $dir` on a bug-hit
+    // "prune" decision would still fail to remove the blocked subtree and
+    // leave the outer dir "surviving" by accident — a false pass that says
+    // nothing about whether the GATE itself made the right call.
+    const stale = await mkdtemp(join(tmpdir(), "spur-prune-unreadable-sub-"));
+    cleanupPaths.push(stale);
+    const projectDir = join(stale, "worktrees", "api");
+    const sessionDir = join(projectDir, "api-1");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, "dirty.txt"), "uncommitted\n", "utf8");
+    chmodSync(projectDir, 0o000);
+
+    try {
+      const exitCode = await runDirHasUnsavedWork(stale, stale);
+      expect(exitCode).toBe(0);
+    } finally {
+      chmodSync(projectDir, 0o700);
     }
   });
 

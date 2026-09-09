@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { getTmuxPanePid, killTmuxSession } from "../runtime-tmux.js";
@@ -727,7 +727,15 @@ export async function reapRecordedPortDaemon(
         // Positive evidence of non-membership: dropped entirely.
         continue;
       }
-      const t4 = bounds.some((bound) => isPathInside(parsed.cliEntryPath, bound));
+      // Lexically normalized (no filesystem access, the target need not
+      // exist yet — `defaultPathExists`-style checks are a separate
+      // concern) before the containment test: `isPathInside` is a raw
+      // string `startsWith`, so an argv value like
+      // `<worktreePath>/../../elsewhere/v2/dist/cli.js` would otherwise
+      // pass containment despite resolving outside `worktreePath` — a
+      // kill-authority term, so path hygiene here is not a cosmetic nit.
+      const normalizedCliEntryPath = resolvePath(parsed.cliEntryPath);
+      const t4 = bounds.some((bound) => isPathInside(normalizedCliEntryPath, resolvePath(bound)));
       if (!t4) {
         survivorPids.add(pid);
         continue;
@@ -1204,6 +1212,8 @@ export interface SweepSidecarsInput {
   reap: boolean;
   /** The calling instance's own config path (B3a self-exclusion). */
   selfConfigPath?: string;
+  /** Injectable for tests; defaults to a real `ps` fork. Never a network-facing input. */
+  takeSnapshot?: () => Promise<ProcSnapshot>;
 }
 
 /**
@@ -1212,7 +1222,7 @@ export interface SweepSidecarsInput {
  * `spur doctor`, which calls `findLeakedSidecarTrees` directly.
  */
 export async function sweepSidecars(input: SweepSidecarsInput): Promise<SidecarSweepResult> {
-  const snapshot = await snapshotProcesses();
+  const snapshot = await (input.takeSnapshot ?? snapshotProcesses)();
   const { supported, leaked } = await findLeakedSidecarTrees({
     snapshot,
     claims: input.claims,

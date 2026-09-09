@@ -2586,16 +2586,28 @@ export class SessionService {
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
   private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
+  // process trees" over the real HTTP /sidecars/sweep route would
+  // otherwise scan the real host process table — on a host with even one
+  // leftover orphan isolated daemon, that turns an unrelated empty-sandbox
+  // assertion host-state-dependent, the exact defect class B4 exists to
+  // remove. Never set outside a test; a production `startServer` never
+  // passes it.
+  private readonly sidecarSnapshotOverride: (() => Promise<ProcSnapshot>) | undefined;
 
   constructor(
     configPath?: string,
     startedAt = nowIso(),
-    options: { deferBackgroundLoops?: boolean } = {},
+    options: {
+      deferBackgroundLoops?: boolean;
+      sidecarSnapshot?: () => Promise<ProcSnapshot>;
+    } = {},
   ) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
       skipInvalid: false,
     });
     this.bootstrapConfigPath = bootstrap.config.configPath;
+    this.sidecarSnapshotOverride = options.sidecarSnapshot;
     this.startedAt = startedAt;
     mkdirSync(bootstrap.config.dataDir, { recursive: true });
     mkdirSync(bootstrap.config.worktreeDir, { recursive: true });
@@ -6184,6 +6196,72 @@ export class SessionService {
         );
       }
     }
+  }
+
+  // spur#859 B1's recorded-port kill term (stopSidecarLocked, below) assumes
+  // T1 — the recorded port — uniquely identifies this owner's own
+  // reservation. `refuseOverlappingCrossWorkspaceSidecar` above proves that
+  // premise false: it deliberately TOLERATES a stale cross-workspace
+  // duplicate port recording (measured 29 on this host) whenever the other
+  // holder isn't live or the port is free, to preserve a legitimate
+  // self-heal. So a stop against a stale record CAN find a live sibling
+  // workspace's real daemon still listening on the same recorded port
+  // number — sharpest for two `worktree:false` siblings, where T4 also
+  // collapses to the shared `project.path` and admits it.
+  //
+  // Excludes any port a DIFFERENT, currently-live sibling sidecar also
+  // records, before that port ever reaches the kill term. An ambiguous
+  // port is treated as unprovable — not signaled, not even probed for a
+  // survivor — the same "report-only is the default" direction pushed one
+  // step earlier: safer to say nothing about a port than to name a pid
+  // that may belong to a live sibling's own daemon.
+  private async excludeAmbiguousCrossWorkspacePorts(
+    owner: SessionRecord,
+    ownerId: string,
+    ports: readonly number[],
+  ): Promise<number[]> {
+    if (ports.length === 0) {
+      return [];
+    }
+    const candidatePorts = new Set(ports);
+    for (const other of listSessions(this.config.dataDir)) {
+      if (candidatePorts.size === 0) {
+        break;
+      }
+      if (other.project !== owner.project) {
+        continue;
+      }
+      let otherProject: ProjectConfig | undefined;
+      try {
+        otherProject = this.resolveProjectForSession(other);
+      } catch {
+        continue;
+      }
+      for (const otherSidecarName of sessionSidecarNames(other, otherProject)) {
+        const otherOwnerId = this.sidecarOwnerIdForName(other, otherProject, otherSidecarName);
+        if (otherOwnerId === ownerId) {
+          continue;
+        }
+        const otherOwner =
+          otherOwnerId === other.id ? other : readSession(this.config.dataDir, otherOwnerId);
+        const otherRecordedPorts = otherOwner?.sidecarPorts?.[otherSidecarName];
+        if (!otherRecordedPorts) {
+          continue;
+        }
+        const collidingPorts = Object.values(otherRecordedPorts).filter((port) =>
+          candidatePorts.has(port),
+        );
+        if (collidingPorts.length === 0) {
+          continue;
+        }
+        if (await sidecarTmuxAlive(otherOwnerId, otherSidecarName)) {
+          for (const port of collidingPorts) {
+            candidatePorts.delete(port);
+          }
+        }
+      }
+    }
+    return [...candidatePorts];
   }
 
   private async ensureSidecarReservation(
@@ -11216,7 +11294,13 @@ export class SessionService {
       // pane is gone and the old early-return here reported a lie
       // (`nothing-to-stop`) without ever probing the port.
       const owner = readSession(this.config.dataDir, ownerId);
-      const recordedPorts = Object.values(owner?.sidecarPorts?.[sidecarName] ?? {});
+      const recordedPortsRaw = Object.values(owner?.sidecarPorts?.[sidecarName] ?? {});
+      // T1 (the recorded port) is not proof of exclusive ownership on its
+      // own — see excludeAmbiguousCrossWorkspacePorts. Never signal, or
+      // even probe, a port a live sibling workspace also records.
+      const recordedPorts = owner
+        ? await this.excludeAmbiguousCrossWorkspacePorts(owner, ownerId, recordedPortsRaw)
+        : recordedPortsRaw;
       const alive = await sidecarTmuxAlive(ownerId, sidecarName);
       const paneOutcome =
         alive || owner?.sidecarProcs?.[sidecarName]
@@ -11273,7 +11357,12 @@ export class SessionService {
     if (!assembled) {
       return { supported: false, leaked: [], reaped: [] };
     }
-    return sweepSidecars({ ...assembled, reap, selfConfigPath: this.bootstrapConfigPath });
+    return sweepSidecars({
+      ...assembled,
+      reap,
+      selfConfigPath: this.bootstrapConfigPath,
+      ...(this.sidecarSnapshotOverride ? { takeSnapshot: this.sidecarSnapshotOverride } : {}),
+    });
   }
 
   // Signals every torn-down sidecar's pane first, then confirms the whole

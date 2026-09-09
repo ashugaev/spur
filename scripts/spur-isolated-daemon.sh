@@ -43,15 +43,26 @@ prune_stale_config_dirs() {
   # at its `mktemp -d` above; work inside it bumps `worktrees/`, not `$dir`),
   # so this is what makes that floor survivable.
   dir_has_unsaved_work() { # returns 0 = keep the dir
-    local root="$1/worktrees" wt status entries upstream
+    local root="$1/worktrees" wt status entries upstream list_file
     [[ -d "$root" ]] || return 1
     [[ -r "$root" && -x "$root" ]] || return 0 # unreadable root -> keep
+    # `done < <(find ...) || return 0` does NOT work here: bash gives that
+    # construct the exit status of the LOOP BODY (or 0 on zero iterations),
+    # never the process substitution's — a failing `find` (e.g. an
+    # unreadable worktrees/<project> subdir) would silently yield `found=()`
+    # and fall through to "no unsaved work found", pruning a dir GATE C was
+    # supposed to keep. Capture find's own exit status directly by writing
+    # to a real file first, never through a pipe or process substitution.
+    list_file="$(mktemp "${tmp_root}/spur-prune-find.XXXXXX" 2>/dev/null)" || return 0
+    if ! find "$root" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null >"$list_file"; then
+      rm -f "$list_file"
+      return 0 # find failed -> keep
+    fi
     local -a found=()
     while IFS= read -r -d '' wt; do
       found+=("$wt")
-    done < <(
-      find "$root" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null
-    ) || return 0 # find failed -> keep
+    done <"$list_file"
+    rm -f "$list_file"
     for wt in "${found[@]:-}"; do
       [[ -n "$wt" ]] || continue
       if [[ ! -e "$wt/.git" ]]; then

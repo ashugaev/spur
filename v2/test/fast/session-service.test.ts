@@ -26631,6 +26631,81 @@ describe("SessionService", () => {
     expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
   });
 
+  it("859/AC-item2: a stale duplicate port recording shared with a LIVE sibling workspace is never probed or signaled", async () => {
+    // refuseOverlappingCrossWorkspaceSidecar deliberately tolerates a stale
+    // cross-workspace duplicate port recording (measured 29 on this host)
+    // when the other holder isn't live or the port is free, to preserve a
+    // legitimate self-heal — so T1 (the recorded port) does NOT uniquely
+    // identify this owner's own reservation. Two separate `worktree:false`
+    // session records, same project (so worktreePath — and hence T4 —
+    // collapses to the same shared project.path for both), whose
+    // `sidecarPorts` happen to name the SAME numeric port: api-2 is LIVE
+    // (sidecarTmuxAlive true) and genuinely owns that port; api-1's own
+    // record is a stale leftover naming the identical number. Stopping
+    // api-1's sidecar must never probe, let alone signal, api-2's real
+    // daemon on that port.
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sharedPort = 43337;
+    const apiOne = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: sharedPort } },
+    };
+    const apiTwo = {
+      id: "api-2",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-2",
+      worktree: false,
+      worktreePath: "/tmp/spur-worktrees/api",
+      tmuxSession: "api-2",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: sharedPort } },
+    };
+    listSessionsMock.mockReturnValue([apiOne, apiTwo]);
+    readSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
+      sessionId === "api-2" ? apiTwo : apiOne,
+    );
+    // api-1 (the one being stopped) is offline; api-2 (the sibling that
+    // actually owns the port) is live.
+    sidecarTmuxAliveMock.mockImplementation(async (ownerId: string) => ownerId === "api-2");
+    findListenerPidsMock.mockImplementation(async (port: number) =>
+      port === sharedPort ? [999_999_996] : [],
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.stopSidecar("api-1", "dev");
+
+    // The ambiguous port is excluded before ever reaching the recorded-port
+    // kill term — never queried, so api-2's real daemon is never at risk.
+    expect(findListenerPidsMock).not.toHaveBeenCalledWith(sharedPort);
+    expect(result.sidecarStop).toEqual({ outcome: "nothing-to-stop" });
+  });
+
   it("stopSidecar kills the sidecar tmux session and logs the stop event", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

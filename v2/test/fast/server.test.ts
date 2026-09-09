@@ -141,10 +141,18 @@ describe("startServer", () => {
       "utf8",
     );
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
+    // `findOrphanDaemonTrees` scans the whole host process table, unscoped
+    // by worktreeDir (spur#859 B4) — hitting the real `/sidecars/sweep`
+    // route on a host with even one leftover orphan daemon makes this
+    // empty-sandbox assertion host-state-dependent. Inject the same
+    // snapshot seam B4 added for the doctor check (collectHostInstallChecks)
+    // here too, via startServer's test-only override, instead of masking
+    // the symptom by stripping a volatile field from the comparison.
+    const server = await startServer(
+      configPath,
+      { info: () => undefined, warn: () => undefined },
+      { sidecarSnapshot: async () => ({ ok: true, byPid: new Map(), byPgid: new Map() }) },
+    );
 
     try {
       const defaultResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
@@ -159,6 +167,7 @@ describe("startServer", () => {
         reaped: unknown[];
       };
       expect(defaultResult.reaped).toEqual([]);
+      expect(defaultResult.leaked).toEqual([]);
 
       const reapResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
         method: "POST",
@@ -171,19 +180,7 @@ describe("startServer", () => {
         leaked: unknown[];
         reaped: unknown[];
       };
-      // Nothing leaked in THIS empty sandbox, but `findOrphanDaemonTrees`
-      // scans the whole host process table unscoped by worktreeDir (spur#859
-      // B4) — on a host with a real leftover orphan daemon, its `ageSeconds`
-      // can tick by 1 between these two round trips even though nothing else
-      // about the row changed. Strip that one volatile field; the real
-      // assertion (default omits any reaping regardless of what `leaked`
-      // ends up containing) does not depend on it.
-      const stripAgeSeconds = (rows: unknown[]) =>
-        rows.map((row) => {
-          const { ageSeconds: _ageSeconds, ...rest } = row as Record<string, unknown>;
-          return rest;
-        });
-      expect(stripAgeSeconds(reapResult.leaked)).toEqual(stripAgeSeconds(defaultResult.leaked));
+      expect(reapResult.leaked).toEqual(defaultResult.leaked);
     } finally {
       await server.stop();
     }
