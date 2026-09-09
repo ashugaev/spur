@@ -1588,11 +1588,7 @@ export async function startServer(
       if (method === "POST" && wakeSessionId) {
         const parsed = parseSessionWakeRequest(await readJsonBody<unknown>(request));
         if (parsed.mode === "update") {
-          sendJson(
-            response,
-            200,
-            await service.updateWakeMessage(wakeSessionId, parsed.request),
-          );
+          sendJson(response, 200, await service.updateWakeMessage(wakeSessionId, parsed.request));
         } else {
           sendJson(response, 200, await service.scheduleWake(wakeSessionId, parsed.request));
         }

@@ -2,11 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
-import {
-  errorMessage,
-  readApiErrorMessage,
-  readResponsePayload,
-} from "@/lib/json-payload";
+import { errorMessage, readApiErrorMessage, readResponsePayload } from "@/lib/json-payload";
 import { toDashboardSession, type DashboardSession, type SpurSessionView } from "@/lib/types";
 import { Spinner } from "@/components/icons/Spinner";
 import {
@@ -206,7 +202,10 @@ export function WakeControls({
           const trimmedDraft = draft.trim();
           const dirty = draft !== summary.message;
           const saveDisabled =
-            busy || !trimmedDraft || !dirty || (busyTarget === summary.target && busyAction === "save");
+            busy ||
+            !trimmedDraft ||
+            !dirty ||
+            (busyTarget === summary.target && busyAction === "save");
           const wakeDisabled =
             busy ||
             dirty ||
@@ -223,7 +222,9 @@ export function WakeControls({
                 <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-attention)]">
                   {summary.label}
                 </span>
-                <span className="font-mono text-[var(--color-text-primary)]">{recordCountdown}</span>
+                <span className="font-mono text-[var(--color-text-primary)]">
+                  {recordCountdown}
+                </span>
               </div>
               {summary.intervalMs ? (
                 <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
@@ -255,9 +256,7 @@ export function WakeControls({
               </label>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
-                  aria-busy={
-                    (busyTarget === summary.target && busyAction === "save") || undefined
-                  }
+                  aria-busy={(busyTarget === summary.target && busyAction === "save") || undefined}
                   className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-1.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                   disabled={saveDisabled}
                   onClick={() => saveMessage(summary.target)}
@@ -269,9 +268,7 @@ export function WakeControls({
                   Save message
                 </button>
                 <button
-                  aria-busy={
-                    (busyTarget === summary.target && busyAction === "wake") || undefined
-                  }
+                  aria-busy={(busyTarget === summary.target && busyAction === "wake") || undefined}
                   className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-1.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                   disabled={wakeDisabled}
                   onClick={() => wakeNow(summary.target)}

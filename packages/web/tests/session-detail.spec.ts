@@ -608,7 +608,10 @@ test.describe("S1: Session detail header", () => {
 
     await page.getByRole("button", { name: "3 wakes configured" }).click();
     await expect(page.getByRole("dialog", { name: "Wake controls" })).toBeVisible();
-    await page.screenshot({ path: join(artifactsDir, "wake-ui", "open-all-shapes.png"), fullPage: true });
+    await page.screenshot({
+      path: join(artifactsDir, "wake-ui", "open-all-shapes.png"),
+      fullPage: true,
+    });
 
     await page.getByLabel("Interval wake message").fill("Updated CI");
     await page.getByRole("button", { name: "Save message" }).first().click();
