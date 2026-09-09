@@ -6216,24 +6216,30 @@ export class SessionService {
   // step earlier: safer to say nothing about a port than to name a pid
   // that may belong to a live sibling's own daemon.
   //
-  // D3: excluding a port is not the same as knowing it is clear. When the
-  // exclusion fires because the port is PROVEN occupied (isHostPortFree
-  // false) and the sibling is merely non-terminal (not proven alive via a
-  // live pane), the port's `excludedOccupied` in the return value carries
-  // that fact forward so the caller can report it rather than silently
-  // folding it into a false "nothing to stop". A port excluded because the
-  // sibling's own pane is confirmed alive is genuinely accounted for — no
-  // ambiguity to report — and stays out of `excludedOccupied`.
+  // D3: excluding a port is not the same as knowing it is clear. A port
+  // excluded because the sibling's own pane is confirmed alive is genuinely
+  // accounted for — no ambiguity to report. A port excluded because the
+  // sibling is merely non-terminal (not proven alive via a live pane) is
+  // returned separately as `ambiguousPorts`: whether it is worth reporting
+  // depends on whether it is STILL occupied after this owner's own kill
+  // runs, which this method cannot know — it runs before that kill. ND-1:
+  // sampling isHostPortFree here, before the caller's own reap, mistakes
+  // this owner's own live sidecar (still holding its own recorded port at
+  // the moment of this call) for the ambiguous sibling's occupant, turning
+  // every fully-successful stop that also has a stale non-terminal sibling
+  // recording into a false `partial`. The caller re-checks `ambiguousPorts`
+  // for real occupancy AFTER the reap, when the owner's own hold (if any)
+  // is already gone.
   private async excludeAmbiguousCrossWorkspacePorts(
     owner: SessionRecord,
     ownerId: string,
     ports: readonly number[],
-  ): Promise<{ ports: number[]; excludedOccupied: number[] }> {
+  ): Promise<{ ports: number[]; ambiguousPorts: number[] }> {
     if (ports.length === 0) {
-      return { ports: [], excludedOccupied: [] };
+      return { ports: [], ambiguousPorts: [] };
     }
     const candidatePorts = new Set(ports);
-    const excludedOccupied = new Set<number>();
+    const ambiguousPorts = new Set<number>();
     for (const other of listSessions(this.config.dataDir)) {
       if (candidatePorts.size === 0) {
         break;
@@ -6285,13 +6291,13 @@ export class SessionService {
           for (const port of collidingPorts) {
             if (!(await isHostPortFree(port))) {
               candidatePorts.delete(port);
-              excludedOccupied.add(port);
+              ambiguousPorts.add(port);
             }
           }
         }
       }
     }
-    return { ports: [...candidatePorts], excludedOccupied: [...excludedOccupied] };
+    return { ports: [...candidatePorts], ambiguousPorts: [...ambiguousPorts] };
   }
 
   private async ensureSidecarReservation(
@@ -11328,9 +11334,9 @@ export class SessionService {
       // T1 (the recorded port) is not proof of exclusive ownership on its
       // own — see excludeAmbiguousCrossWorkspacePorts. Never signal, or
       // even probe, a port a live sibling workspace also records.
-      const { ports: recordedPorts, excludedOccupied } = owner
+      const { ports: recordedPorts, ambiguousPorts } = owner
         ? await this.excludeAmbiguousCrossWorkspacePorts(owner, ownerId, recordedPortsRaw)
-        : { ports: recordedPortsRaw, excludedOccupied: [] as number[] };
+        : { ports: recordedPortsRaw, ambiguousPorts: [] as number[] };
       const alive = await sidecarTmuxAlive(ownerId, sidecarName);
       const paneOutcome =
         alive || owner?.sidecarProcs?.[sidecarName]
@@ -11343,16 +11349,30 @@ export class SessionService {
       if (clearsWorkspaceReplay) {
         this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
       }
+      // ND-1: `ambiguousPorts` was excluded from the reap above purely on
+      // recorded-ownership ambiguity, before this owner's own kill could run
+      // — occupancy is re-checked only now, after the kill, so a port this
+      // owner's own sidecar was holding at the time of the earlier exclusion
+      // reads as free here and never gets reported. Only a port still
+      // occupied AFTER this owner's own reap is genuine evidence of a
+      // sibling's daemon.
+      const excludedOccupied: number[] = [];
+      for (const port of ambiguousPorts) {
+        if (!(await isHostPortFree(port))) {
+          excludedOccupied.push(port);
+        }
+      }
       const survivors = [
         ...new Set([...(paneOutcome?.survivors ?? []), ...(portOutcome?.survivors ?? [])]),
       ];
       // A recorded port whose listener probe itself could not run (859/N1:
       // neither `lsof` nor `ss` produced a usable result), or that was
       // excluded from the probe entirely because a non-terminal sibling
-      // makes ownership ambiguous while the port is proven occupied
-      // (D3/859/N2 follow-up), is never proof the port is clear — it must
-      // never collapse into "reaped", nor disappear into "nothing-to-stop",
-      // even when no pid was ever identified to name as a survivor.
+      // makes ownership ambiguous and the port is still proven occupied
+      // after this owner's own reap (D3/859/N2/ND-1 follow-up), is never
+      // proof the port is clear — it must never collapse into "reaped", nor
+      // disappear into "nothing-to-stop", even when no pid was ever
+      // identified to name as a survivor.
       const unverifiedPorts = [
         ...new Set([...(portOutcome?.unverifiedPorts ?? []), ...excludedOccupied]),
       ];
