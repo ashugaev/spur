@@ -75,6 +75,7 @@ import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as updateWakeMessage } from "@/app/api/sessions/[id]/wake/route";
 import { POST as removeQueuedMessage } from "@/app/api/sessions/[id]/queue/remove/route";
 import { POST as flushQueuedMessage } from "@/app/api/sessions/[id]/queue/flush/route";
 import { POST as answerQuestion } from "@/app/api/sessions/[id]/answer/route";
@@ -682,6 +683,74 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({ message: "", attachments }),
       }),
     );
+  });
+
+  it("POST /api/sessions/:id/wake forwards targeted message updates", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({})), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "interval", message: "Updated wake" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/wake",
+      expect.objectContaining({
+        body: JSON.stringify({ target: "interval", message: "Updated wake" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/wake rejects blank and mixed update bodies", async () => {
+    const blank = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "interval", message: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(blank.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+
+    const mixed = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "interval", message: "Updated", intervalMs: 60_000 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(mixed.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/wake passes through daemon 409 responses", async () => {
+    const conflict = { error: 'Wake target "daily" not found for api-a1' };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "daily", message: "Updated wake" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
   });
 
   it("send forwards a 409 rate-limited body and status verbatim", async () => {

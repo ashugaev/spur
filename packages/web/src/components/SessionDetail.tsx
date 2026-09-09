@@ -29,6 +29,7 @@ import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
+import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -173,25 +174,6 @@ function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
-function WakeIcon({ recurring }: { recurring: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <circle cx="12" cy="12" r="8" />
-      <path d="M12 8v5l3 2" />
-      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -2829,33 +2811,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {session.branch}
                   </span>
                 ) : null}
-                {wakeSummary ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                    title={
-                      wakeSummary.kind === "interval"
-                        ? "Interval wake scheduled"
-                        : wakeSummary.kind === "daily"
-                          ? "Daily wake scheduled"
-                          : "Wake scheduled"
-                    }
-                  >
-                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                    <span>{wakeSummary.label.toLowerCase()}</span>
-                    <span className="font-mono text-[var(--color-text-primary)]">
-                      {wakeCountdown}
-                    </span>
-                    {wakeSummary.intervalMs ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        every {formatIntervalDuration(wakeSummary.intervalMs)}
-                      </span>
-                    ) : null}
-                    {wakeSummary.dailyAt ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        daily {wakeSummary.dailyAt.join(", ")}
-                      </span>
-                    ) : null}
-                  </span>
+                {session && getWakeSummary(session) ? (
+                  <WakeControls
+                    onRefresh={loadSession}
+                    onSessionUpdated={setSession}
+                    session={session}
+                    showErrorToast={showErrorToast}
+                    showSuccessToast={showSuccessToast}
+                  />
                 ) : null}
                 {surfacedLinks.map((link) => (
                   <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />

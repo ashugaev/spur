@@ -544,6 +544,84 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("Daily checks done")).toBeVisible();
   });
 
+  test("wake controls open, save, and wake now", async ({ page }) => {
+    const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR ?? "playwright-artifacts";
+    mkdirSync(join(artifactsDir, "wake-ui"), { recursive: true });
+
+    let session = makeWorkingSession({
+      id: "detail-s1-wake-controls",
+      intervalWake: {
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      },
+      scheduledWake: {
+        dueAt: new Date(Date.now() + 600_000).toISOString(),
+        message: "One-shot check",
+      },
+      dailyWake: {
+        dailyAt: ["09:00"],
+        nextDueAt: new Date(Date.now() + 900_000).toISOString(),
+        message: "Daily check",
+        stopCondition: "Daily done",
+      },
+    });
+
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+    await mockSessionConversation(page, session.id, "working");
+
+    await page.route(`**/api/sessions/${session.id}/wake`, async (route) => {
+      const body = route.request().postDataJSON() as { target: string; message: string };
+      session = {
+        ...session,
+        intervalWake: session.intervalWake
+          ? { ...session.intervalWake, message: body.message }
+          : undefined,
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      const body = route.request().postDataJSON() as { message: string; queue?: boolean };
+      expect(body).toEqual({ message: "Updated CI", queue: false });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByRole("button", { name: "3 wakes configured" })).toBeVisible();
+    await page.screenshot({ path: join(artifactsDir, "wake-ui", "closed.png"), fullPage: true });
+
+    await page.getByRole("button", { name: "3 wakes configured" }).click();
+    await expect(page.getByRole("dialog", { name: "Wake controls" })).toBeVisible();
+    await page.screenshot({ path: join(artifactsDir, "wake-ui", "open-all-shapes.png"), fullPage: true });
+
+    await page.getByLabel("Interval wake message").fill("Updated CI");
+    await page.getByRole("button", { name: "Save message" }).first().click();
+    await expect(page.getByText("Wake message saved")).toBeVisible();
+    await page.screenshot({ path: join(artifactsDir, "wake-ui", "saving.png"), fullPage: true });
+
+    await page.getByRole("button", { name: "Wake now" }).first().click();
+    await expect(page.getByText("Wake message sent")).toBeVisible();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: join(artifactsDir, "wake-ui", "mobile.png"), fullPage: true });
+  });
+
   test("opening detail marks an unseen needs_input session opened", async ({ page }) => {
     let session = makeNeedsInputSession({
       id: "detail-s1-opened-needs-input",

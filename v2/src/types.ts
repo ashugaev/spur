@@ -1129,6 +1129,8 @@ export interface SourceReplyResponse {
   messageThreadId?: number;
 }
 
+export type WakeTarget = "scheduled" | "interval" | "daily";
+
 export interface ScheduleSessionWakeRequest {
   at?: string;
   delayMs?: number;
@@ -1136,6 +1138,11 @@ export interface ScheduleSessionWakeRequest {
   dailyAt?: string[];
   stopCondition?: string;
   message?: string;
+}
+
+export interface UpdateSessionWakeMessageRequest {
+  target: WakeTarget;
+  message: string;
 }
 
 export interface RunServiceRequest {

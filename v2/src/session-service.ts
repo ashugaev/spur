@@ -383,6 +383,8 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type UpdateSessionWakeMessageRequest,
+  type WakeTarget,
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
@@ -830,6 +832,10 @@ export class SessionNotReopenableError extends Error {
 // already in flight (either the drain or another flush), so serializing
 // behind it could hang the HTTP request for a whole ack window.
 export class QueueDeliveryInFlightError extends Error {
+  readonly statusCode = 409;
+}
+
+export class WakeTargetMissingError extends Error {
   readonly statusCode = 409;
 }
 
@@ -9841,6 +9847,48 @@ export class SessionService {
     return this.withSessionLifecycleLock(sessionId, () =>
       this.scheduleWakeLocked(sessionId, request),
     );
+  }
+
+  async updateWakeMessage(
+    sessionId: string,
+    request: UpdateSessionWakeMessageRequest,
+  ): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.updateWakeMessageLocked(sessionId, request),
+    );
+  }
+
+  private wakeTargetProperty(target: WakeTarget): "scheduledWake" | "intervalWake" | "dailyWake" {
+    if (target === "scheduled") return "scheduledWake";
+    if (target === "interval") return "intervalWake";
+    return "dailyWake";
+  }
+
+  private async updateWakeMessageLocked(
+    sessionId: string,
+    request: UpdateSessionWakeMessageRequest,
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const property = this.wakeTargetProperty(request.target);
+    const current = session[property];
+    if (!current) {
+      throw new WakeTargetMissingError(
+        `Wake target "${request.target}" not found for ${sessionId}`,
+      );
+    }
+    const updated: SessionRecord = {
+      ...session,
+      [property]: {
+        ...current,
+        message: request.message,
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    return this.enrich(updated);
   }
 
   private async scheduleWakeLocked(
