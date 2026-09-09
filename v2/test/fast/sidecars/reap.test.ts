@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as timersPromisesModule from "node:timers/promises";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarClaims,
@@ -23,6 +24,8 @@ import {
 } from "../../../src/sidecars/reap.js";
 import type { SessionRecord } from "../../../src/types.js";
 import { createTempDir } from "../../helpers/common.js";
+
+const execFileAsync = promisify(execFile);
 
 // Spy on the module's own sleep so timing assertions can count invocations
 // instead of trusting wall-clock, which a loaded CI host can blow past even
@@ -633,6 +636,48 @@ describe("confirmReaps", () => {
       expect(outcome?.survivors).toEqual([]);
     } finally {
       killGroupSafely(pid);
+    }
+  });
+
+  it("drops a real zombie pid instead of reporting it as a survivor", async () => {
+    // A zombie's kill(pid, 0) probe succeeds (the pid still occupies a slot
+    // in the process table) — only isZombie's /proc/<pid>/stat state check
+    // tells it apart from a genuinely alive survivor. Force a real zombie:
+    // a backgrounded grandchild that exits quickly while its parent (kept
+    // busy by a long foreground sleep) never reaps it.
+    const parent = spawn("bash", ["-c", "(sleep 0.2) & disown; sleep 5"], {
+      stdio: "ignore",
+      detached: true,
+    });
+    const parentPid = must(parent.pid, "expected a spawned parent pid");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const { stdout } = await execFileAsync("ps", [
+        "--ppid",
+        String(parentPid),
+        "-o",
+        "pid=,stat=",
+      ]);
+      const zombieLine = stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => /^\d+\s+Z/.test(line));
+      const zombiePidToken = must(
+        zombieLine,
+        "expected a zombie grandchild under the spawned parent",
+      ).split(/\s+/)[0];
+      const zombiePid = Number.parseInt(must(zombiePidToken, "expected a pid token"), 10);
+      const pending = {
+        sessionName: "zombie-test",
+        panePid: null,
+        tree: [zombiePid],
+        ownedGroups: [],
+        snapshot: { ok: true, byPid: new Map(), byPgid: new Map() } as ProcSnapshot,
+      };
+      const [outcome] = await confirmReaps([pending], 50);
+      expect(outcome?.survivors).toEqual([]);
+    } finally {
+      killGroupSafely(parentPid);
     }
   });
 });
