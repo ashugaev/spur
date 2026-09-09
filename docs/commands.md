@@ -52,11 +52,12 @@ Prunable: `vendor-cache` (`~/.npm/_cacache`) — 7d, protected while npm/pnpm/np
 
 Any CLI command syncs its `--config` into the daemon's durable registry. Attached configs must agree on `server.host`, `server.port`, `dataDir`, `worktreeDir`; project ids/`sessionPrefix` stay globally unique per daemon. Registry mechanics: [config registry](configuration.md#config-registry).
 
-Implicit auto-start (any command that reaches an unreachable daemon outside `daemon start|stop|restart`) refuses and never forks a detached daemon:
+Implicit auto-start (any command that reaches an unreachable daemon outside `daemon start|stop|restart`) refuses only in these cases, otherwise it forks a detached daemon:
 
 - `$SPUR_SESSION` or `$SPUR_SIDECAR_NAME` set: `systemctl --user restart spur-daemon` or `spur daemon start` from a host shell.
-- Resolved `--config` isn't the default instance config: `spur --config <path> daemon start`, or `spur sidecar start --name isolated-daemon` for an isolated sidecar.
 - `$SPUR_DISABLE_AUTOSTART=1`: applies to every auto-start path, including `daemon restart`'s internal fallback.
+
+A resolved `--config` that isn't the default instance config no longer blocks autostart — a plain host shell running against a non-default config path forks a daemon like any other unreachable-daemon case.
 
 `daemon restart` itself is exempt from the first two terms.
 
