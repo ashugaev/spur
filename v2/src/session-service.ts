@@ -14,6 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
   agentHasLaunchSubmitAck,
+  agentLaunchUsesForeignBinary,
   agentProcessMatchers,
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
@@ -347,6 +348,7 @@ import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
+  isRespawnableStatus,
   isStaleParked,
   isTerminalSessionStatus,
   type AdmissionCapSource,
@@ -972,7 +974,11 @@ async function wakeDeliverability(session: SessionRecord): Promise<WakeDeliverab
   if (session.project === SHEPHERD_PROJECT_ID) return "deliverable";
   if (session.worktreePath && workspaceExists(session.worktreePath)) return "deliverable";
   if (!(await tmuxSessionExists(session.tmuxSession))) return "workspace_missing";
-  return (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)))
+  return (await agentProcessAlive({
+    tmuxSession: session.tmuxSession,
+    agent: session.agent,
+    launchCommand: session.launchCommand,
+  }))
     ? "deliverable"
     : "workspace_missing";
 }
@@ -1335,6 +1341,23 @@ function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCo
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
 
+// Single point through which every liveness read of isProcessRunningInTmux
+// passes, so the pane-child fallback gate (issue #806) cannot drift from the
+// matcher list: it depends on the SAME (agent, launchCommand) pair used to
+// build the matchers, which varies per call site (record vs. a recovery/
+// restore plan's launch command).
+async function agentProcessAlive(
+  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
+  options?: { fresh?: boolean },
+): Promise<boolean> {
+  const matchers = agentProcessMatchers(input.agent, input.launchCommand);
+  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  return isProcessRunningInTmux(input.tmuxSession, matchers, {
+    ...(options?.fresh ? { fresh: true } : {}),
+    ...(foreign ? { paneChildFallback: true } : {}),
+  });
+}
+
 function withProjectAgentOptions(
   agent: AgentName,
   project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
@@ -1591,6 +1614,25 @@ export function isRestorableSession(
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
+}
+
+// Pure: restore's refusal hint (session-service.ts's only
+// SessionNotRestorableError throw site), derived from the two gates it must
+// not contradict rather than the inverted !isTerminalSessionStatus check
+// that shipped both actions for the wrong statuses. force_kill is
+// meaningless exactly where isTerminalSessionStatus is true (kill throws on
+// "completed", no-ops on "killed"); respawn is exactly isRespawnableStatus.
+export function restoreRecoveryActions(
+  status: SessionRecord["status"],
+): SessionNotRestorablePayload["availableActions"] {
+  const availableActions: SessionNotRestorablePayload["availableActions"] = [];
+  if (!isTerminalSessionStatus(status)) {
+    availableActions.push("force_kill");
+  }
+  if (isRespawnableStatus(status)) {
+    availableActions.push("respawn");
+  }
+  return availableActions;
 }
 
 // Pure park predicate, exported for direct unit coverage the same way
@@ -4893,7 +4935,13 @@ export class SessionService {
         }
         return;
       }
-      if (await isProcessRunningInTmux(cleaned.tmuxSession, sessionProcessMatchers(cleaned))) {
+      if (
+        await agentProcessAlive({
+          tmuxSession: cleaned.tmuxSession,
+          agent: cleaned.agent,
+          launchCommand: cleaned.launchCommand,
+        })
+      ) {
         abandonPark();
         return;
       }
@@ -10663,9 +10711,12 @@ export class SessionService {
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const processAlive = await isProcessRunningInTmux(
-      session.tmuxSession,
-      sessionProcessMatchers(session),
+    const processAlive = await agentProcessAlive(
+      {
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: session.launchCommand,
+      },
       { fresh: true },
     );
     const elapsedMs = Date.now() - startedAt;
@@ -11985,10 +12036,11 @@ export class SessionService {
     const runtimeAlive = presence.present;
     let processAlive = false;
     if (runtimeAlive) {
-      processAlive = await isProcessRunningInTmux(
-        session.tmuxSession,
-        sessionProcessMatchers(session),
-      );
+      processAlive = await agentProcessAlive({
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: session.launchCommand,
+      });
       if (processAlive) {
         return this.captureAgentSessionId(session, 0);
       }
@@ -12220,9 +12272,12 @@ export class SessionService {
       // snapshot, which would otherwise wrongly see it as absent and abort a
       // genuinely successful recovery.
       if (
-        !(await isProcessRunningInTmux(
-          session.tmuxSession,
-          agentProcessMatchers(session.agent, recoveryPlan?.launchCommand ?? baseLaunchCommand),
+        !(await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+          },
           { fresh: true },
         ))
       ) {
@@ -12275,9 +12330,12 @@ export class SessionService {
       // fresh:true — same rationale as the resume-plan check above: this
       // pane was just (re)created and may postdate the last fleet snapshot.
       if (
-        !(await isProcessRunningInTmux(
-          session.tmuxSession,
-          agentProcessMatchers(session.agent, freshLaunchCommand),
+        !(await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: freshLaunchCommand,
+          },
           { fresh: true },
         ))
       ) {
@@ -12437,10 +12495,7 @@ export class SessionService {
           workspaceExists: current.workspaceExists,
         },
       });
-      const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
-      if (!isTerminalSessionStatus(current.status)) {
-        availableActions.push("respawn");
-      }
+      const availableActions = restoreRecoveryActions(current.status);
       throw new SessionNotRestorableError(
         sessionId,
         `Session ${sessionId} is not restorable`,
@@ -12642,9 +12697,12 @@ export class SessionService {
         }
         // fresh:true — this pane was just created by createTmuxSession above.
         if (
-          !(await isProcessRunningInTmux(
-            current.tmuxSession,
-            agentProcessMatchers(current.agent, restoreLaunchCommand),
+          !(await agentProcessAlive(
+            {
+              tmuxSession: current.tmuxSession,
+              agent: current.agent,
+              launchCommand: restoreLaunchCommand,
+            },
             { fresh: true },
           ))
         ) {
@@ -12666,9 +12724,12 @@ export class SessionService {
       // fresh:true — this pane was just created by createTmuxSession above
       // and may postdate the last fleet-pane snapshot.
       if (
-        !(await isProcessRunningInTmux(
-          current.tmuxSession,
-          agentProcessMatchers(current.agent, restoreLaunchCommand),
+        !(await agentProcessAlive(
+          {
+            tmuxSession: current.tmuxSession,
+            agent: current.agent,
+            launchCommand: restoreLaunchCommand,
+          },
           { fresh: true },
         ))
       ) {
@@ -12690,9 +12751,15 @@ export class SessionService {
           // The fallback relaunched the agent instead of resuming it, so this is a
           // launch send with no transcript behind it, same as a spawn's. A resume
           // send keeps the mid-session pacing and its own timeout handling below.
-          const restoreSendOutcome = await this.sendAgentMessage(current, restoreInitialMessage, {
-            freshLaunch: freshLaunchFallback,
-          });
+          // launchCommand is overridden to restoreLaunchCommand: an unacked send's
+          // liveness probe (agentProcessAlive) gates on the pane's ACTUAL launch
+          // command, not current's stale recorded one, same as the two fresh
+          // liveness checks above this block.
+          const restoreSendOutcome = await this.sendAgentMessage(
+            { ...current, launchCommand: restoreLaunchCommand },
+            restoreInitialMessage,
+            { freshLaunch: freshLaunchFallback },
+          );
           if (restoreSendOutcome === "submit_unconfirmed") {
             // Same degraded state the catch below reports for a resume send that
             // timed out on a live pane: the agent is up, its prompt is not
@@ -12861,8 +12928,31 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (session.status !== "completed") {
+      // enrich() can persist a write here via three reconcilers it calls
+      // unconditionally (classifySessionRecord, ~14743-14753 below):
+      // reconcileUnexpectedStop (running/spawning), reconcileStaleStoppedSession
+      // (stopped), reconcileStaleErroredSession (errored) — each fires only
+      // when the live-pane evidence contradicts the persisted status. This is
+      // the same enrich() restore()'s own refusal (12175) and the dashboard
+      // cache tick already call. Accepted so the message never names
+      // restore/respawn for a status their own gates would reject (the bug
+      // this refusal exists to avoid); the happy path above never reaches
+      // here, so it costs nothing extra.
+      const view = await this.enrich(session);
+      const restorable = isRestorableSession(view);
+      const respawnable = isRespawnableStatus(view.status);
+      const restoreClause = `\`spur restore ${sessionId}\` resumes it with its conversation`;
+      const respawnClause = `\`spur respawn ${sessionId}\` starts a fresh session (conversation not carried over)`;
+      const guidance =
+        restorable && respawnable
+          ? `${restoreClause}; ${respawnClause}`
+          : restorable
+            ? restoreClause
+            : respawnable
+              ? respawnClause
+              : `\`spur kill ${sessionId} --force\`, then \`spur respawn ${sessionId}\``;
       throw new SessionNotReopenableError(
-        `Session ${sessionId} is ${session.status}, not completed — \`spur restore ${sessionId}\` resumes it with its conversation; \`spur respawn ${sessionId}\` starts a fresh session (conversation not carried over)`,
+        `Session ${sessionId} is ${session.status}, not completed — ${guidance}`,
       );
     }
 
@@ -13243,11 +13333,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (
-      session.status !== "completed" &&
-      session.status !== "killed" &&
-      session.status !== "errored"
-    ) {
+    if (!isRespawnableStatus(session.status)) {
       throw new Error(
         `Session ${sessionId} is not in a terminal state (status: ${session.status})`,
       );
@@ -14047,7 +14133,13 @@ export class SessionService {
   ): Promise<boolean> {
     const first = await getTmuxSessionPresence(session.tmuxSession);
     if (first.present) {
-      if (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))) {
+      if (
+        await agentProcessAlive({
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        })
+      ) {
         return false;
       }
     } else if (first.unresponsive) {
@@ -14061,9 +14153,14 @@ export class SessionService {
     await sleep(PIPELINE_POLL_INTERVAL_MS);
     const second = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
     if (second.present) {
-      return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
-        fresh: true,
-      }));
+      return !(await agentProcessAlive(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      ));
     }
     if (second.unresponsive) {
       return false;
@@ -14221,9 +14318,14 @@ export class SessionService {
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
-        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session), {
-            fresh,
-          })
+        ? await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: session.launchCommand,
+            },
+            { fresh },
+          )
         : false;
     // Guarded so neither call can force a snapshot that was never fetched:
     // sessionsUnresponsive only matters when the session read itself came up
@@ -15405,6 +15507,11 @@ export class SessionService {
       pipeline: _pipeline,
       sidecarNames: _sidecarNames,
       sidecarPorts: _sidecarPorts,
+      launchCommand: _launchCommand,
+      stateSubscriptions: _stateSubscriptions,
+      allowedTriggers: _allowedTriggers,
+      agentSessionId: _agentSessionId,
+      branchSource: _branchSource,
       ...dashboardSession
     } = session;
     const workspacePresent = classified.workspacePresent;
@@ -15432,7 +15539,8 @@ export class SessionService {
       await Promise.all(
         sidecarNames.map(async (name) => {
           const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
-          return (await sidecarTmuxAlive(ownerId, name)) ? name : null;
+          const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
+          return exists && !paneDead ? name : null;
         }),
       )
     ).filter((name): name is string => name !== null);
@@ -15456,6 +15564,22 @@ export class SessionService {
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
+  }
+
+  // Readout-only pane state for a sidecar: does its tmux session name exist,
+  // and if so is its pane dead (remain-on-exit keeps the name around after
+  // the pane exits). Reads only the two already-memoized fleet snapshots
+  // (getFleetSessionSnapshot / getFleetPaneSnapshot, both on a 2s TTL) —
+  // never passes { fresh: true }, so this adds zero new tmux forks. Every
+  // non-readout sidecarTmuxAlive call site keeps its "name exists" meaning
+  // unchanged; this helper only backs the two view readouts below.
+  private async sidecarPaneState(
+    ownerId: string,
+    sidecarName: string,
+  ): Promise<{ exists: boolean; paneDead: boolean }> {
+    const exists = await sidecarTmuxAlive(ownerId, sidecarName);
+    const paneDead = exists && (await tmuxPaneDead(sidecarTmuxSession(ownerId, sidecarName)));
+    return { exists, paneDead };
   }
 
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
@@ -15581,13 +15705,15 @@ export class SessionService {
       // the backend event can never disagree.
       const ageWarn =
         ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60;
+      const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
       sidecars.push({
         name,
-        alive: await sidecarTmuxAlive(ownerId, name),
+        alive: exists && !paneDead,
         ports: sidecarViewPorts(ownerRecord, name, sidecar),
         tmuxSession: sidecarTmuxSession(ownerId, name),
         ...(ageSeconds !== undefined ? { ageSeconds } : {}),
         ...(ageWarn ? { ageWarn } : {}),
+        ...(paneDead ? { deadPane: true } : {}),
       });
     }
     const queuedMessagesView = displayQueuedMessages(session);
