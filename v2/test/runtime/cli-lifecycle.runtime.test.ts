@@ -1455,6 +1455,20 @@ projects:
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "slots",
+        "--session",
+        "api-999",
+        "--title",
+        "does not matter",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
     const listed = JSON.parse(
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
