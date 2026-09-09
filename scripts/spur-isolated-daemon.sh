@@ -29,6 +29,47 @@ prune_stale_config_dirs() {
 
   tmp_root="${TMPDIR:-/tmp}"
 
+  # GATE C: refuses to prune a dir whose worktrees/<project>/<session> holds
+  # unsaved or unevaluable work — uncommitted changes, unpushed commits,
+  # non-repo content, or a git/find call that failed outright. Semantics
+  # mirror workspace.ts's hasUncommittedChanges/hasUnpushedCommits, without
+  # `:(exclude)` pathspecs: bash has no access to project.symlinks here (the
+  # project config is written only after this prune runs, at
+  # $PROJECT_CONFIG_RUNTIME_PATH below) — bounded and one-directional, since
+  # `git status --short` never lists a gitignored path, so this only ever
+  # keeps a dir it could have safely removed, never removes one it should
+  # have kept. Every unevaluable path returns 0 (keep) — GATE A/B's own
+  # `mmin +60` floor is not a protection on its own (a dir's mtime freezes
+  # at its `mktemp -d` above; work inside it bumps `worktrees/`, not `$dir`),
+  # so this is what makes that floor survivable.
+  dir_has_unsaved_work() { # returns 0 = keep the dir
+    local root="$1/worktrees" wt status entries upstream
+    [[ -d "$root" ]] || return 1
+    [[ -r "$root" && -x "$root" ]] || return 0 # unreadable root -> keep
+    local -a found=()
+    while IFS= read -r -d '' wt; do
+      found+=("$wt")
+    done < <(
+      find "$root" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null
+    ) || return 0 # find failed -> keep
+    for wt in "${found[@]:-}"; do
+      [[ -n "$wt" ]] || continue
+      if [[ ! -e "$wt/.git" ]]; then
+        entries="$(find "$wt" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return 0
+        [[ -n "$entries" ]] && return 0 # non-repo but non-empty -> keep
+        continue
+      fi
+      status="$(git -C "$wt" status --short 2>/dev/null)" || return 0
+      [[ -n "$status" ]] && return 0
+      if upstream="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
+        git -C "$wt" merge-base --is-ancestor HEAD "$upstream" 2>/dev/null || return 0
+      else
+        [[ -z "$(git -C "$wt" branch -r --contains HEAD 2>/dev/null)" ]] && return 0
+      fi
+    done
+    return 1
+  }
+
   # GATE A source: a live isolated daemon always names its own CONFIG_DIR in
   # argv (this script's own `exec "$NODE_BIN" "$CLI_PATH" --config
   # "$CONFIG_DIR/config.yaml" ...` below) — a sound liveness proof for that
@@ -72,6 +113,8 @@ prune_stale_config_dirs() {
     if [[ "$matched" -eq 1 ]]; then
       continue
     fi
+
+    dir_has_unsaved_work "$dir" && continue
 
     # `|| true`: under `set -euo pipefail`, an unremovable candidate (another
     # uid's leftover in sticky /tmp, a partially-unwritable tree) must never

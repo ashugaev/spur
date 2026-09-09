@@ -2,8 +2,9 @@ import { execFile, spawn } from "node:child_process";
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type * as timersPromisesModule from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -1050,5 +1051,41 @@ describe("reapRecordedPortDaemon", () => {
   it("returns null when no port is recorded at all", async () => {
     const outcome = await reapRecordedPortDaemon({ ports: [], worktreePath: "/tmp/whatever" });
     expect(outcome).toBeNull();
+  });
+});
+
+describe("859/AC16 GUARD: reapRecordedPortDaemon reachability", () => {
+  it("is reachable from exactly one call site, inside stopSidecarLocked", async () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../../src");
+    const { stdout } = await execFileAsync("grep", ["-rn", "reapRecordedPortDaemon", srcDir]);
+    const hits = stdout
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0);
+    expect(hits).toHaveLength(3);
+    const callSite = hits.find(
+      (hit) => hit.includes("session-service.ts") && hit.includes("await reapRecordedPortDaemon"),
+    );
+    if (!callSite) {
+      throw new Error(`expected one call site inside session-service.ts, got: ${hits.join("\n")}`);
+    }
+    const [, lineNumberRaw] = callSite.split(":");
+    const callLine = Number.parseInt(lineNumberRaw ?? "", 10);
+    const sessionServiceSource = await readFile(resolve(srcDir, "session-service.ts"), "utf8");
+    const sessionServiceLines = sessionServiceSource.split("\n");
+    const stopSidecarLockedStart = sessionServiceLines.findIndex((line) =>
+      line.includes("private async stopSidecarLocked("),
+    );
+    const nextMethodStart = sessionServiceLines.findIndex(
+      (line, index) =>
+        index > stopSidecarLockedStart + 5 &&
+        /^\s{2}(private |async |public )/.test(line) &&
+        !line.includes("stopSidecarLocked"),
+    );
+    expect(stopSidecarLockedStart).toBeGreaterThan(-1);
+    expect(nextMethodStart).toBeGreaterThan(stopSidecarLockedStart);
+    // callLine is 1-indexed from grep; sessionServiceLines is 0-indexed.
+    expect(callLine - 1).toBeGreaterThan(stopSidecarLockedStart);
+    expect(callLine - 1).toBeLessThan(nextMethodStart);
   });
 });

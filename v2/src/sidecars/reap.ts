@@ -1202,6 +1202,8 @@ export interface SweepSidecarsInput {
   worktreeDirRealpath: string;
   /** Reaping happens only when true — report-first by default. */
   reap: boolean;
+  /** The calling instance's own config path (B3a self-exclusion). */
+  selfConfigPath?: string;
 }
 
 /**
@@ -1216,6 +1218,7 @@ export async function sweepSidecars(input: SweepSidecarsInput): Promise<SidecarS
     claims: input.claims,
     worktreePaths: input.worktreePaths,
     worktreeDirRealpath: input.worktreeDirRealpath,
+    ...(input.selfConfigPath !== undefined ? { selfConfigPath: input.selfConfigPath } : {}),
   });
   if (!input.reap || !supported) {
     return { supported, leaked, reaped: [] };

@@ -1,5 +1,13 @@
 import { spawn as spawnChildProcess, execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -49,6 +57,64 @@ async function makeStaleDir(root: string, name: string, ageMinutes: number): Pro
   return dir;
 }
 
+// GATE C (859/B2) fixtures: a `worktrees/<project>/<session>` git checkout
+// in a chosen dirty/clean state. `gitEnv` pins HOME/GIT_CONFIG_GLOBAL so
+// `git status`/`commit`/`push` never touch the real operator's identity or
+// global config, and never hit "detected dubious ownership" under a
+// container uid mismatch.
+async function makeGitTestHome(): Promise<{ home: string; env: NodeJS.ProcessEnv }> {
+  const home = await mkdtemp(join(tmpdir(), "spur-prune-git-home-"));
+  const gitConfigPath = join(home, ".gitconfig");
+  writeFileSync(
+    gitConfigPath,
+    [
+      "[user]",
+      "  name = Spur Prune Test",
+      "  email = spur-prune-test@example.com",
+      "[init]",
+      "  defaultBranch = main",
+      "[safe]",
+      "  directory = *",
+    ].join("\n"),
+    "utf8",
+  );
+  return {
+    home,
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      HOME: home,
+      GIT_CONFIG_GLOBAL: gitConfigPath,
+    },
+  };
+}
+
+function worktreeSessionDir(configDir: string): string {
+  const dir = join(configDir, "worktrees", "api", "api-1");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+async function git(env: NodeJS.ProcessEnv, cwd: string, ...args: string[]): Promise<void> {
+  await execFileAsync("git", ["-C", cwd, ...args], { env });
+}
+
+// Clean, pushed worktree: a bare "origin" remote, one committed file, pushed
+// and tracked — the baseline every dirty variant below starts from.
+async function makeCleanPushedWorktree(
+  env: NodeJS.ProcessEnv,
+  wt: string,
+  originRoot: string,
+): Promise<void> {
+  const originDir = join(originRoot, "origin.git");
+  await execFileAsync("git", ["init", "-q", "--bare", "-b", "main", originDir], { env });
+  await git(env, wt, "init", "-q", "-b", "main");
+  writeFileSync(join(wt, "committed.txt"), "hello\n", "utf8");
+  await git(env, wt, "add", "committed.txt");
+  await git(env, wt, "commit", "-q", "-m", "initial");
+  await git(env, wt, "remote", "add", "origin", originDir);
+  await git(env, wt, "push", "-q", "-u", "origin", "main");
+}
+
 async function runPrune(options: {
   tmpRoot: string;
   configDir: string;
@@ -57,6 +123,13 @@ async function runPrune(options: {
   psPidOutput?: string;
   psPidFail?: boolean;
   fakeBinDir: string;
+  // GATE C (859/B2): HOME + GIT_CONFIG_GLOBAL for the real `git` calls
+  // inside dir_has_unsaved_work. Without HOME, `git status` in a fixture
+  // repo can exit 128 ("detected dubious ownership" / no global config),
+  // which GATE C converts to "keep" — a green test proving nothing. Callers
+  // exercising GATE C pass the SAME home their fixture worktree was created
+  // under; every other caller gets a fresh, harmless throwaway one.
+  gitHome?: { home: string; env: NodeJS.ProcessEnv };
 }): Promise<void> {
   const {
     tmpRoot,
@@ -66,7 +139,12 @@ async function runPrune(options: {
     psPidOutput = "",
     psPidFail = false,
     fakeBinDir,
+    gitHome,
   } = options;
+  const resolvedGitHome = gitHome ?? (await makeGitTestHome());
+  if (!gitHome) {
+    cleanupPaths.push(resolvedGitHome.home);
+  }
   mkdirSync(fakeBinDir, { recursive: true });
   const fakePs = join(fakeBinDir, "ps");
   makeExecutable(
@@ -107,6 +185,8 @@ exit 97
       CONFIG_DIR: configDir,
       PRUNE_TEST_PS_ARGS_OUTPUT: psArgsOutput,
       PRUNE_TEST_PS_PID_OUTPUT: psPidOutput,
+      HOME: resolvedGitHome.home,
+      GIT_CONFIG_GLOBAL: join(resolvedGitHome.home, ".gitconfig"),
     },
   });
 }
@@ -324,5 +404,186 @@ describe("spur-isolated-daemon.sh prune_stale_config_dirs", () => {
     });
 
     expect(existsSync(outsideStale)).toBe(true);
+  });
+});
+
+// GATE C (859/B2): the prune must never delete a stale dir whose
+// worktrees/<project>/<session> holds unsaved or unevaluable work.
+describe("spur-isolated-daemon.sh prune_stale_config_dirs: GATE C", () => {
+  it("859/AC15: keeps a stale dir with an untracked file", async () => {
+    const gitHome = await makeGitTestHome();
+    cleanupPaths.push(gitHome.home);
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-untracked", 120);
+    const wt = worktreeSessionDir(stale);
+    await makeCleanPushedWorktree(gitHome.env, wt, tmpRoot);
+    writeFileSync(join(wt, "untracked.txt"), "surprise\n", "utf8");
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-untracked", 120);
+
+    await runPrune({ tmpRoot, configDir, fakeBinDir: join(tmpRoot, "bin"), gitHome });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
+  it("859/AC15: keeps a stale dir with a modified tracked file", async () => {
+    const gitHome = await makeGitTestHome();
+    cleanupPaths.push(gitHome.home);
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-modified", 120);
+    const wt = worktreeSessionDir(stale);
+    await makeCleanPushedWorktree(gitHome.env, wt, tmpRoot);
+    writeFileSync(join(wt, "committed.txt"), "changed\n", "utf8");
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-modified", 120);
+
+    await runPrune({ tmpRoot, configDir, fakeBinDir: join(tmpRoot, "bin"), gitHome });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
+  it("859/AC15: keeps a stale dir with a commit unreachable from upstream (unpushed)", async () => {
+    const gitHome = await makeGitTestHome();
+    cleanupPaths.push(gitHome.home);
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-unpushed", 120);
+    const wt = worktreeSessionDir(stale);
+    await makeCleanPushedWorktree(gitHome.env, wt, tmpRoot);
+    writeFileSync(join(wt, "second.txt"), "more\n", "utf8");
+    await git(gitHome.env, wt, "add", "second.txt");
+    await git(gitHome.env, wt, "commit", "-q", "-m", "unpushed");
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-unpushed", 120);
+
+    await runPrune({ tmpRoot, configDir, fakeBinDir: join(tmpRoot, "bin"), gitHome });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
+  it("859/AC15: keeps a stale dir with a non-repo, non-empty session directory", async () => {
+    const gitHome = await makeGitTestHome();
+    cleanupPaths.push(gitHome.home);
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-non-repo", 120);
+    const wt = worktreeSessionDir(stale);
+    writeFileSync(join(wt, "some-file.txt"), "content\n", "utf8");
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-non-repo", 120);
+
+    await runPrune({ tmpRoot, configDir, fakeBinDir: join(tmpRoot, "bin"), gitHome });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
+  it("859/AC15: keeps a stale dir whose worktrees/ root is unreadable", async () => {
+    const gitHome = await makeGitTestHome();
+    cleanupPaths.push(gitHome.home);
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-unreadable-root", 120);
+    const worktreesRoot = join(stale, "worktrees");
+    mkdirSync(worktreesRoot, { recursive: true });
+    chmodSync(worktreesRoot, 0o000);
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-unreadable-root", 120);
+
+    try {
+      await runPrune({ tmpRoot, configDir, fakeBinDir: join(tmpRoot, "bin"), gitHome });
+      expect(existsSync(stale)).toBe(true);
+    } finally {
+      chmodSync(worktreesRoot, 0o700);
+    }
+  });
+
+  it("859/AC15: keeps a stale dir when a `git` call fails outright (corrupt .git)", async () => {
+    const gitHome = await makeGitTestHome();
+    cleanupPaths.push(gitHome.home);
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-corrupt-git", 120);
+    const wt = worktreeSessionDir(stale);
+    // A `.git` entry that exists but is not a valid git dir: `git status`
+    // exits nonzero, exercising the `|| return 0` (keep) fail-safe rather
+    // than the "no .git at all" non-repo branch above.
+    writeFileSync(join(wt, ".git"), "not a real gitdir\n", "utf8");
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.dirty-corrupt-git", 120);
+
+    await runPrune({ tmpRoot, configDir, fakeBinDir: join(tmpRoot, "bin"), gitHome });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
+  it("859/AC15: removes an otherwise-stale dir whose worktree is clean, pushed, and its only untracked-looking entry is a gitignored symlinked node_modules", async () => {
+    const gitHome = await makeGitTestHome();
+    cleanupPaths.push(gitHome.home);
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.clean-pushed", 120);
+    const wt = worktreeSessionDir(stale);
+    await makeCleanPushedWorktree(gitHome.env, wt, tmpRoot);
+    const realNodeModules = join(tmpRoot, "shared-node-modules");
+    mkdirSync(realNodeModules, { recursive: true });
+    symlinkSync(realNodeModules, join(wt, "node_modules"));
+    writeFileSync(join(wt, ".gitignore"), "node_modules\n", "utf8");
+    await git(gitHome.env, wt, "add", ".gitignore");
+    await git(gitHome.env, wt, "commit", "-q", "-m", "ignore node_modules");
+    await git(gitHome.env, wt, "push", "-q");
+    await makeStaleDir(tmpRoot, "spur-isolated-daemon.clean-pushed", 120);
+
+    await runPrune({ tmpRoot, configDir, fakeBinDir: join(tmpRoot, "bin"), gitHome });
+
+    expect(existsSync(stale)).toBe(false);
+  });
+});
+
+// 859/AC17: GATE A's `ps` substring depends on the wrapper's own `--config`
+// line (script:175) staying in sync. Extracted BY PATTERN from the real
+// script, never hardcoded, so this fails on a one-sided change either way.
+describe("spur-isolated-daemon.sh: GATE A / wrapper exec line cross-file pin", () => {
+  it("859/AC17: a ps line synthesized from the wrapper's own exec line is matched by GATE A's grep, so the dir survives", async () => {
+    const scriptLines = readFileSync(SCRIPT_PATH, "utf8").split("\n");
+    const execLine = scriptLines.find(
+      (line) => line.startsWith("exec ") && line.includes("--config") && line.includes("CLI_PATH"),
+    );
+    if (!execLine) {
+      throw new Error("wrapper's --config exec line not found in spur-isolated-daemon.sh");
+    }
+
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-via-wrapper", 120);
+    // Substitute the same shell variables the real wrapper heredoc would
+    // have expanded at generation time, synthesizing the exact `ps args=`
+    // line a live daemon for THIS dir would produce.
+    const synthesizedPsLine = execLine
+      .replace(/^exec\s+/, "")
+      .replaceAll('"$NODE_BIN"', "/usr/bin/node")
+      .replaceAll('"$CLI_PATH"', `${stale}/v2/dist/cli.js`)
+      .replaceAll('"$CONFIG_DIR/config.yaml"', `${stale}/config.yaml`)
+      .replaceAll('"\\$@"', "daemon start");
+
+    await runPrune({
+      tmpRoot,
+      configDir,
+      psArgsOutput: synthesizedPsLine,
+      fakeBinDir: join(tmpRoot, "bin"),
+    });
+
+    expect(existsSync(stale)).toBe(true);
   });
 });

@@ -56,6 +56,7 @@ import {
   collectTree,
   confirmReaps,
   reapRecordedIdentity,
+  reapRecordedPortDaemon,
   reapSidecarPane,
   readProcessStarttime,
   signalSidecarPane,
@@ -11207,37 +11208,48 @@ export class SessionService {
     suppressed.add(sidecarName);
     this.healTaskSkipNames.get(sessionId)?.add(sidecarName);
     try {
-      // A dead pane or an absent tmux session with no recorded identity means
-      // there is genuinely nothing left to reap.
+      // Captured BEFORE any kill: killSidecarAndUnlinkSlot can unlink this
+      // sidecar's slot/identity, and the recorded-port term below (spur#859
+      // B1) is the ONLY thing that can see a detached daemon that already
+      // took over this port — the isolated-daemon sidecar's own pane
+      // `exec`s into its daemon, so once a forked daemon takes the port the
+      // pane is gone and the old early-return here reported a lie
+      // (`nothing-to-stop`) without ever probing the port.
       const owner = readSession(this.config.dataDir, ownerId);
+      const recordedPorts = Object.values(owner?.sidecarPorts?.[sidecarName] ?? {});
       const alive = await sidecarTmuxAlive(ownerId, sidecarName);
-      if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
-        if (clearsWorkspaceReplay) {
-          this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
-        }
-        return { ...(await this.enrich(session)), sidecarStop: { outcome: "nothing-to-stop" } };
-      }
-
-      const outcome = await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
+      const paneOutcome =
+        alive || owner?.sidecarProcs?.[sidecarName]
+          ? await this.killSidecarAndUnlinkSlot(ownerId, sidecarName)
+          : null;
+      const portOutcome = await reapRecordedPortDaemon({
+        ports: recordedPorts,
+        worktreePath: owner?.worktreePath ?? "",
+      });
       if (clearsWorkspaceReplay) {
         this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
       }
+      const survivors = [
+        ...new Set([...(paneOutcome?.survivors ?? []), ...(portOutcome?.survivors ?? [])]),
+      ];
       const sidecarStop: SidecarStopReport =
-        outcome === null
+        paneOutcome === null && portOutcome === null
           ? { outcome: "nothing-to-stop" }
-          : outcome.survivors.length === 0
+          : survivors.length === 0
             ? { outcome: "reaped" }
-            : { outcome: "partial", survivors: outcome.survivors };
-      this.logEvent("session.sidecar.stopped", {
-        level: "info",
-        sessionId,
-        projectId: session.project,
-        message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
-        details: {
-          sidecarName,
-          tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
-        },
-      });
+            : { outcome: "partial", survivors };
+      if (sidecarStop.outcome !== "nothing-to-stop") {
+        this.logEvent("session.sidecar.stopped", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+          details: {
+            sidecarName,
+            tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
+          },
+        });
+      }
       const view = await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
       return { ...view, sidecarStop };
     } finally {
@@ -11261,7 +11273,7 @@ export class SessionService {
     if (!assembled) {
       return { supported: false, leaked: [], reaped: [] };
     }
-    return sweepSidecars({ ...assembled, reap });
+    return sweepSidecars({ ...assembled, reap, selfConfigPath: this.bootstrapConfigPath });
   }
 
   // Signals every torn-down sidecar's pane first, then confirms the whole
