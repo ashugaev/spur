@@ -171,10 +171,19 @@ describe("startServer", () => {
         leaked: unknown[];
         reaped: unknown[];
       };
-      // Nothing leaked in this empty sandbox, so both calls report the same
-      // shape either way — the important assertion is the default omits any
-      // reaping regardless of what `leaked` ends up containing.
-      expect(reapResult.leaked).toEqual(defaultResult.leaked);
+      // Nothing leaked in THIS empty sandbox, but `findOrphanDaemonTrees`
+      // scans the whole host process table unscoped by worktreeDir (spur#859
+      // B4) — on a host with a real leftover orphan daemon, its `ageSeconds`
+      // can tick by 1 between these two round trips even though nothing else
+      // about the row changed. Strip that one volatile field; the real
+      // assertion (default omits any reaping regardless of what `leaked`
+      // ends up containing) does not depend on it.
+      const stripAgeSeconds = (rows: unknown[]) =>
+        rows.map((row) => {
+          const { ageSeconds: _ageSeconds, ...rest } = row as Record<string, unknown>;
+          return rest;
+        });
+      expect(stripAgeSeconds(reapResult.leaked)).toEqual(stripAgeSeconds(defaultResult.leaked));
     } finally {
       await server.stop();
     }
