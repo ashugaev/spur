@@ -513,7 +513,10 @@ describe("BackendConnectionProvider", () => {
 
   it("publishes the version each healthy heartbeat reports", async () => {
     let version = "1.4.2";
-    mockFetchResults(() => true, () => version);
+    mockFetchResults(
+      () => true,
+      () => version,
+    );
 
     vi.useFakeTimers();
     const { result } = renderProvider();
@@ -613,7 +616,10 @@ describe("BackendConnectionProvider", () => {
       );
     }
 
-    mockFetchResults(() => true, () => "1.4.2");
+    mockFetchResults(
+      () => true,
+      () => "1.4.2",
+    );
 
     vi.useFakeTimers();
     const { result } = renderHook(() => useVersionSwitch(), { wrapper: memoWrapper });
@@ -638,7 +644,10 @@ describe("BackendConnectionProvider", () => {
   });
 
   it("ignores an empty version string from a healthy probe", async () => {
-    mockFetchResults(() => true, () => "");
+    mockFetchResults(
+      () => true,
+      () => "",
+    );
 
     vi.useFakeTimers();
     const { result } = renderProvider();
