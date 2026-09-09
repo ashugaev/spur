@@ -120,6 +120,7 @@ import {
   type ServiceInstanceView,
   type SessionListItemView,
   type SessionView,
+  type SidecarStopView,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
@@ -1175,8 +1176,16 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
       outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
     // Tree total, not the root pid's own rss — the root alone understated
     // the measured 863333/863351 leak by 17x.
+    const attribution =
+      tree.kind === "orphan-daemon"
+        ? tree.liveness === "serving"
+          ? `daemon ${tree.configPath} — serving on ${tree.port} — stop it with 'spur --config ${tree.configPath} daemon stop'`
+          : tree.liveness === "unknown"
+            ? `daemon ${tree.configPath} — liveness unknown — verify manually before killing`
+            : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
+        : (tree.sidecarName ?? "unattributed");
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,
     );
   });
   return lines.join("\n");
@@ -1185,6 +1194,42 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
 // Test-only: exercises the sweep summary's status/survivors formatting
 // without spinning up a live CLI command or the daemon route it calls.
 export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
+
+// `sidecar stop`'s success line, per real outcome — never claims a reap that
+// did not happen (`sidecarStop.outcome`, session-service.ts's stopSidecar).
+function renderSidecarStopMessage(name: string, session: SidecarStopView): string {
+  const { sidecarStop } = session;
+  if (sidecarStop.outcome === "nothing-to-stop") {
+    return `Sidecar ${name} on ${session.id} was not running; nothing to stop.`;
+  }
+  if (sidecarStop.outcome === "partial") {
+    // ND-2: unverifiedPorts has two distinct causes (a probe that could not
+    // run, or a port excluded as ambiguous against a non-terminal sibling —
+    // see docs/daemon-api.md's sidecar-stop route entry) — this message
+    // names neither, rather than misattributing an ambiguous-ownership
+    // exclusion to a missing OS tool.
+    const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
+    if (sidecarStop.survivors.length === 0 && unverifiedPorts.length > 0) {
+      return `Stopped sidecar ${name} for ${session.id}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Report them: spur sidecar sweep`;
+    }
+    return `Stopped sidecar ${name} for ${session.id}, but ${sidecarStop.survivors.length} process(es) survived: ${sidecarStop.survivors.join(",")}. Report them: spur sidecar sweep`;
+  }
+  return `Stopped sidecar ${name} for ${session.id}.`;
+}
+
+// Test-only: exercises the stop message's per-outcome branching without a
+// live CLI command or the daemon route it calls.
+export const _renderSidecarStopMessageForTests = renderSidecarStopMessage;
+
+// `sidecar stop`'s process exit code, per real outcome — only a `partial`
+// reap (survivors left behind) is operator-actionable failure.
+function sidecarStopExitCode(session: SidecarStopView): number | undefined {
+  return session.sidecarStop.outcome === "partial" ? 1 : undefined;
+}
+
+// Test-only: exercises the stop exit-code mapping without a live CLI
+// command or the daemon route it calls.
+export const _sidecarStopExitCodeForTests = sidecarStopExitCode;
 
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
@@ -3835,13 +3880,14 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "stopping sidecar",
         action: () =>
-          postJson<SessionView>(
+          postJson<SidecarStopView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
             {},
             configPath,
           ),
-        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
+        success: (session) => renderSidecarStopMessage(options.name as string, session),
+        exitCode: sidecarStopExitCode,
         render: renderSessionCard,
       });
     });
