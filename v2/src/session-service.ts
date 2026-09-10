@@ -154,6 +154,7 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   flushEventLogCollapse,
   logSpurEvent,
@@ -441,6 +442,7 @@ import {
   ensureTodoLedger,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
+  TodoLedgerCorruptError,
   TodoOpenWorkError,
   todoLedgerBlock,
   unfinishedTodo,
@@ -553,6 +555,8 @@ const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
+const TODO_NUDGE_BACKOFF_BASE_MS = 2 * 60 * 1000;
+const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
 // (workspaceExists, hasServiceIssues, workspace slots), never from agent
@@ -2628,6 +2632,14 @@ export class SessionService {
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
   private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  private readonly todoNudgeDisabled = new Map<
+    string,
+    { kind: "ledger_corrupt" | "target_gone"; reason: string }
+  >();
+  private readonly todoNudgeBackoff = new Map<
+    string,
+    { failures: number; nextRetryAtMs: number }
+  >();
   // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
   // process trees" over the real HTTP /sidecars/sweep route would
   // otherwise scan the real host process table — on a host with even one
@@ -5097,6 +5109,12 @@ export class SessionService {
     for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
       if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
     }
+    for (const sessionId of this.todoNudgeDisabled.keys()) {
+      if (!liveIds.has(sessionId)) this.todoNudgeDisabled.delete(sessionId);
+    }
+    for (const sessionId of this.todoNudgeBackoff.keys()) {
+      if (!liveIds.has(sessionId)) this.todoNudgeBackoff.delete(sessionId);
+    }
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.codexMcpDialogOverrides.delete(sessionId);
@@ -5990,6 +6008,33 @@ export class SessionService {
     }
   }
 
+  // Anti-false-positive guard mirrors isGitHubPermanentNotFoundError
+  // (event-sources/github.ts:115-124): a non-tmux error whose text happens to
+  // carry "can't find session" (an agent transcript excerpt, a shell echo)
+  // must stay transient.
+  private isMissingTmuxTarget(error: unknown): boolean {
+    const text = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    return text.includes("tmux") && text.includes("can't find session");
+  }
+
+  private todoNudgeBackoffBaseMs(): number {
+    const collapseWindowMs =
+      this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
+    // Floor at the original fixed base: a tiny configured collapseWindowMs
+    // must not shrink the nudge backoff below its pre-derivation floor.
+    return Math.max(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs * 2);
+  }
+
+  // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
+  // target_gone observation: the tmux target that was missing now exists
+  // again under the same name. ledger_corrupt is untouched — a respawn does
+  // not change the ledger bytes.
+  private clearTargetGoneNudgeGate(sessionId: string): void {
+    if (this.todoNudgeDisabled.get(sessionId)?.kind === "target_gone") {
+      this.todoNudgeDisabled.delete(sessionId);
+    }
+  }
+
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
     if (
       hasQueuedMessages(session) ||
@@ -5998,6 +6043,8 @@ export class SessionService {
     ) {
       return;
     }
+    if (this.todoNudgeDisabled.has(session.id)) return;
+    if ((this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now()) return;
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
@@ -6023,15 +6070,53 @@ export class SessionService {
       } else if (projection.counts.total === 0) {
         message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
       }
-      if (!message) return;
+      if (!message) {
+        // A clean observation with nothing to send: #836's "cleared on a
+        // clean observation". Not moved above the ensureTodoLedger read —
+        // that read succeeds on every send-failure cycle, so clearing there
+        // would zero `failures` forever and flatten the backoff to the base.
+        this.todoNudgeBackoff.delete(session.id);
+        return;
+      }
       await this.sendAgentMessage(session, message, { interrupt: false });
       this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
+      this.todoNudgeBackoff.delete(session.id);
     } catch (error) {
+      if (
+        (error instanceof TodoLedgerCorruptError && !error.transient) ||
+        this.isMissingTmuxTarget(error)
+      ) {
+        if (!this.todoNudgeDisabled.has(session.id)) {
+          const kind = error instanceof TodoLedgerCorruptError ? "ledger_corrupt" : "target_gone";
+          const reason = error instanceof Error ? error.message : String(error);
+          this.todoNudgeDisabled.set(session.id, { kind, reason });
+          this.logEvent("session.todo.nudge_disabled", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Spur ToDo nudges disabled for ${session.id}: ${reason}`,
+            details: { kind },
+          });
+          this.todoNudgeBackoff.delete(session.id);
+        }
+        return;
+      }
       this.logEvent("session.todo.nudge_failed", {
         level: "warn",
         sessionId: session.id,
         projectId: session.project,
         message: `Failed to nudge ${session.id} about Spur ToDo: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      const failures = (this.todoNudgeBackoff.get(session.id)?.failures ?? 0) + 1;
+      const base = this.todoNudgeBackoffBaseMs();
+      // The cap must never fall below the base: a large configured
+      // collapseWindowMs derives a base above the fixed 30-minute cap, and
+      // clamping to that fixed cap would put every retry back under the
+      // collapse window it exists to clear.
+      const cap = Math.max(TODO_NUDGE_BACKOFF_MAX_MS, base);
+      this.todoNudgeBackoff.set(session.id, {
+        failures,
+        nextRetryAtMs: Date.now() + Math.min(base * 2 ** (failures - 1), cap),
       });
     }
   }
@@ -12292,6 +12377,7 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
+    this.clearTargetGoneNudgeGate(session.id);
     await this.assertNoForeignAgentForSession(
       session,
       await this.lookupPanePidQuietly(session.tmuxSession),
@@ -12605,6 +12691,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    this.clearTargetGoneNudgeGate(sessionId);
     // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
     // path reads the session directly rather than through that method, so
     // isRestorableSession's workspaceExists (computed by enrich() below) would
