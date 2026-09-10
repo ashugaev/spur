@@ -9,6 +9,7 @@ import {
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
+  isPermanentTodoLedgerCorruptError,
   TodoTransitionConflictError,
 } from "../../src/todo.js";
 import type { SessionRecord, TodoActor } from "../../src/types.js";
@@ -169,6 +170,45 @@ describe("Spur ToDo ledger", () => {
   it("throws TodoLedgerCorruptError, not a raw fs error, when the ledger file is absent", async () => {
     const { dataDir, session } = await fixture();
     expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
+  });
+
+  it("classifies missing and truncated replay throws as transient for nudge give-up", async () => {
+    const { dataDir, session } = await fixture();
+    try {
+      replayTodo(dataDir, session.id);
+      expect.unreachable();
+    } catch (error) {
+      expect(isPermanentTodoLedgerCorruptError(error)).toBe(false);
+    }
+
+    mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    const content = readFileSync(path, "utf8");
+    writeFileSync(path, content.slice(0, -1), "utf8");
+    try {
+      replayTodo(dataDir, session.id);
+      expect.unreachable();
+    } catch (error) {
+      expect(isPermanentTodoLedgerCorruptError(error)).toBe(false);
+    }
+  });
+
+  it("classifies deterministic replay errors as permanent for nudge give-up", () => {
+    expect(
+      isPermanentTodoLedgerCorruptError(
+        new TodoLedgerCorruptError("s-1", "Event contains an invalid transition"),
+      ),
+    ).toBe(true);
+    expect(
+      isPermanentTodoLedgerCorruptError(
+        new TodoLedgerCorruptError("s-1", "ToDo ledger contains invalid JSON", 2),
+      ),
+    ).toBe(true);
   });
 
   it("rejects blank mutation fields before append", async () => {

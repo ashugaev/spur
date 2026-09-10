@@ -440,6 +440,7 @@ import {
 } from "./types.js";
 import {
   ensureTodoLedger,
+  isPermanentTodoLedgerCorruptError,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
@@ -555,7 +556,6 @@ const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
-const TODO_NUDGE_BACKOFF_MIN_MS = 2 * 60 * 1000;
 const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
@@ -6020,7 +6020,7 @@ export class SessionService {
   private todoNudgeBackoffBaseMs(): number {
     const collapseWindowMs =
       this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
-    return Math.max(TODO_NUDGE_BACKOFF_MIN_MS, collapseWindowMs + 1);
+    return collapseWindowMs * 2;
   }
 
   // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
@@ -6080,10 +6080,7 @@ export class SessionService {
       this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
       this.todoNudgeBackoff.delete(session.id);
     } catch (error) {
-      if (
-        (error instanceof TodoLedgerCorruptError && !error.transient) ||
-        this.isMissingTmuxTarget(error)
-      ) {
+      if (isPermanentTodoLedgerCorruptError(error) || this.isMissingTmuxTarget(error)) {
         if (!this.todoNudgeDisabled.has(session.id)) {
           const kind = error instanceof TodoLedgerCorruptError ? "ledger_corrupt" : "target_gone";
           const reason = error instanceof Error ? error.message : String(error);
