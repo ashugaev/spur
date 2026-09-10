@@ -2111,7 +2111,12 @@ describe("SessionService", () => {
       sessions.set(session.id, session);
       const todo = await import("../../src/todo.js");
       vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
-        throw new todo.TodoLedgerCorruptError(session.id, "ToDo ledger is missing");
+        throw new todo.TodoLedgerCorruptError(
+          session.id,
+          "ToDo ledger is missing",
+          undefined,
+          true,
+        );
       });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2144,7 +2149,12 @@ describe("SessionService", () => {
       sessions.set(session.id, session);
       const todo = await import("../../src/todo.js");
       vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
-        throw new todo.TodoLedgerCorruptError(session.id, "ToDo ledger is empty or truncated");
+        throw new todo.TodoLedgerCorruptError(
+          session.id,
+          "ToDo ledger is empty or truncated",
+          undefined,
+          true,
+        );
       });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

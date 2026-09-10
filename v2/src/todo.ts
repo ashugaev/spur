@@ -28,16 +28,15 @@ export class TodoLedgerCorruptError extends Error {
     readonly sessionId: string,
     message: string,
     readonly line?: number,
+    /**
+     * True only for a file-state race (ledger missing/truncated mid-write),
+     * never for a deterministic content error. A transient throw must back
+     * off like any other nudge failure, not latch the permanent give-up gate.
+     */
+    readonly transient = false,
   ) {
     super(message);
   }
-}
-
-export function isPermanentTodoLedgerCorruptError(error: unknown): error is TodoLedgerCorruptError {
-  if (!(error instanceof TodoLedgerCorruptError)) return false;
-  if (error.message === "ToDo ledger is missing") return false;
-  if (error.message === "ToDo ledger is empty or truncated") return false;
-  return true;
 }
 
 export class InvalidTodoRequestError extends Error {
@@ -198,10 +197,16 @@ function eventBase(sessionId: string, actor: TodoActor) {
 
 export function replayTodo(dataDir: string, sessionId: string): TodoProjection {
   const path = ledgerPath(dataDir, sessionId);
-  if (!existsSync(path)) throw new TodoLedgerCorruptError(sessionId, "ToDo ledger is missing");
+  if (!existsSync(path))
+    throw new TodoLedgerCorruptError(sessionId, "ToDo ledger is missing", undefined, true);
   const text = readFileSync(path, "utf8");
   if (!text || !text.endsWith("\n"))
-    throw new TodoLedgerCorruptError(sessionId, "ToDo ledger is empty or truncated");
+    throw new TodoLedgerCorruptError(
+      sessionId,
+      "ToDo ledger is empty or truncated",
+      undefined,
+      true,
+    );
   const events = text
     .slice(0, -1)
     .split("\n")

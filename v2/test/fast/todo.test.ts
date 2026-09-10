@@ -9,7 +9,6 @@ import {
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
-  isPermanentTodoLedgerCorruptError,
   TodoTransitionConflictError,
 } from "../../src/todo.js";
 import type { SessionRecord, TodoActor } from "../../src/types.js";
@@ -178,7 +177,8 @@ describe("Spur ToDo ledger", () => {
       replayTodo(dataDir, session.id);
       expect.unreachable();
     } catch (error) {
-      expect(isPermanentTodoLedgerCorruptError(error)).toBe(false);
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).transient).toBe(true);
     }
 
     mutateTodo(
@@ -194,21 +194,19 @@ describe("Spur ToDo ledger", () => {
       replayTodo(dataDir, session.id);
       expect.unreachable();
     } catch (error) {
-      expect(isPermanentTodoLedgerCorruptError(error)).toBe(false);
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).transient).toBe(true);
     }
   });
 
-  it("classifies deterministic replay errors as permanent for nudge give-up", () => {
+  it("classifies deterministic replay errors as non-transient for nudge give-up", () => {
     expect(
-      isPermanentTodoLedgerCorruptError(
-        new TodoLedgerCorruptError("s-1", "Event contains an invalid transition"),
-      ),
-    ).toBe(true);
-    expect(
-      isPermanentTodoLedgerCorruptError(
-        new TodoLedgerCorruptError("s-1", "ToDo ledger contains invalid JSON", 2),
-      ),
-    ).toBe(true);
+      new TodoLedgerCorruptError("s-1", "Event contains an invalid transition").transient,
+    ).toBe(false);
+    expect(new TodoLedgerCorruptError("s-1", "Duplicate item id").transient).toBe(false);
+    expect(new TodoLedgerCorruptError("s-1", "Event references an unknown item").transient).toBe(
+      false,
+    );
   });
 
   it("rejects blank mutation fields before append", async () => {

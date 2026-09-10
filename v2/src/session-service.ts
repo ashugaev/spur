@@ -440,7 +440,6 @@ import {
 } from "./types.js";
 import {
   ensureTodoLedger,
-  isPermanentTodoLedgerCorruptError,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
@@ -6080,7 +6079,10 @@ export class SessionService {
       this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
       this.todoNudgeBackoff.delete(session.id);
     } catch (error) {
-      if (isPermanentTodoLedgerCorruptError(error) || this.isMissingTmuxTarget(error)) {
+      if (
+        (error instanceof TodoLedgerCorruptError && !error.transient) ||
+        this.isMissingTmuxTarget(error)
+      ) {
         if (!this.todoNudgeDisabled.has(session.id)) {
           const kind = error instanceof TodoLedgerCorruptError ? "ledger_corrupt" : "target_gone";
           const reason = error instanceof Error ? error.message : String(error);
