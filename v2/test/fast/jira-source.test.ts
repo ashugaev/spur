@@ -65,8 +65,15 @@ describe("jira source", () => {
     ]);
     const emit = vi.fn();
 
-    const handle = await start(emit);
+    const handle = await start(emit, { maxResults: 75 });
 
+    expect(fetchJiraIssuesMock).toHaveBeenCalledWith({
+      baseUrl: "https://jira.example.com/",
+      email: "bot@example.com",
+      token: "secret",
+      jql: "project = WEBDEV AND statusCategory != Done",
+      maxResults: 75,
+    });
     expect(recordWorkItemMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       "backend",
@@ -121,20 +128,29 @@ describe("jira source", () => {
   });
 
   it("caps the first-poll backlog at 10 per key prefix when emitExisting is true, recording all", async () => {
-    const issues = Array.from({ length: 12 }, (_, index) => ({
+    const webdevIssues = Array.from({ length: 12 }, (_, index) => ({
       id: String(index),
       key: `WEBDEV-${index + 1}`,
       title: `Issue ${index + 1}`,
       url: `https://jira.example.com/browse/WEBDEV-${index + 1}`,
     }));
-    fetchJiraIssuesMock.mockResolvedValueOnce(issues);
+    const infraIssues = Array.from({ length: 3 }, (_, index) => ({
+      id: `infra-${index}`,
+      key: `INFRA-${index + 1}`,
+      title: `Infra issue ${index + 1}`,
+      url: `https://jira.example.com/browse/INFRA-${index + 1}`,
+    }));
+    fetchJiraIssuesMock.mockResolvedValueOnce([...webdevIssues, ...infraIssues]);
     const emit = vi.fn();
 
     const handle = await start(emit, { emitExisting: true });
 
     const emits = emit.mock.calls.filter((call) => call[0] === "jira:work_item.new");
-    expect(emits).toHaveLength(10);
-    expect(recordWorkItemMock).toHaveBeenCalledTimes(12);
+    const webdevEmits = emits.filter((call) => (call[1] as { repo: string }).repo === "WEBDEV");
+    const infraEmits = emits.filter((call) => (call[1] as { repo: string }).repo === "INFRA");
+    expect(webdevEmits).toHaveLength(10);
+    expect(infraEmits).toHaveLength(3);
+    expect(recordWorkItemMock).toHaveBeenCalledTimes(15);
 
     handle.stop();
   });

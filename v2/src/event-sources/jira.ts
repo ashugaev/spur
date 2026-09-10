@@ -18,18 +18,14 @@ function issueProjectPrefix(key: string): string {
 
 async function pollIssues(
   deps: SourceStartDeps<JiraSourceConfig>,
+  query: string,
   seenIssues: Set<string>,
 ): Promise<void> {
-  if (deps.config.query === undefined) {
-    throw new Error(
-      `jira source ${deps.projectId}/${deps.sourceId} has no query; it should have been skipped as connection-only`,
-    );
-  }
   const issues = await fetchJiraIssues({
     baseUrl: deps.config.baseUrl,
     email: deps.config.email,
     token: deps.config.token,
-    jql: deps.config.query,
+    jql: query,
     maxResults: deps.config.maxResults,
   });
   const candidates = issues.map((issue) => {
@@ -48,10 +44,16 @@ async function pollIssues(
 }
 
 function startJiraSource(deps: SourceStartDeps<JiraSourceConfig>): Promise<SourceHandle> {
+  const query = deps.config.query;
+  if (query === undefined) {
+    throw new Error(
+      `jira source ${deps.projectId}/${deps.sourceId} has no query; it should have been skipped as connection-only`,
+    );
+  }
   return startWorkItemPoller(
     deps,
     { warn: "issue poll failed", event: "Jira issue poll failed" },
-    pollIssues,
+    (pollDeps, seenIssues) => pollIssues(pollDeps, query, seenIssues),
   );
 }
 
