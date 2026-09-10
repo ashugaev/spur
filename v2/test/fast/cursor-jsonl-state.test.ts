@@ -12,6 +12,7 @@ import {
   parseCursorJsonlRecord,
   readCursorJsonlState,
   readCursorTranscriptEntries,
+  resolveCursorPinnedTranscriptPath,
   toCursorProjectPath,
   type CursorParsedRecord,
 } from "../../src/cursor-jsonl-state.js";
@@ -620,6 +621,58 @@ describe("findCursorAckTranscriptFile", () => {
 
     const filePath = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
     expect(filePath).toBe(join(transcriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
+  });
+
+  // Review thread (cursor-jsonl-state.ts:149): resolveCursorPinnedTranscriptPath
+  // guesses the LAST worktree-path candidate (realpath, i.e. canonical) for the
+  // pending-pin baseline, while findCursorAckTranscriptFile's id branch
+  // (delegated to findLatestCursorTranscriptFile) iterates ALL candidates,
+  // stat-then-continue. When cursor lands the pinned transcript only under the
+  // RAW alias slug (measured fact in the spec: cursor wrote real records under
+  // a stale raw slug on 2026-09-04), the guessed path never exists, but the
+  // pinned lookup still finds the file because it does not stop at the guess.
+  it("finds the pinned transcript under the raw alias slug even though the pending-pin guess targets the realpath slug", async () => {
+    const root = await mkdtemp(join(homedir(), "spur-cursor-ack-pin-alias-"));
+    tempRoots.push(root);
+    const canonical = join(root, "canonical");
+    const alias = join(root, "alias");
+    await mkdir(canonical);
+    await symlink(canonical, alias);
+
+    const agentSessionId = "aaaaaaaa-1111-2222-3333-444444444444";
+    const aliasTranscriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(alias),
+      "agent-transcripts",
+    );
+    const canonicalTranscriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(canonical),
+      "agent-transcripts",
+    );
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(alias)));
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(canonical)));
+
+    // Cursor writes the pinned transcript only under the raw alias slug, not
+    // the realpath (canonical) slug the pending-pin guess targets.
+    await mkdir(join(aliasTranscriptsDir, agentSessionId), { recursive: true });
+    await writeFile(
+      join(aliasTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
+      '{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}\n',
+    );
+
+    const pendingPinGuess = await resolveCursorPinnedTranscriptPath(alias, agentSessionId);
+    expect(pendingPinGuess).toBe(
+      join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
+    );
+
+    const filePath = await findCursorAckTranscriptFile(alias, agentSessionId);
+    expect(filePath).toBe(join(aliasTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
+    expect(filePath).not.toBe(pendingPinGuess);
   });
 
   // AC2b, I8 pin: findLatestCursorTranscriptFile's no-id behavior is
