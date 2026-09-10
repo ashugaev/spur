@@ -289,6 +289,36 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
     expect(deps.vacuum).toHaveBeenCalledTimes(0);
   });
 
+  it("honors the planner's interlocks, whole array, not just computes them", async () => {
+    // Every other executor case plans an EMPTY blockReasons array, so the
+    // propagation itself was invisible: an executor that dropped the
+    // planner's reasons would VACUUM despite live_opencode_record — the one
+    // interlock guarding a running opencode agent against a 93 s whole-file
+    // rewrite. Two reasons, asserted with toEqual, so propagating only the
+    // first element also reds.
+    const deps = spyDeps();
+    const plan = planFixture();
+
+    const report = await executeOpenCodeGc(
+      planFixture({
+        vacuum: {
+          ...plan.vacuum,
+          blockReasons: ["insufficient_free_space", "live_opencode_record"],
+        },
+      }),
+      deps,
+      { dryRun: false, sizes: true, vacuum: true, dbPayload: true },
+    );
+
+    expect(deps.vacuum).toHaveBeenCalledTimes(0);
+    expect(report.vacuum.blockReasons).toContain("live_opencode_record");
+    expect(report.vacuum.blockReasons).toEqual(["insufficient_free_space", "live_opencode_record"]);
+    expect(report.vacuum.attempted).toBe(false);
+    // The delete DID run, so neither the freshness gate nor
+    // `no_sessions_deleted` is what blocked the VACUUM here.
+    expect(report.totals.sessionsDeleted).toBe(1);
+  });
+
   it("never vacuums when the daemon disables it (I5)", async () => {
     const deps = spyDeps();
 
