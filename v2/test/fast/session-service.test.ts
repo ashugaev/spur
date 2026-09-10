@@ -21604,7 +21604,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("I5 the daemon sweep executes with vacuum disabled", async () => {
+  it("I5 the daemon sweep executes with vacuum and the payload query disabled", async () => {
     createSessionStore();
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -21625,6 +21625,7 @@ describe("SessionService", () => {
       dryRun: false,
       sizes: true,
       vacuum: false,
+      dbPayload: false,
     });
     const completed = logSpurEventMock.mock.calls.find(
       ([, entry]) => entry.event === "opencode.gc.completed",
