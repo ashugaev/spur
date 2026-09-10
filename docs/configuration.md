@@ -282,8 +282,8 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins.
 - `projects.<id>.modes.<name>.skill`: required, non-empty; the skill a session in this mode loads.
 - `projects.<id>.modes.<name>.default`: optional boolean; at most one mode per project may set it `true`.
-- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
-- `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
+- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram|webhook`.
+- `projects.<id>.sources.<sourceId>.runOnStart`: optional for `cron|github|github-ci|gitlab|sentry|service|telegram`, default `false`. Unsupported for `jira` and `webhook`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
 - `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.
@@ -304,6 +304,10 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.autoSpawn.agent`: optional `claude|codex|cursor|opencode`, default `opencode`.
 - `projects.<id>.sources.<sourceId>.autoSpawn.model`: optional, no default; requires `agent` to be set. Unset, the spawn falls through the model-resolution order described under `projects.<id>.defaultModels` above. Setting `model` without `agent` throws. Forwarded verbatim — an invalid model surfaces as a `Spawn failed: <cause>` reply.
 - `projects.<id>.sources.<sourceId>.autoSpawn.selfDestruct`: optional, default `{enabled: true}`. [selfDestruct](#selfdestruct-steps) shape.
+- `projects.<id>.sources.<sourceId>.host`: optional IP literal for `webhook`, default `127.0.0.1`. Hostnames, URLs, and zone-scoped addresses fail validation.
+- `projects.<id>.sources.<sourceId>.port`: required integer from `1` through `65535` for `webhook`. Each normalized webhook `host`/`port` pair must be unique across the merged project registry.
+- `projects.<id>.sources.<sourceId>.path`: required exact raw request path for `webhook`, 1 through 2048 visible ASCII bytes. Starts with one `/`; no query, fragment, whitespace, control byte, or second leading `/`.
+- `projects.<id>.sources.<sourceId>.secret`: required 16 through 512 visible ASCII bytes for `webhook`; supports `${ENV_VAR}` from the project `.env` or process env.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn` | `send`: exactly one required; `spawn` accepts object form or a flat block array.
@@ -440,6 +444,13 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
 - `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`. `text` also carries a transcribed voice note, see [voice.md](voice.md#telegram-voice-notes).
+- `webhook`: `webhook:received`. Spawn only; `send` fails config validation. Payload: normalized JSON object string `body` and ISO-8601 UTC `receivedAt`; use `{{body}}` and `{{receivedAt}}` in spawn prompts.
+
+Webhook sources own one plaintext HTTP listener each. Send `POST <path>` with one `Authorization: Bearer <secret>` and `Content-Type: application/json`; optional charset is UTF-8, optional content encoding is `identity`. Keep the default loopback bind. For remote producers, terminate TLS at an owned reverse proxy, preserve `Authorization`, and proxy only the configured path. Forwarded address headers are ignored; peer limits see the proxy socket.
+
+Webhook limits: 262144 body bytes, 15000 ms headers/body timeout, 64 connections, 32 in-flight requests, 8 in flight per peer, 60 requests per peer per 60000 ms, 1024 tracked peers, JSON depth 64. Responses close their connections. Statuses: `202` accepted; `400` invalid length, UTF-8, JSON, shape, or depth; `404` route or bearer failure; `405` method; `408` body timeout; `413` body limit; `415` media type, charset, or encoding; `417` unsupported expectation; `429` resource or rate limit; `500` synchronous emit failure; `503` source shutdown. Route and bearer failures share one empty `404` response.
+
+Webhook `202` means synchronous in-process event emission returned. Spawn runs asynchronously. No persistence, downstream receipt, dedupe, or retry suppression; a producer retry can spawn twice.
 
 `github` polls running sessions, matches each to a PR branch, emits changed signals only; state persists under `dataDir`. With `query` set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids. GitHub PR URLs seed the native `session.pr` binding; other review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 

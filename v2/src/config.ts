@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, totalmem } from "node:os";
+import { isIP } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -7,6 +8,7 @@ import {
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
+  WEBHOOK_RECEIVED_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AdmissionCapSource,
@@ -40,6 +42,7 @@ import {
   type TagDefinition,
   type TelegramAutoSpawnConfig,
   type TelegramSourceConfig,
+  type WebhookSourceConfig,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -630,6 +633,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "telegram") {
     return [TELEGRAM_MESSAGE_EVENT];
   }
+  if (source.type === "webhook") {
+    return [WEBHOOK_RECEIVED_EVENT];
+  }
   if (source.type === "jira") {
     return [];
   }
@@ -929,6 +935,53 @@ function parseTelegramSource(
   };
 }
 
+function parseWebhookSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): WebhookSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const allowedKeys = new Set(["type", "host", "port", "path", "secret"]);
+  const unknownKey = Object.keys(raw).find((key) => !allowedKeys.has(key));
+  if (unknownKey) {
+    throw new Error(`${label}.${unknownKey} is not supported for webhook sources`);
+  }
+
+  const host = asOptionalString(raw["host"], `${label}.host`) ?? "127.0.0.1";
+  if (isIP(host) === 0 || host.includes("%")) {
+    throw new Error(`${label}.host must be an IPv4 or IPv6 literal without a zone id`);
+  }
+
+  const path = asString(raw["path"], `${label}.path`);
+  const pathBytes = Buffer.byteLength(path);
+  if (
+    pathBytes < 1 ||
+    pathBytes > 2_048 ||
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    /[^\x21-\x7e]|[?#]/.test(path)
+  ) {
+    throw new Error(
+      `${label}.path must be 1 through 2048 visible ASCII bytes, start with one "/", and contain no "?" or "#"`,
+    );
+  }
+
+  const secret = resolveRequiredEnvString(raw["secret"], `${label}.secret`, projectEnv);
+  const secretBytes = Buffer.byteLength(secret);
+  if (secretBytes < 16 || secretBytes > 512 || /[^\x21-\x7e]/.test(secret)) {
+    throw new Error(`${label}.secret must be 16 through 512 visible ASCII bytes`);
+  }
+
+  return {
+    type: "webhook",
+    host,
+    port: asPortNumber(raw["port"], `${label}.port`),
+    path,
+    secret,
+  };
+}
+
 function parseSource(
   projectId: string,
   sourceId: string,
@@ -962,6 +1015,9 @@ function parseSource(
   if (type === "telegram") {
     return parseTelegramSource(projectId, sourceId, raw, projectEnv);
   }
+  if (type === "webhook") {
+    return parseWebhookSource(projectId, sourceId, raw, projectEnv);
+  }
   if (type === "github-ci") {
     return parseGitHubCiSource(projectId, sourceId, raw);
   }
@@ -982,6 +1038,22 @@ function validateTelegramBotTokens(projects: Record<string, ProjectConfig>): voi
         );
       }
       owners.set(source.token, owner);
+    }
+  }
+}
+
+export function validateWebhookSourceBindings(projects: Record<string, ProjectConfig>): void {
+  const owners = new Map<string, string>();
+  for (const [projectId, project] of Object.entries(projects)) {
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "webhook") continue;
+      const owner = `projects.${projectId}.sources.${sourceId}`;
+      const endpoint = `${source.host}:${source.port}`;
+      const existingOwner = owners.get(endpoint);
+      if (existingOwner) {
+        throw new Error(`${owner} duplicates webhook bind ${endpoint} owned by ${existingOwner}`);
+      }
+      owners.set(endpoint, owner);
     }
   }
 }
@@ -1362,6 +1434,9 @@ function parseTrigger(
   if (hasSend) {
     if (spawnDeskGroup !== undefined) {
       throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
+    }
+    if (sourceConfig.type === "webhook") {
+      throw new Error(`${label}.send is not supported for webhook sources; use spawn`);
     }
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
@@ -1934,6 +2009,7 @@ function parseConfigFile(
     normalizedProjects[projectId] = parsedProject;
   }
   validateTelegramBotTokens(normalizedProjects);
+  validateWebhookSourceBindings(normalizedProjects);
 
   const tags = parseTags(root["tags"]);
 

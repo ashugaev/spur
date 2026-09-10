@@ -9,7 +9,6 @@ import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helper
 import {
   isTmuxAvailable,
   killTmuxServer,
-  killTmuxSession,
   killTmuxSessionsByPrefix,
   readTmuxStatus,
   setActiveTmuxSocketName,
@@ -424,7 +423,7 @@ After the file and the session metadata are set, wait for more instructions.`,
       }
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
-      await killTmuxSession(session.id);
+      await service.pause(session.id);
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);

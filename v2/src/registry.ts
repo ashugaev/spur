@@ -8,7 +8,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { expandHome, loadConfig, loadInstanceConfigReadOnly, loadProjectConfig } from "./config.js";
+import {
+  expandHome,
+  loadConfig,
+  loadInstanceConfigReadOnly,
+  loadProjectConfig,
+  validateWebhookSourceBindings,
+} from "./config.js";
 import type { AppConfig, ProjectConfig } from "./types.js";
 
 const REGISTRY_FILE = "config-registry.json";
@@ -123,6 +129,8 @@ function mergeProjects(base: AppConfig, configs: AppConfig[]): AppConfig {
       projects[projectId] = project;
     }
   }
+
+  validateWebhookSourceBindings(projects);
 
   return {
     ...base,

@@ -143,6 +143,7 @@ export type SourceType =
   | "sentry"
   | "service"
   | "telegram"
+  | "webhook"
   | "jira"
   | "github-ci";
 
@@ -166,6 +167,7 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+export const WEBHOOK_RECEIVED_EVENT = "webhook:received" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
@@ -309,6 +311,14 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   autoSpawn?: TelegramAutoSpawnConfig;
 }
 
+export interface WebhookSourceConfig {
+  type: "webhook";
+  host: string;
+  port: number;
+  path: string;
+  secret: string;
+}
+
 export interface TelegramAutoSpawnConfig {
   enabled: boolean;
   project: string;
@@ -338,6 +348,7 @@ export type SourceConfig =
   | SentrySourceConfig
   | ServiceSourceConfig
   | TelegramSourceConfig
+  | WebhookSourceConfig
   | JiraSourceConfig
   | GitHubCiSourceConfig;
 
@@ -349,6 +360,11 @@ export interface TelegramMessageEventData {
   username?: string;
   messageId: number;
   text: string;
+}
+
+export interface WebhookReceivedEventData {
+  body: string;
+  receivedAt: string;
 }
 
 export interface SpawnOverrides {

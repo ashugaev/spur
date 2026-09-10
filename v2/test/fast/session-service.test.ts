@@ -461,6 +461,7 @@ vi.mock("../../src/config.js", () => ({
       : `${template}:${reservedPort}`,
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
+  validateWebhookSourceBindings: () => undefined,
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),

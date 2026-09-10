@@ -72,6 +72,132 @@ afterEach(async () => {
 });
 
 describe("loadConfig", () => {
+  it("normalizes webhook sources and resolves their secret", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events/provider
+        secret: \${WEBHOOK_SECRET}
+    triggers:
+      receive:
+        source: incoming
+        event: webhook:received
+        spawn:
+          prompt: "Handle {{body}} received at {{receivedAt}}"
+`);
+    await writeProjectEnv(configPath, "WEBHOOK_SECRET=test-webhook-key\n");
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects.backend?.sources.incoming).toEqual({
+      type: "webhook",
+      host: "127.0.0.1",
+      port: 8456,
+      path: "/events/provider",
+      secret: "test-webhook-key",
+    });
+    expect(config.projects.backend?.triggers.receive).toMatchObject({
+      source: "incoming",
+      event: "webhook:received",
+    });
+  });
+
+  it.each([
+    [
+      "host",
+      "host: localhost\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
+      "host must be an IPv4 or IPv6 literal without a zone id",
+    ],
+    [
+      "zone-scoped host",
+      "host: fe80::1%lo\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
+      "host must be an IPv4 or IPv6 literal without a zone id",
+    ],
+    [
+      "port",
+      "port: 0\n        path: /events\n        secret: test-webhook-key",
+      "port must be an integer between 1 and 65535",
+    ],
+    [
+      "path",
+      "port: 8456\n        path: //events\n        secret: test-webhook-key",
+      "path must be 1 through 2048 visible ASCII bytes",
+    ],
+    [
+      "secret",
+      "port: 8456\n        path: /events\n        secret: short",
+      "secret must be 16 through 512 visible ASCII bytes",
+    ],
+    [
+      "unknown key",
+      "port: 8456\n        path: /events\n        secret: test-webhook-key\n        extra: true",
+      "extra is not supported for webhook sources",
+    ],
+  ])("rejects invalid webhook %s", async (_name, fields, message) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        ${fields}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(message);
+  });
+
+  it("rejects duplicate webhook binds inside one config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      first:
+        type: webhook
+        port: 8456
+        path: /first
+        secret: test-webhook-key
+      second:
+        type: webhook
+        port: 8456
+        path: /second
+        secret: second-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.second duplicates webhook bind 127.0.0.1:8456 owned by projects.backend.sources.first",
+    );
+  });
+
+  it("rejects webhook send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+    triggers:
+      receive:
+        source: incoming
+        event: webhook:received
+        send: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.receive.send is not supported for webhook sources; use spawn",
+    );
+  });
+
   it("applies Spur defaults once at the config boundary", async () => {
     const configPath = await writeConfig(`
 projects:
