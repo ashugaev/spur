@@ -23,7 +23,7 @@ const OPENCODE_EXPORT_TIMEOUT_MS = 30_000;
 // whole document, so every JSON read of the CLI goes through here.
 export async function readOpenCodeJson(
   args: string[],
-  options: { cwd?: string; timeoutMs: number },
+  options: { cwd?: string; timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): Promise<string> {
   const directory = await mkdtemp(join(resolveTempDir(), "spur-opencode-"));
   const outputPath = join(directory, "out.json");
@@ -33,6 +33,9 @@ export async function readOpenCodeJson(
       await new Promise<void>((resolve, reject) => {
         const child = spawn(opencodeCommand(), args, {
           ...(options.cwd ? { cwd: options.cwd } : {}),
+          // Merged over process.env, never replacing it: a bare env would
+          // strip PATH and HOME from the child.
+          ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
           stdio: ["ignore", handle.fd, "ignore"],
         });
         const timer = setTimeout(() => {
