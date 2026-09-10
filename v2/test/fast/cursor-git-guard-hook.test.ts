@@ -117,7 +117,9 @@ describe("CURSOR_GIT_GUARD_SCRIPT", () => {
     expect(decision.permission).toBe("deny");
   });
 
-  function runGuardWithoutStdinEnd(writeStdin: (stdin: NodeJS.WritableStream) => void): Promise<HookDecision> {
+  function runGuardWithoutStdinEnd(
+    writeStdin: (stdin: NodeJS.WritableStream) => void,
+  ): Promise<HookDecision> {
     return new Promise((resolve, reject) => {
       const child = execFile(
         process.execPath,

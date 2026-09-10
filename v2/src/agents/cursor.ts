@@ -365,7 +365,6 @@ interface CursorHookEntry {
   [key: string]: unknown;
 }
 
-
 function isSpurManagedRestrictWritesGuard(command: unknown): boolean {
   if (typeof command !== "string" || !command.includes("/.spur/cursor/")) {
     return false;
