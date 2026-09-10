@@ -1455,6 +1455,20 @@ projects:
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "slots",
+        "--session",
+        "api-999",
+        "--title",
+        "does not matter",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
     const listed = JSON.parse(
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
@@ -5507,6 +5521,12 @@ projects:
       "spur-isolated-daemon.sh",
     );
     const siblingProbePath = await writeIsolatedDaemonSiblingProbe(context);
+    // scripts/spur-isolated-daemon.sh self-prunes stale spur-isolated-daemon.*
+    // dirs under ${TMPDIR:-/tmp} on every start (spur#811). Without an
+    // injected TMPDIR here, the sidecar would resolve the runner's real
+    // /tmp — the same host that can hold other live isolated daemons.
+    const isolatedDaemonTmpDir = join(context.rootDir, "isolated-daemon-tmp");
+    await mkdir(isolatedDaemonTmpDir, { recursive: true });
     const projectConfigDir = join(context.rootDir, "UPPER-CONFIG-PATH");
     await mkdir(projectConfigDir, { recursive: true });
     const projectConfigPath = join(projectConfigDir, "isolated-source-project.yaml");
@@ -5545,6 +5565,7 @@ projects:
         autoStart: true
         env:
           SPUR_PROJECT_CONFIG_PATH: ${projectConfigPath}
+          TMPDIR: ${isolatedDaemonTmpDir}
         ports:
           daemon:
             env: SPUR_RESERVED_PORT_DAEMON

@@ -57,6 +57,7 @@ import {
   collectTree,
   confirmReaps,
   reapRecordedIdentity,
+  reapRecordedPortDaemon,
   reapSidecarPane,
   readProcessStarttime,
   signalSidecarPane,
@@ -153,6 +154,7 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   flushEventLogCollapse,
   logSpurEvent,
@@ -420,6 +422,8 @@ import {
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
+  type SidecarStopReport,
+  type SidecarStopView,
   type SessionListItemView,
   type SessionStateTransition,
   type SubscribeSessionStatesRequest,
@@ -440,6 +444,7 @@ import {
   ensureTodoLedger,
   mutateTodo as applyTodoMutation,
   TodoEmptyLedgerError,
+  TodoLedgerCorruptError,
   TodoOpenWorkError,
   todoLedgerBlock,
   unfinishedTodo,
@@ -552,6 +557,8 @@ const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
+const TODO_NUDGE_BACKOFF_BASE_MS = 2 * 60 * 1000;
+const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
 // (workspaceExists, hasServiceIssues, workspace slots), never from agent
@@ -2642,16 +2649,36 @@ export class SessionService {
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
   private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  private readonly todoNudgeDisabled = new Map<
+    string,
+    { kind: "ledger_corrupt" | "target_gone"; reason: string }
+  >();
+  private readonly todoNudgeBackoff = new Map<
+    string,
+    { failures: number; nextRetryAtMs: number }
+  >();
+  // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
+  // process trees" over the real HTTP /sidecars/sweep route would
+  // otherwise scan the real host process table — on a host with even one
+  // leftover orphan isolated daemon, that turns an unrelated empty-sandbox
+  // assertion host-state-dependent, the exact defect class B4 exists to
+  // remove. Never set outside a test; a production `startServer` never
+  // passes it.
+  private readonly sidecarSnapshotOverride: (() => Promise<ProcSnapshot>) | undefined;
 
   constructor(
     configPath?: string,
     startedAt = nowIso(),
-    options: { deferBackgroundLoops?: boolean } = {},
+    options: {
+      deferBackgroundLoops?: boolean;
+      sidecarSnapshot?: () => Promise<ProcSnapshot>;
+    } = {},
   ) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
       skipInvalid: false,
     });
     this.bootstrapConfigPath = bootstrap.config.configPath;
+    this.sidecarSnapshotOverride = options.sidecarSnapshot;
     this.startedAt = startedAt;
     mkdirSync(bootstrap.config.dataDir, { recursive: true });
     mkdirSync(bootstrap.config.worktreeDir, { recursive: true });
@@ -5118,6 +5145,12 @@ export class SessionService {
     for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
       if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
     }
+    for (const sessionId of this.todoNudgeDisabled.keys()) {
+      if (!liveIds.has(sessionId)) this.todoNudgeDisabled.delete(sessionId);
+    }
+    for (const sessionId of this.todoNudgeBackoff.keys()) {
+      if (!liveIds.has(sessionId)) this.todoNudgeBackoff.delete(sessionId);
+    }
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.codexMcpDialogOverrides.delete(sessionId);
@@ -6019,6 +6052,33 @@ export class SessionService {
     }
   }
 
+  // Anti-false-positive guard mirrors isGitHubPermanentNotFoundError
+  // (event-sources/github.ts:115-124): a non-tmux error whose text happens to
+  // carry "can't find session" (an agent transcript excerpt, a shell echo)
+  // must stay transient.
+  private isMissingTmuxTarget(error: unknown): boolean {
+    const text = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    return text.includes("tmux") && text.includes("can't find session");
+  }
+
+  private todoNudgeBackoffBaseMs(): number {
+    const collapseWindowMs =
+      this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
+    // Floor at the original fixed base: a tiny configured collapseWindowMs
+    // must not shrink the nudge backoff below its pre-derivation floor.
+    return Math.max(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs * 2);
+  }
+
+  // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
+  // target_gone observation: the tmux target that was missing now exists
+  // again under the same name. ledger_corrupt is untouched — a respawn does
+  // not change the ledger bytes.
+  private clearTargetGoneNudgeGate(sessionId: string): void {
+    if (this.todoNudgeDisabled.get(sessionId)?.kind === "target_gone") {
+      this.todoNudgeDisabled.delete(sessionId);
+    }
+  }
+
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
     if (
       hasQueuedMessages(session) ||
@@ -6027,6 +6087,8 @@ export class SessionService {
     ) {
       return;
     }
+    if (this.todoNudgeDisabled.has(session.id)) return;
+    if ((this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now()) return;
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
@@ -6052,15 +6114,53 @@ export class SessionService {
       } else if (projection.counts.total === 0) {
         message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
       }
-      if (!message) return;
+      if (!message) {
+        // A clean observation with nothing to send: #836's "cleared on a
+        // clean observation". Not moved above the ensureTodoLedger read —
+        // that read succeeds on every send-failure cycle, so clearing there
+        // would zero `failures` forever and flatten the backoff to the base.
+        this.todoNudgeBackoff.delete(session.id);
+        return;
+      }
       await this.sendAgentMessage(session, message, { interrupt: false });
       this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
+      this.todoNudgeBackoff.delete(session.id);
     } catch (error) {
+      if (
+        (error instanceof TodoLedgerCorruptError && !error.transient) ||
+        this.isMissingTmuxTarget(error)
+      ) {
+        if (!this.todoNudgeDisabled.has(session.id)) {
+          const kind = error instanceof TodoLedgerCorruptError ? "ledger_corrupt" : "target_gone";
+          const reason = error instanceof Error ? error.message : String(error);
+          this.todoNudgeDisabled.set(session.id, { kind, reason });
+          this.logEvent("session.todo.nudge_disabled", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Spur ToDo nudges disabled for ${session.id}: ${reason}`,
+            details: { kind },
+          });
+          this.todoNudgeBackoff.delete(session.id);
+        }
+        return;
+      }
       this.logEvent("session.todo.nudge_failed", {
         level: "warn",
         sessionId: session.id,
         projectId: session.project,
         message: `Failed to nudge ${session.id} about Spur ToDo: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      const failures = (this.todoNudgeBackoff.get(session.id)?.failures ?? 0) + 1;
+      const base = this.todoNudgeBackoffBaseMs();
+      // The cap must never fall below the base: a large configured
+      // collapseWindowMs derives a base above the fixed 30-minute cap, and
+      // clamping to that fixed cap would put every retry back under the
+      // collapse window it exists to clear.
+      const cap = Math.max(TODO_NUDGE_BACKOFF_MAX_MS, base);
+      this.todoNudgeBackoff.set(session.id, {
+        failures,
+        nextRetryAtMs: Date.now() + Math.min(base * 2 ** (failures - 1), cap),
       });
     }
   }
@@ -6273,6 +6373,108 @@ export class SessionService {
         );
       }
     }
+  }
+
+  // spur#859 B1's recorded-port kill term (stopSidecarLocked, below) assumes
+  // T1 — the recorded port — uniquely identifies this owner's own
+  // reservation. `refuseOverlappingCrossWorkspaceSidecar` above proves that
+  // premise false: it deliberately TOLERATES a stale cross-workspace
+  // duplicate port recording (measured 29 on this host) whenever the other
+  // holder isn't live or the port is free, to preserve a legitimate
+  // self-heal. So a stop against a stale record CAN find a live sibling
+  // workspace's real daemon still listening on the same recorded port
+  // number — sharpest for two `worktree:false` siblings, where T4 also
+  // collapses to the shared `project.path` and admits it.
+  //
+  // Excludes any port a DIFFERENT, currently-live sibling sidecar also
+  // records, before that port ever reaches the kill term. An ambiguous
+  // port is treated as unprovable — not signaled, not even probed for a
+  // survivor — the same "report-only is the default" direction pushed one
+  // step earlier: safer to say nothing about a port than to name a pid
+  // that may belong to a live sibling's own daemon.
+  //
+  // D3: excluding a port is not the same as knowing it is clear. A port
+  // excluded because the sibling's own pane is confirmed alive is genuinely
+  // accounted for — no ambiguity to report. A port excluded because the
+  // sibling is merely non-terminal (not proven alive via a live pane) is
+  // returned separately as `ambiguousPorts`: whether it is worth reporting
+  // depends on whether it is STILL occupied after this owner's own kill
+  // runs, which this method cannot know — it runs before that kill. ND-1:
+  // sampling isHostPortFree here, before the caller's own reap, mistakes
+  // this owner's own live sidecar (still holding its own recorded port at
+  // the moment of this call) for the ambiguous sibling's occupant, turning
+  // every fully-successful stop that also has a stale non-terminal sibling
+  // recording into a false `partial`. The caller re-checks `ambiguousPorts`
+  // for real occupancy AFTER the reap, when the owner's own hold (if any)
+  // is already gone.
+  private async excludeAmbiguousCrossWorkspacePorts(
+    owner: SessionRecord,
+    ownerId: string,
+    ports: readonly number[],
+  ): Promise<{ ports: number[]; ambiguousPorts: number[] }> {
+    if (ports.length === 0) {
+      return { ports: [], ambiguousPorts: [] };
+    }
+    const candidatePorts = new Set(ports);
+    const ambiguousPorts = new Set<number>();
+    for (const other of listSessions(this.config.dataDir)) {
+      if (candidatePorts.size === 0) {
+        break;
+      }
+      if (other.project !== owner.project) {
+        continue;
+      }
+      let otherProject: ProjectConfig | undefined;
+      try {
+        otherProject = this.resolveProjectForSession(other);
+      } catch {
+        continue;
+      }
+      for (const otherSidecarName of sessionSidecarNames(other, otherProject)) {
+        const otherOwnerId = this.sidecarOwnerIdForName(other, otherProject, otherSidecarName);
+        if (otherOwnerId === ownerId) {
+          continue;
+        }
+        const otherOwner =
+          otherOwnerId === other.id ? other : readSession(this.config.dataDir, otherOwnerId);
+        const otherRecordedPorts = otherOwner?.sidecarPorts?.[otherSidecarName];
+        if (!otherRecordedPorts) {
+          continue;
+        }
+        const collidingPorts = Object.values(otherRecordedPorts).filter((port) =>
+          candidatePorts.has(port),
+        );
+        if (collidingPorts.length === 0) {
+          continue;
+        }
+        if (await sidecarTmuxAlive(otherOwnerId, otherSidecarName)) {
+          for (const port of collidingPorts) {
+            candidatePorts.delete(port);
+          }
+          continue;
+        }
+        // 859/N2: the sibling's pane can be gone while its own
+        // isolated-daemon has escaped it and is still genuinely serving on
+        // the recorded port — sidecarTmuxAlive alone can't see that (the
+        // very #811 shape this whole PR exists to close). Pane-dead is not
+        // proof the sibling is dead: if the sibling session record is still
+        // non-terminal AND the port is actually occupied by something, we
+        // cannot tell whether that's the sibling's escaped daemon or this
+        // owner's own — exclude it either way rather than risk this stop
+        // signaling a live sibling's daemon it can never distinguish from
+        // its own (T4 alone does not separate `worktree:false` siblings,
+        // which share `project.path`).
+        if (!isTerminalSessionStatus(otherOwner.status)) {
+          for (const port of collidingPorts) {
+            if (!(await isHostPortFree(port))) {
+              candidatePorts.delete(port);
+              ambiguousPorts.add(port);
+            }
+          }
+        }
+      }
+    }
+    return { ports: [...candidatePorts], ambiguousPorts: [...ambiguousPorts] };
   }
 
   private async ensureSidecarReservation(
@@ -10699,26 +10901,55 @@ export class SessionService {
       freshLaunch,
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
+    // Set only when the mid-loop probe below observes a dead pane; reused for
+    // the post-loop processAlive check so a confirmed-dead agent is not
+    // re-probed. Never set on a live result — a live pane can still die before
+    // the next check, so "alive" is never cached, only "dead" (see the probe's
+    // own fresh:true comment).
+    let knownDead = false;
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
       lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
         return "submitted";
       }
       if (attempt < maxResends) {
+        // Cursor-only fast dead-agent exit (I2 scopes this to cursor's short
+        // window/high-resend pacing; claude/codex/opencode keep their long
+        // window and freshLaunch "submit_unconfirmed" pacing untouched). A
+        // dead pane process does not come back inside one send, so a false
+        // result here can be trusted for the rest of this loop; { fresh: true }
+        // is mandatory — a stale cached hit would report an agent that just
+        // died as alive.
+        if (session.agent === "cursor") {
+          const alive = await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: session.launchCommand,
+            },
+            { fresh: true },
+          );
+          if (!alive) {
+            knownDead = true;
+            break;
+          }
+        }
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const processAlive = await agentProcessAlive(
-      {
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        launchCommand: session.launchCommand,
-      },
-      { fresh: true },
-    );
+    const processAlive = knownDead
+      ? false
+      : await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: session.launchCommand,
+          },
+          { fresh: true },
+        );
     const elapsedMs = Date.now() - startedAt;
     if (session.agent === "cursor" && processAlive) {
       this.logEvent("session.submit.recovered", {
@@ -11193,8 +11424,9 @@ export class SessionService {
   // slot-unlink/URL-probe-abort logic. Returns the signal outcome (or null
   // when there was nothing to signal) so a caller that logs its own
   // survivors/rss event, like the reap pass, does not need a second probe;
-  // stopSidecar itself still just logs its own fixed-shape event and ignores
-  // the return. Never gates on sidecarTmuxAlive alone (a dead pane and an
+  // stopSidecar itself maps the return into its own `sidecarStop` outcome
+  // (nothing-to-stop/reaped/partial) rather than logging a fixed-shape
+  // event. Never gates on sidecarTmuxAlive alone (a dead pane and an
   // absent tmux session are exactly the states a leaked tree lives in):
   // falls through to the recorded `sidecarProcs` identity when the tmux
   // session is gone.
@@ -11261,13 +11493,16 @@ export class SessionService {
     }
   }
 
-  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async stopSidecar(sessionId: string, sidecarName: string): Promise<SidecarStopView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.stopSidecarLocked(sessionId, sidecarName),
     );
   }
 
-  private async stopSidecarLocked(sessionId: string, sidecarName: string): Promise<SessionView> {
+  private async stopSidecarLocked(
+    sessionId: string,
+    sidecarName: string,
+  ): Promise<SidecarStopView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -11296,32 +11531,87 @@ export class SessionService {
     suppressed.add(sidecarName);
     this.healTaskSkipNames.get(sessionId)?.add(sidecarName);
     try {
-      // A dead pane or an absent tmux session with no recorded identity means
-      // there is genuinely nothing left to reap.
+      // Captured BEFORE any kill: killSidecarAndUnlinkSlot can unlink this
+      // sidecar's slot/identity, and the recorded-port term below (spur#859
+      // B1) is the ONLY thing that can see a detached daemon that already
+      // took over this port — the isolated-daemon sidecar's own pane
+      // `exec`s into its daemon, so once a forked daemon takes the port the
+      // pane is gone and the old early-return here reported a lie
+      // (`nothing-to-stop`) without ever probing the port.
       const owner = readSession(this.config.dataDir, ownerId);
+      const recordedPortsRaw = Object.values(owner?.sidecarPorts?.[sidecarName] ?? {});
+      // T1 (the recorded port) is not proof of exclusive ownership on its
+      // own — see excludeAmbiguousCrossWorkspacePorts. Never signal, or
+      // even probe, a port a live sibling workspace also records.
+      const { ports: recordedPorts, ambiguousPorts } = owner
+        ? await this.excludeAmbiguousCrossWorkspacePorts(owner, ownerId, recordedPortsRaw)
+        : { ports: recordedPortsRaw, ambiguousPorts: [] as number[] };
       const alive = await sidecarTmuxAlive(ownerId, sidecarName);
-      if (!alive && !owner?.sidecarProcs?.[sidecarName]) {
-        if (clearsWorkspaceReplay) {
-          this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
-        }
-        return await this.enrich(session);
-      }
-
-      await this.killSidecarAndUnlinkSlot(ownerId, sidecarName);
+      const paneOutcome =
+        alive || owner?.sidecarProcs?.[sidecarName]
+          ? await this.killSidecarAndUnlinkSlot(ownerId, sidecarName)
+          : null;
+      const portOutcome = await reapRecordedPortDaemon({
+        ports: recordedPorts,
+        worktreePath: owner?.worktreePath ?? "",
+      });
       if (clearsWorkspaceReplay) {
         this.clearWorkspaceStaleSidecarReplay(session, sidecarName);
       }
-      this.logEvent("session.sidecar.stopped", {
-        level: "info",
-        sessionId,
-        projectId: session.project,
-        message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
-        details: {
-          sidecarName,
-          tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
-        },
-      });
-      return await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+      // ND-1: `ambiguousPorts` was excluded from the reap above purely on
+      // recorded-ownership ambiguity, before this owner's own kill could run
+      // — occupancy is re-checked only now, after the kill, so a port this
+      // owner's own sidecar was holding at the time of the earlier exclusion
+      // reads as free here and never gets reported. Only a port still
+      // occupied AFTER this owner's own reap is genuine evidence of a
+      // sibling's daemon.
+      const excludedOccupied: number[] = [];
+      for (const port of ambiguousPorts) {
+        if (!(await isHostPortFree(port))) {
+          excludedOccupied.push(port);
+        }
+      }
+      const survivors = [
+        ...new Set([...(paneOutcome?.survivors ?? []), ...(portOutcome?.survivors ?? [])]),
+      ];
+      // A recorded port whose listener probe itself could not run (859/N1:
+      // neither `lsof` nor `ss` produced a usable result), or that was
+      // excluded from the probe entirely because a non-terminal sibling
+      // makes ownership ambiguous and the port is still proven occupied
+      // after this owner's own reap (D3/859/N2/ND-1 follow-up), is never
+      // proof the port is clear — it must never collapse into "reaped", nor
+      // disappear into "nothing-to-stop", even when no pid was ever
+      // identified to name as a survivor.
+      const unverifiedPorts = [
+        ...new Set([...(portOutcome?.unverifiedPorts ?? []), ...excludedOccupied]),
+      ];
+      const sidecarStop: SidecarStopReport =
+        paneOutcome === null && portOutcome === null && unverifiedPorts.length === 0
+          ? { outcome: "nothing-to-stop" }
+          : survivors.length === 0 && unverifiedPorts.length === 0
+            ? { outcome: "reaped" }
+            : {
+                outcome: "partial",
+                survivors,
+                ...(unverifiedPorts.length > 0 ? { unverifiedPorts } : {}),
+              };
+      if (sidecarStop.outcome !== "nothing-to-stop") {
+        this.logEvent("session.sidecar.stopped", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message:
+            sidecarStop.outcome === "partial"
+              ? `Sidecar ${sidecarName} for ${sessionId} did not fully stop`
+              : `Stopped sidecar ${sidecarName} for ${sessionId}`,
+          details: {
+            sidecarName,
+            tmuxSession: sidecarTmuxSession(ownerId, sidecarName),
+          },
+        });
+      }
+      const view = await this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+      return { ...view, sidecarStop };
     } finally {
       const current = this.suppressedSidecarHeals.get(sessionId);
       if (current) {
@@ -11343,7 +11633,12 @@ export class SessionService {
     if (!assembled) {
       return { supported: false, leaked: [], reaped: [] };
     }
-    return sweepSidecars({ ...assembled, reap });
+    return sweepSidecars({
+      ...assembled,
+      reap,
+      selfConfigPath: this.bootstrapConfigPath,
+      ...(this.sidecarSnapshotOverride ? { takeSnapshot: this.sidecarSnapshotOverride } : {}),
+    });
   }
 
   // Signals every torn-down sidecar's pane first, then confirms the whole
@@ -12151,6 +12446,7 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
+    this.clearTargetGoneNudgeGate(session.id);
     await this.assertNoForeignAgentForSession(
       session,
       await this.lookupPanePidQuietly(session.tmuxSession),
@@ -12464,6 +12760,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    this.clearTargetGoneNudgeGate(sessionId);
     // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
     // path reads the session directly rather than through that method, so
     // isRestorableSession's workspaceExists (computed by enrich() below) would

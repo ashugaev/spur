@@ -2226,6 +2226,37 @@ export function isDefaultInstanceConfigPath(configPath: string): boolean {
   return samePathOnDisk(configPath, DEFAULT_INSTANCE_CONFIG_PATH);
 }
 
+// Wraps the same tolerant-of-symlinks comparison `isDefaultInstanceConfigPath`
+// uses, for the self-exclusion check in `findOrphanDaemonTrees`: an
+// orphan-daemon row must never name the instance config the check itself is
+// running against. Keeps every configPath-on-disk comparison in this module.
+export function isSameInstanceConfigPath(a: string, b: string): boolean {
+  return samePathOnDisk(a, b);
+}
+
+// Pure guard, no writes. Bootstrapping belongs to the default instance config
+// path alone: `ensureInstanceConfig` seeds a defaults template that claims
+// server.port 4310 and dataDir ~/.spur, so auto-creating it at an arbitrary
+// `--config` path turns a typo'd, stale, or unexpanded path into a silent
+// retarget at the production daemon, exit 0, with the notice printed only on
+// the run that created the file (issue #846). A non-default path is therefore
+// a caller assertion that the file already exists.
+// The default path stays exempt for the same reason it is exempt in
+// `assertConfigMayUseProdSlot`: refusing it would break first boot.
+// `SPUR_CONFIG` is explicit too — `resolveInstanceConfigPath` folds it in
+// before this check, so env and flag behave identically.
+export function assertInstanceConfigPathExists(input?: string): void {
+  const configPath = resolveInstanceConfigPath(input);
+  if (isDefaultInstanceConfigPath(configPath) || existsSync(configPath)) {
+    return;
+  }
+  throw new Error(
+    `Instance config ${configPath} does not exist. ` +
+      `Spur only bootstraps the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
+      `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
+  );
+}
+
 // Pure guard, no writes: `daemon start`/`stop`/`restart` (and any other
 // `startServer` caller) must neither bootstrap a prod-default config
 // template at an arbitrary path, nor bind or target the production slot
@@ -2255,13 +2286,7 @@ export function assertConfigMayUseProdSlot(input?: string): void {
   if (isDefaultInstanceConfigPath(configPath)) {
     return;
   }
-  if (!existsSync(configPath)) {
-    throw new Error(
-      `Instance config ${configPath} does not exist. ` +
-        `'daemon start'/'stop'/'restart' only bootstrap the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
-        `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
-    );
-  }
+  assertInstanceConfigPathExists(input);
   const result = loadInstanceConfigReadOnly(input);
   if (result.status !== "ok") {
     // Unparseable (or, unreachably here, absent): a config that cannot be
@@ -2289,6 +2314,10 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
   if (existsSync(configPath)) {
     return { configPath, initialized: false };
   }
+  // Guard the seeding site itself, not each caller: `loadConfig` and every CLI
+  // command action reach bootstrap through here, so this is the only place
+  // that sees each attempt to create a config (#846).
+  assertInstanceConfigPathExists(input);
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, defaultInstanceConfigYaml(), "utf-8");
   return { configPath, initialized: true };

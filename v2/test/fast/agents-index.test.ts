@@ -508,19 +508,28 @@ describe("createAgentSubmitAckBinding", () => {
     expect(binding).toBeNull();
   });
 
-  it("returns a binding for cursor that scans the captured transcript", async () => {
+  it("threads the pinned agentSessionId into cursor capture and scan, and reports the rotated file actually scanned", async () => {
     captureCursorSubmitBaselineMock.mockResolvedValue({ file: "/some/chat.jsonl", size: 7 });
-    scanCursorJsonlForMessageMock.mockResolvedValue(true);
+    scanCursorJsonlForMessageMock.mockResolvedValue({
+      found: true,
+      scannedFile: "/rotated/chat.jsonl",
+    });
 
-    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    const pinnedCtx = { ...ctx, agentSessionId: "sid-1" };
+    const binding = await createAgentSubmitAckBinding("cursor", pinnedCtx);
     expect(binding).not.toBeNull();
     const result = await binding?.scan("hello");
-    expect(result).toEqual({ found: true, lastScannedFile: "/some/chat.jsonl" });
+
+    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "sid-1");
     expect(scanCursorJsonlForMessageMock).toHaveBeenCalledWith(
       { file: "/some/chat.jsonl", size: 7 },
       "hello",
       ctx.worktreePath,
+      "sid-1",
     );
+    // The rotated path, not baseline.file: change (e) reports the file the scan
+    // actually read, not a hardcoded baseline.
+    expect(result).toEqual({ found: true, lastScannedFile: "/rotated/chat.jsonl" });
   });
 });
 
