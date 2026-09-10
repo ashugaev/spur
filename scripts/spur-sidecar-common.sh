@@ -16,12 +16,15 @@ NODE_ENGINES_RANGE=""
 NODE_CHECK_ERROR=""
 
 # True when the `node` on PATH right now satisfies the root package.json's
-# engines.node range. Mirrors satisfiesClause in v2/src/host-install.ts:460-483
+# engines.node range. Mirrors satisfiesClause in v2/src/host-install.ts
 # — same two clause forms (`^X.Y.Z` and `>=X[.Y[.Z]]`), anything else is
 # false — so minor/patch precision is real; bash arithmetic can't tell
 # 22.13.0 from 22.5.0. The fast test pins this check's verdicts against the
 # exported satisfiesNodeEngineRange so the two implementations cannot drift
 # apart.
+# The release triple alone decides (#826): a prerelease/build suffix
+# (`-nightly...`, `-rc.1`, `+build.5`) is stripped before evaluation and
+# never changes the verdict.
 # The version compared is `node -v`'s own output, passed as an argv string,
 # rather than that same process's `process.versions.node` — the two are
 # always identical for a real node binary, and going through argv is what
@@ -55,7 +58,7 @@ node_satisfies_engines() {
     NODE_CHECK_ERROR="node -v exited $version_status instead of reporting a version"
     return 1
   fi
-  if [[ ! "$current_version" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
+  if [[ ! "$current_version" =~ ^v[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.-]+)?$ ]]; then
     NODE_CHECK_ERROR="node -v produced unparseable output: '$current_version'"
     return 1
   fi
@@ -78,7 +81,7 @@ node_satisfies_engines() {
     }
 
     function parseVersionTuple(value) {
-      const parts = String(value).replace(/^v/, "").split(".");
+      const parts = String(value).replace(/^v/, "").split(/[-+]/)[0].split(".");
       const major = Number.parseInt(parts[0] || "0", 10);
       const minor = Number.parseInt(parts[1] || "0", 10);
       const patch = Number.parseInt(parts[2] || "0", 10);

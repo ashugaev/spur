@@ -437,8 +437,12 @@ function readEnginesNodeRange(): string | undefined {
   }
 }
 
+// #826: the release triple alone decides — a prerelease/build suffix
+// (`-nightly...`, `-rc.1`, `+build.5`) is stripped before splitting so it
+// never changes the verdict.
 function parseVersionTuple(value: string): [number, number, number] {
-  const parts = value.replace(/^v/, "").split(".");
+  const release = value.replace(/^v/, "").split(/[-+]/)[0] ?? "";
+  const parts = release.split(".");
   const major = Number.parseInt(parts[0] ?? "0", 10);
   const minor = Number.parseInt(parts[1] ?? "0", 10);
   const patch = Number.parseInt(parts[2] ?? "0", 10);
