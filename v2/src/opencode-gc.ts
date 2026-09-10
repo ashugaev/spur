@@ -25,7 +25,7 @@ import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { opencodeCommand, readOpenCodeJson } from "./agents/opencode.js";
 import { readFreeKb } from "./disk-space.js";
-import { listSessions } from "./metadata.js";
+import { listSessions, readSession } from "./metadata.js";
 import { workspaceIdOf } from "./session-desk.js";
 import {
   isTerminalSessionStatus,
@@ -141,6 +141,8 @@ export interface OpenCodeGcPlan {
 
 export interface OpenCodeGcSessionResult extends OpenCodeGcSessionEntry {
   deleted: boolean;
+  /** Set when the execute-time re-read no longer matches the plan. */
+  blockReason?: "changed_during_run";
   error?: string;
 }
 
@@ -183,6 +185,8 @@ export interface OpenCodeGcReport {
   totals: {
     sessionsSelected: number;
     sessionsDeleted: number;
+    /** Selected, then refused at execute time by the freshness re-read. */
+    sessionsBlocked: number;
     snapshotLeavesRemoved: number;
     /** FILE bytes only: snapshot leaves plus the log delta. Never DB bytes. */
     freedBytes: number | null;
@@ -198,6 +202,11 @@ export interface OpenCodeGcExecutorDeps {
   /** `du -s --block-size=1 --`, the same measurement session-gc.ts makes. */
   measureSize(path: string): Promise<number | null>;
   removePath(path: string): Promise<void>;
+  /**
+   * Fresh read of the rule-(a) records, straight off disk. `null` for a
+   * record that no longer exists. Mirrors session-gc.ts's readGroupMembers.
+   */
+  readRecords(ids: readonly string[]): (SessionRecord | null)[];
   deleteSession(id: string): Promise<void>;
   writeLogArchive(logPath: string, archivePath: string, tailBytes: number): Promise<void>;
   truncateLog(logPath: string): Promise<void>;
@@ -211,6 +220,8 @@ export interface ExecuteOpenCodeGcOptions {
   sizes: boolean;
   /** The daemon sweep passes false: a 93 s blocking VACUUM is CLI-only. */
   vacuum: boolean;
+  /** The daemon sweep passes false: the payload aggregate is CLI-only too. */
+  dbPayload: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -509,12 +520,27 @@ export async function executeOpenCodeGc(
   const leaves: OpenCodeGcLeafResult[] = [];
   let freedBytes = 0;
   let deletedCount = 0;
+  let blockedCount = 0;
   let removedCount = 0;
   let errors = 0;
 
+  // The plan's statuses were read at collect time. Enumeration alone costs
+  // 2-4 s, the snapshot scan and the du of a 484 MB log follow, and each
+  // delete carries a 60 s timeout — so by the last entry the snapshot is
+  // minutes old. `completed` is in isRespawnableStatus and an opencode
+  // resume is `--session <agentSessionId>`, so a session respawned inside
+  // that window would come back EMPTY if its rows went. Re-read per entry,
+  // immediately before its own delete, because the window keeps widening as
+  // the loop proceeds.
+  const selectable = new Set<string>(plan.statuses);
   for (const entry of plan.sessions) {
     if (options.dryRun) {
       sessions.push({ ...entry, deleted: false });
+      continue;
+    }
+    if (isChangedDuringRun(deps, entry, selectable)) {
+      blockedCount += 1;
+      sessions.push({ ...entry, deleted: false, blockReason: "changed_during_run" });
       continue;
     }
     try {
@@ -528,7 +554,10 @@ export async function executeOpenCodeGc(
   }
 
   let dbPayloadBytesEstimate: number | null = null;
-  if (options.sizes && plan.sessions.length > 0) {
+  // CLI-only, like the VACUUM: this is a sqlite3 aggregate over event,
+  // message and part of a multi-GB WAL store. cache-retention.ts:19-34 is
+  // the standing precedent that expensive disk work stays out of the daemon.
+  if (options.dbPayload && options.sizes && plan.sessions.length > 0) {
     dbPayloadBytesEstimate = await deps.measureDbPayload(plan.sessions.map((entry) => entry.id));
   }
 
@@ -611,8 +640,12 @@ export async function executeOpenCodeGc(
 
   const vacuum = { attempted: false, ok: false, blockReasons: [...plan.vacuum.blockReasons] };
   let dbFileBytesFreed: number | null = null;
+  // `dry_run` is its own reason, not folded into `no_sessions_deleted`: a
+  // dry run must say why it did not VACUUM, and the guard stays load-bearing
+  // rather than resting on "a dry run happens to delete nothing".
+  if (options.dryRun) vacuum.blockReasons.push("dry_run");
   if (deletedCount === 0) vacuum.blockReasons.push("no_sessions_deleted");
-  if (options.vacuum && !options.dryRun && vacuum.blockReasons.length === 0) {
+  if (options.vacuum && vacuum.blockReasons.length === 0) {
     const before = await deps.statDbSize();
     try {
       vacuum.attempted = true;
@@ -643,6 +676,7 @@ export async function executeOpenCodeGc(
     totals: {
       sessionsSelected: plan.sessions.length,
       sessionsDeleted: deletedCount,
+      sessionsBlocked: blockedCount,
       snapshotLeavesRemoved: removedCount,
       freedBytes: options.sizes ? freedBytes : null,
       dbPayloadBytesEstimate,
@@ -650,6 +684,32 @@ export async function executeOpenCodeGc(
       errors,
     },
   };
+}
+
+/**
+ * Fail-closed freshness gate. True means "refuse this entry". A record that
+ * vanished, a read that threw, or a status that left the selectable set all
+ * count as changed — never as a clean re-confirmation.
+ *
+ * Only the session deletes need this. A snapshot leaf is selected because
+ * its recorded git worktree does not exist, and Spur never recreates a
+ * removed worktree at the same path; its `du` already sits in the same loop
+ * iteration as its removal. The log is selected on size, which only grows
+ * during a run, so staleness cannot flip that decision toward acting.
+ */
+function isChangedDuringRun(
+  deps: OpenCodeGcExecutorDeps,
+  entry: OpenCodeGcSessionEntry,
+  selectable: ReadonlySet<string>,
+): boolean {
+  let fresh: (SessionRecord | null)[];
+  try {
+    fresh = deps.readRecords(entry.recordIds);
+  } catch {
+    return true;
+  }
+  if (fresh.length !== entry.recordIds.length) return true;
+  return fresh.some((record) => !record || !selectable.has(record.status));
 }
 
 function messageOf(error: unknown): string {
@@ -869,6 +929,7 @@ export function createOpenCodeGcDeps(
     },
     measureSize,
     removePath: (path) => rm(path, { recursive: true, force: true }),
+    readRecords: (ids) => ids.map((id) => readSession(config.dataDir, id)),
     deleteSession: async (id) => {
       await execFileAsync(opencodeCommand(), ["session", "delete", id], {
         cwd,

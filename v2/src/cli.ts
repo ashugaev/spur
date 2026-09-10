@@ -1309,9 +1309,14 @@ export function renderOpenCodeGcResult(report: OpenCodeGcReport): string {
     "",
   ];
   for (const entry of report.sessions) {
-    const detail = entry.error ? `error: ${entry.error}` : entry.canonicalDirectory;
+    const detail = entry.error
+      ? `error: ${entry.error}`
+      : entry.blockReason
+        ? entry.blockReason
+        : entry.canonicalDirectory;
+    const verb = entry.blockReason ? "blocked" : entry.deleted ? "deleted" : "select ";
     lines.push(
-      `  ${accent(entry.deleted ? "deleted" : "select ")}  ${entry.id.padEnd(31)}  ${`${Math.floor(entry.ageDays)}d`.padEnd(5)}  ${detail}`,
+      `  ${accent(verb)}  ${entry.id.padEnd(31)}  ${`${Math.floor(entry.ageDays)}d`.padEnd(5)}  ${detail}`,
     );
     lines.push(dimText(`           ${entry.recordIds.join(" ")}`));
   }
@@ -1321,8 +1326,12 @@ export function renderOpenCodeGcResult(report: OpenCodeGcReport): string {
     );
   }
   if (report.log) {
+    // A dry run has no archive to `du`, so its retained term is an
+    // apparent-size projection up to one filesystem block off the executing
+    // path's exact du − du. Say so, or the two read identically.
+    const projected = report.log.projected ? " [projected, not measured]" : "";
     lines.push(
-      `  ${accent(report.log.truncated ? "truncated" : "log      ")}  ${formatBytes(report.log.freedBytes).padEnd(9)}  ${report.log.path} (retaining ${formatBytes(report.log.retainedBytes)} as ${report.log.archivePath})`,
+      `  ${accent(report.log.truncated ? "truncated" : "log      ")}  ${formatBytes(report.log.freedBytes).padEnd(9)}  ${report.log.path} (retaining ${formatBytes(report.log.retainedBytes)} as ${report.log.archivePath})${projected}`,
     );
   }
   if (lines.length === 2) {
@@ -1339,7 +1348,7 @@ export function renderOpenCodeGcResult(report: OpenCodeGcReport): string {
   );
   lines.push(`DB file bytes returned by VACUUM: ${formatBytes(report.totals.dbFileBytesFreed)}`);
   lines.push(
-    `Totals: ${report.totals.sessionsSelected} session(s) selected, ${report.totals.sessionsDeleted} deleted, ${report.totals.snapshotLeavesRemoved} snapshot leaf/leaves removed, ${report.totals.errors} error(s).`,
+    `Totals: ${report.totals.sessionsSelected} session(s) selected, ${report.totals.sessionsDeleted} deleted, ${report.totals.sessionsBlocked} blocked by a status change during the run, ${report.totals.snapshotLeavesRemoved} snapshot leaf/leaves removed, ${report.totals.errors} error(s).`,
   );
   if (report.vacuum.blockReasons.length > 0) {
     lines.push(dimText(`VACUUM skipped: ${report.vacuum.blockReasons.join(",")}.`));
@@ -2718,7 +2727,7 @@ export function createProgram(cliEntrypoint: string): Command {
           });
           // The single VACUUM is CLI-only: 93 s measured on a 3.1 GB store,
           // against a 300 s daemon tick.
-          return executeOpenCodeGc(plan, deps, { dryRun, sizes, vacuum: true });
+          return executeOpenCodeGc(plan, deps, { dryRun, sizes, vacuum: true, dbPayload: true });
         },
         render: renderOpenCodeGcResult,
         exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),

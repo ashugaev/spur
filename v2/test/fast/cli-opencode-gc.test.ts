@@ -2,7 +2,11 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createProgram, renderOpenCodeGcResult } from "../../src/cli.js";
-import type { OpenCodeGcReport } from "../../src/opencode-gc.js";
+import type {
+  OpenCodeGcLogResult,
+  OpenCodeGcReport,
+  OpenCodeGcSessionResult,
+} from "../../src/opencode-gc.js";
 
 function command() {
   const found = createProgram("/tmp/dist/cli.js").commands.find(
@@ -12,6 +16,26 @@ function command() {
   return found;
 }
 
+const SESSION: OpenCodeGcSessionResult = {
+  id: "ses_fc843fe5dffegfDFNqCKw6TP4W",
+  directory: "/w/a",
+  canonicalDirectory: "/w/a",
+  updatedAt: "2026-08-01T00:00:00.000Z",
+  ageDays: 40.5,
+  recordIds: ["spur-a"],
+  deleted: false,
+};
+
+const LOG: OpenCodeGcLogResult = {
+  path: "/store/log/opencode.log",
+  archivePath: "/store/log/opencode.log.1",
+  duBytes: 484_297_755,
+  retainedBytes: 16_777_216,
+  freedBytes: 467_520_539,
+  projected: true,
+  truncated: false,
+};
+
 function report(overrides: Partial<OpenCodeGcReport> = {}): OpenCodeGcReport {
   return {
     dryRun: true,
@@ -20,32 +44,15 @@ function report(overrides: Partial<OpenCodeGcReport> = {}): OpenCodeGcReport {
     olderThanDays: 14,
     statuses: ["completed", "killed"],
     enumeration: { listedCount: 279, limit: 100_000, truncated: false, note: "floor" },
-    sessions: [
-      {
-        id: "ses_fc843fe5dffegfDFNqCKw6TP4W",
-        directory: "/w/a",
-        canonicalDirectory: "/w/a",
-        updatedAt: "2026-08-01T00:00:00.000Z",
-        ageDays: 40.5,
-        recordIds: ["spur-a"],
-        deleted: false,
-      },
-    ],
+    sessions: [SESSION],
     skipped: [{ id: "ses_other", reason: "protected_live_record" }],
     snapshotLeaves: [{ path: "/store/snapshot/p/dead", sizeBytes: 80_146_432, removed: false }],
-    log: {
-      path: "/store/log/opencode.log",
-      archivePath: "/store/log/opencode.log.1",
-      duBytes: 484_297_755,
-      retainedBytes: 16_777_216,
-      freedBytes: 467_520_539,
-      projected: true,
-      truncated: false,
-    },
-    vacuum: { attempted: false, ok: false, blockReasons: ["no_sessions_deleted"] },
+    log: LOG,
+    vacuum: { attempted: false, ok: false, blockReasons: ["dry_run", "no_sessions_deleted"] },
     totals: {
       sessionsSelected: 1,
       sessionsDeleted: 0,
+      sessionsBlocked: 0,
       snapshotLeavesRemoved: 0,
       freedBytes: 547_666_971,
       dbPayloadBytesEstimate: 2_100_182_202,
@@ -104,7 +111,34 @@ describe("renderOpenCodeGcResult", () => {
 
     expect(rendered).toContain("a floor");
     expect(rendered).toContain("Re-run with --execute to apply.");
-    expect(rendered).toContain("VACUUM skipped: no_sessions_deleted.");
+    expect(rendered).toContain("VACUUM skipped: dry_run,no_sessions_deleted.");
+  });
+
+  it("marks a projected log term and leaves a measured one unmarked", () => {
+    const dry = renderOpenCodeGcResult(report());
+    const executed = renderOpenCodeGcResult(
+      report({
+        dryRun: false,
+        log: { ...LOG, projected: false, truncated: true },
+      }),
+    );
+
+    expect(dry).toContain("[projected, not measured]");
+    expect(executed).not.toContain("[projected, not measured]");
+  });
+
+  it("names a session blocked by the execute-time freshness re-read", () => {
+    const rendered = renderOpenCodeGcResult(
+      report({
+        dryRun: false,
+        sessions: [{ ...SESSION, blockReason: "changed_during_run" }],
+        totals: { ...report().totals, sessionsBlocked: 1 },
+      }),
+    );
+
+    expect(rendered).toContain("blocked");
+    expect(rendered).toContain("changed_during_run");
+    expect(rendered).toContain("1 blocked by a status change during the run");
   });
 
   it("renders nothing but the reason when the store could not be resolved", () => {
