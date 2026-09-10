@@ -688,6 +688,41 @@ describe("findLatestCursorTranscriptFile", () => {
     const pinned1 = await findLatestCursorTranscriptFile(worktreePath, id1);
     expect(pinned1).toBe(file1);
   });
+
+  it("findLatestCursorTranscriptFile and readCursorJsonlState ignore minMtimeMs when agentSessionId is pinned", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-pinned-mtime-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    const pinnedId = "33333333-3333-3333-3333-333333333333";
+    await mkdir(join(transcriptsDir, pinnedId), { recursive: true });
+    const pinnedPath = join(transcriptsDir, pinnedId, `${pinnedId}.jsonl`);
+    await writeFile(
+      pinnedPath,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"pinned session"}]}}\n',
+    );
+    const oldTime = new Date(1_000_000);
+    await utimes(pinnedPath, oldTime, oldTime);
+
+    const threshold = 2_000_000;
+    const found = await findLatestCursorTranscriptFile(worktreePath, pinnedId, {
+      minMtimeMs: threshold,
+    });
+    expect(found).toBe(pinnedPath);
+
+    const state = await readCursorJsonlState(worktreePath, undefined, pinnedId, {
+      minMtimeMs: threshold,
+    });
+    expect(state).not.toBeNull();
+    expect(state?.reader.filePath).toBe(pinnedPath);
+  });
 });
 
 describe("toCursorProjectPath", () => {

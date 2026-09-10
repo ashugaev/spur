@@ -14807,7 +14807,11 @@ export class SessionService {
           session.worktreePath,
           this.cursorJsonlReaders.get(session.id),
           session.agentSessionId,
-          { minMtimeMs: new Date(session.createdAt).getTime() },
+          {
+            minMtimeMs: session.agentSessionId
+              ? undefined
+              : Math.max(0, new Date(session.createdAt).getTime() - 60_000),
+          },
         );
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);

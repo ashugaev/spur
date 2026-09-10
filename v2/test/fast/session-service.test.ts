@@ -9996,7 +9996,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("passes minMtimeMs from session.createdAt when classifying cursor JSONL state", async () => {
+    it("applies a 60-second grace window to minMtimeMs for unpinned cursor sessions", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
       const createdAt = "2026-03-18T10:00:00.000Z";
@@ -10008,8 +10008,31 @@ describe("SessionService", () => {
       expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
         cursorSession.worktreePath,
         undefined,
-        cursorSession.agentSessionId,
-        { minMtimeMs: new Date(createdAt).getTime() },
+        undefined,
+        { minMtimeMs: new Date(createdAt).getTime() - 60_000 },
+      );
+    });
+
+    it("skips minMtimeMs when agentSessionId is pinned for cursor sessions", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const createdAt = "2026-03-18T10:00:00.000Z";
+      const agentSessionId = "pinned-cursor-session-123";
+      const cursorSession = runningSession({
+        id: "cursor-1",
+        agent: "cursor",
+        createdAt,
+        agentSessionId,
+      });
+      mockCursorJsonlState("working");
+
+      await internals.classifySessionRecord(cursorSession);
+
+      expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
+        cursorSession.worktreePath,
+        undefined,
+        agentSessionId,
+        { minMtimeMs: undefined },
       );
     });
 
