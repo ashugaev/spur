@@ -56,12 +56,18 @@ function readIsolatedUiPort(session: SidecarSession): number | null {
   return port;
 }
 
+// Name-only "has-session" reports alive for a remain-on-exit tmux session
+// whose pane already exited. Probe pane state instead: a running pane
+// reports "#{pane_dead}" == "0"; a dead pane or an absent session (the tmux
+// call throws) both resolve to not-alive.
 function isolatedUiTmuxAlive(sessionId: string): boolean {
   try {
-    execFileSync("tmux", ["has-session", "-t", `${sessionId}--isolated-ui`], {
-      stdio: "ignore",
-    });
-    return true;
+    const output = execFileSync(
+      "tmux",
+      ["list-panes", "-t", `${sessionId}--isolated-ui`, "-F", "#{pane_dead}"],
+      { encoding: "utf8", stdio: "pipe" },
+    );
+    return output.split("\n").some((line) => line.trim() === "0");
   } catch {
     return false;
   }
@@ -105,8 +111,10 @@ function readSidecarBaseUrl(env: NodeJS.ProcessEnv): string | null {
     const uiSidecarAlive = session.sidecars?.some(
       (sidecar) => sidecar.name === "isolated-ui" && sidecar.alive,
     );
+    if (!uiSidecarAlive) return null;
+
     const uiPort = readIsolatedUiPort(session);
-    if (!uiSidecarAlive || !uiPort) return readMetadataSidecarBaseUrl(env);
+    if (!uiPort) return readMetadataSidecarBaseUrl(env);
 
     return `http://127.0.0.1:${uiPort}`;
   } catch {

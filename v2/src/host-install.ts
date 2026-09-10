@@ -43,6 +43,8 @@ import {
   findLeakedSidecarTrees,
   snapshotProcesses,
   SWEEP_DETAIL_MAX_TREES,
+  type LeakedSidecarTree,
+  type ProcSnapshot,
 } from "./sidecars/reap.js";
 import type { AppConfig } from "./types.js";
 import {
@@ -1019,7 +1021,21 @@ async function portConflictCheck(
   ctl: string[],
 ): Promise<HostInstallCheck> {
   const ownPid = getUnitMainPid(ctl, unit);
-  const pids = await findListenerPids(port);
+  // findListenerPids throws when the probe itself is unavailable (neither
+  // `lsof` nor `ss` produced a usable result) — doctor never crashes or
+  // hangs on a missing OS tool, so that case reports "unknown" rather than
+  // taking down the whole check run.
+  let pids: number[];
+  try {
+    pids = await findListenerPids(port);
+  } catch {
+    return {
+      id: `${id}-port-conflict`,
+      ok: false,
+      severity: "error",
+      detail: `port ${port} expected for ${unit} appears occupied, but the pid holding it could not be determined (lsof/ss unavailable)`,
+    };
+  }
   if (ownPid !== undefined && pids.includes(ownPid)) {
     return {
       id: `${id}-reachable`,
@@ -1205,7 +1221,12 @@ export function checkVersionDrift(daemonVersion: string | undefined): HostInstal
   };
 }
 
-export async function collectHostInstallChecks(home = homedir()): Promise<HostInstallCheck[]> {
+export async function collectHostInstallChecks(
+  home = homedir(),
+  // Test seam for `checkLeakedSidecars`'s process-table read only (859/
+  // AC18) — real doctor runs never pass this and get the live `ps` table.
+  sidecarSnapshot: () => Promise<ProcSnapshot> = snapshotProcesses,
+): Promise<HostInstallCheck[]> {
   const checks: HostInstallCheck[] = [];
   const scope = resolveSystemdScope(home);
   const expectedPrefix = npmGlobalPrefix(home);
@@ -1477,7 +1498,7 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
         : {}),
     });
 
-    checks.push(await checkLeakedSidecars(instanceConfig.config));
+    checks.push(await checkLeakedSidecars(instanceConfig.config, sidecarSnapshot));
   }
 
   const daemonHost =
@@ -1496,26 +1517,45 @@ export async function collectHostInstallChecks(home = homedir()): Promise<HostIn
   return checks;
 }
 
-function formatSweepTreeLine(tree: {
-  rootPid: number;
-  pgid: number;
-  treeRssKb: number;
-  ageSeconds: number;
-  worktreePath: string;
-  sidecarName: string | null;
-}): string {
+function formatSweepTreeLine(tree: LeakedSidecarTree): string {
   const ageMinutes = Math.floor(tree.ageSeconds / 60);
   const hours = Math.floor(ageMinutes / 60);
   const minutes = ageMinutes % 60;
   // Tree total, not the root pid's own rss — the root alone understated the
   // measured 863333/863351 leak by 17x.
   const rssMb = Math.round(tree.treeRssKb / 1024);
-  return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  age ${hours}h${minutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
+  const age = `age ${hours}h${minutes}m`;
+  if (tree.kind === "orphan-daemon") {
+    // Serving is a per-row fact, never suppressed: a node process whose
+    // checkout was deleted keeps serving from already-loaded code (859/B3),
+    // so this label must never carry the kill-verb phrasing on that row.
+    // "unknown" (the port probe itself could not run, or the row's own
+    // instance config didn't resolve) must render distinctly from
+    // "not-serving" — a probe that could not run is not evidence of death,
+    // so it must not share the "verify [...] then kill" phrasing that
+    // implies a completed, negative liveness check.
+    const prefix =
+      tree.liveness === "serving"
+        ? `[report-only, SERVING on ${tree.port}]`
+        : tree.liveness === "unknown"
+          ? "[report-only, liveness unknown — verify manually before killing]"
+          : "[report-only, verify before killing]";
+    return `  ${prefix} pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  daemon ${tree.configPath}  ${tree.worktreePath}`;
+  }
+  return `  pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${rssMb} MB  ${age}  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}`;
 }
 
 // Read-only doctor check: calls findLeakedSidecarTrees only, never
 // sweepSidecars(reap: true) — doctor performs zero writes and zero signals.
-async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck> {
+// `takeSnapshot` is a test seam (859/AC18): a fixture that expects zero
+// leaks must control the process table it scans, never the real host's —
+// a bare-metal `ps` snapshot on a host with even one leftover orphan daemon
+// (any developer box, any CI runner that ran this suite before) makes this
+// check see rows a fixture pinning an empty worktreeDir never intended.
+async function checkLeakedSidecars(
+  config: AppConfig,
+  takeSnapshot: () => Promise<ProcSnapshot> = snapshotProcesses,
+): Promise<HostInstallCheck> {
   const sessions = listSessions(config.dataDir);
   const assembled = assembleSidecarSweepClaims(sessions, config.worktreeDir);
   if (!assembled) {
@@ -1526,12 +1566,13 @@ async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck>
       detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
     };
   }
-  const snapshot = await snapshotProcesses();
+  const snapshot = await takeSnapshot();
   const { supported, leaked } = await findLeakedSidecarTrees({
     snapshot,
     claims: assembled.claims,
     worktreePaths: assembled.worktreePaths,
     worktreeDirRealpath: assembled.worktreeDirRealpath,
+    selfConfigPath: config.configPath,
   });
   if (!supported) {
     return {
@@ -1549,21 +1590,58 @@ async function checkLeakedSidecars(config: AppConfig): Promise<HostInstallCheck>
       detail: "sidecar-orphans: none found",
     };
   }
-  const shown = leaked.slice(0, SWEEP_DETAIL_MAX_TREES);
-  const remaining = leaked.length - shown.length;
-  const detail = [
-    `sidecar-orphans: ${leaked.length} leaked sidecar process tree(s) found`,
-    ...shown.map(formatSweepTreeLine),
-    ...(remaining > 0 ? [`  +${remaining} more`] : []),
-  ].join("\n");
   return {
     id: "sidecar-orphans",
     ok: false,
     severity: "warn",
-    detail,
-    fix: "spur sidecar sweep --reap",
+    ...formatLeakedSidecarsCheck(leaked),
   };
 }
+
+// Split out from checkLeakedSidecars so its per-kind header/fix logic is
+// unit-testable without a real `ps` fork (checkLeakedSidecars itself always
+// runs against the live host process table).
+function formatLeakedSidecarsCheck(leaked: LeakedSidecarTree[]): { detail: string; fix: string } {
+  const shown = leaked.slice(0, SWEEP_DETAIL_MAX_TREES);
+  const remaining = leaked.length - shown.length;
+  const worktreeTreeCount = leaked.filter((tree) => tree.kind === "worktree-tree").length;
+  const orphanDaemonCount = leaked.length - worktreeTreeCount;
+  const headerParts = [
+    ...(worktreeTreeCount > 0 ? [`${worktreeTreeCount} leaked sidecar process tree(s)`] : []),
+    ...(orphanDaemonCount > 0 ? [`${orphanDaemonCount} orphan daemon(s)`] : []),
+  ];
+  const detail = [
+    `sidecar-orphans: ${headerParts.join(", ")} found`,
+    ...shown.map(formatSweepTreeLine),
+    ...(remaining > 0 ? [`  +${remaining} more`] : []),
+  ].join("\n");
+  const hasReapable = leaked.some((tree) => tree.reapable);
+  const servingRow = leaked.find(
+    (tree): tree is Extract<LeakedSidecarTree, { kind: "orphan-daemon" }> =>
+      tree.kind === "orphan-daemon" && tree.liveness === "serving",
+  );
+  // A probe that could not run is not proof of death: "unknown" must never
+  // share the "genuinely dead" fix text with a real not-serving result, or
+  // an operator following it could `kill` a daemon that is actually still
+  // serving but whose port probe merely failed (missing/timed-out lsof/ss).
+  const hasUnknownLiveness = leaked.some(
+    (tree) => tree.kind === "orphan-daemon" && tree.liveness === "unknown",
+  );
+  return {
+    detail,
+    fix: servingRow
+      ? `stop each serving orphan daemon with 'spur --config ${servingRow.configPath} daemon stop'; never kill a serving pid blind`
+      : hasReapable
+        ? "spur sidecar sweep --reap"
+        : hasUnknownLiveness
+          ? "liveness could not be confirmed for at least one row (lsof/ss unavailable) — verify manually before touching it; only `kill <pid>` a row confirmed genuinely dead"
+          : "verify each row is genuinely dead, then `kill <pid>` by hand",
+  };
+}
+
+// Test-only: exercises the per-kind header/fix split without a real `ps`
+// fork or a live leaked process tree.
+export const _formatLeakedSidecarsCheckForTests = formatLeakedSidecarsCheck;
 
 export function hasErrorSeverity(checks: HostInstallCheck[]): boolean {
   return checks.some((check) => !check.ok && check.severity === "error");

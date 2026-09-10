@@ -12,6 +12,7 @@ import type {
   RuntimeInfo,
   ServiceInstanceView,
   SidecarPortConflictPayload,
+  SessionListItemView,
   SessionRecord,
   SessionView,
   TodoProjection,
@@ -1450,6 +1451,20 @@ projects:
 
     await expect(
       context.execCli(["--config", configPath, "respawn", "api-999"]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "slots",
+        "--session",
+        "api-999",
+        "--title",
+        "does not matter",
+      ]),
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("Session not found: api-999"),
     });
@@ -3334,11 +3349,10 @@ projects:
       },
     });
 
-    const attachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("l logs"),
+      accept: (value) => value.includes("l logs") && value.includes("service web:3000:running"),
     });
-    expect(attachedPane).toContain("service web:3000:running");
 
     await sendKeysToTmux(controllerSessionName, "l");
 
@@ -3801,15 +3815,17 @@ projects:
       timeoutMs: 15_000,
       accept: (value) => value.includes("startup:launch::"),
     });
-    const listed = await context.fetchJson<SessionView[]>("/sessions");
+    const listed = await context.fetchJson<SessionListItemView[]>("/sessions");
+    const listedDetail = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
 
     expect(log).toContain("startup:launch::");
     expect(log).not.toContain("research");
     expect(log).not.toContain("[Spur step");
     expect(pane).not.toContain("[Spur step");
     expect(listed[0]?.id).toBe(spawned.id);
-    expect(listed[0]?.prompt).toBe("");
+    expect(listed[0]).not.toHaveProperty("prompt");
     expect(listed[0]?.pipeline).toBeUndefined();
+    expect(listedDetail.prompt).toBe("");
   });
 
   it.each([
@@ -5505,6 +5521,12 @@ projects:
       "spur-isolated-daemon.sh",
     );
     const siblingProbePath = await writeIsolatedDaemonSiblingProbe(context);
+    // scripts/spur-isolated-daemon.sh self-prunes stale spur-isolated-daemon.*
+    // dirs under ${TMPDIR:-/tmp} on every start (spur#811). Without an
+    // injected TMPDIR here, the sidecar would resolve the runner's real
+    // /tmp — the same host that can hold other live isolated daemons.
+    const isolatedDaemonTmpDir = join(context.rootDir, "isolated-daemon-tmp");
+    await mkdir(isolatedDaemonTmpDir, { recursive: true });
     const projectConfigDir = join(context.rootDir, "UPPER-CONFIG-PATH");
     await mkdir(projectConfigDir, { recursive: true });
     const projectConfigPath = join(projectConfigDir, "isolated-source-project.yaml");
@@ -5543,6 +5565,7 @@ projects:
         autoStart: true
         env:
           SPUR_PROJECT_CONFIG_PATH: ${projectConfigPath}
+          TMPDIR: ${isolatedDaemonTmpDir}
         ports:
           daemon:
             env: SPUR_RESERVED_PORT_DAEMON

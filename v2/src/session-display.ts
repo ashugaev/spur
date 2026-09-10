@@ -1,4 +1,4 @@
-import type { SessionState, SessionView } from "./types.js";
+import type { SessionListItemView, SessionState } from "./types.js";
 
 const SESSION_DISPLAY_ORDER: SessionState[] = [
   "needs_input",
@@ -15,11 +15,14 @@ const SESSION_DISPLAY_RANK = new Map(
   SESSION_DISPLAY_ORDER.map((state, index) => [state, index] satisfies [SessionState, number]),
 );
 
-function displayRank(session: SessionView): number {
+function displayRank(session: SessionListItemView): number {
   return SESSION_DISPLAY_RANK.get(session.state) ?? SESSION_DISPLAY_ORDER.length;
 }
 
-export function compareSessionsForList(left: SessionView, right: SessionView): number {
+export function compareSessionsForList(
+  left: SessionListItemView,
+  right: SessionListItemView,
+): number {
   const rankDelta = displayRank(left) - displayRank(right);
   if (rankDelta !== 0) return rankDelta;
 
@@ -33,6 +36,6 @@ export function compareSessionsForList(left: SessionView, right: SessionView): n
   return left.id.localeCompare(right.id);
 }
 
-export function sortSessionsForList(sessions: SessionView[]): SessionView[] {
+export function sortSessionsForList(sessions: SessionListItemView[]): SessionListItemView[] {
   return [...sessions].sort(compareSessionsForList);
 }

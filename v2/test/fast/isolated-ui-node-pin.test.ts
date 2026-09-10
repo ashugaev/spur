@@ -206,14 +206,14 @@ function writeStubNvm(nvmDir: string): void {
 }
 
 // A PATH entry that carries only what ensure_node_ready's early failure
-// paths need to run (bash itself, dirname for SCRIPT_DIR, tr for parsing
-// .nvmrc) and deliberately no `node` — real `/usr/bin` and `/bin` both carry
-// a real node on this host, so a plain fallback PATH can never reproduce
-// "node not found on PATH".
+// paths need to run (bash itself, dirname/realpath for SCRIPT_DIR and
+// SIDECAR_REPO_ROOT, tr for parsing .nvmrc) and deliberately no `node` —
+// real `/usr/bin` and `/bin` both carry a real node on this host, so a plain
+// fallback PATH can never reproduce "node not found on PATH".
 function createNodeFreePathDir(repoDir: string): string {
   const dir = join(repoDir, "no-node-path");
   mkdirSync(dir, { recursive: true });
-  for (const bin of ["bash", "dirname", "tr"]) {
+  for (const bin of ["bash", "dirname", "tr", "realpath"]) {
     symlinkSync(`/usr/bin/${bin}`, join(dir, bin));
   }
   return dir;
@@ -614,12 +614,12 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
 
     const worktree = createFakeWorktree();
     const scriptSource = readFileSync(
-      join(worktree.repoDir, "scripts", "spur-isolated-ui.sh"),
+      join(worktree.repoDir, "scripts", "spur-sidecar-common.sh"),
       "utf8",
     );
     const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
     if (!functionMatch) {
-      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+      throw new Error("could not extract node_satisfies_engines from spur-sidecar-common.sh");
     }
 
     for (const version of versions) {
@@ -672,10 +672,10 @@ fi
   // process.exitCode, never an explicit process.exit(satisfied ...) call,
   // so the hazard cannot be silently reintroduced.
   it("regression guard: the engines-range write is never immediately followed by process.exit (finding: #824 LOW 2)", () => {
-    const scriptSource = readFileSync(join(SOURCE_SCRIPT_DIR, "spur-isolated-ui.sh"), "utf8");
+    const scriptSource = readFileSync(join(SOURCE_SCRIPT_DIR, "spur-sidecar-common.sh"), "utf8");
     const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
     if (!functionMatch) {
-      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+      throw new Error("could not extract node_satisfies_engines from spur-sidecar-common.sh");
     }
 
     expect(functionMatch[0]).not.toMatch(/process\.exit\(satisfied/);

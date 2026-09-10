@@ -11,6 +11,7 @@ import {
   deriveShedCriticalFloorBytes,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
+  isSameInstanceConfigPath,
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
@@ -4855,6 +4856,29 @@ describe("loadInstanceConfigReadOnly", () => {
     if (result.status === "ok") {
       expect(result.config).toEqual(loadConfig(configPath));
     }
+  });
+});
+
+describe("isSameInstanceConfigPath", () => {
+  it("859/AC10: is true for the same path resolved two different ways", async () => {
+    const dir = await createTempDir("spur-fast-same-config-path-");
+    tempDirs.push(dir);
+    const configPath = join(dir, "config.yaml");
+    await writeFile(configPath, "server:\n  port: 5555\n", "utf8");
+    const realDir = await realpath(dir);
+
+    expect(isSameInstanceConfigPath(configPath, join(realDir, "config.yaml"))).toBe(true);
+  });
+
+  it("is false for two distinct, both-existing paths", async () => {
+    const dir = await createTempDir("spur-fast-same-config-path-");
+    tempDirs.push(dir);
+    const a = join(dir, "a.yaml");
+    const b = join(dir, "b.yaml");
+    await writeFile(a, "server:\n  port: 5555\n", "utf8");
+    await writeFile(b, "server:\n  port: 5556\n", "utf8");
+
+    expect(isSameInstanceConfigPath(a, b)).toBe(false);
   });
 });
 

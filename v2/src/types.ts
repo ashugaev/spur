@@ -916,6 +916,15 @@ export function isTerminalSessionStatus(
   return status === "completed" || status === "killed";
 }
 
+// respawn()'s own gate. One definition consumed by the hint builders in
+// session-service.ts and cli.ts so a hint can never name respawn for a
+// status respawn's own throw would reject.
+export function isRespawnableStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" | "errored" {
+  return status === "completed" || status === "killed" || status === "errored";
+}
+
 export interface ServiceInstanceRecord {
   sessionId: string;
   project: string;
@@ -961,6 +970,9 @@ export interface SessionSidecarView {
   ageSeconds?: number;
   /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
   ageWarn?: boolean;
+  /** True when the sidecar's tmux session exists but its pane has exited
+   * (remain-on-exit); omitted otherwise. */
+  deadPane?: boolean;
 }
 
 export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
@@ -982,7 +994,24 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   queuedMessages?: SessionQueuedMessagesView;
 }
 
-export interface DashboardSessionView extends SessionRecord {
+/**
+ * Fields enrichDashboard strips: the runtime detail the dashboard listing never
+ * renders. `launchCommand`, `stateSubscriptions`, `allowedTriggers`,
+ * `agentSessionId` and `branchSource` are read only from the single-session
+ * views, and together they were ~14% of the listing payload.
+ */
+export type DashboardOmittedField =
+  | "queuedMessages"
+  | "pipeline"
+  | "sidecarNames"
+  | "sidecarPorts"
+  | "launchCommand"
+  | "stateSubscriptions"
+  | "allowedTriggers"
+  | "agentSessionId"
+  | "branchSource";
+
+export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -994,7 +1023,31 @@ export interface DashboardSessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
 }
 
-export type SessionListView = SessionView | DashboardSessionView;
+export type SidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
+export type SidecarStopView = SessionView & { sidecarStop: SidecarStopReport };
+
+// Dropped from the list projection because they are the byte-heavy or
+// filesystem-walk-backed fields: `artifacts`/`artifactsTruncated` require a
+// per-session recursive readdir+stat walk, `stateHistory` and the prompt
+// bodies dominate the pretty-printed payload at production scale. Full
+// detail for all six stays on GET /sessions/:id (SessionView via `get`).
+// Not exported — no consumer outside this file needs the field-name union
+// itself, only the resulting `SessionListItemView` shape.
+type SessionListOmittedField =
+  | "artifacts"
+  | "artifactsTruncated"
+  | "stateHistory"
+  | "launchCommand"
+  | "prompt"
+  | "originalTaskPrompt";
+
+export type SessionListItemView = Omit<SessionView, SessionListOmittedField>;
+
+export type SessionListView = SessionListItemView | DashboardSessionView;
 
 export interface SessionWorkspaceAccessItem {
   label: string;
