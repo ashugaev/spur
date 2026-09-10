@@ -198,10 +198,29 @@ if (process.env[ENV_VAR] !== "1") {
   process.exit(0);
 }
 
+let settled = false;
+function finish(command) {
+  if (settled) return;
+  settled = true;
+  if (command && commandDeniesGitWrite(command)) {
+    deny();
+  } else {
+    allow();
+  }
+  process.exit(0);
+}
+
 let raw = "";
 process.stdin.on("data", (chunk) => {
   raw += chunk;
+  try {
+    const payload = JSON.parse(raw);
+    finish(String((payload && payload.command) || ""));
+  } catch {
+    // wait for more data if payload is fragmented
+  }
 });
+
 process.stdin.on("end", () => {
   let payload;
   try {
@@ -213,12 +232,7 @@ process.stdin.on("end", () => {
   }
 
   const command = String((payload && payload.command) || "");
-  if (commandDeniesGitWrite(command)) {
-    deny();
-  } else {
-    allow();
-  }
-  process.exit(0);
+  finish(command);
 });
 `;
 
@@ -352,7 +366,17 @@ async function mergeCursorGitGuardHook(worktreePath: string, scriptPath: string)
   const existingEntries = Array.isArray(hooks["beforeShellExecution"])
     ? (hooks["beforeShellExecution"] as CursorHookEntry[])
     : [];
-  const preserved = existingEntries.filter((entry) => entry.command !== scriptPath);
+  const preserved = existingEntries.filter((entry) => {
+    if (entry.command === scriptPath) return false;
+    if (
+      typeof entry.command === "string" &&
+      entry.command.includes("restrict-writes-hook.js") &&
+      !existsSync(entry.command)
+    ) {
+      return false;
+    }
+    return true;
+  });
   hooks["beforeShellExecution"] = [
     ...preserved,
     { command: scriptPath, timeout: 5, failClosed: true },

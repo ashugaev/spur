@@ -116,4 +116,29 @@ describe("CURSOR_GIT_GUARD_SCRIPT", () => {
     const decision = await runGuardRaw("not json");
     expect(decision.permission).toBe("deny");
   });
+
+  it("responds immediately on data write without waiting for stdin to close", async () => {
+    const decision = await new Promise<HookDecision>((resolve, reject) => {
+      const child = execFile(
+        process.execPath,
+        [scriptPath],
+        {
+          env: {
+            PATH: process.env["PATH"] ?? "",
+            [CURSOR_RESTRICT_WRITES_ENV]: "1",
+          },
+        },
+        (error, stdout) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(JSON.parse(stdout) as HookDecision);
+        },
+      );
+      child.stdin?.write(JSON.stringify({ command: "git status" }));
+      // Notice: child.stdin.end() is NOT called!
+    });
+    expect(decision.permission).toBe("allow");
+  });
 });
