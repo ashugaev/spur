@@ -154,6 +154,7 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import {
+  DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   flushEventLogCollapse,
   logSpurEvent,
@@ -554,10 +555,7 @@ const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
-// Must exceed eventLog.collapseWindowMs (default 60_000, event-log.ts:51, user-settable
-// with no upper bound) or the event-log collapse summary/occurrence pair returns for a
-// transiently-failing session's session.todo.nudge_failed events.
-const TODO_NUDGE_BACKOFF_BASE_MS = 2 * 60 * 1000;
+const TODO_NUDGE_BACKOFF_MIN_MS = 2 * 60 * 1000;
 const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
@@ -6019,20 +6017,10 @@ export class SessionService {
     return text.includes("tmux") && text.includes("can't find session");
   }
 
-  // Reads fresh, never the tick's snapshot — a write built from a stale
-  // snapshot clobbers concurrent updates to the same record.
-  private persistTodoNudgeDisabled(
-    sessionId: string,
-    value: { kind: "ledger_corrupt" | "target_gone"; reason: string; atMs: number } | undefined,
-  ): void {
-    const current = readSession(this.config.dataDir, sessionId);
-    if (!current) return;
-    if (value) {
-      writeSession(this.config.dataDir, { ...current, todoNudgeDisabled: value });
-    } else if (current.todoNudgeDisabled) {
-      const { todoNudgeDisabled: _todoNudgeDisabled, ...rest } = current;
-      writeSession(this.config.dataDir, rest);
-    }
+  private todoNudgeBackoffBaseMs(): number {
+    const collapseWindowMs =
+      this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
+    return Math.max(TODO_NUDGE_BACKOFF_MIN_MS, collapseWindowMs + 1);
   }
 
   // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
@@ -6091,16 +6079,15 @@ export class SessionService {
       await this.sendAgentMessage(session, message, { interrupt: false });
       this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
       this.todoNudgeBackoff.delete(session.id);
-      if (session.todoNudgeDisabled) {
-        this.persistTodoNudgeDisabled(session.id, undefined);
-      }
     } catch (error) {
-      if (error instanceof TodoLedgerCorruptError || this.isMissingTmuxTarget(error)) {
+      if (
+        (error instanceof TodoLedgerCorruptError && !error.transient) ||
+        this.isMissingTmuxTarget(error)
+      ) {
         if (!this.todoNudgeDisabled.has(session.id)) {
           const kind = error instanceof TodoLedgerCorruptError ? "ledger_corrupt" : "target_gone";
           const reason = error instanceof Error ? error.message : String(error);
           this.todoNudgeDisabled.set(session.id, { kind, reason });
-          this.persistTodoNudgeDisabled(session.id, { kind, reason, atMs: Date.now() });
           this.logEvent("session.todo.nudge_disabled", {
             level: "warn",
             sessionId: session.id,
@@ -6123,7 +6110,10 @@ export class SessionService {
         failures,
         nextRetryAtMs:
           Date.now() +
-          Math.min(TODO_NUDGE_BACKOFF_BASE_MS * 2 ** (failures - 1), TODO_NUDGE_BACKOFF_MAX_MS),
+          Math.min(
+            this.todoNudgeBackoffBaseMs() * 2 ** (failures - 1),
+            TODO_NUDGE_BACKOFF_MAX_MS,
+          ),
       });
     }
   }

@@ -2105,6 +2105,61 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("backs off, does not latch, on a missing-ledger race (TOCTOU)", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
+        throw new todo.TodoLedgerCorruptError(session.id, "ToDo ledger is missing");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const t0 = Date.now();
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      const disabledEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.todo.nudge_disabled");
+      expect(disabledEvents).toHaveLength(0);
+      const failedEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.todo.nudge_failed");
+      expect(failedEvents).toHaveLength(1);
+      expect(internals.todoNudgeDisabled.has(session.id)).toBe(false);
+
+      // Backoff still gates the next retry; it must not have latched forever.
+      vi.setSystemTime(t0 + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(vi.mocked(todo.ensureTodoLedger)).toHaveBeenCalledTimes(2);
+      expect(send).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("backs off, does not latch, on a mid-write truncated ledger", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
+        throw new todo.TodoLedgerCorruptError(session.id, "ToDo ledger is empty or truncated");
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      const disabledEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.todo.nudge_disabled");
+      expect(disabledEvents).toHaveLength(0);
+      expect(internals.todoNudgeDisabled.has(session.id)).toBe(false);
+      service.dispose();
+    });
+
     it("backs off exponentially on a transient nudge failure", async () => {
       const sessions = createSessionStore();
       const session = runningSession();
@@ -2321,43 +2376,6 @@ describe("SessionService", () => {
       vi.setSystemTime(t0 + 120_000);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(2);
-      service.dispose();
-    });
-
-    it("records the give-up reason on the session record and clears it on the next successful nudge", async () => {
-      const sessions = createSessionStore();
-      const session = runningSession();
-      sessions.set(session.id, session);
-      const todo = await import("../../src/todo.js");
-      vi.mocked(todo.ensureTodoLedger).mockImplementation(() => {
-        throw new todo.TodoLedgerCorruptError(session.id, "Event contains an invalid transition");
-      });
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const internals = sessionServiceInternals(service);
-      vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
-      const t0Ms = Date.now();
-
-      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-      expect(sessions.get(session.id)?.todoNudgeDisabled).toEqual({
-        kind: "ledger_corrupt",
-        reason: expect.stringContaining("invalid transition"),
-        atMs: t0Ms,
-      });
-
-      // Standing in for a daemon restart: drop the in-memory gate.
-      internals.todoNudgeDisabled.delete(session.id);
-      vi.mocked(todo.ensureTodoLedger).mockReturnValue({
-        revision: "fixture-resolved",
-        status: "resolved",
-        counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
-        items: [],
-        finishOverrides: [],
-      });
-      vi.setSystemTime(t0Ms + 61_000);
-      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-
-      expect(sessions.get(session.id)).not.toHaveProperty("todoNudgeDisabled");
       service.dispose();
     });
 
