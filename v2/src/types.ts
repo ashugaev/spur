@@ -767,13 +767,12 @@ export interface AppConfig {
 // must never treat it as a candidate regardless of age.
 export type SessionGcStatus = "completed" | "killed" | "stopped";
 
-// Statuses the opencode store reclaim may collect. Same three values as
-// SessionGcStatus, kept a separate union because the two sweeps reclaim
-// different things and default differently: opencodeGc defaults to
+// Statuses the opencode store reclaim may collect: the same allow-list as
+// sessionGc, one definition. Only the DEFAULT differs — opencodeGc ships
 // [completed, killed] (isTerminalSessionStatus exactly), because a `stopped`
 // opencode session is still resumable through `--session <agentSessionId>`
 // and deleting its rows turns the resume into a silent empty session.
-export type OpenCodeGcStatus = "completed" | "killed" | "stopped";
+export type OpenCodeGcStatus = SessionGcStatus;
 
 // opencode's own logLevel enum (upstream config schema). There is no OFF.
 export type OpenCodeLogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
