@@ -8,7 +8,9 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 
 `spur <unknown> --help` reports the unknown command, exits `1`. `spur --help <unknown>`/`spur -h <unknown>` prints root help, exits `0`.
 
-Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config. Every command exits non-zero when `<path>` doesn't exist and isn't the default `~/.spur/config.yaml`; only the default path is bootstrapped, on first boot. A missing non-default path is never created — otherwise a typo'd or stale path is seeded from defaults and targets the daemon on `4310`.
+Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config. A missing non-default path is never created — only the default `~/.spur/config.yaml` is bootstrapped, on first boot. Any command that resolves a daemon from `<path>` exits non-zero when it doesn't exist, so a typo'd or stale path can't be seeded from defaults and target the daemon on `4310`.
+
+Commands that never reach that guard: `init`/`reinit` bootstrap the default path only; `doctor` and `cache` never bootstrap; `update`/`update-monitor` fall back to default port resolution rather than failing, so a typo'd `SPUR_CONFIG` there probes `4310` instead of exiting non-zero.
 
 ## Session tools and environment
 
