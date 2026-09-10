@@ -1737,6 +1737,10 @@ export const DEFAULT_OPENCODE_GC: AppConfig["opencodeGc"] = {
   // turns the resume into a silent empty session.
   statuses: ["completed", "killed"],
   logLevel: "WARN",
+  // Same numbers as DEFAULT_EVENT_LOG_HOT_BYTES / _SHARD_HOT_BYTES, written
+  // out rather than imported: Spur's own jsonl retention and a vendor log are
+  // independent policies, and sharing the constant would let a change to
+  // either silently move the other.
   logMaxBytes: 134_217_728,
   logTailBytes: 16_777_216,
 };
