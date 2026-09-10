@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createOpenCodeGcDeps,
   executeOpenCodeGc,
+  planOpenCodeGc,
   writeLogTailArchive,
   type OpenCodeGcExecutorDeps,
   type OpenCodeGcPlan,
@@ -40,7 +41,14 @@ function planFixture(overrides: Partial<OpenCodeGcPlan> = {}): OpenCodeGcPlan {
     skipped: [],
     snapshotLeaves: [],
     log: null,
-    enumeration: { listedCount: 1, limit: 100_000, truncated: false, note: "floor" },
+    enumeration: {
+      directories: ["/w/a"],
+      directoriesFailed: 0,
+      listedCount: 1,
+      limit: 100_000,
+      truncated: false,
+      note: "floor",
+    },
     vacuum: {
       dbPath: "/store/opencode.db",
       dbSizeBytes: 1000,
@@ -78,7 +86,6 @@ function spyDeps(overrides: Partial<OpenCodeGcExecutorDeps> = {}) {
     deleteSession: vi.fn(async () => {}),
     writeLogArchive: vi.fn(async () => {}),
     truncateLog: vi.fn(async () => {}),
-    measureDbPayload: vi.fn(async () => 999),
     statDbSize: vi.fn(async () => 1000),
     vacuum: vi.fn(async () => {}),
     ...overrides,
@@ -102,7 +109,6 @@ describe("executeOpenCodeGc dry run (AC1)", () => {
       dryRun: true,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     expect(deps.removePath).toHaveBeenCalledTimes(0);
@@ -127,10 +133,11 @@ describe("executeOpenCodeGc dry run (AC1)", () => {
       dryRun: false,
       sizes: true,
       vacuum: false,
-      dbPayload: true,
     });
 
-    expect(deps.deleteSession).toHaveBeenCalledWith("ses_a");
+    // The delete runs from the session's OWN directory: `session delete` is
+    // project-scoped like `session list`.
+    expect(deps.deleteSession).toHaveBeenCalledWith("ses_a", "/w/a");
     expect(deps.removePath).toHaveBeenCalledWith("/store/snapshot/p/dead");
     expect(report.totals.sessionsDeleted).toBe(1);
     expect(report.totals.snapshotLeavesRemoved).toBe(1);
@@ -151,7 +158,6 @@ describe("execute-time freshness re-read", () => {
       dryRun: false,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     expect(deps.deleteSession).toHaveBeenCalledTimes(0);
@@ -176,7 +182,6 @@ describe("execute-time freshness re-read", () => {
         dryRun: false,
         sizes: true,
         vacuum: false,
-        dbPayload: true,
       });
       expect(deps.deleteSession).toHaveBeenCalledTimes(0);
       expect(report.sessions[0]?.blockReason).toBe("changed_during_run");
@@ -219,7 +224,6 @@ describe("execute-time freshness re-read", () => {
       dryRun: false,
       sizes: true,
       vacuum: false,
-      dbPayload: true,
     });
 
     // Interleaved, so the second entry's window is not the first's.
@@ -233,46 +237,52 @@ describe("execute-time freshness re-read", () => {
       dryRun: true,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     expect(deps.readRecords).toHaveBeenCalledTimes(0);
   });
 });
 
-describe("the payload estimate is CLI-only", () => {
-  it("skips measureDbPayload when dbPayload is false (the daemon sweep)", async () => {
-    const deps = spyDeps();
-
-    const report = await executeOpenCodeGc(planFixture(), deps, {
-      dryRun: false,
-      sizes: true,
-      vacuum: false,
-      dbPayload: false,
-    });
-
-    expect(deps.measureDbPayload).toHaveBeenCalledTimes(0);
-    expect(report.totals.dbPayloadBytesEstimate).toBeNull();
-    // du sizing survives; only the sqlite3 aggregate is dropped.
-    expect(report.totals.freedBytes).not.toBeNull();
-  });
-
-  it("runs measureDbPayload when dbPayload is true (the CLI)", async () => {
-    const deps = spyDeps();
-
-    const report = await executeOpenCodeGc(planFixture(), deps, {
-      dryRun: false,
-      sizes: true,
-      vacuum: false,
-      dbPayload: true,
-    });
-
-    expect(deps.measureDbPayload).toHaveBeenCalledTimes(1);
-    expect(report.totals.dbPayloadBytesEstimate).toBe(999);
-  });
-});
-
 describe("executeOpenCodeGc vacuum interlocks", () => {
+  it("never repeats a block reason the executor also appends", async () => {
+    // A real empty plan, straight from the planner, not the hand-built
+    // fixture: the planner must not pre-seed `no_sessions_deleted`, because
+    // the executor appends it whenever deletedCount is 0 — which an empty
+    // plan always is. Two sources would print the reason twice.
+    const emptyPlan = planOpenCodeGc({
+      storeRoot: null,
+      sessions: [],
+      records: [],
+      canonicalPaths: new Map(),
+      snapshotLeaves: [],
+      log: null,
+      now: new Date("2026-09-10T00:00:00.000Z"),
+      olderThanDays: 14,
+      statuses: ["completed", "killed"],
+      limit: 20,
+      logMaxBytes: 1024,
+      logTailBytes: 128,
+      directories: [],
+      directoriesFailed: 0,
+      listedCount: 0,
+      listLimit: 100_000,
+      listTruncated: false,
+      dbPath: null,
+      dbSizeBytes: null,
+      freeBytes: null,
+    });
+
+    expect(emptyPlan.vacuum.blockReasons).toEqual([]);
+
+    const report = await executeOpenCodeGc(emptyPlan, spyDeps(), {
+      dryRun: true,
+      sizes: true,
+      vacuum: true,
+    });
+
+    expect(report.vacuum.blockReasons).toEqual(["dry_run", "no_sessions_deleted"]);
+  });
+
   it("names dry_run as its own vacuum block reason", async () => {
     const deps = spyDeps();
 
@@ -280,7 +290,6 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
       dryRun: true,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     // Independent of `no_sessions_deleted`: a dry run must say WHY, and the
@@ -307,7 +316,7 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
         },
       }),
       deps,
-      { dryRun: false, sizes: true, vacuum: true, dbPayload: true },
+      { dryRun: false, sizes: true, vacuum: true },
     );
 
     expect(deps.vacuum).toHaveBeenCalledTimes(0);
@@ -326,7 +335,6 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
       dryRun: false,
       sizes: true,
       vacuum: false,
-      dbPayload: true,
     });
 
     expect(deps.vacuum).toHaveBeenCalledTimes(0);
@@ -340,7 +348,6 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
       dryRun: false,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     expect(deps.vacuum).toHaveBeenCalledTimes(0);
@@ -356,7 +363,6 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
       dryRun: false,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     expect(deps.vacuum).toHaveBeenCalledTimes(1);
@@ -375,7 +381,6 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
       dryRun: false,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     expect(deps.vacuum).toHaveBeenCalledTimes(1);
@@ -399,13 +404,12 @@ describe("freed bytes match a du of the same paths (AC3)", () => {
       await makeLeaf(root, "dead-a", 40_000),
       await makeLeaf(root, "dead-b", 130_000),
     ];
-    const deps = spyDeps({ measureSize: vi.fn(du), measureDbPayload: vi.fn(async () => null) });
+    const deps = spyDeps({ measureSize: vi.fn(du) });
 
     const report = await executeOpenCodeGc(planFixture({ snapshotLeaves: leaves }), deps, {
       dryRun: true,
       sizes: true,
       vacuum: true,
-      dbPayload: true,
     });
 
     const expected = (await Promise.all(leaves.map(du))).reduce((sum, n) => sum + n, 0);
@@ -413,27 +417,7 @@ describe("freed bytes match a du of the same paths (AC3)", () => {
     expect(report.totals.freedBytes).toBe(expected);
     // Nothing was removed, so the du above measured the very same paths.
     expect(report.totals.snapshotLeavesRemoved).toBe(0);
-    expect(report.totals.dbPayloadBytesEstimate).toBeNull();
     expect(report.totals.dbFileBytesFreed).toBeNull();
-  });
-
-  it("I3 never folds the DB payload estimate into freedBytes", async () => {
-    const root = await createTempDir("opencode-gc-du-db");
-    const leaf = await makeLeaf(root, "dead-a", 40_000);
-    const deps = spyDeps({
-      measureSize: vi.fn(du),
-      measureDbPayload: vi.fn(async () => 999_999_999),
-    });
-
-    const report = await executeOpenCodeGc(planFixture({ snapshotLeaves: [leaf] }), deps, {
-      dryRun: true,
-      sizes: true,
-      vacuum: true,
-      dbPayload: true,
-    });
-
-    expect(report.totals.dbPayloadBytesEstimate).toBe(999_999_999);
-    expect(report.totals.freedBytes).toBe(await du(leaf));
   });
 
   it("AC3.2 log included: freedBytes is the leaf du sum plus du(log) - du(archive)", async () => {
@@ -448,7 +432,7 @@ describe("freed bytes match a du of the same paths (AC3)", () => {
     const leafDu = await du(leaf);
     const logDu = await du(logPath);
     const deps = {
-      ...spyDeps({ measureSize: vi.fn(du), measureDbPayload: vi.fn(async () => null) }),
+      ...spyDeps({ measureSize: vi.fn(du) }),
       writeLogArchive: writeLogTailArchive,
       truncateLog: vi.fn(async () => {}),
     };
@@ -460,7 +444,7 @@ describe("freed bytes match a du of the same paths (AC3)", () => {
         log: { path: logPath, archivePath, sizeBytes: 300_000, tailBytes: 50_000 },
       }),
       deps,
-      { dryRun: false, sizes: true, vacuum: false, dbPayload: true },
+      { dryRun: false, sizes: true, vacuum: false },
     );
 
     const archiveDu = await du(archivePath);
@@ -469,7 +453,6 @@ describe("freed bytes match a du of the same paths (AC3)", () => {
     expect(report.log?.retainedBytes).toBe(archiveDu);
     expect(report.log?.freedBytes).toBe(logDu - archiveDu);
     expect(report.totals.freedBytes).toBe(leafDu + (logDu - archiveDu));
-    expect(report.totals.dbPayloadBytesEstimate).toBeNull();
     expect(report.totals.dbFileBytesFreed).toBeNull();
   });
 
@@ -478,7 +461,7 @@ describe("freed bytes match a du of the same paths (AC3)", () => {
     const logPath = join(root, "opencode.log");
     await writeFile(logPath, Buffer.alloc(300_000, 65));
     const logDu = await du(logPath);
-    const deps = spyDeps({ measureSize: vi.fn(du), measureDbPayload: vi.fn(async () => null) });
+    const deps = spyDeps({ measureSize: vi.fn(du) });
 
     const report = await executeOpenCodeGc(
       planFixture({
@@ -491,7 +474,7 @@ describe("freed bytes match a du of the same paths (AC3)", () => {
         },
       }),
       deps,
-      { dryRun: true, sizes: true, vacuum: false, dbPayload: true },
+      { dryRun: true, sizes: true, vacuum: false },
     );
 
     expect(deps.writeLogArchive).toHaveBeenCalledTimes(0);
@@ -521,7 +504,7 @@ describe("log reclaim truncates, never renames (AC7)", () => {
           log: { path: logPath, archivePath, sizeBytes: 200_000, tailBytes: 4_000 },
         }),
         deps,
-        { dryRun: false, sizes: true, vacuum: false, dbPayload: true },
+        { dryRun: false, sizes: true, vacuum: false },
       );
 
       expect(report.log?.truncated).toBe(true);

@@ -1302,12 +1302,35 @@ export function renderOpenCodeGcResult(report: OpenCodeGcReport): string {
   if (report.reason) {
     return dimText(`No plan: ${report.reason}. Nothing was read or removed.`);
   }
+  // An operator has to be able to tell a genuinely empty plan from a blind
+  // one, so the scope of the listing is stated, not implied: how many
+  // directories were listed, how many failed, and that the listing is
+  // project-scoped rather than store-wide.
+  const enumeration = report.enumeration;
   const lines = [
     dimText(
-      `Store ${report.storeRoot}; enumerated ${report.enumeration.listedCount} session(s) of a possibly larger store (limit ${report.enumeration.limit}, older than ${report.olderThanDays}d, statuses ${report.statuses.join(",")}).`,
+      `Store ${report.storeRoot}; enumerated ${enumeration.listedCount} session(s) from ${enumeration.directories.length} candidate director${enumeration.directories.length === 1 ? "y" : "ies"} (limit ${enumeration.limit}, older than ${report.olderThanDays}d, statuses ${report.statuses.join(",")}).`,
     ),
-    "",
+    dimText(
+      "  `opencode session list` is project-scoped by its cwd, so this is what those directories project to, not the whole store.",
+    ),
   ];
+  if (enumeration.directories.length === 0) {
+    lines.push(
+      dimText("  No candidate directory: no terminal opencode record carries an agentSessionId."),
+    );
+  }
+  if (enumeration.directoriesFailed > 0) {
+    lines.push(
+      dimText(
+        `  ${enumeration.directoriesFailed} director${enumeration.directoriesFailed === 1 ? "y" : "ies"} failed to list; their sessions are invisible to this plan.`,
+      ),
+    );
+  }
+  for (const directory of enumeration.directories) {
+    lines.push(dimText(`  listed  ${directory}`));
+  }
+  lines.push("");
   for (const entry of report.sessions) {
     const detail = entry.error
       ? `error: ${entry.error}`
@@ -1334,19 +1357,21 @@ export function renderOpenCodeGcResult(report: OpenCodeGcReport): string {
       `  ${accent(report.log.truncated ? "truncated" : "log      ")}  ${formatBytes(report.log.freedBytes).padEnd(9)}  ${report.log.path} (retaining ${formatBytes(report.log.retainedBytes)} as ${report.log.archivePath})${projected}`,
     );
   }
-  if (lines.length === 2) {
+  if (report.sessions.length === 0 && report.snapshotLeaves.length === 0 && !report.log) {
     lines.push(dimText("Nothing to collect."));
   }
   lines.push("");
-  // Three differently-sourced numbers, never summed: file bytes are a du,
-  // the payload is a SUM(LENGTH(data)) estimate, and the db file delta is a
-  // stat across the VACUUM.
+  // Two differently-sourced numbers, never summed: file bytes are a du, the
+  // db file delta is a stat across the VACUUM. There is no third, estimated
+  // number — sizing the selected rows up front would open the store.
   lines.push(`Freed (files): ${formatBytes(report.totals.freedBytes)} — a floor, not the store's`);
-  lines.push(dimText("  total reclaimable size: the CLI does not enumerate every store session."));
-  lines.push(
-    `DB payload (estimate, not disk): ${formatBytes(report.totals.dbPayloadBytesEstimate)}`,
-  );
+  lines.push(dimText("  total reclaimable size: the listing is project-scoped, not store-wide."));
   lines.push(`DB file bytes returned by VACUUM: ${formatBytes(report.totals.dbFileBytesFreed)}`);
+  if (report.dryRun) {
+    lines.push(
+      dimText("  A dry run reports file bytes only; DB bytes are known after the VACUUM runs."),
+    );
+  }
   lines.push(
     `Totals: ${report.totals.sessionsSelected} session(s) selected, ${report.totals.sessionsDeleted} deleted, ${report.totals.sessionsBlocked} blocked by a status change during the run, ${report.totals.snapshotLeavesRemoved} snapshot leaf/leaves removed, ${report.totals.errors} error(s).`,
   );
@@ -2727,7 +2752,7 @@ export function createProgram(cliEntrypoint: string): Command {
           });
           // The single VACUUM is CLI-only: 93 s measured on a 3.1 GB store,
           // against a 300 s daemon tick.
-          return executeOpenCodeGc(plan, deps, { dryRun, sizes, vacuum: true, dbPayload: true });
+          return executeOpenCodeGc(plan, deps, { dryRun, sizes, vacuum: true });
         },
         render: renderOpenCodeGcResult,
         exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),

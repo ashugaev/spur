@@ -5640,16 +5640,21 @@ export class SessionService {
         logMaxBytes: gcConfig.logMaxBytes,
         logTailBytes: gcConfig.logTailBytes,
       });
-      // vacuum and dbPayload false, always. The measured VACUUM is 93 s on a
-      // 3.1 GB store against a 300 s tick, and the payload estimate is a
-      // sqlite3 aggregate over event/message/part of the same store; neither
-      // belongs in the daemon process. The sweep keeps its `du` sizing.
-      // `spur opencode-gc --execute` returns the freelist debt this creates.
+      // vacuum: false, always. The measured VACUUM is 93 s on a 3.1 GB store
+      // against a 300 s tick; a blocking child that long inside the daemon
+      // process is not acceptable. `spur opencode-gc --execute` returns the
+      // freelist debt this sweep creates.
+      //
+      // Enumeration stays in the sweep: it costs one `opencode session list`
+      // per distinct candidate directory at a measured 2-4 s each, and the
+      // candidate set is opencode-owned terminal records only — 3 directories
+      // on the dev host, so ~12 s worst case inside a 300 s tick. The
+      // opencodeGcRunning guard makes an overrun a skipped tick, never
+      // overlap.
       const report = await executeOpenCodeGc(plan, deps, {
         dryRun: false,
         sizes: true,
         vacuum: false,
-        dbPayload: false,
       });
       this.logEvent("opencode.gc.completed", {
         level: "info",

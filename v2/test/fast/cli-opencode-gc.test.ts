@@ -43,7 +43,14 @@ function report(overrides: Partial<OpenCodeGcReport> = {}): OpenCodeGcReport {
     reason: null,
     olderThanDays: 14,
     statuses: ["completed", "killed"],
-    enumeration: { listedCount: 279, limit: 100_000, truncated: false, note: "floor" },
+    enumeration: {
+      directories: ["/home/alek/projects/ao"],
+      directoriesFailed: 0,
+      listedCount: 279,
+      limit: 100_000,
+      truncated: false,
+      note: "floor",
+    },
     sessions: [SESSION],
     skipped: [{ id: "ses_other", reason: "protected_live_record" }],
     snapshotLeaves: [{ path: "/store/snapshot/p/dead", sizeBytes: 80_146_432, removed: false }],
@@ -55,7 +62,6 @@ function report(overrides: Partial<OpenCodeGcReport> = {}): OpenCodeGcReport {
       sessionsBlocked: 0,
       snapshotLeavesRemoved: 0,
       freedBytes: 547_666_971,
-      dbPayloadBytesEstimate: 2_100_182_202,
       dbFileBytesFreed: null,
       errors: 0,
     },
@@ -98,12 +104,42 @@ describe("spur opencode-gc options (AC9)", () => {
 });
 
 describe("renderOpenCodeGcResult", () => {
-  it("labels the DB payload an estimate and never sums it into freed bytes (I4)", () => {
+  it("reports file bytes and the VACUUM delta, and estimates no DB bytes", () => {
     const rendered = renderOpenCodeGcResult(report());
 
-    expect(rendered).toContain("DB payload (estimate, not disk): 2.0 GB");
     expect(rendered).toContain("Freed (files): 522.3 MB");
     expect(rendered).toContain("DB file bytes returned by VACUUM: -");
+    expect(rendered).toContain("DB bytes are known after the VACUUM runs");
+    // No up-front payload estimate exists any more: producing one would open
+    // the store, and even a read-only URI rewrites the -shm.
+    expect(rendered).not.toContain("estimate");
+  });
+
+  it("states the enumeration scope, so a blind plan cannot read as an empty one", () => {
+    const listed = renderOpenCodeGcResult(report());
+    const blind = renderOpenCodeGcResult(
+      report({
+        sessions: [],
+        snapshotLeaves: [],
+        log: null,
+        enumeration: { ...report().enumeration, directories: [], listedCount: 0 },
+      }),
+    );
+
+    expect(listed).toContain("from 1 candidate directory");
+    expect(listed).toContain("project-scoped by its cwd");
+    expect(listed).toContain("listed  /home/alek/projects/ao");
+    expect(blind).toContain("from 0 candidate directories");
+    expect(blind).toContain("No candidate directory");
+    expect(blind).toContain("Nothing to collect.");
+  });
+
+  it("names how many directories failed to list", () => {
+    const rendered = renderOpenCodeGcResult(
+      report({ enumeration: { ...report().enumeration, directoriesFailed: 2 } }),
+    );
+
+    expect(rendered).toContain("2 directories failed to list");
   });
 
   it("states the total is a floor and names the escape hatch on a dry run", () => {

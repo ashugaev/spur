@@ -45,7 +45,6 @@ export const OPENCODE_STORE_LIST_TIMEOUT_MS = 60_000;
 export const OPENCODE_STORE_LIST_LIMIT = 100_000;
 const DU_TIMEOUT_MS = 120_000;
 const DB_PATH_TIMEOUT_MS = 20_000;
-const SQLITE_TIMEOUT_MS = 120_000;
 // 6.4x the 93 s measured on a 3.1 GB store.
 const VACUUM_TIMEOUT_MS = 600_000;
 const SESSION_DELETE_TIMEOUT_MS = 60_000;
@@ -106,12 +105,19 @@ export interface OpenCodeGcLogPlan {
 }
 
 export interface OpenCodeGcEnumeration {
+  /** Distinct candidate directories the listing was run from. */
+  directories: string[];
+  /** Directories whose listing failed. Their sessions stay invisible. */
+  directoriesFailed: number;
+  /** Distinct store sessions merged across every directory's listing. */
   listedCount: number;
   limit: number;
   truncated: boolean;
   /**
-   * The CLI lists fewer sessions than the store holds, so the yield is a
-   * floor and an unlisted session is invisible, never unowned.
+   * `opencode session list` is scoped by the cwd's PROJECT and has no
+   * directory flag, so the plan sees only what the candidate directories
+   * project to. An unlisted session is invisible, never unowned, and every
+   * byte total is a floor.
    */
   note: string;
 }
@@ -190,9 +196,12 @@ export interface OpenCodeGcReport {
     snapshotLeavesRemoved: number;
     /** FILE bytes only: snapshot leaves plus the log delta. Never DB bytes. */
     freedBytes: number | null;
-    /** SUM(LENGTH(data)) over the selected ids. An estimate, never disk. */
-    dbPayloadBytesEstimate: number | null;
-    /** stat delta across the VACUUM. Null unless a VACUUM actually ran. */
+    /**
+     * stat delta across the VACUUM, the ONLY DB-byte number this feature
+     * reports. Null unless a VACUUM actually ran, so a dry run never claims
+     * one: every way to estimate the payload up front opens the store, and
+     * even `sqlite3 "file:<db>?mode=ro" "<SELECT>"` rewrites the -shm.
+     */
     dbFileBytesFreed: number | null;
     errors: number;
   };
@@ -207,10 +216,14 @@ export interface OpenCodeGcExecutorDeps {
    * record that no longer exists. Mirrors session-gc.ts's readGroupMembers.
    */
   readRecords(ids: readonly string[]): (SessionRecord | null)[];
-  deleteSession(id: string): Promise<void>;
+  /**
+   * `cwd` is the session's own canonicalized directory — the same scope the
+   * listing that produced it ran under, since `session delete` is
+   * project-scoped like `session list`.
+   */
+  deleteSession(id: string, cwd: string): Promise<void>;
   writeLogArchive(logPath: string, archivePath: string, tailBytes: number): Promise<void>;
   truncateLog(logPath: string): Promise<void>;
-  measureDbPayload(ids: readonly string[]): Promise<number | null>;
   statDbSize(): Promise<number | null>;
   vacuum(): Promise<void>;
 }
@@ -220,8 +233,6 @@ export interface ExecuteOpenCodeGcOptions {
   sizes: boolean;
   /** The daemon sweep passes false: a 93 s blocking VACUUM is CLI-only. */
   vacuum: boolean;
-  /** The daemon sweep passes false: the payload aggregate is CLI-only too. */
-  dbPayload: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,15 +334,33 @@ export interface OpenCodeGcPlanInput {
   limit: number;
   logMaxBytes: number;
   logTailBytes: number;
+  directories: readonly string[];
+  directoriesFailed: number;
   listedCount: number;
   listLimit: number;
+  /** True when ANY directory's listing came back at the -n cap. */
+  listTruncated: boolean;
   dbPath: string | null;
   dbSizeBytes: number | null;
   freeBytes: number | null;
 }
 
 const ENUMERATION_NOTE =
-  "opencode's CLI lists fewer sessions than the store holds; an unlisted session is invisible to this plan, never unowned. Every byte total is a floor.";
+  "`opencode session list` is scoped by the cwd's project and has no directory flag, so this plan sees only what the candidate directories project to; an unlisted session is invisible, never unowned. Every byte total is a floor.";
+
+function enumerationOf(
+  input: OpenCodeGcPlanInput,
+  truncated: boolean,
+): OpenCodeGcPlan["enumeration"] {
+  return {
+    directories: [...input.directories],
+    directoriesFailed: input.directoriesFailed,
+    listedCount: input.listedCount,
+    limit: input.listLimit,
+    truncated,
+    note: ENUMERATION_NOTE,
+  };
+}
 
 function emptyPlan(
   input: OpenCodeGcPlanInput,
@@ -347,18 +376,16 @@ function emptyPlan(
     skipped: [],
     snapshotLeaves: [],
     log: null,
-    enumeration: {
-      listedCount: input.listedCount,
-      limit: input.listLimit,
-      truncated: reason === "enumeration_truncated",
-      note: ENUMERATION_NOTE,
-    },
+    enumeration: enumerationOf(input, reason === "enumeration_truncated"),
     vacuum: {
       dbPath: input.dbPath,
       dbSizeBytes: input.dbSizeBytes,
       freeBytes: input.freeBytes,
       requiredBytes: input.dbSizeBytes === null ? null : input.dbSizeBytes * 2,
-      blockReasons: ["no_sessions_deleted"],
+      // Not "no_sessions_deleted": the executor owns that reason and appends
+      // it whenever deletedCount is 0, which an empty plan always is. One
+      // source, or an empty dry run prints it twice.
+      blockReasons: [],
     },
   };
 }
@@ -366,7 +393,9 @@ function emptyPlan(
 export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
   if (input.storeRoot === null) return emptyPlan(input, "store_unresolved");
   if (input.reason) return emptyPlan(input, input.reason);
-  if (input.listedCount >= input.listLimit) return emptyPlan(input, "enumeration_truncated");
+  // Derived by the collector, per directory: a merged count can legitimately
+  // exceed one call's -n cap, so the cap can only be judged call by call.
+  if (input.listTruncated) return emptyPlan(input, "enumeration_truncated");
 
   // The selectable set is exactly the configured statuses; every other status
   // is LIVE and protects. Default [completed, killed] is
@@ -409,7 +438,11 @@ export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
       return record.worktreePath !== "" && record.worktreePath === session.directory;
     });
     const protection = new Map<string, SessionRecord>();
-    for (const record of [...direct, ...coLocated]) protection.set(record.id, record);
+    for (const record of direct) protection.set(record.id, record);
+    // One insertion path for the co-located half: every record sits in its
+    // OWN workspace bucket, so the union below already re-inserts each
+    // co-located record. Adding them here too was a second path to the same
+    // fact.
     for (const record of coLocated) {
       for (const sibling of byWorkspaceId.get(workspaceIdOf(record)) ?? []) {
         protection.set(sibling.id, sibling);
@@ -491,12 +524,7 @@ export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
     skipped,
     snapshotLeaves,
     log,
-    enumeration: {
-      listedCount: input.listedCount,
-      limit: input.listLimit,
-      truncated: false,
-      note: ENUMERATION_NOTE,
-    },
+    enumeration: enumerationOf(input, false),
     vacuum: {
       dbPath: input.dbPath,
       dbSizeBytes: input.dbSizeBytes,
@@ -544,21 +572,13 @@ export async function executeOpenCodeGc(
       continue;
     }
     try {
-      await deps.deleteSession(entry.id);
+      await deps.deleteSession(entry.id, entry.canonicalDirectory);
       deletedCount += 1;
       sessions.push({ ...entry, deleted: true });
     } catch (error) {
       errors += 1;
       sessions.push({ ...entry, deleted: false, error: messageOf(error) });
     }
-  }
-
-  let dbPayloadBytesEstimate: number | null = null;
-  // CLI-only, like the VACUUM: this is a sqlite3 aggregate over event,
-  // message and part of a multi-GB WAL store. cache-retention.ts:19-34 is
-  // the standing precedent that expensive disk work stays out of the daemon.
-  if (options.dbPayload && options.sizes && plan.sessions.length > 0) {
-    dbPayloadBytesEstimate = await deps.measureDbPayload(plan.sessions.map((entry) => entry.id));
   }
 
   for (const path of plan.snapshotLeaves) {
@@ -679,7 +699,6 @@ export async function executeOpenCodeGc(
       sessionsBlocked: blockedCount,
       snapshotLeavesRemoved: removedCount,
       freedBytes: options.sizes ? freedBytes : null,
-      dbPayloadBytesEstimate,
       dbFileBytesFreed,
       errors,
     },
@@ -723,7 +742,14 @@ function messageOf(error: unknown): string {
 export interface OpenCodeGcCollectorDeps {
   /** `opencode db path`; null when the call fails or the path is not a file. */
   resolveStore(): Promise<{ storeRoot: string; dbPath: string } | null>;
-  listStoreSessions(): Promise<string>;
+  /**
+   * One `opencode session list` run FROM `cwd`. The listing is scoped by
+   * that directory's project and the CLI exposes no directory flag, so the
+   * caller runs it once per distinct candidate directory. Measured on the
+   * dev host, same command and same -n: cwd ~/projects/ao returns 280
+   * sessions, cwd ~/.spur/worktrees returns 4, cwd ~ returns 4.
+   */
+  listStoreSessions(cwd: string): Promise<string>;
   listSpurRecords(): SessionRecord[];
   readSnapshotLeaves(storeRoot: string): Promise<OpenCodeSnapshotLeafInput[]>;
   statLog(storeRoot: string): Promise<{ path: string; sizeBytes: number } | null>;
@@ -759,8 +785,11 @@ export async function collectOpenCodeGcPlan(
     limit: options.limit,
     logMaxBytes: options.logMaxBytes,
     logTailBytes: options.logTailBytes,
+    directories: [],
+    directoriesFailed: 0,
     listedCount: 0,
     listLimit: OPENCODE_STORE_LIST_LIMIT,
+    listTruncated: false,
     dbPath: null,
     dbSizeBytes: null,
     freeBytes: null,
@@ -770,20 +799,52 @@ export async function collectOpenCodeGcPlan(
   if (!store) return planOpenCodeGc(base);
 
   const records = deps.listSpurRecords();
-  let sessions: OpenCodeStoreSession[];
-  try {
-    sessions = parseOpenCodeStoreSessions(await deps.listStoreSessions());
-  } catch {
-    return planOpenCodeGc({ ...base, storeRoot: store.storeRoot, reason: "enumeration_failed" });
-  }
-
+  // Record paths must be canonical BEFORE enumeration, because they choose
+  // the directories to enumerate from. Store-session directories are folded
+  // into the same map afterwards.
   const canonicalPaths = await resolveCanonicalPaths(
-    [...sessions.map((entry) => entry.directory), ...records.map((record) => record.worktreePath)],
+    records.map((record) => record.worktreePath),
     deps.realpath,
   );
 
+  const directories = candidateDirectories(records, options.statuses, canonicalPaths);
+  const merged = new Map<string, OpenCodeStoreSession>();
+  let directoriesFailed = 0;
+  let listTruncated = false;
+  for (const directory of directories) {
+    try {
+      const listed = parseOpenCodeStoreSessions(await deps.listStoreSessions(directory));
+      // Judge the -n cap per call: a merged total across directories can
+      // legitimately exceed one call's limit.
+      if (listed.length >= OPENCODE_STORE_LIST_LIMIT) listTruncated = true;
+      for (const session of listed) merged.set(session.id, session);
+    } catch {
+      // Losing one directory's listing only shrinks the candidate set, and
+      // absence never authorizes a deletion, so carry on and report it.
+      directoriesFailed += 1;
+    }
+  }
+  const enumeration = { directories, directoriesFailed, listTruncated };
+  if (directories.length > 0 && directoriesFailed === directories.length) {
+    return planOpenCodeGc({
+      ...base,
+      ...enumeration,
+      storeRoot: store.storeRoot,
+      reason: "enumeration_failed",
+    });
+  }
+
+  const sessions = [...merged.values()];
+  for (const [path, canonical] of await resolveCanonicalPaths(
+    sessions.map((entry) => entry.directory),
+    deps.realpath,
+  )) {
+    canonicalPaths.set(path, canonical);
+  }
+
   return planOpenCodeGc({
     ...base,
+    ...enumeration,
     storeRoot: store.storeRoot,
     sessions,
     records,
@@ -795,6 +856,37 @@ export async function collectOpenCodeGcPlan(
     dbSizeBytes: await deps.statPathSize(store.dbPath),
     freeBytes: await deps.freeBytes(dirname(store.dbPath)),
   });
+}
+
+/**
+ * The distinct canonicalized directories worth enumerating from: those of
+ * records that could supply a rule-(a) match.
+ *
+ * Restricted to `agent === "opencode"` records because only an opencode
+ * record's `agentSessionId` can ever equal a `ses_` store id, so no other
+ * record's directory can produce a match. Measured on the dev host at the
+ * default statuses: 3 directories instead of 24, which at the measured 2-4 s
+ * per listing is 12 s instead of 96 s per sweep.
+ *
+ * Narrowing here is safe by construction: it can only enumerate FEWER store
+ * sessions, and a session that is never enumerated is never selected.
+ */
+export function candidateDirectories(
+  records: readonly SessionRecord[],
+  statuses: readonly OpenCodeGcStatus[],
+  canonicalPaths: ReadonlyMap<string, string | null>,
+): string[] {
+  const selectable = new Set<string>(statuses);
+  const directories = new Set<string>();
+  for (const record of records) {
+    if (record.agent !== "opencode") continue;
+    if (!record.agentSessionId) continue;
+    if (!selectable.has(record.status)) continue;
+    // An unresolvable path cannot be a cwd; skip it rather than guessing.
+    const canonical = canonicalPaths.get(record.worktreePath);
+    if (canonical) directories.add(canonical);
+  }
+  return [...directories].sort();
 }
 
 async function measureSize(path: string): Promise<number | null> {
@@ -868,8 +960,6 @@ export async function writeLogTailArchive(
   await pipeline(createReadStream(logPath, { start }), createWriteStream(archivePath));
 }
 
-const STORE_SESSION_ID = /^[A-Za-z0-9_]+$/;
-
 export function createOpenCodeGcDeps(
   config: AppConfig,
 ): OpenCodeGcCollectorDeps & OpenCodeGcExecutorDeps {
@@ -880,7 +970,9 @@ export function createOpenCodeGcDeps(
   // Explicit cwd, never inherited: a daemon-side spawn with no cwd inherits
   // the daemon's $HOME, the pattern behind ~692k `creating instance
   // directory=/home/alek` lines. worktreeDir is Spur-owned, stable, and not
-  // any session's worktree.
+  // any session's worktree. Used for the store-global calls only — `db path`
+  // and `db VACUUM` ignore cwd. The listing and the per-session delete are
+  // project-scoped and carry their own directory instead.
   const cwd = config.worktreeDir;
   let dbPath: string | null = null;
 
@@ -900,10 +992,10 @@ export function createOpenCodeGcDeps(
         return null;
       }
     },
-    listStoreSessions: () =>
+    listStoreSessions: (listCwd) =>
       readOpenCodeJson(
         ["session", "list", "--format", "json", "-n", String(OPENCODE_STORE_LIST_LIMIT)],
-        { cwd, timeoutMs: OPENCODE_STORE_LIST_TIMEOUT_MS, env },
+        { cwd: listCwd, timeoutMs: OPENCODE_STORE_LIST_TIMEOUT_MS, env },
       ),
     listSpurRecords: () => listSessions(config.dataDir),
     readSnapshotLeaves,
@@ -930,38 +1022,20 @@ export function createOpenCodeGcDeps(
     measureSize,
     removePath: (path) => rm(path, { recursive: true, force: true }),
     readRecords: (ids) => ids.map((id) => readSession(config.dataDir, id)),
-    deleteSession: async (id) => {
+    deleteSession: async (id, deleteCwd) => {
       await execFileAsync(opencodeCommand(), ["session", "delete", id], {
-        cwd,
+        cwd: deleteCwd,
         timeout: SESSION_DELETE_TIMEOUT_MS,
         env: { ...process.env, ...env },
       });
     },
     writeLogArchive: writeLogTailArchive,
     truncateLog: (logPath) => truncate(logPath, 0),
-    measureDbPayload: async (ids) => {
-      if (!dbPath) return null;
-      const safe = ids.filter((id) => STORE_SESSION_ID.test(id));
-      if (safe.length === 0) return null;
-      const list = safe.map((id) => `'${id}'`).join(",");
-      // Read-only URI, never `opencode db "<SELECT>"`: the store is WAL, and
-      // a vendor CLI opening it read-write for a SELECT can extend -wal/-shm
-      // or checkpoint on close, which is a write under the store root.
-      const sql =
-        `SELECT COALESCE(SUM(n),0) FROM (` +
-        `SELECT SUM(LENGTH(data)) AS n FROM event WHERE aggregate_id IN (${list}) UNION ALL ` +
-        `SELECT SUM(LENGTH(data)) AS n FROM message WHERE session_id IN (${list}) UNION ALL ` +
-        `SELECT SUM(LENGTH(data)) AS n FROM part WHERE session_id IN (${list}))`;
-      try {
-        const { stdout } = await execFileAsync("sqlite3", [`file:${dbPath}?mode=ro`, sql], {
-          timeout: SQLITE_TIMEOUT_MS,
-        });
-        const parsed = Number.parseInt(stdout.trim(), 10);
-        return Number.isFinite(parsed) ? parsed : null;
-      } catch {
-        return null;
-      }
-    },
+    // No payload estimate, deliberately. Every way to size the selected rows
+    // up front opens the store, and a read-only URI is not enough: measured
+    // on a scratch WAL db, `sqlite3 "file:<db>?mode=ro" "<SELECT>"` rewrites
+    // the -shm. DB reclaim is reported on the execute path only, as the
+    // opencode.db size delta below, which costs a stat and no DB open.
     statDbSize: async () => {
       if (!dbPath) return null;
       try {
