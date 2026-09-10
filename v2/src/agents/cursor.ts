@@ -198,11 +198,24 @@ if (process.env[ENV_VAR] !== "1") {
   process.exit(0);
 }
 
+const NO_INPUT_TIMEOUT_MS = 4000;
+
+function parseHookCommand(payload) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  if (typeof payload.command !== "string") {
+    return null;
+  }
+  return payload.command;
+}
+
 let settled = false;
 function finish(command) {
   if (settled) return;
   settled = true;
-  if (command && commandDeniesGitWrite(command)) {
+  clearTimeout(noInputTimer);
+  if (commandDeniesGitWrite(command)) {
     deny();
   } else {
     allow();
@@ -210,29 +223,41 @@ function finish(command) {
   process.exit(0);
 }
 
+function denyUnparseable() {
+  if (settled) return;
+  settled = true;
+  clearTimeout(noInputTimer);
+  deny();
+  process.exit(0);
+}
+
 let raw = "";
+process.stdin.setEncoding("utf8");
+
+const noInputTimer = setTimeout(() => {
+  denyUnparseable();
+}, NO_INPUT_TIMEOUT_MS);
+
 process.stdin.on("data", (chunk) => {
+  clearTimeout(noInputTimer);
   raw += chunk;
   try {
     const payload = JSON.parse(raw);
-    finish(String((payload && payload.command) || ""));
+    const command = parseHookCommand(payload);
+    if (command === null) {
+      denyUnparseable();
+      return;
+    }
+    finish(command);
   } catch {
     // wait for more data if payload is fragmented
   }
 });
 
 process.stdin.on("end", () => {
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    deny();
-    process.exit(0);
-    return;
+  if (!settled) {
+    denyUnparseable();
   }
-
-  const command = String((payload && payload.command) || "");
-  finish(command);
 });
 `;
 
@@ -340,6 +365,17 @@ interface CursorHookEntry {
   [key: string]: unknown;
 }
 
+
+function isSpurManagedRestrictWritesGuard(command: unknown): boolean {
+  if (typeof command !== "string" || !command.includes("/.spur/cursor/")) {
+    return false;
+  }
+  return command.split(/\s+/).some((token) => {
+    const base = token.split("/").pop() ?? token;
+    return base === CURSOR_GIT_GUARD_FILENAME;
+  });
+}
+
 /**
  * Merges a `beforeShellExecution` guard entry into `<worktreePath>/.cursor/hooks.json`
  * without clobbering existing hooks (e.g. the repo's `stop` array) or other
@@ -368,13 +404,7 @@ async function mergeCursorGitGuardHook(worktreePath: string, scriptPath: string)
     : [];
   const preserved = existingEntries.filter((entry) => {
     if (entry.command === scriptPath) return false;
-    if (
-      typeof entry.command === "string" &&
-      entry.command.includes("restrict-writes-hook.js") &&
-      !existsSync(entry.command)
-    ) {
-      return false;
-    }
+    if (isSpurManagedRestrictWritesGuard(entry.command)) return false;
     return true;
   });
   hooks["beforeShellExecution"] = [
