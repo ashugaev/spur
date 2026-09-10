@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   collectOpenCodeGcPlan,
+  OPENCODE_STORE_LIST_LIMIT,
   parseGitConfigWorktree,
   planOpenCodeGc,
   readSnapshotLeaves,
@@ -63,7 +64,10 @@ function plan(
     limit: 20,
     logMaxBytes: 1024,
     logTailBytes: 128,
+    directories: ["/worktrees/sp"],
+    directoriesFailed: 0,
     listLimit: 100_000,
+    listTruncated: false,
     dbPath: "/store/opencode.db",
     dbSizeBytes: 1000,
     freeBytes: 10_000,
@@ -252,12 +256,12 @@ describe("planOpenCodeGc enumeration and store guards", () => {
     expect(result.log).toBeNull();
   });
 
-  it("aborts when the listed count reaches the -n limit", () => {
+  it("aborts when any one directory's listing came back at the -n cap", () => {
     const directory = "/worktrees/sp/spur-clean";
     const result = plan({
       sessions: [storeSession({ directory })],
       records: [record({ id: "spur-clean", worktreePath: directory, agentSessionId: STORE_ID })],
-      listLimit: 1,
+      listTruncated: true,
     });
 
     expect(result.reason).toBe("enumeration_truncated");
@@ -384,7 +388,12 @@ describe("collectOpenCodeGcPlan", () => {
 
   it("returns enumeration_failed on unparsable CLI output", async () => {
     const result = await collectOpenCodeGcPlan(
-      collectorDeps({ listStoreSessions: async () => "not json" }),
+      collectorDeps({
+        listStoreSessions: async () => "not json",
+        listSpurRecords: () => [
+          record({ id: "spur-a", worktreePath: "/proj/a", agentSessionId: "ses_a" }),
+        ],
+      }),
       options,
     );
 
@@ -408,5 +417,201 @@ describe("collectOpenCodeGcPlan", () => {
     expect(result.reason).toBeNull();
     expect(result.sessions.map((entry) => entry.id)).toEqual([STORE_ID]);
     expect(result.enumeration.listedCount).toBe(1);
+    // Enumerated from the record's CANONICAL directory, not its raw path.
+    expect(result.enumeration.directories).toEqual(["/real/ao"]);
+  });
+
+  // `opencode session list` is scoped by the cwd's project and has no
+  // directory flag: one cwd sees one project. Measured on the dev host,
+  // ~/projects/ao returns 280 sessions and ~/.spur/worktrees returns 4, so a
+  // single fixed cwd made the sweep structurally blind to almost the whole
+  // store.
+  it("enumerates once per distinct candidate directory and merges the results", async () => {
+    const listedFrom: string[] = [];
+    const byDirectory: Record<string, unknown[]> = {
+      "/proj/a": [
+        { id: "ses_a", directory: "/proj/a", updated: OLD },
+        { id: "ses_shared", directory: "/proj/a", updated: OLD },
+      ],
+      "/proj/b": [
+        { id: "ses_b", directory: "/proj/b", updated: OLD },
+        // Same session visible from both projects: merged, never doubled.
+        { id: "ses_shared", directory: "/proj/a", updated: OLD },
+      ],
+    };
+    const result = await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async (cwd: string) => {
+          listedFrom.push(cwd);
+          return JSON.stringify(byDirectory[cwd] ?? []);
+        },
+        listSpurRecords: () => [
+          record({ id: "spur-a", worktreePath: "/proj/a", agentSessionId: "ses_a" }),
+          // Second record in the SAME directory: deduped to one call.
+          record({ id: "spur-a2", worktreePath: "/proj/a", agentSessionId: "ses_shared" }),
+          record({ id: "spur-b", worktreePath: "/proj/b", agentSessionId: "ses_b" }),
+        ],
+      }),
+      options,
+    );
+
+    expect(listedFrom).toEqual(["/proj/a", "/proj/b"]);
+    expect(result.enumeration.directories).toEqual(["/proj/a", "/proj/b"]);
+    expect(result.enumeration.listedCount).toBe(3);
+    expect(result.sessions.map((entry) => entry.id).sort()).toEqual([
+      "ses_a",
+      "ses_b",
+      "ses_shared",
+    ]);
+  });
+
+  it("never enumerates from a single fixed directory", async () => {
+    const listedFrom: string[] = [];
+    await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async (cwd: string) => {
+          listedFrom.push(cwd);
+          return "[]";
+        },
+        listSpurRecords: () => [
+          record({ id: "spur-a", worktreePath: "/proj/a", agentSessionId: "ses_a" }),
+          record({ id: "spur-b", worktreePath: "/proj/b", agentSessionId: "ses_b" }),
+          record({ id: "spur-c", worktreePath: "/proj/c", agentSessionId: "ses_c" }),
+        ],
+      }),
+      options,
+    );
+
+    // Reds the moment the code regresses to one cwd for the whole sweep.
+    expect(listedFrom).toHaveLength(3);
+    expect(new Set(listedFrom).size).toBe(3);
+  });
+
+  it("skips directories of records that cannot supply a rule-(a) match", async () => {
+    const listedFrom: string[] = [];
+    const result = await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async (cwd: string) => {
+          listedFrom.push(cwd);
+          return "[]";
+        },
+        listSpurRecords: () => [
+          // Non-opencode agent. It DOES carry an agentSessionId — a claude
+          // transcript id — so only the agent check can exclude it.
+          record({
+            id: "spur-claude",
+            agent: "claude",
+            worktreePath: "/proj/claude",
+            agentSessionId: "8f3c1d02-0000-4000-8000-000000000000",
+          }),
+          // No agentSessionId at all.
+          record({ id: "spur-bare", worktreePath: "/proj/bare" }),
+          // Live status: not in the collected set.
+          record({
+            id: "spur-live",
+            worktreePath: "/proj/live",
+            status: "running",
+            agentSessionId: "ses_live",
+          }),
+          record({ id: "spur-ok", worktreePath: "/proj/ok", agentSessionId: "ses_ok" }),
+        ],
+      }),
+      options,
+    );
+
+    expect(listedFrom).toEqual(["/proj/ok"]);
+    expect(result.enumeration.directories).toEqual(["/proj/ok"]);
+  });
+
+  it("skips a directory that cannot be canonicalized", async () => {
+    const listedFrom: string[] = [];
+    await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async (cwd: string) => {
+          listedFrom.push(cwd);
+          return "[]";
+        },
+        listSpurRecords: () => [
+          record({ id: "spur-gone", worktreePath: "/proj/gone", agentSessionId: "ses_gone" }),
+        ],
+        realpath: async () => {
+          throw new Error("ENOENT");
+        },
+      }),
+      options,
+    );
+
+    expect(listedFrom).toEqual([]);
+  });
+
+  it("carries on when one directory fails, and reports the count", async () => {
+    const result = await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async (cwd: string) => {
+          if (cwd === "/proj/a") throw new Error("opencode exited with code 1");
+          return JSON.stringify([{ id: "ses_b", directory: "/proj/b", updated: OLD }]);
+        },
+        listSpurRecords: () => [
+          record({ id: "spur-a", worktreePath: "/proj/a", agentSessionId: "ses_a" }),
+          record({ id: "spur-b", worktreePath: "/proj/b", agentSessionId: "ses_b" }),
+        ],
+      }),
+      options,
+    );
+
+    // A lost listing only shrinks the candidate set, and absence never
+    // authorizes a deletion, so the run continues rather than aborting.
+    expect(result.reason).toBeNull();
+    expect(result.enumeration.directoriesFailed).toBe(1);
+    expect(result.sessions.map((entry) => entry.id)).toEqual(["ses_b"]);
+  });
+
+  it("aborts when one directory's listing comes back at the -n cap", async () => {
+    // `--max-count` truncates SILENTLY: exit 0, valid JSON, no warning. The
+    // cap has to be judged per call, since a merged total across directories
+    // can legitimately exceed one call's limit.
+    const atCap = Array.from({ length: OPENCODE_STORE_LIST_LIMIT }, (_, index) => ({
+      id: `ses_${index}`,
+      directory: "/proj/a",
+      updated: OLD,
+    }));
+    const result = await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async () => JSON.stringify(atCap),
+        listSpurRecords: () => [
+          record({ id: "spur-a", worktreePath: "/proj/a", agentSessionId: "ses_0" }),
+        ],
+      }),
+      options,
+    );
+
+    expect(result.reason).toBe("enumeration_truncated");
+    expect(result.enumeration.truncated).toBe(true);
+    expect(result.sessions).toEqual([]);
+  });
+
+  it("returns enumeration_failed only when every directory failed", async () => {
+    const result = await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async () => {
+          throw new Error("opencode exited with code 1");
+        },
+        listSpurRecords: () => [
+          record({ id: "spur-a", worktreePath: "/proj/a", agentSessionId: "ses_a" }),
+        ],
+      }),
+      options,
+    );
+
+    expect(result.reason).toBe("enumeration_failed");
+    expect(result.enumeration.directoriesFailed).toBe(1);
+  });
+
+  it("plans nothing, without error, when no record can supply a match", async () => {
+    const result = await collectOpenCodeGcPlan(collectorDeps(), options);
+
+    expect(result.reason).toBeNull();
+    expect(result.enumeration.directories).toEqual([]);
+    expect(result.sessions).toEqual([]);
   });
 });
