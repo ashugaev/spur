@@ -768,7 +768,7 @@ function parseJiraSource(
     ...(query !== undefined ? { query } : {}),
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
-    maxResults: asOptionalNumber(raw["maxResults"], `${label}.maxResults`) ?? 50,
+    maxResults: asOptionalNumber(raw["maxResults"], `${label}.maxResults`) ?? 100,
   };
 }
 

@@ -2158,8 +2158,32 @@ projects:
       token: "secret",
       intervalMs: 60_000,
       emitExisting: false,
-      maxResults: 50,
+      maxResults: 100,
     });
+  });
+
+  it("rejects a jira source with a non-positive maxResults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+        maxResults: 0
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.jira.maxResults must be a positive number",
+    );
   });
 
   it("rejects a jira source whose auth cannot be resolved", async () => {
@@ -2607,7 +2631,7 @@ projects:
       query: "project = WEBDEV AND statusCategory != Done",
       intervalMs: 60_000,
       emitExisting: false,
-      maxResults: 50,
+      maxResults: 100,
     });
     expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
       source: "jira",
