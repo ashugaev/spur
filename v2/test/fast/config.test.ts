@@ -4624,6 +4624,94 @@ projects:
   });
 });
 
+describe("opencodeGc", () => {
+  const defaults = {
+    enabled: false,
+    olderThanDays: 14,
+    intervalMinutes: 360,
+    maxSessionsPerSweep: 20,
+    statuses: ["completed", "killed"],
+    logLevel: "WARN",
+    logMaxBytes: 134_217_728,
+    logTailBytes: 16_777_216,
+  };
+
+  it("defaults to disabled with the documented values when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadConfig(configPath).opencodeGc).toEqual(defaults);
+  });
+
+  it("parses opencodeGc in instance mode", async () => {
+    const configPath = await writeConfig(`
+opencodeGc:
+  enabled: true
+  olderThanDays: 7
+  intervalMinutes: 120
+  maxSessionsPerSweep: 5
+  statuses: [completed, stopped]
+  logLevel: ERROR
+  logMaxBytes: 1024
+  logTailBytes: 256
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadConfig(configPath).opencodeGc).toEqual({
+      enabled: true,
+      olderThanDays: 7,
+      intervalMinutes: 120,
+      maxSessionsPerSweep: 5,
+      statuses: ["completed", "stopped"],
+      logLevel: "ERROR",
+      logMaxBytes: 1024,
+      logTailBytes: 256,
+    });
+  });
+
+  it("rejects a status outside the completed|killed|stopped allow-list", async () => {
+    const configPath = await writeConfig(`
+opencodeGc:
+  statuses: [running]
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/opencodeGc\.statuses/);
+  });
+
+  it("rejects a logLevel outside the upstream DEBUG|INFO|WARN|ERROR enum", async () => {
+    const configPath = await writeConfig(`
+opencodeGc:
+  logLevel: OFF
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/opencodeGc\.logLevel/);
+  });
+
+  it("ignores opencodeGc in project mode", async () => {
+    const configPath = await writeConfig(`
+opencodeGc:
+  enabled: true
+  olderThanDays: 1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadProjectConfig(configPath).opencodeGc).toEqual(defaults);
+  });
+});
+
 describe("sidecarGc", () => {
   it("defaults to enabled true / 120 / 360 when absent (AC10)", async () => {
     const configPath = await writeConfig(`

@@ -738,6 +738,16 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  opencodeGc: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxSessionsPerSweep: number;
+    statuses: OpenCodeGcStatus[];
+    logLevel: OpenCodeLogLevel;
+    logMaxBytes: number;
+    logTailBytes: number;
+  };
   sidecarGc: {
     enabled: boolean;
     idleTtlMinutes: number;
@@ -756,6 +766,17 @@ export interface AppConfig {
 // `spawning`, `paused`, or `errored` may resume work in its worktree, so GC
 // must never treat it as a candidate regardless of age.
 export type SessionGcStatus = "completed" | "killed" | "stopped";
+
+// Statuses the opencode store reclaim may collect. Same three values as
+// SessionGcStatus, kept a separate union because the two sweeps reclaim
+// different things and default differently: opencodeGc defaults to
+// [completed, killed] (isTerminalSessionStatus exactly), because a `stopped`
+// opencode session is still resumable through `--session <agentSessionId>`
+// and deleting its rows turns the resume into a silent empty session.
+export type OpenCodeGcStatus = "completed" | "killed" | "stopped";
+
+// opencode's own logLevel enum (upstream config schema). There is no OFF.
+export type OpenCodeLogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
 export interface SessionPipelineState {
   steps: string[];
