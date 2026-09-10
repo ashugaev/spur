@@ -50,6 +50,7 @@ import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
   AgentName,
+  OpenCodeLogLevel,
   ProviderReasoningEffort,
   TranscriptEntry,
   SidecarMcpBinding,
@@ -158,6 +159,9 @@ interface AgentAdapter {
     cursorConfigDir?: string;
     claudeConfigDir?: string;
     modelsCacheHome?: string;
+    // Resolved by the caller from `opencodeGc.logLevel`. Never read AppConfig
+    // from inside agents/.
+    opencodeLogLevel?: OpenCodeLogLevel;
   }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -548,9 +552,9 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
     readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
-    setup: async ({ mcpBindings, restrictWrites }) => {
+    setup: async ({ mcpBindings, restrictWrites, opencodeLogLevel }) => {
       await assertOpenCodeCompatibility();
-      const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
+      const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites, opencodeLogLevel);
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
     processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
@@ -666,6 +670,7 @@ export async function setupAgentHooks(args: {
   cursorConfigDir?: string;
   claudeConfigDir?: string;
   modelsCacheHome?: string;
+  opencodeLogLevel?: OpenCodeLogLevel;
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;

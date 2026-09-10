@@ -391,6 +391,7 @@ import {
   type SendMessageAttachment,
   type SendMessageRequest,
   type SidecarConfig,
+  type OpenCodeLogLevel,
   type SidecarMcpBinding,
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
@@ -1251,6 +1252,11 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   modelsCacheHome: string;
+  // opencodeGc.logLevel, resolved by the caller. Every launch path must pass
+  // it: threading one site would cap spawn and leave restore/resume
+  // uncapped, which is worse than not shipping the cap — the log keeps
+  // growing while the config claims otherwise.
+  opencodeLogLevel: OpenCodeLogLevel;
   mcpBindings?: SidecarMcpBinding[];
   mcpExclude?: string[];
 }) {
@@ -1269,6 +1275,7 @@ async function setupSessionAgentHooks(args: {
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
+    ...(args.agent === "opencode" ? { opencodeLogLevel: args.opencodeLogLevel } : {}),
     ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
@@ -8625,6 +8632,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        opencodeLogLevel: this.config.opencodeGc.logLevel,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -9644,6 +9652,7 @@ export class SessionService {
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        opencodeLogLevel: this.config.opencodeGc.logLevel,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -12284,6 +12293,7 @@ export class SessionService {
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
       modelsCacheHome: this.config.models.codexHome,
+      opencodeLogLevel: this.config.opencodeGc.logLevel,
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
@@ -12655,6 +12665,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
         modelsCacheHome: this.config.models.codexHome,
+        opencodeLogLevel: this.config.opencodeGc.logLevel,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(restoreProjectConfig.mcp?.exclude.length
           ? { mcpExclude: restoreProjectConfig.mcp.exclude }

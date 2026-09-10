@@ -72,6 +72,44 @@ describe("OpenCode adapter", () => {
     });
   });
 
+  it("emits the log level and still returns undefined on an empty config", () => {
+    expect(JSON.parse(buildOpenCodeConfig(undefined, undefined, "WARN") ?? "{}")).toEqual({
+      logLevel: "WARN",
+    });
+    expect(JSON.parse(buildOpenCodeConfig(undefined, true, "ERROR") ?? "{}")["logLevel"]).toBe(
+      "ERROR",
+    );
+    expect(buildOpenCodeConfig(undefined, undefined, undefined)).toBeUndefined();
+    expect(buildOpenCodeConfig([], false)).toBeUndefined();
+  });
+
+  it("passes an env override through to the CLI spawn", async () => {
+    const binDir = await mkdtemp(join(tmpdir(), "spur-opencode-env-"));
+    const binPath = join(binDir, "opencode");
+    await writeFile(
+      binPath,
+      [
+        "#!/usr/bin/env node",
+        // Echoes back both the injected var and an inherited one, proving the
+        // env is merged over process.env rather than replacing it.
+        "process.stdout.write(JSON.stringify({ injected: process.env.OPENCODE_CONFIG_CONTENT, path: Boolean(process.env.PATH) }));",
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(binPath, 0o755);
+    vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+    try {
+      const stdout = await readOpenCodeJson(["session", "list"], {
+        timeoutMs: 20_000,
+        env: { OPENCODE_CONFIG_CONTENT: '{"logLevel":"WARN"}' },
+      });
+      expect(JSON.parse(stdout)).toEqual({ injected: '{"logLevel":"WARN"}', path: true });
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(binDir, { recursive: true, force: true });
+    }
+  });
+
   it("resumes the exact native session id", () => {
     expect(buildOpenCodeResumePlan("ses_123", "opencode").launchCommand).toBe(
       "'opencode' --auto --session 'ses_123'",

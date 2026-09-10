@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { SidecarMcpBinding, TranscriptEntry } from "../types.js";
+import type { OpenCodeLogLevel, SidecarMcpBinding, TranscriptEntry } from "../types.js";
 import {
   agentExecutableCommand,
   missingAgentExecutableMessage,
@@ -83,8 +83,16 @@ export const OPENCODE_RESTRICT_WRITES_CONFIG = JSON.stringify({
 export function buildOpenCodeConfig(
   mcpBindings: SidecarMcpBinding[] | undefined,
   restrictWrites: boolean | undefined,
+  // opencode logs INFO by default and never rotates `log/opencode.log`;
+  // INFO is ~99% of its volume. Capping here rides the existing
+  // OPENCODE_CONFIG_CONTENT channel — no new launch flag. Future volume only;
+  // the existing file is `opencodeGc.logMaxBytes`' job.
+  logLevel?: OpenCodeLogLevel,
 ): string | undefined {
   const config: Record<string, unknown> = {};
+  if (logLevel) {
+    config["logLevel"] = logLevel;
+  }
   if (mcpBindings?.length) {
     config["mcp"] = Object.fromEntries(
       mcpBindings.map((binding) => [
