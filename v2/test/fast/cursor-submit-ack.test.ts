@@ -60,13 +60,27 @@ describe("captureCursorSubmitBaseline", () => {
   it("returns the file path and current size when a transcript exists", async () => {
     const filePath = await makeJsonl("a.jsonl", [userTurn("hi")]);
     findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
-    const result = await captureCursorSubmitBaseline("/tmp/worktree");
+    const result = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
     expect(result?.file).toBe(filePath);
     expect(result?.size).toBeGreaterThan(0);
+    expect(findLatestCursorTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
   });
 });
 
 describe("scanCursorJsonlForMessage", () => {
+  it("forwards pinned agentSessionId to findLatestCursorTranscriptFile on rotation check", async () => {
+    const filePath = await makeJsonl("init.jsonl", [userTurn("hi")]);
+    const rotatedPath = await makeJsonl("rotated.jsonl", [userTurn("target")]);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(rotatedPath);
+    const found = await scanCursorJsonlForMessage(
+      { file: filePath, size: (await stat(filePath)).size },
+      "target",
+      "/tmp/worktree",
+      "pinned-id",
+    );
+    expect(found).toBe(true);
+    expect(findLatestCursorTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
+  });
   it("matches a user turn that wraps the sent text in cursor context tags", async () => {
     const filePath = await makeJsonl("wrap.jsonl", []);
     findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);

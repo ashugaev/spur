@@ -520,6 +520,7 @@ describe("createAgentSubmitAckBinding", () => {
       { file: "/some/chat.jsonl", size: 7 },
       "hello",
       ctx.worktreePath,
+      undefined,
     );
   });
 });
