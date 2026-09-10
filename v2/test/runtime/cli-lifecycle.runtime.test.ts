@@ -76,7 +76,7 @@ async function runDoctorJson(
   try {
     const result = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
       ...options,
-      timeout: 90_000,
+      timeout: 120_000,
     });
     stdout = result.stdout;
     exitCode = 0;
