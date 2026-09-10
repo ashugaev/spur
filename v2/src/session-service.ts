@@ -278,6 +278,7 @@ import {
   resolveSessionCleanupContext,
   type SessionCleanupContext,
 } from "./session-gc.js";
+import { collectOpenCodeGcPlan, createOpenCodeGcDeps, executeOpenCodeGc } from "./opencode-gc.js";
 import {
   deleteWorkspaceState,
   readWorkspaceState,
@@ -2548,6 +2549,11 @@ export class SessionService {
   // swept before" as "due immediately" — the first tick after a restart
   // waits out a full intervalMinutes like every other tick.
   private lastSessionGcSweepAt = Date.now();
+  // The opencode store sweep rides the sessionGc tick (no second timer) but
+  // keeps its own clock and re-entrancy guard, so either sweep can be
+  // enabled, disabled, or slow without touching the other.
+  private opencodeGcRunning = false;
+  private lastOpenCodeGcSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -5531,6 +5537,7 @@ export class SessionService {
     }
     this.sessionGcTimer = setInterval(() => {
       void this.runSessionGcSweep();
+      void this.runOpenCodeGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
   }
@@ -5603,6 +5610,62 @@ export class SessionService {
       });
     } finally {
       this.sessionGcRunning = false;
+    }
+  }
+
+  // Config-gated daemon sweep for the opencode store. Same shape as
+  // runSessionGcSweep: off unless opencodeGc.enabled, both that flag and
+  // intervalMinutes re-read from this.config every tick, clock seeded from
+  // construction so a restart never sweeps immediately.
+  private async runOpenCodeGcSweep(): Promise<void> {
+    if (this.opencodeGcRunning) {
+      return;
+    }
+    const gcConfig = this.config.opencodeGc;
+    if (!gcConfig.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastOpenCodeGcSweepAt < gcConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    this.opencodeGcRunning = true;
+    this.lastOpenCodeGcSweepAt = Date.now();
+    try {
+      const deps = createOpenCodeGcDeps(this.config);
+      const plan = await collectOpenCodeGcPlan(deps, {
+        now: new Date(),
+        olderThanDays: gcConfig.olderThanDays,
+        statuses: gcConfig.statuses,
+        limit: gcConfig.maxSessionsPerSweep,
+        logMaxBytes: gcConfig.logMaxBytes,
+        logTailBytes: gcConfig.logTailBytes,
+      });
+      // vacuum: false, always. The measured VACUUM is 93 s on a 3.1 GB store
+      // against a 300 s tick; a blocking child that long inside the daemon
+      // process is not acceptable. `spur opencode-gc --execute` returns the
+      // freelist debt this sweep creates.
+      const report = await executeOpenCodeGc(plan, deps, {
+        dryRun: false,
+        sizes: true,
+        vacuum: false,
+      });
+      this.logEvent("opencode.gc.completed", {
+        level: "info",
+        message: `OpenCode GC sweep: ${report.totals.sessionsDeleted} store session(s) deleted, ${report.totals.snapshotLeavesRemoved} snapshot leaf/leaves removed, ${report.totals.freedBytes ?? 0} byte(s) freed. Run \`spur opencode-gc --execute\` to VACUUM the freelist debt back.`,
+        details: {
+          totals: report.totals,
+          reason: report.reason,
+          sessionIds: report.sessions.map((entry) => entry.id),
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("opencode.gc.failed", {
+        level: "warn",
+        message: `OpenCode GC sweep failed: ${message}`,
+      });
+    } finally {
+      this.opencodeGcRunning = false;
     }
   }
 
