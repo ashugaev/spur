@@ -2389,6 +2389,76 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("floors the backoff base at 120_000ms for a tiny configured collapseWindowMs", async () => {
+      loadConfigMock.mockReset().mockReturnValue({
+        ...baseConfig(),
+        eventLog: { collapseWindowMs: 100 },
+      });
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValue(new Error("pane unavailable"));
+      const t0 = Date.now();
+
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // A derived base of collapseWindowMs * 2 (200ms) would retry almost
+      // immediately; the floor keeps the retry at the fixed 120_000ms base.
+      vi.setSystemTime(t0 + 119_999);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(t0 + 120_000);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+      service.dispose();
+      loadConfigMock.mockReset().mockReturnValue(baseConfig());
+    });
+
+    it("keeps the backoff cap at or above a base derived from a large collapseWindowMs", async () => {
+      const oneHourMs = 60 * 60 * 1000;
+      loadConfigMock.mockReset().mockReturnValue({
+        ...baseConfig(),
+        eventLog: { collapseWindowMs: oneHourMs },
+      });
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(openLedgerProjection());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockRejectedValue(new Error("pane unavailable"));
+      const t0 = Date.now();
+
+      // base = collapseWindowMs * 2 = 2h, above the fixed 30-minute cap. The
+      // first retry delay must still be at least the base, not clamped down
+      // to 30 minutes.
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(t0 + oneHourMs * 2 - 1);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(t0 + oneHourMs * 2);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+      expect(send).toHaveBeenCalledTimes(2);
+      service.dispose();
+      loadConfigMock.mockReset().mockReturnValue(baseConfig());
+    });
+
     it("re-arms nudges for a relaunched session whose tmux target was gone", async () => {
       const sessions = createSessionStore();
       const session = runningSession();

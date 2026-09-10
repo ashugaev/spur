@@ -555,6 +555,7 @@ const AGENT_SESSION_ID_PERSIST_BACKOFF_MS = 60_000;
 const SPAWN_RETRY_ATTEMPTS = 3;
 const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
+const TODO_NUDGE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
@@ -6019,7 +6020,9 @@ export class SessionService {
   private todoNudgeBackoffBaseMs(): number {
     const collapseWindowMs =
       this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
-    return collapseWindowMs * 2;
+    // Floor at the original fixed base: a tiny configured collapseWindowMs
+    // must not shrink the nudge backoff below its pre-derivation floor.
+    return Math.max(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs * 2);
   }
 
   // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
@@ -6105,14 +6108,15 @@ export class SessionService {
         message: `Failed to nudge ${session.id} about Spur ToDo: ${error instanceof Error ? error.message : String(error)}`,
       });
       const failures = (this.todoNudgeBackoff.get(session.id)?.failures ?? 0) + 1;
+      const base = this.todoNudgeBackoffBaseMs();
+      // The cap must never fall below the base: a large configured
+      // collapseWindowMs derives a base above the fixed 30-minute cap, and
+      // clamping to that fixed cap would put every retry back under the
+      // collapse window it exists to clear.
+      const cap = Math.max(TODO_NUDGE_BACKOFF_MAX_MS, base);
       this.todoNudgeBackoff.set(session.id, {
         failures,
-        nextRetryAtMs:
-          Date.now() +
-          Math.min(
-            this.todoNudgeBackoffBaseMs() * 2 ** (failures - 1),
-            TODO_NUDGE_BACKOFF_MAX_MS,
-          ),
+        nextRetryAtMs: Date.now() + Math.min(base * 2 ** (failures - 1), cap),
       });
     }
   }
