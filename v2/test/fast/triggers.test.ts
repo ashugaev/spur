@@ -4065,4 +4065,282 @@ describe("startConfiguredTriggers", () => {
       expect.objectContaining({ queueKey: "api:send:api-1" }),
     );
   });
+
+  describe("memory-guard hold", () => {
+    it("defaults to never held when the dep is omitted", async () => {
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await advanceSendWindow();
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("leaves the pending batch intact and logs trigger.send.suppressed_memory_guard when delivery is denied by the memory guard", async () => {
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      // Import after loadTriggersModule()'s vi.resetModules() so this resolves to
+      // the same session-service.js module instance triggers.ts uses internally
+      // for the instanceof check.
+      const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+      const deliverMock = vi
+        .fn()
+        .mockRejectedValue(new SessionAdmissionDeniedError("memory guard crossed", "memory_guard"));
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+          "trigger.send.suppressed_memory_guard",
+        );
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.failed",
+        );
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("never drops or retries a pending batch on the 3-attempt CI-failed schedule while the memory hold is engaged, and delivers it once the hold clears", async () => {
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+      let held = true;
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config({ event: "github:ci_failed", interrupt: true }) as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        memoryHoldEngaged: () => held,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(ciFailedEvent());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(deliverMock).not.toHaveBeenCalled();
+
+        // Full 3-attempt CI-failed cadence (10 minutes apart) plus one extra
+        // interval: never delivered, never dropped, while held.
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(deliverMock).not.toHaveBeenCalled();
+        expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.dropped",
+        );
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.failed",
+        );
+
+        held = false;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("never drops or retries a pending batch on the 8-attempt delivery schedule while the memory hold is engaged, and delivers it once the hold clears", async () => {
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+      let held = true;
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        memoryHoldEngaged: () => held,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await advanceSendWindow();
+        expect(deliverMock).not.toHaveBeenCalled();
+
+        const backoffsMs = [10, 20, 40, 80, 160, 320, 640].map((seconds) => seconds * 1_000);
+        for (const backoff of backoffsMs) {
+          await vi.advanceTimersByTimeAsync(backoff);
+        }
+        expect(deliverMock).not.toHaveBeenCalled();
+        expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.dropped",
+        );
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.failed",
+        );
+
+        held = false;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("re-engages the hold once after a restart and keeps the reloaded batch queued", async () => {
+      const persisted: PersistedPendingBatch = {
+        queueKey: "api:send:api-1",
+        projectId: "api",
+        triggerId: "send",
+        sourceId: "pr-watch",
+        batch: {
+          kind: "review",
+          providerId: "github",
+          projectId: "api",
+          sourceId: "pr-watch",
+          sessionId: "api-1",
+          prNumber: 42,
+          prTitle: "Tighten coverage",
+          signals: [{ key: "comment:1", kind: "comment", text: "A new comment arrived." }],
+        },
+      };
+      readPendingSendBatchesMock.mockReturnValue(new Map([[persisted.queueKey, persisted]]));
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      let held = true;
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        memoryHoldEngaged: () => held,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        // The reloaded batch is still on disk (never re-deleted) and no
+        // delivery attempt is ever made while the restart-time hold is
+        // engaged.
+        await advanceSendWindow();
+        expect(deliverMock).not.toHaveBeenCalled();
+        expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+
+        held = false;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("does not drop a batch for a stopped session while the memory hold is engaged, and drops it once the hold clears", async () => {
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "stopped",
+        state: "stopped",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      let held = true;
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        memoryHoldEngaged: () => held,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await advanceSendWindow();
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "trigger.send.dropped",
+        );
+        expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+
+        held = false;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "trigger.send.dropped"),
+        ).toHaveLength(1);
+        expect(deletePendingSendBatchMock).toHaveBeenCalled();
+        expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+  });
 });
