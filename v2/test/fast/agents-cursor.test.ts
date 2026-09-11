@@ -232,6 +232,38 @@ describe("ensureCursorRestrictWritesConfig", () => {
     ]);
   });
 
+  it("prunes spur-managed restrict-writes guard entries but keeps human hooks", async () => {
+    const staleGuard = "/tmp/.spur/cursor/old-session/restrict-writes-hook.js";
+    const humanGuard = ".cursor/restrict-writes-hook.js";
+    mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          beforeShellExecution: [
+            { command: staleGuard, timeout: 5, failClosed: true },
+            { command: `node ${staleGuard}`, timeout: 5, failClosed: true },
+            { command: humanGuard, timeout: 5 },
+            { command: "other-hook.sh", timeout: 5 },
+          ],
+        },
+      }),
+    );
+
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    const tmpPath = mockRename.mock.calls[0]?.[0] as string;
+    const written = mockWriteFile.mock.calls.find((call) => call[0] === tmpPath);
+    const merged = JSON.parse(written?.[1] as string) as {
+      hooks: { beforeShellExecution: Array<{ command: string }> };
+    };
+    expect(merged.hooks.beforeShellExecution).toEqual([
+      { command: humanGuard, timeout: 5 },
+      { command: "other-hook.sh", timeout: 5 },
+      { command: scriptPath, timeout: 5, failClosed: true },
+    ]);
+  });
+
   it("does not duplicate the entry on re-invocation", async () => {
     let hooksJson = JSON.stringify({ version: 1, hooks: {} });
     mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
