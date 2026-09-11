@@ -5399,11 +5399,12 @@ export class SessionService {
           continue;
         }
         // A desk-shared sidecar's pane is named after the desk anchor, so on a
-        // terminal anchor this loop would otherwise reap the pane a live
-        // sibling is still using. Same rule as teardownSessionSidecars: the
-        // last running member releases it.
+        // terminal anchor this loop would otherwise reap the pane a restorable
+        // sibling is still using. Same active-workspace semantics as the
+        // policy pass (collectSidecarReapCandidates): any non-terminal member
+        // holds the shared pane.
         const deskSiblingsAlive =
-          (session.sidecarNames?.length ?? 0) > 0 && this.hasRunningWorkspaceMembers(session);
+          (session.sidecarNames?.length ?? 0) > 0 && this.hasActiveWorkspaceMembers(session);
         // Resolved unconditionally (not only when deskSiblingsAlive): every
         // sidecar's owner id below needs it, since a desk-shared sidecar's
         // pane is named after the desk anchor/owner, never this session's

@@ -396,7 +396,7 @@ Idle time: now minus the newest activity over all members, per member the newer 
 
 Decision per sidecar, first match wins:
 
-1. `sidecarGc.enabled: false` — keep.
+1. `sidecarGc.enabled: false` — keep. No sidecar reaper runs at all; a non-terminal owner's pane is never killed by this pass or the 5-minute orphan loop.
 2. MCP sidecar — keep.
 3. No live pane and no recorded process — keep.
 4. Established TCP connection on any port reserved for this sidecar — keep. Outranks every reap rule below, on any owner status.
