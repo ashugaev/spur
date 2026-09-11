@@ -1,8 +1,7 @@
-import type { Mock } from "vitest";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
 import { startServer } from "../../src/server.js";
 import { getVersion } from "../../src/version.js";

@@ -1,5 +1,4 @@
-import type { Mock } from "vitest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 const fsMockState = vi.hoisted(() => ({
   files: new Map<string, string>(),
@@ -109,12 +108,12 @@ const mockExecFileAsync = (() => {
   }
   return value;
 })();
-const mockExistsSync = existsSync as unknown as Mock;
+const mockExistsSync = existsSync as unknown as Mock<typeof existsSync>;
 const mockLinkSync = linkSync as unknown as Mock;
-const mockMkdirSync = mkdirSync as unknown as Mock;
-const mockRmSync = rmSync as unknown as Mock;
+const mockMkdirSync = mkdirSync as unknown as Mock<typeof mkdirSync>;
+const mockRmSync = rmSync as unknown as Mock<typeof rmSync>;
 const mockStatSync = statSync as unknown as Mock;
-const mockSymlinkSync = symlinkSync as unknown as Mock;
+const mockSymlinkSync = symlinkSync as unknown as Mock<typeof symlinkSync>;
 
 function mockGitSuccess(stdout = ""): void {
   mockExecFileAsync.mockResolvedValueOnce({ stdout: stdout ? `${stdout}\n` : "", stderr: "" });

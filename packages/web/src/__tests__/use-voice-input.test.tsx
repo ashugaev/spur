@@ -1,6 +1,5 @@
-import type { Mock } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { startRealtimeTranscription } from "@/lib/realtime-voice-client";
 

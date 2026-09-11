@@ -1,10 +1,9 @@
-import type { Mock } from "vitest";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
 import { findFreePort } from "../helpers/common.js";

@@ -1,7 +1,6 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { SourceSessionListItem } from "../../src/event-sources/types.js";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
