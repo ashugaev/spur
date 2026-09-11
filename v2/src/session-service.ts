@@ -12348,34 +12348,14 @@ export class SessionService {
     session: SessionRecord,
     options?: { paneAlreadyConfirmedGone?: boolean },
   ): Promise<SessionRecord> {
-    const presence = await getTmuxSessionPresence(session.tmuxSession);
-    const runtimeAlive = presence.present;
-    let processAlive = false;
-    if (runtimeAlive) {
-      processAlive = await agentProcessAlive({
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        launchCommand: session.launchCommand,
-      });
-      if (processAlive) {
-        return this.captureAgentSessionId(session, 0);
-      }
-      const panePresence = await getTmuxPanePresence(session.tmuxSession);
-      if (panePresence.unresponsive && options?.paneAlreadyConfirmedGone !== true) {
-        throw new Error(
-          `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
-        );
-      }
-    } else if (presence.unresponsive && options?.paneAlreadyConfirmedGone !== true) {
-      // A timeout-killed tmux probe is ambiguous, not confirmed absence: below
-      // this point a "not ready" verdict falls into relaunchSessionInPlace,
-      // which kills the pane (killAgentPaneAndConfirmExit) and relaunches —
-      // capturePaneAgentProcesses reads `ps`, not tmux, so a tmux-only hang
-      // would sail past the survivor guard and kill+relaunch a genuinely live
-      // agent. This is reached automatically from the delivery loop
-      // (tryDeliverQueuedMessageLocked), which already treats any throw here
-      // as "retry on the next poll, message stays queued" — never a dropped
-      // message and never a silent recovery attempt.
+    // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
+    // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
+    // cannot be mistaken for a dead agent when list-windows still answers.
+    const runtime = await this.readRuntimeSnapshot(session);
+    if (runtime.processAlive) {
+      return this.captureAgentSessionId(session, 0);
+    }
+    if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       throw new Error(
         `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
       );
@@ -12390,8 +12370,8 @@ export class SessionService {
       details: {
         agent: session.agent,
         status: session.status,
-        runtimeAlive,
-        processAlive,
+        runtimeAlive: runtime.runtimeAlive,
+        processAlive: runtime.processAlive,
         workspaceExists: workspacePresent,
         agentSessionId: session.agentSessionId ?? null,
       },
