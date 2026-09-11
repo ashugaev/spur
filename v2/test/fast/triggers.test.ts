@@ -4098,6 +4098,50 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
+    it("holds handleSendEvent's own immediate stale-parked delivery while the memory hold is engaged", async () => {
+      // isStaleParked delivery bypasses the flush loop entirely (triggers.ts
+      // :1133-1136), so handleSendEvent needs its own hold check distinct
+      // from flushPending's — a "waiting"-state session's ordinary flush-loop
+      // delivery never exercises this branch.
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "stopped",
+        stopReason: "stale_timeout",
+        state: "stale",
+        lastActivityAt: recentActivity(),
+        workspaceExists: true,
+      });
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      let held = true;
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: {
+          get: getMock,
+          deliver: deliverMock,
+        } as never,
+        memoryHoldEngaged: () => held,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(deliverMock).not.toHaveBeenCalled();
+
+        held = false;
+        for (let i = 0; i < 10 && deliverMock.mock.calls.length === 0; i += 1) {
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
     it("leaves the pending batch intact and logs trigger.send.suppressed_memory_guard when delivery is denied by the memory guard", async () => {
       const getMock = vi.fn().mockResolvedValue({
         id: "api-1",
