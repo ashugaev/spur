@@ -7762,6 +7762,11 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    // The distinguishing guarantee over the test above: readRuntimeSnapshot
+    // short-circuits processAlive to false on a dead pane without ever
+    // reaching agentProcessAlive's ps probe, so "ps would report the agent
+    // alive" cannot matter here — the mock resolving true never gets asked.
+    expect(isProcessRunningInTmuxMock).not.toHaveBeenCalled();
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
