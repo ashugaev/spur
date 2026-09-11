@@ -385,6 +385,8 @@ Below the critical floor each tick stops at most one safe sidecar. Session shedd
 
 Pressure closes at the admission floor (RAM), below the cgroup-high threshold by the smaller of 10% or the emergency threshold, or above twice the emergency headroom (finite max). Swap-only shedding starts disarmed, arms after swap recovers 10 percentage points below `shedSwapUsedFraction`, and spends one sidecar attempt per recovery. Healthy and recovery ticks log nothing. Events: `daemon.memory.shed`, `daemon.memory.shed.failed`, `session.admission.denied`, `session.admission.memory_guard`, startup warning `daemon.memory.unbounded`.
 
+While the guard would deny a `"wake"` admission, a host-wide hold engages on the same 1-second tick: due scheduled/interval/daily wakes, queued-message delivery, and pending trigger sends are held in place rather than attempted, so a sustained crossing produces one hold instead of a per-session retry-and-drop storm. The hold engages once (`daemon.memory.hold.engaged`, warn) and clears only after ten consecutive ticks (~10s) sampling above the restore floor plus one `perSessionBytes` margin (`daemon.memory.hold.cleared`, info). `admission.enabled: false` disables the hold along with the guard and force-releases an already-engaged one. A held trigger delivery logs `trigger.send.suppressed_memory_guard` (info) instead of `trigger.send.failed`; a stuck `updateMemoryHold` tick logs `daemon.memory.hold.failed` (warn) without affecting the shed tick that follows it.
+
 ## Sidecar reaping
 
 `sidecarGc` kills idle and unowned project sidecar processes. Candidates: non-MCP sidecars under `projects.<id>.sidecars`; a built-in MCP sidecar (`playwright`) never is. Runs on the sidecar-reaper tick and once at boot.
