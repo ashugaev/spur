@@ -238,7 +238,7 @@ Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limite
 `/spawn` picks an agent, then a project, before creating a session. Bare `/spawn` asks the agent first; `/spawn <agent>` and `/spawn <agent> <task>` go straight to the project step. The picked project overrides the source's own project.
 
 - Picker lists configured non-shepherd projects; a registry-discovered project is never a spawn target.
-- One configured project auto-picks — no keyboard, reply names the project.
+- One configured project auto-picks — no keyboard. `/spawn <agent>` replies naming the project; `/spawn <agent> <task>` spawns immediately instead, replying `Spawning...`/`Spawned and bound...` with no project name.
 - A pending `/spawn` expires 10 minutes after its last step with no reply.
 - A stale project keyboard, from an overwritten or expired `/spawn`, answers `Spawn expired. Run /spawn again.` and spawns nothing.
 
