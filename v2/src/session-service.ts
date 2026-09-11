@@ -2823,11 +2823,18 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    // One host-memory read shared by both calls below: updateMemoryHold's
+    // wake-context check and runMemoryShed's opening pressure sample would
+    // otherwise each take their own /proc read microseconds apart for the
+    // same tick. Only this shared opening sample is reused — runMemoryShed's
+    // later re-reads (after it stops a sidecar or session) still take a
+    // fresh sample, since host memory has actually changed by then.
+    const host = readHostMemory();
     // Its own try/catch, separate from runMemoryShed's below: without this
     // isolation a throw inside updateMemoryHold would be mislabeled as
     // daemon.memory.shed.failed.
     try {
-      this.updateMemoryHold();
+      this.updateMemoryHold(host);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("daemon.memory.hold.failed", {
@@ -2837,7 +2844,7 @@ export class SessionService {
       });
     }
     try {
-      await this.runMemoryShed();
+      await this.runMemoryShed(host);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("daemon.memory.shed.failed", {
@@ -2854,7 +2861,7 @@ export class SessionService {
   // memory-shed tick so admission.enabled: false is the only key that can
   // disable it — memoryGuard.shedEnabled must NOT (runMemoryShed's own
   // shedEnabled early-return must never reach here).
-  private updateMemoryHold(): void {
+  private updateMemoryHold(hostSample: HostMemory | null): void {
     const admission = this.config.admission;
     if (!admission.enabled) {
       // Escape hatch: neither the cap nor the guard can deny, so the hold
@@ -2884,7 +2891,7 @@ export class SessionService {
     }
 
     const guard = admission.memoryGuard;
-    const sample = this.evaluateMemoryDenial("wake");
+    const sample = this.evaluateMemoryDenial("wake", hostSample);
     const denied =
       sample !== null &&
       ((sample.legacyDetail !== undefined && guard.enforce) ||
@@ -2920,7 +2927,9 @@ export class SessionService {
     }
 
     if (sample.availableBytes >= guard.restoreFloorBytes + admission.perSessionBytes) {
-      this.memoryHold.clearTicks += 1;
+      if (this.memoryHold.engaged) {
+        this.memoryHold.clearTicks += 1;
+      }
       if (this.memoryHold.engaged && this.memoryHold.clearTicks >= MEMORY_HOLD_CLEAR_TICKS) {
         const engagedAtMs = this.memoryHold.engagedAtMs;
         const engagedCause = this.memoryHold.engagedCause;
@@ -2993,8 +3002,10 @@ export class SessionService {
     }
   }
 
-  private readMemoryPressure(nowMs: number): MemoryPressureState {
-    const host = readHostMemory();
+  // hostSample: reuse an already-taken readHostMemory() sample instead of
+  // taking a second one; omitted by every caller that needs a fresh read.
+  private readMemoryPressure(nowMs: number, hostSample?: HostMemory | null): MemoryPressureState {
+    const host = hostSample !== undefined ? hostSample : readHostMemory();
     const cgroup = readCgroupMemorySnapshot();
     const guard = this.config.admission.memoryGuard;
     const episode = this.memoryShedEpisode;
@@ -3274,7 +3285,11 @@ export class SessionService {
     return edges;
   }
 
-  private async runMemoryShed(): Promise<void> {
+  // hostSample: an opening host-memory sample the tick already took (see
+  // runMemoryShedTick), reused for the opening pressure read only. Every
+  // later re-read within this run stays a fresh readHostMemory() call, since
+  // shedding an action changes the live memory state.
+  private async runMemoryShed(hostSample?: HostMemory | null): Promise<void> {
     if (this.memoryShedRunning) return;
     const guard = this.config.admission.memoryGuard;
     if (!this.config.admission.enabled || !guard.shedEnabled) {
@@ -3289,7 +3304,7 @@ export class SessionService {
     let tier: MemoryShedTier = "mcp_sidecar";
     let candidateProvenExhausted = false;
     try {
-      pressure = this.readMemoryPressure(Date.now());
+      pressure = this.readMemoryPressure(Date.now(), hostSample);
       if (pressure.stage === "none") return;
       const candidates = await this.memoryShedCandidates();
       const liveTmux = await listTmuxSessionNames();
@@ -14018,12 +14033,12 @@ export class SessionService {
     if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
-    // The guard throw on this path originates in ensureSessionReadyForSend's
-    // assertAdmissible("wake") call for a stale-parked session, not in
-    // deliverQueuedMessage below — holding here, before that attempt, is the
-    // only position that keeps the attempt from happening at all. Returning
-    // false is safe: runDeliveryLoop treats true/false identically, and false
-    // is what every other stays-queued path below returns.
+    // While the memory hold is engaged, defer this attempt entirely: it
+    // would otherwise call ensureSessionReadyForSend, which can relaunch the
+    // session in place and write to its pane — real work this loop should
+    // not do under host memory pressure. Returning false is safe:
+    // runDeliveryLoop treats true/false identically, and false is what every
+    // other stays-queued path below returns.
     if (this.memoryHold.engaged) {
       return false;
     }
@@ -14087,15 +14102,10 @@ export class SessionService {
         // wiped worktree) would otherwise log an error every
         // PIPELINE_POLL_INTERVAL_MS (1s) forever. Only the first occurrence
         // of a given failure message logs; a change (new problem, or
-        // recovery then a fresh failure) logs again. A memory-guard denial's
-        // message embeds the live MiB sample, so it would defeat this dedupe
-        // on every attempt — key it on a stable literal instead.
-        const isMemoryGuardDenial =
-          error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard";
-        const dedupeKey = isMemoryGuardDenial ? "memory_guard" : failure;
+        // recovery then a fresh failure) logs again.
         const lastFailure = this.queuedMessageDeliveryLastFailure.get(sessionId);
-        if (lastFailure !== dedupeKey) {
-          this.queuedMessageDeliveryLastFailure.set(sessionId, dedupeKey);
+        if (lastFailure !== failure) {
+          this.queuedMessageDeliveryLastFailure.set(sessionId, failure);
           this.logEvent("session.message.delivery_failed", {
             level: "error",
             sessionId,
@@ -14800,9 +14810,15 @@ export class SessionService {
   // without a second, driftable copy of the thresholds. Applies NO gate:
   // `enforce`, `enforceFloors`, and `admission.enabled` are each applied by
   // the caller, never here.
-  private evaluateMemoryDenial(context: "spawn" | "restore" | "wake"): MemoryDenialSample | null {
+  // hostSample lets updateMemoryHold's tick reuse the single readHostMemory()
+  // it already took for this tick instead of taking a second one; every
+  // other caller omits it and gets its own live read.
+  private evaluateMemoryDenial(
+    context: "spawn" | "restore" | "wake",
+    hostSample?: HostMemory | null,
+  ): MemoryDenialSample | null {
     const admission = this.config.admission;
-    const memory = readHostMemory();
+    const memory = hostSample !== undefined ? hostSample : readHostMemory();
     if (!memory) return null;
     const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
     const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
