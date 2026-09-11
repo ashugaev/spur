@@ -7,10 +7,16 @@ import {
   parseGitConfigWorktree,
   planOpenCodeGc,
   readSnapshotLeaves,
-  resolveCanonicalPaths,
+  REAL_DIRECTORY_PROBE,
+  resolveDirectoryState,
+  resolveRecordPathInfo,
+  resolveRecordPaths,
+  type DirectoryProbe,
   type OpenCodeGcPlanInput,
   type OpenCodeGcSkipReason,
   type OpenCodeStoreSession,
+  type PathResolution,
+  type RecordPathInfo,
 } from "../../src/opencode-gc.js";
 import type { SessionRecord, SessionStatus } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
@@ -41,12 +47,15 @@ function storeSession(overrides: Partial<OpenCodeStoreSession> = {}): OpenCodeSt
   return { id: STORE_ID, directory: "/worktrees/sp/spur-d704", updated: OLD, ...overrides };
 }
 
-/**
- * Identity canonicalization for the fixtures that are not about symlinks: a
- * path maps to itself, an unknown path maps to null (unresolvable).
- */
-function identityCanon(paths: string[]): Map<string, string | null> {
-  return new Map(paths.map((path) => [path, path]));
+/** Every path resolves to itself: the default for fixtures not about paths. */
+function identityStates(paths: string[]): Map<string, PathResolution> {
+  return new Map(paths.map((path) => [path, { state: "resolved", canonical: path }]));
+}
+
+function identityRecordPaths(paths: string[]): Map<string, RecordPathInfo> {
+  return new Map(
+    paths.map((path) => [path, { resolution: { state: "resolved", canonical: path } }]),
+  );
 }
 
 function plan(
@@ -71,17 +80,52 @@ function plan(
     dbPath: "/store/opencode.db",
     dbSizeBytes: 1000,
     freeBytes: 10_000,
+    // Readable process tree, nothing holding any session, unless a case
+    // overrides it. Never null by default: null disables the gone fallback.
+    processArgs: [],
     ...overrides,
     sessions,
     records,
-    canonicalPaths:
-      overrides.canonicalPaths ??
-      identityCanon([
-        ...sessions.map((entry) => entry.directory),
-        ...records.map((entry) => entry.worktreePath),
-      ]),
+    directoryStates:
+      overrides.directoryStates ?? identityStates(sessions.map((entry) => entry.directory)),
+    recordPaths:
+      overrides.recordPaths ?? identityRecordPaths(records.map((entry) => entry.worktreePath)),
     listedCount: overrides.listedCount ?? sessions.length,
   });
+}
+
+/** An error that carries an errno, the way libuv throws one. */
+function errnoError(code: string | undefined): Error {
+  const error = new Error(`fake ${code ?? "no-code"}`);
+  if (code !== undefined) Object.assign(error, { code });
+  return error;
+}
+
+/**
+ * Injected realpath/readlink/lstat. `resolved` maps a path to its canonical
+ * form; `fails` maps a path to the errno realpath throws; `links` maps a
+ * symlink to its raw target.
+ */
+function fakeProbe(spec: {
+  resolved?: Record<string, string>;
+  fails?: Record<string, string | undefined>;
+  links?: Record<string, string>;
+}): DirectoryProbe {
+  return {
+    realpath: async (path) => {
+      const canonical = spec.resolved?.[path];
+      if (canonical) return canonical;
+      if (spec.fails && path in spec.fails) throw errnoError(spec.fails[path]);
+      if (spec.links && path in spec.links) throw errnoError("ENOENT");
+      return path;
+    },
+    readlink: async (path) => {
+      const target = spec.links?.[path];
+      if (target === undefined) throw errnoError("EINVAL");
+      return target;
+    },
+    isSymlink: async (path) => Boolean(spec.links && path in spec.links),
+  };
 }
 
 function skipReasonOf(
@@ -122,14 +166,16 @@ describe("planOpenCodeGc never selects a live session's data (AC2)", () => {
       record({ id: "spur-2c04", worktreePath: link, agentSessionId: STORE_ID }),
       record({ id: "spur-54da", worktreePath: link, status: "running" }),
     ];
-    const canonicalPaths = await resolveCanonicalPaths([real, link]);
+    const probe = REAL_DIRECTORY_PROBE;
+    const recordPaths = await resolveRecordPaths(records, probe);
     const result = plan({
       sessions: [storeSession({ directory: real })],
       records,
-      canonicalPaths,
+      directoryStates: new Map([[real, await resolveDirectoryState(real, probe)]]),
+      recordPaths,
     });
 
-    expect(canonicalPaths.get(link)).toBe(real);
+    expect(recordPaths.get(link)?.resolution).toEqual({ state: "resolved", canonical: real });
     expect(result.sessions).toEqual([]);
     expect(skipReasonOf(result)).toBe("protected_live_record");
   });
@@ -189,9 +235,10 @@ describe("planOpenCodeGc never selects a live session's data (AC2)", () => {
     const result = plan({
       sessions: [storeSession({ directory })],
       records: [record({ id: "spur-gone", worktreePath: directory, agentSessionId: STORE_ID })],
-      // Both sides unresolvable: the record still protects on raw equality,
-      // but it is completed, so the session survives to the directory gate.
-      canonicalPaths: new Map([[directory, null]]),
+      // OPAQUE, not GONE: realpath failed with something other than ENOENT,
+      // so the session is never selectable however the records look.
+      directoryStates: new Map([[directory, { state: "opaque" }]]),
+      recordPaths: new Map([[directory, { resolution: { state: "opaque" } }]]),
     });
 
     expect(result.sessions).toEqual([]);
@@ -243,6 +290,219 @@ describe("planOpenCodeGc never selects a live session's data (AC2)", () => {
 
     expect(result.sessions).toEqual([]);
     expect(skipReasonOf(result)).toBe("too_recent");
+  });
+});
+
+// Section 9. Same preamble as AC2 and it is not optional: EVERY fixture
+// below gives the terminal record `agentSessionId === <store session id>`,
+// so rule (a) matches and the session is genuinely selectable but for the
+// gate under test. A fixture without it proves nothing about its gate.
+describe("gone-directory reclaim (section 9)", () => {
+  const GONE_DIR = "/worktrees/assistant/ass-91e4";
+
+  /**
+   * The gone state comes from the REAL resolveDirectoryState over a probe
+   * that throws ENOENT — never from a hand-written `{ state: "gone" }`.
+   * Hand-building it would bypass the errno allow-list and leave every case
+   * below green under a mutation of the one rule they all depend on.
+   */
+  async function gonePlan(overrides: Partial<OpenCodeGcPlanInput> = {}) {
+    const records = overrides.records ?? [
+      record({ id: "ass-91e4", worktreePath: GONE_DIR, agentSessionId: STORE_ID }),
+    ];
+    const probe = fakeProbe({ fails: { [GONE_DIR]: "ENOENT" } });
+    return plan({
+      sessions: [storeSession({ directory: GONE_DIR })],
+      records,
+      directoryStates: new Map([[GONE_DIR, await resolveDirectoryState(GONE_DIR, probe)]]),
+      recordPaths: await resolveRecordPaths(records, probe),
+      ...overrides,
+    });
+  }
+
+  it("AC13 a gone directory becomes selectable, with directoryState gone", async () => {
+    // The population this feature targets: terminal opencode sessions whose
+    // worktree session-gc already removed. 3.4's fail-closed realpath was
+    // excluding exactly them, which is the zero-DB-reclaim bug.
+    const result = await gonePlan();
+
+    expect(result.sessions.map((entry) => entry.id)).toEqual([STORE_ID]);
+    expect(result.sessions[0]?.directoryState).toBe("gone");
+    expect(result.sessions[0]?.canonicalDirectory).toBe(GONE_DIR);
+  });
+
+  it("AC14 every errno other than ENOENT keeps failing closed, ENOENT alone opens", async () => {
+    // An EACCES on a LIVE directory read as "deleted" is the worst outcome
+    // this feature can produce. The allow-list is ENOENT only; everything
+    // else, including an error carrying no `code` at all, lands in the
+    // default branch. Each row drives the REAL resolveDirectoryState through
+    // an injected throw and then the real planner, so the table is
+    // end-to-end rather than seven copies of one hand-written state.
+    const codes = ["EACCES", "ELOOP", "ENOTDIR", "ENAMETOOLONG", "ESTALE", "EIO", undefined];
+
+    const outcome = await Promise.all(
+      codes.map(async (code) => {
+        const probe = fakeProbe({ fails: { [GONE_DIR]: code } });
+        const state = await resolveDirectoryState(GONE_DIR, probe);
+        const result = await gonePlan({ directoryStates: new Map([[GONE_DIR, state]]) });
+        return [
+          code ?? "no-code",
+          state.state,
+          result.sessions.length === 1 ? "SELECTED" : skipReasonOf(result),
+        ];
+      }),
+    );
+
+    expect(outcome).toEqual(
+      codes.map((code) => [code ?? "no-code", "opaque", "directory_unresolvable"]),
+    );
+
+    // The one code that opens the fallback, through the same path.
+    const enoent = await resolveDirectoryState(
+      GONE_DIR,
+      fakeProbe({ fails: { [GONE_DIR]: "ENOENT" } }),
+    );
+    expect(enoent.state).toBe("gone");
+    expect(
+      (await gonePlan({ directoryStates: new Map([[GONE_DIR, enoent]]) })).sessions.map(
+        (e) => e.id,
+      ),
+    ).toEqual([STORE_ID]);
+  });
+
+  it("AC15.1 a live record whose raw worktreePath equals the gone directory protects", async () => {
+    const result = await gonePlan({
+      records: [
+        record({ id: "ass-91e4", worktreePath: GONE_DIR, agentSessionId: STORE_ID }),
+        record({ id: "ass-live", worktreePath: GONE_DIR, status: "running" }),
+      ],
+    });
+
+    expect(result.sessions).toEqual([]);
+    expect(skipReasonOf(result)).toBe("directory_gone_protected");
+  });
+
+  it("AC15.3 a live record reached only through a DANGLING symlink protects", async () => {
+    // realpath cannot see through a link whose target was deleted, so no
+    // canonical comparison can find this record. Only the readlink hop can.
+    const link = "/worktrees/sp/spur-link";
+    const probe = fakeProbe({ links: { [link]: GONE_DIR } });
+    const records = [
+      record({ id: "ass-91e4", worktreePath: GONE_DIR, agentSessionId: STORE_ID }),
+      record({ id: "ass-live", worktreePath: link, status: "running" }),
+    ];
+
+    const result = await gonePlan({
+      records,
+      recordPaths: await resolveRecordPaths(records, probe),
+    });
+
+    expect((await resolveRecordPathInfo(link, probe)).hop).toEqual({
+      target: GONE_DIR,
+      terminates: true,
+    });
+    expect(result.sessions).toEqual([]);
+    expect(skipReasonOf(result)).toBe("directory_gone_protected");
+  });
+
+  it("AC15.4 an unresolved symlink CHAIN fails closed, never selectable", async () => {
+    // S1 -> S2 -> D. One hop yields S2, which never equals the resolved D
+    // the store recorded. Letting that fall through to "no match" would be
+    // fail-open inside a fail-closed section — the difference between
+    // refusing and deleting.
+    const s1 = "/worktrees/sp/s1";
+    const s2 = "/worktrees/sp/s2";
+    const probe = fakeProbe({ links: { [s1]: s2, [s2]: GONE_DIR } });
+    const records = [
+      record({ id: "ass-91e4", worktreePath: GONE_DIR, agentSessionId: STORE_ID }),
+      record({ id: "ass-live", worktreePath: s1, status: "running" }),
+    ];
+
+    const result = await gonePlan({
+      records,
+      recordPaths: await resolveRecordPaths(records, probe),
+    });
+
+    expect((await resolveRecordPathInfo(s1, probe)).hop).toEqual({
+      target: s2,
+      terminates: false,
+    });
+    expect(result.sessions).toEqual([]);
+    expect(skipReasonOf(result)).toBe("directory_unresolvable");
+  });
+
+  it("AC16.1 a running process holding the session id protects it", async () => {
+    const result = await gonePlan({
+      processArgs: [`opencode --auto --session ${STORE_ID}`],
+    });
+
+    expect(result.sessions).toEqual([]);
+    expect(skipReasonOf(result)).toBe("live_process_holds_session");
+  });
+
+  it("AC16.2 an unreadable process tree disables the gone fallback entirely", async () => {
+    const result = await gonePlan({ processArgs: null });
+
+    expect(result.sessions).toEqual([]);
+    expect(skipReasonOf(result)).toBe("directory_unresolvable");
+  });
+
+  it("AC16.3 a process named opencode without the session id does NOT protect", async () => {
+    // 15 opencode processes are permanently resident on the dev host. A
+    // binary-name match would protect everything and silently restore the
+    // zero-reclaim bug.
+    const result = await gonePlan({
+      processArgs: ["opencode --auto --prompt ship it", "/usr/bin/opencode serve"],
+    });
+
+    expect(result.sessions.map((entry) => entry.id)).toEqual([STORE_ID]);
+  });
+
+  it("AC18 an errored record with a nonexistent worktreePath still protects", async () => {
+    // Exactly what session-service.ts:8961 writes: removeWorktree first,
+    // THEN a record pointing at the removed path with status "errored",
+    // which section 3.2 puts in the LIVE set. The premise "a live record
+    // cannot have a nonexistent worktreePath" is false, and this is the
+    // test that makes the protection not depend on it.
+    const result = await gonePlan({
+      records: [
+        record({ id: "ass-91e4", worktreePath: GONE_DIR, agentSessionId: STORE_ID }),
+        record({ id: "spur-failed-spawn", worktreePath: GONE_DIR, status: "errored" }),
+      ],
+    });
+
+    expect(result.sessions).toEqual([]);
+    expect(skipReasonOf(result)).toBe("directory_gone_protected");
+  });
+
+  it("AC18 the same errored record protects through the symlink spelling", async () => {
+    const link = "/worktrees/sp/spur-link";
+    const probe = fakeProbe({ links: { [link]: GONE_DIR } });
+    const records = [
+      record({ id: "ass-91e4", worktreePath: GONE_DIR, agentSessionId: STORE_ID }),
+      record({ id: "spur-failed-spawn", worktreePath: link, status: "errored" }),
+    ];
+
+    const result = await gonePlan({
+      records,
+      recordPaths: await resolveRecordPaths(records, probe),
+    });
+
+    expect(result.sessions).toEqual([]);
+    expect(skipReasonOf(result)).toBe("directory_gone_protected");
+  });
+
+  it("a terminal co-located record does not protect a gone session", async () => {
+    // The mirror of AC15.1: co-location protects only when the co-located
+    // record is LIVE. Otherwise the whole fallback would protect everything.
+    const result = await gonePlan({
+      records: [
+        record({ id: "ass-91e4", worktreePath: GONE_DIR, agentSessionId: STORE_ID }),
+        record({ id: "ass-done", worktreePath: GONE_DIR, status: "completed" }),
+      ],
+    });
+
+    expect(result.sessions.map((entry) => entry.id)).toEqual([STORE_ID]);
   });
 });
 
@@ -369,7 +629,8 @@ describe("collectOpenCodeGcPlan", () => {
       listSpurRecords: () => [],
       readSnapshotLeaves: async () => [],
       statLog: async () => null,
-      realpath: async (path: string) => path,
+      probe: fakeProbe({}),
+      processArgs: async () => [],
       freeBytes: async () => 10_000,
       statPathSize: async () => 1000,
       ...overrides,
@@ -409,7 +670,7 @@ describe("collectOpenCodeGcPlan", () => {
         listSpurRecords: () => [
           record({ id: "spur-link", worktreePath: "/link/spur", agentSessionId: STORE_ID }),
         ],
-        realpath: async (path: string) => (path === "/link/spur" ? "/real/ao" : path),
+        probe: fakeProbe({ resolved: { "/link/spur": "/real/ao" } }),
       }),
       options,
     );
@@ -534,9 +795,7 @@ describe("collectOpenCodeGcPlan", () => {
         listSpurRecords: () => [
           record({ id: "spur-gone", worktreePath: "/proj/gone", agentSessionId: "ses_gone" }),
         ],
-        realpath: async () => {
-          throw new Error("ENOENT");
-        },
+        probe: fakeProbe({ fails: { "/proj/gone": "ENOENT" } }),
       }),
       options,
     );

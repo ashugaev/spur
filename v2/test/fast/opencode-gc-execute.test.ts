@@ -7,7 +7,9 @@ import {
   createOpenCodeGcDeps,
   executeOpenCodeGc,
   planOpenCodeGc,
+  recheckSessionDirectory,
   writeLogTailArchive,
+  type DirectoryProbe,
   type OpenCodeGcExecutorDeps,
   type OpenCodeGcPlan,
 } from "../../src/opencode-gc.js";
@@ -33,6 +35,7 @@ function planFixture(overrides: Partial<OpenCodeGcPlan> = {}): OpenCodeGcPlan {
         id: "ses_a",
         directory: "/w/a",
         canonicalDirectory: "/w/a",
+        directoryState: "resolved",
         updatedAt: "2026-08-01T00:00:00.000Z",
         ageDays: 40,
         recordIds: ["spur-a"],
@@ -83,6 +86,7 @@ function spyDeps(overrides: Partial<OpenCodeGcExecutorDeps> = {}) {
     measureSize: vi.fn(async () => 4096),
     removePath: vi.fn(async () => {}),
     readRecords: vi.fn((ids: readonly string[]) => ids.map((id) => freshRecord(id))),
+    recheckDirectory: vi.fn(async () => null),
     deleteSession: vi.fn(async () => {}),
     writeLogArchive: vi.fn(async () => {}),
     truncateLog: vi.fn(async () => {}),
@@ -141,6 +145,195 @@ describe("executeOpenCodeGc dry run (AC1)", () => {
     expect(deps.removePath).toHaveBeenCalledWith("/store/snapshot/p/dead");
     expect(report.totals.sessionsDeleted).toBe(1);
     expect(report.totals.snapshotLeavesRemoved).toBe(1);
+  });
+});
+
+describe("AC17 delete-time directory re-check (TOCTOU)", () => {
+  const GONE_DIR = "/worktrees/assistant/ass-91e4";
+  const LINK = "/worktrees/sp/spur-link";
+
+  /**
+   * realpath throws ENOENT while planning and SUCCEEDS during execution, as
+   * if the worktree were recreated mid-run. The live record injected in the
+   * meantime carries the SYMLINK spelling of that directory, so raw
+   * comparison on the record re-read cannot see it — only re-running the
+   * directory rule can.
+   */
+  function recreatedDirProbe(): DirectoryProbe {
+    return {
+      realpath: async (path) => (path === LINK ? GONE_DIR : path),
+      readlink: async (path) => {
+        if (path === LINK) return GONE_DIR;
+        throw Object.assign(new Error("EINVAL"), { code: "EINVAL" });
+      },
+      isSymlink: async (path) => path === LINK,
+    };
+  }
+
+  function gonePlanEntry(): OpenCodeGcPlan {
+    return planFixture({
+      sessions: [
+        {
+          id: "ses_a",
+          directory: GONE_DIR,
+          canonicalDirectory: GONE_DIR,
+          directoryState: "gone",
+          updatedAt: "2026-08-01T00:00:00.000Z",
+          ageDays: 40,
+          recordIds: ["spur-a"],
+        },
+      ],
+    });
+  }
+
+  it("refuses the delete when the directory came back with a live symlink record", async () => {
+    const probe = recreatedDirProbe();
+    // The record set as it looks AT DELETE TIME: the owner is still
+    // completed (so the record re-read alone is satisfied), plus a running
+    // record reachable only through the symlink.
+    const records = [
+      { ...freshRecord("spur-a"), worktreePath: GONE_DIR, agentSessionId: "ses_a" },
+      { ...freshRecord("spur-live", "running"), worktreePath: LINK },
+    ];
+    const deps = spyDeps({
+      readRecords: vi.fn((ids: readonly string[]) => ids.map((id) => freshRecord(id))),
+      // The REAL recheck over injected IO, not a hand-rolled fake.
+      recheckDirectory: (entry) =>
+        recheckSessionDirectory(entry, {
+          listRecords: () => records,
+          probe,
+          statuses: ["completed", "killed"],
+          processArgs: async () => [],
+        }),
+    });
+
+    const report = await executeOpenCodeGc(gonePlanEntry(), deps, {
+      dryRun: false,
+      sizes: true,
+      vacuum: false,
+    });
+
+    // The record re-read alone is satisfied — only the directory re-check
+    // catches this, and both halves are asserted so neither can carry it.
+    expect(deps.readRecords).toHaveBeenCalled();
+    expect(deps.deleteSession).toHaveBeenCalledTimes(0);
+    expect(report.sessions[0]?.blockReason).toBe("changed_during_run");
+    expect(report.totals.sessionsBlocked).toBe(1);
+  });
+
+  it("proceeds when the directory is still gone and nothing new protects it", async () => {
+    const probe: DirectoryProbe = {
+      realpath: async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      readlink: async () => {
+        throw Object.assign(new Error("EINVAL"), { code: "EINVAL" });
+      },
+      isSymlink: async () => false,
+    };
+    const records = [{ ...freshRecord("spur-a"), worktreePath: GONE_DIR, agentSessionId: "ses_a" }];
+    const deps = spyDeps({
+      recheckDirectory: (entry) =>
+        recheckSessionDirectory(entry, {
+          listRecords: () => records,
+          probe,
+          statuses: ["completed", "killed"],
+          processArgs: async () => [],
+        }),
+    });
+
+    const report = await executeOpenCodeGc(gonePlanEntry(), deps, {
+      dryRun: false,
+      sizes: true,
+      vacuum: false,
+    });
+
+    expect(deps.deleteSession).toHaveBeenCalledWith("ses_a", GONE_DIR);
+    expect(report.totals.sessionsDeleted).toBe(1);
+  });
+
+  it("refuses when a process grabbed the session id between plan and delete", async () => {
+    const probe: DirectoryProbe = {
+      realpath: async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      readlink: async () => {
+        throw Object.assign(new Error("EINVAL"), { code: "EINVAL" });
+      },
+      isSymlink: async () => false,
+    };
+    const deps = spyDeps({
+      recheckDirectory: (entry) =>
+        recheckSessionDirectory(entry, {
+          listRecords: () => [
+            { ...freshRecord("spur-a"), worktreePath: GONE_DIR, agentSessionId: "ses_a" },
+          ],
+          probe,
+          statuses: ["completed", "killed"],
+          processArgs: async () => ["opencode --auto --session ses_a"],
+        }),
+    });
+
+    const report = await executeOpenCodeGc(gonePlanEntry(), deps, {
+      dryRun: false,
+      sizes: true,
+      vacuum: false,
+    });
+
+    expect(deps.deleteSession).toHaveBeenCalledTimes(0);
+    expect(report.sessions[0]?.recheck).toBe("live_process_holds_session");
+  });
+
+  it("refuses a directory that came back, even when nothing yet protects it", async () => {
+    // Recreated under us with no live record attached yet. Nothing in the
+    // protection predicate objects, so only the plan-vs-now state
+    // comparison can refuse: the plan reasoned about a gone directory and
+    // that reasoning no longer describes the disk.
+    const probe: DirectoryProbe = {
+      realpath: async (path) => path,
+      readlink: async () => {
+        throw Object.assign(new Error("EINVAL"), { code: "EINVAL" });
+      },
+      isSymlink: async () => false,
+    };
+    const deps = spyDeps({
+      recheckDirectory: (entry) =>
+        recheckSessionDirectory(entry, {
+          listRecords: () => [
+            { ...freshRecord("spur-a"), worktreePath: GONE_DIR, agentSessionId: "ses_a" },
+          ],
+          probe,
+          statuses: ["completed", "killed"],
+          processArgs: async () => [],
+        }),
+    });
+
+    const report = await executeOpenCodeGc(gonePlanEntry(), deps, {
+      dryRun: false,
+      sizes: true,
+      vacuum: false,
+    });
+
+    expect(deps.deleteSession).toHaveBeenCalledTimes(0);
+    expect(report.sessions[0]?.blockReason).toBe("changed_during_run");
+    expect(report.sessions[0]?.recheck).toBe("directory_unresolvable");
+  });
+
+  it("refuses when the re-check itself throws", async () => {
+    const deps = spyDeps({
+      recheckDirectory: async () => {
+        throw new Error("EIO");
+      },
+    });
+
+    const report = await executeOpenCodeGc(gonePlanEntry(), deps, {
+      dryRun: false,
+      sizes: true,
+      vacuum: false,
+    });
+
+    expect(deps.deleteSession).toHaveBeenCalledTimes(0);
+    expect(report.sessions[0]?.blockReason).toBe("changed_during_run");
   });
 });
 
@@ -205,6 +398,7 @@ describe("execute-time freshness re-read", () => {
           id: "ses_a",
           directory: "/w/a",
           canonicalDirectory: "/w/a",
+          directoryState: "resolved",
           updatedAt: "2026-08-01T00:00:00.000Z",
           ageDays: 40,
           recordIds: ["spur-a"],
@@ -213,6 +407,7 @@ describe("execute-time freshness re-read", () => {
           id: "ses_b",
           directory: "/w/b",
           canonicalDirectory: "/w/b",
+          directoryState: "resolved",
           updatedAt: "2026-08-01T00:00:00.000Z",
           ageDays: 40,
           recordIds: ["spur-b"],
@@ -253,7 +448,9 @@ describe("executeOpenCodeGc vacuum interlocks", () => {
       storeRoot: null,
       sessions: [],
       records: [],
-      canonicalPaths: new Map(),
+      directoryStates: new Map(),
+      recordPaths: new Map(),
+      processArgs: [],
       snapshotLeaves: [],
       log: null,
       now: new Date("2026-09-10T00:00:00.000Z"),

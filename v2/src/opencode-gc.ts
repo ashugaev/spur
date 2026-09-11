@@ -19,13 +19,14 @@
 // 1.18.30.
 import { execFile } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
-import { readdir, readFile, realpath, rm, stat, truncate } from "node:fs/promises";
-import { dirname, join, sep } from "node:path";
+import { lstat, readdir, readFile, readlink, realpath, rm, stat, truncate } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { opencodeCommand, readOpenCodeJson } from "./agents/opencode.js";
 import { readFreeKb } from "./disk-space.js";
 import { listSessions, readSession } from "./metadata.js";
+import { canReadProcessTree, snapshotProcesses } from "./process-tree.js";
 import { workspaceIdOf } from "./session-desk.js";
 import {
   isTerminalSessionStatus,
@@ -64,10 +65,39 @@ export interface OpenCodeStoreSession {
 
 export type OpenCodeGcSkipReason =
   | "protected_live_record"
-  | "no_record_match"
+  /** GONE, but a live record matched the raw path or the readlink hop. */
+  | "directory_gone_protected"
+  /** A running process carries this session's id in its argv. */
+  | "live_process_holds_session"
+  /** OPAQUE only: realpath failed with something other than ENOENT, the
+   *  process tree was unreadable, or a live record's symlink chain did not
+   *  terminate in one hop. A gone directory is NOT this reason. */
   | "directory_unresolvable"
+  | "no_record_match"
   | "too_recent"
   | "over_limit";
+
+/**
+ * Outcome of resolving a directory, discriminated by errno rather than by
+ * the presence of a throw.
+ */
+export type PathResolution =
+  | { state: "resolved"; canonical: string }
+  /** realpath failed with errno exactly ENOENT: some path component is gone. */
+  | { state: "gone" }
+  /** Any other errno, or an error carrying no `code` at all. Fails closed. */
+  | { state: "opaque" };
+
+/** A record's path, plus the one readlink hop 9.4 needs when it will not resolve. */
+export interface RecordPathInfo {
+  resolution: PathResolution;
+  /**
+   * Lexical one-hop readlink target, resolved against the link's dirname.
+   * Present only when the path is a symlink that did not resolve. `terminates`
+   * is false when the hop lands on another symlink.
+   */
+  hop?: { target: string; terminates: boolean };
+}
 
 export type OpenCodeGcPlanReason =
   | "store_unresolved"
@@ -77,7 +107,10 @@ export type OpenCodeGcPlanReason =
 export interface OpenCodeGcSessionEntry {
   id: string;
   directory: string;
+  /** The resolved path, or the raw directory when the state is "gone". */
   canonicalDirectory: string;
+  /** "gone" selections rest on the 9.2.1 fallback, not on a resolved path. */
+  directoryState: "resolved" | "gone";
   updatedAt: string;
   ageDays: number;
   /** Rule-(a) matches. Never empty — an empty array means (c) authorized. */
@@ -149,6 +182,8 @@ export interface OpenCodeGcSessionResult extends OpenCodeGcSessionEntry {
   deleted: boolean;
   /** Set when the execute-time re-read no longer matches the plan. */
   blockReason?: "changed_during_run";
+  /** Which gate the delete-time directory re-check tripped, when it did. */
+  recheck?: OpenCodeGcSkipReason;
   error?: string;
 }
 
@@ -216,6 +251,23 @@ export interface OpenCodeGcExecutorDeps {
    * record that no longer exists. Mirrors session-gc.ts's readGroupMembers.
    */
   readRecords(ids: readonly string[]): (SessionRecord | null)[];
+  /**
+   * Re-runs the FULL directory rule for one session at delete time: fresh
+   * records, fresh realpath, fresh 9.2.1/9.4 comparison, against the process
+   * snapshot taken once for the run. Returns a skip reason, or null to
+   * proceed.
+   *
+   * Re-reading records alone is not enough — a live record added mid-run can
+   * carry the SYMLINK spelling of a recreated directory, which raw
+   * comparison cannot see. Precedent: currentLivenessBlockReason
+   * (session-gc.ts:441-453) is called at execute time, not only at plan time.
+   *
+   * THE RE-CHECK NARROWS THE RACE, IT DOES NOT CLOSE IT. An irreducible
+   * window remains between this call and `session delete`; only a lock
+   * opencode does not offer could remove it. What this buys is a window of
+   * one function call instead of one planning run.
+   */
+  recheckDirectory(entry: OpenCodeGcSessionEntry): Promise<OpenCodeGcSkipReason | null>;
   /**
    * `cwd` is the session's own canonicalized directory — the same scope the
    * listing that produced it ran under, since `session delete` is
@@ -316,6 +368,83 @@ export async function resolveCanonicalPaths(
   return out;
 }
 
+/** IO the directory rule needs. Injected so every branch is testable. */
+export interface DirectoryProbe {
+  realpath(path: string): Promise<string>;
+  readlink(path: string): Promise<string>;
+  isSymlink(path: string): Promise<boolean>;
+}
+
+export const REAL_DIRECTORY_PROBE: DirectoryProbe = {
+  realpath,
+  readlink,
+  isSymlink: async (path) => {
+    try {
+      return (await lstat(path)).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  },
+};
+
+function errnoOf(error: unknown): string | undefined {
+  // Narrow `unknown` with a guard before reading `.code`; no `any`.
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * ENOENT-ONLY ALLOW-LIST. Exactly one errno permits the gone fallback.
+ *
+ * Never a deny-list of known-bad codes: a future libuv errno absent from a
+ * deny-list would default OPEN, and the worst outcome this feature can
+ * produce is treating an EACCES on a live directory as "deleted". EACCES,
+ * ELOOP, ENOTDIR, ENAMETOOLONG, ESTALE, EIO and an error carrying no `code`
+ * at all all land in the default branch and fail closed.
+ *
+ * ENOENT means some path COMPONENT is missing, not "this directory was
+ * deleted" — a vanished parent flips every session beneath it at once. The
+ * render reports the gone count so that mass transition is visible, and
+ * protection does not depend on the parent existing: 9.2.1's raw comparison
+ * and 9.4's hop still match.
+ */
+export async function resolveDirectoryState(
+  path: string,
+  probe: DirectoryProbe,
+): Promise<PathResolution> {
+  if (!path) return { state: "opaque" };
+  try {
+    return { state: "resolved", canonical: stripTrailingSep(await probe.realpath(path)) };
+  } catch (error: unknown) {
+    return errnoOf(error) === "ENOENT" ? { state: "gone" } : { state: "opaque" };
+  }
+}
+
+/**
+ * A record's resolution plus, when it will not resolve, the single readlink
+ * hop of 9.4. Node's realpath cannot resolve a DANGLING symlink; readlink
+ * plus resolve can, and that is the only way a live record carrying the
+ * symlink spelling of a deleted directory can still protect.
+ */
+export async function resolveRecordPathInfo(
+  path: string,
+  probe: DirectoryProbe,
+): Promise<RecordPathInfo> {
+  const resolution = await resolveDirectoryState(path, probe);
+  if (resolution.state === "resolved") return { resolution };
+  try {
+    const target = stripTrailingSep(resolve(dirname(path), await probe.readlink(path)));
+    // A hop that lands on another symlink has not terminated. One hop is a
+    // deliberate bound on the effort, never a bound on the protection:
+    // anything the hop cannot settle is refused, not allowed.
+    return { resolution, hop: { target, terminates: !(await probe.isSymlink(target)) } };
+  } catch {
+    // Not a symlink, or unreadable. No hop to offer.
+    return { resolution };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Planner (pure: no IO, no clock, no fs)
 // ---------------------------------------------------------------------------
@@ -325,7 +454,12 @@ export interface OpenCodeGcPlanInput {
   reason?: OpenCodeGcPlanReason | null;
   sessions: readonly OpenCodeStoreSession[];
   records: readonly SessionRecord[];
-  canonicalPaths: ReadonlyMap<string, string | null>;
+  /** Per store-session directory, keyed by the raw string. */
+  directoryStates: ReadonlyMap<string, PathResolution>;
+  /** Per record worktreePath, keyed by the raw string. */
+  recordPaths: ReadonlyMap<string, RecordPathInfo>;
+  /** argv of every running process, or null when the tree is unreadable. */
+  processArgs: readonly string[] | null;
   snapshotLeaves: readonly OpenCodeSnapshotLeafInput[];
   log: { path: string; sizeBytes: number } | null;
   now: Date;
@@ -390,6 +524,128 @@ function emptyPlan(
   };
 }
 
+export interface SessionProtectionInput {
+  session: OpenCodeStoreSession;
+  records: readonly SessionRecord[];
+  byAgentSessionId: ReadonlyMap<string, SessionRecord[]>;
+  byWorkspaceId: ReadonlyMap<string, SessionRecord[]>;
+  selectable: ReadonlySet<string>;
+  sessionState: PathResolution;
+  recordPaths: ReadonlyMap<string, RecordPathInfo>;
+  /**
+   * argv of every running process, or null when the process tree could not
+   * be read. Null DISABLES the gone fallback for the whole run — the same
+   * degrade-to-report-only discipline cache-retention uses.
+   */
+  processArgs: readonly string[] | null;
+}
+
+export type SessionProtectionVerdict =
+  | { reason: OpenCodeGcSkipReason }
+  | {
+      reason: null;
+      direct: readonly SessionRecord[];
+      canonicalDirectory: string;
+      directoryState: "resolved" | "gone";
+    };
+
+/**
+ * The full protection predicate, pure and shared: the planner runs it over
+ * the enumerated store, and the executor RE-RUNS it immediately before each
+ * `session delete`. One implementation, so the two can never disagree.
+ */
+export function evaluateSessionProtection(input: SessionProtectionInput): SessionProtectionVerdict {
+  const { session, selectable, sessionState, recordPaths } = input;
+
+  // 9.5, subtract-only and path-free: it can protect, it can never
+  // authorize, so its incompleteness (a fresh spawn carries --prompt, not
+  // --session, and is invisible to argv) is safe. Matched on the ses_ id,
+  // NEVER on the binary name — resident opencode processes would otherwise
+  // protect everything and silently restore the zero-reclaim bug.
+  if (input.processArgs?.some((args) => args.includes(session.id))) {
+    return { reason: "live_process_holds_session" };
+  }
+
+  // Rule (a): direct agentSessionId equality. The ONLY selecting rule.
+  const direct = input.byAgentSessionId.get(session.id) ?? [];
+
+  const coLocated: SessionRecord[] = [];
+  let chainUnresolved = false;
+  for (const record of input.records) {
+    if (!record.worktreePath) continue;
+    const info = recordPaths.get(record.worktreePath);
+    const live = !selectable.has(record.status);
+    if (sessionState.state === "resolved") {
+      // 3.5 RESOLVED, unchanged: canonical on both sides.
+      if (info?.resolution.state === "resolved") {
+        if (info.resolution.canonical === sessionState.canonical) coLocated.push(record);
+      } else if (record.worktreePath === session.directory) {
+        // A record we cannot canonicalize never loses its protecting power;
+        // it only loses the ability to match more widely.
+        coLocated.push(record);
+      }
+      continue;
+    }
+    if (sessionState.state !== "gone") continue;
+    // 9.2.1 GONE. No canonical comparison here, and adding one back is dead
+    // code: realpath only ever returns an EXISTING path, which can never
+    // equal a directory that does not exist.
+    if (record.worktreePath === session.directory) {
+      coLocated.push(record);
+      continue;
+    }
+    // 9.4, the dangling-symlink hole. realpath cannot see through a link
+    // whose target was deleted; one readlink hop can.
+    if (!info?.hop) continue;
+    if (info.hop.terminates && info.hop.target === session.directory) {
+      coLocated.push(record);
+      continue;
+    }
+    // A LIVE record whose hop did not settle makes the SESSION opaque. The
+    // ambiguity is resolved against the delete, every time: a chain
+    // S1 -> S2 -> D yields S2, which never equals the resolved D the store
+    // recorded, and letting that fall through to "no match" would be
+    // fail-open inside a fail-closed section.
+    if (live) chainUnresolved = true;
+  }
+
+  const protection = new Map<string, SessionRecord>();
+  for (const record of direct) protection.set(record.id, record);
+  for (const record of coLocated) {
+    for (const sibling of input.byWorkspaceId.get(workspaceIdOf(record)) ?? []) {
+      protection.set(sibling.id, sibling);
+    }
+  }
+  const protectedByRecord = [...protection.values()].some(
+    (record) => !selectable.has(record.status),
+  );
+
+  if (sessionState.state === "gone" && protectedByRecord) {
+    return { reason: "directory_gone_protected" };
+  }
+  if (protectedByRecord) return { reason: "protected_live_record" };
+  if (direct.length === 0) return { reason: "no_record_match" };
+  if (sessionState.state === "resolved") {
+    return {
+      reason: null,
+      direct,
+      canonicalDirectory: sessionState.canonical,
+      directoryState: "resolved",
+    };
+  }
+  // OPAQUE, or GONE with an unsettled live symlink chain, or GONE with the
+  // process tree unreadable: never selectable.
+  if (sessionState.state !== "gone" || chainUnresolved || input.processArgs === null) {
+    return { reason: "directory_unresolvable" };
+  }
+  return {
+    reason: null,
+    direct,
+    canonicalDirectory: session.directory,
+    directoryState: "gone",
+  };
+}
+
 export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
   if (input.storeRoot === null) return emptyPlan(input, "store_unresolved");
   if (input.reason) return emptyPlan(input, input.reason);
@@ -402,7 +658,6 @@ export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
   // isTerminalSessionStatus exactly, so spawning/running/paused/stopped/
   // errored all protect — never isRestorableStatus, which omits two of them.
   const selectable = new Set<string>(input.statuses);
-  const canon = (path: string): string | null => input.canonicalPaths.get(path) ?? null;
 
   const byAgentSessionId = new Map<string, SessionRecord[]>();
   const byWorkspaceId = new Map<string, SessionRecord[]>();
@@ -423,44 +678,21 @@ export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
   const nowMs = input.now.getTime();
 
   for (const session of input.sessions) {
-    const sessionCanon = canon(session.directory);
-    // Rule (a): direct agentSessionId equality. The ONLY selecting rule.
-    const direct = byAgentSessionId.get(session.id) ?? [];
-    // Rule (c): canonicalized directory co-location, unioned across
-    // workspaceId. PROTECTION-ONLY — a shared directory proves co-location,
-    // not ownership, and worktreePath is not unique.
-    const coLocated = input.records.filter((record) => {
-      const recordCanon = canon(record.worktreePath);
-      if (sessionCanon !== null && recordCanon !== null) return sessionCanon === recordCanon;
-      // A record whose worktreePath cannot be canonicalized keeps its
-      // protecting power on raw equality; it only loses the ability to match
-      // more widely.
-      return record.worktreePath !== "" && record.worktreePath === session.directory;
+    const verdict = evaluateSessionProtection({
+      session,
+      records: input.records,
+      byAgentSessionId,
+      byWorkspaceId,
+      selectable,
+      sessionState: input.directoryStates.get(session.directory) ?? { state: "opaque" },
+      recordPaths: input.recordPaths,
+      processArgs: input.processArgs,
     });
-    const protection = new Map<string, SessionRecord>();
-    for (const record of direct) protection.set(record.id, record);
-    // One insertion path for the co-located half: every record sits in its
-    // OWN workspace bucket, so the union below already re-inserts each
-    // co-located record. Adding them here too was a second path to the same
-    // fact.
-    for (const record of coLocated) {
-      for (const sibling of byWorkspaceId.get(workspaceIdOf(record)) ?? []) {
-        protection.set(sibling.id, sibling);
-      }
-    }
-
-    if ([...protection.values()].some((record) => !selectable.has(record.status))) {
-      skipped.push({ id: session.id, reason: "protected_live_record" });
+    if (verdict.reason) {
+      skipped.push({ id: session.id, reason: verdict.reason });
       continue;
     }
-    if (direct.length === 0) {
-      skipped.push({ id: session.id, reason: "no_record_match" });
-      continue;
-    }
-    if (sessionCanon === null) {
-      skipped.push({ id: session.id, reason: "directory_unresolvable" });
-      continue;
-    }
+    const { direct, canonicalDirectory, directoryState } = verdict;
     const ageDays = (nowMs - session.updated) / DAY_MS;
     if (ageDays < input.olderThanDays) {
       skipped.push({ id: session.id, reason: "too_recent" });
@@ -469,7 +701,8 @@ export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
     selected.push({
       id: session.id,
       directory: session.directory,
-      canonicalDirectory: sessionCanon,
+      canonicalDirectory,
+      directoryState,
       updatedAt: new Date(session.updated).toISOString(),
       ageDays,
       recordIds: direct.map((record) => record.id),
@@ -569,6 +802,21 @@ export async function executeOpenCodeGc(
     if (isChangedDuringRun(deps, entry, selectable)) {
       blockedCount += 1;
       sessions.push({ ...entry, deleted: false, blockReason: "changed_during_run" });
+      continue;
+    }
+    // Re-run the DIRECTORY rule too, not just the record read: a directory
+    // recreated mid-run (`git worktree add` at the same path, a restore) can
+    // acquire a live record whose worktreePath is the SYMLINK spelling,
+    // which the raw record re-read above cannot see.
+    let recheck: OpenCodeGcSkipReason | null;
+    try {
+      recheck = await deps.recheckDirectory(entry);
+    } catch {
+      recheck = "directory_unresolvable";
+    }
+    if (recheck) {
+      blockedCount += 1;
+      sessions.push({ ...entry, deleted: false, blockReason: "changed_during_run", recheck });
       continue;
     }
     try {
@@ -753,7 +1001,12 @@ export interface OpenCodeGcCollectorDeps {
   listSpurRecords(): SessionRecord[];
   readSnapshotLeaves(storeRoot: string): Promise<OpenCodeSnapshotLeafInput[]>;
   statLog(storeRoot: string): Promise<{ path: string; sizeBytes: number } | null>;
-  realpath(path: string): Promise<string>;
+  probe: DirectoryProbe;
+  /**
+   * argv of every running process, or null when the process tree cannot be
+   * read. Null disables the gone fallback for the run.
+   */
+  processArgs(): Promise<readonly string[] | null>;
   freeBytes(path: string): Promise<number | null>;
   statPathSize(path: string): Promise<number | null>;
 }
@@ -776,7 +1029,9 @@ export async function collectOpenCodeGcPlan(
     storeRoot: null,
     sessions: [],
     records: [],
-    canonicalPaths: new Map(),
+    directoryStates: new Map(),
+    recordPaths: new Map(),
+    processArgs: null,
     snapshotLeaves: [],
     log: null,
     now: options.now,
@@ -799,15 +1054,12 @@ export async function collectOpenCodeGcPlan(
   if (!store) return planOpenCodeGc(base);
 
   const records = deps.listSpurRecords();
-  // Record paths must be canonical BEFORE enumeration, because they choose
-  // the directories to enumerate from. Store-session directories are folded
-  // into the same map afterwards.
-  const canonicalPaths = await resolveCanonicalPaths(
-    records.map((record) => record.worktreePath),
-    deps.realpath,
-  );
+  // Record paths resolve BEFORE enumeration, because they choose the
+  // directories to enumerate from. Each also carries the one readlink hop
+  // of 9.4, used only when the path itself will not resolve.
+  const recordPaths = await resolveRecordPaths(records, deps.probe);
 
-  const directories = candidateDirectories(records, options.statuses, canonicalPaths);
+  const directories = candidateDirectories(records, options.statuses, recordPaths);
   const merged = new Map<string, OpenCodeStoreSession>();
   let directoriesFailed = 0;
   let listTruncated = false;
@@ -835,11 +1087,9 @@ export async function collectOpenCodeGcPlan(
   }
 
   const sessions = [...merged.values()];
-  for (const [path, canonical] of await resolveCanonicalPaths(
-    sessions.map((entry) => entry.directory),
-    deps.realpath,
-  )) {
-    canonicalPaths.set(path, canonical);
+  const directoryStates = new Map<string, PathResolution>();
+  for (const directory of new Set(sessions.map((entry) => entry.directory))) {
+    directoryStates.set(directory, await resolveDirectoryState(directory, deps.probe));
   }
 
   return planOpenCodeGc({
@@ -848,7 +1098,9 @@ export async function collectOpenCodeGcPlan(
     storeRoot: store.storeRoot,
     sessions,
     records,
-    canonicalPaths,
+    directoryStates,
+    recordPaths,
+    processArgs: await deps.processArgs(),
     snapshotLeaves: await deps.readSnapshotLeaves(store.storeRoot),
     log: await deps.statLog(store.storeRoot),
     listedCount: sessions.length,
@@ -874,7 +1126,7 @@ export async function collectOpenCodeGcPlan(
 export function candidateDirectories(
   records: readonly SessionRecord[],
   statuses: readonly OpenCodeGcStatus[],
-  canonicalPaths: ReadonlyMap<string, string | null>,
+  recordPaths: ReadonlyMap<string, RecordPathInfo>,
 ): string[] {
   const selectable = new Set<string>(statuses);
   const directories = new Set<string>();
@@ -882,11 +1134,86 @@ export function candidateDirectories(
     if (record.agent !== "opencode") continue;
     if (!record.agentSessionId) continue;
     if (!selectable.has(record.status)) continue;
-    // An unresolvable path cannot be a cwd; skip it rather than guessing.
-    const canonical = canonicalPaths.get(record.worktreePath);
-    if (canonical) directories.add(canonical);
+    // A path that will not resolve cannot be a cwd; skip it rather than
+    // guessing. A gone worktree is exactly this case, and its store sessions
+    // still surface through the directories of records that DO resolve.
+    const resolution = recordPaths.get(record.worktreePath)?.resolution;
+    if (resolution?.state === "resolved") directories.add(resolution.canonical);
   }
   return [...directories].sort();
+}
+
+/**
+ * argv of every running process, or null when the process tree cannot be
+ * read. `snapshotProcesses` runs `ps -eo pid=,ppid=,rss=,etime=,args=` —
+ * argv only, NOT the env-dumping `ps e` form, so this can never surface a
+ * secret into a report. Null degrades the gone fallback to report-only,
+ * matching cache-retention's discipline.
+ */
+export interface RecheckDirectoryDeps {
+  listRecords(): SessionRecord[];
+  probe: DirectoryProbe;
+  statuses: readonly OpenCodeGcStatus[];
+  processArgs(): Promise<readonly string[] | null>;
+}
+
+/**
+ * Delete-time re-run of the full directory rule. Same evaluator the planner
+ * uses, fresh inputs. Returns the gate that now refuses the session, or null
+ * to proceed.
+ */
+export async function recheckSessionDirectory(
+  entry: OpenCodeGcSessionEntry,
+  deps: RecheckDirectoryDeps,
+): Promise<OpenCodeGcSkipReason | null> {
+  const records = deps.listRecords();
+  const byAgentSessionId = new Map<string, SessionRecord[]>();
+  const byWorkspaceId = new Map<string, SessionRecord[]>();
+  for (const record of records) {
+    if (record.agentSessionId) {
+      const bucket = byAgentSessionId.get(record.agentSessionId);
+      if (bucket) bucket.push(record);
+      else byAgentSessionId.set(record.agentSessionId, [record]);
+    }
+    const workspaceId = workspaceIdOf(record);
+    const workspaceBucket = byWorkspaceId.get(workspaceId);
+    if (workspaceBucket) workspaceBucket.push(record);
+    else byWorkspaceId.set(workspaceId, [record]);
+  }
+  const verdict = evaluateSessionProtection({
+    session: { id: entry.id, directory: entry.directory, updated: 0 },
+    records,
+    byAgentSessionId,
+    byWorkspaceId,
+    selectable: new Set<string>(deps.statuses),
+    sessionState: await resolveDirectoryState(entry.directory, deps.probe),
+    recordPaths: await resolveRecordPaths(records, deps.probe),
+    processArgs: await deps.processArgs(),
+  });
+  if (verdict.reason) return verdict.reason;
+  // A directory that was GONE at plan time and RESOLVES now was recreated
+  // under us; refuse rather than delete against the new state.
+  return verdict.directoryState === entry.directoryState ? null : "directory_unresolvable";
+}
+
+export async function readProcessArgs(): Promise<readonly string[] | null> {
+  if (!(await canReadProcessTree(process.pid))) return null;
+  const snapshot = await snapshotProcesses();
+  if (snapshot.status !== "ok") return null;
+  return snapshot.processes.map((entry) => entry.args);
+}
+
+/** Resolves every record worktreePath once, with its 9.4 readlink hop. */
+export async function resolveRecordPaths(
+  records: readonly SessionRecord[],
+  probe: DirectoryProbe,
+): Promise<Map<string, RecordPathInfo>> {
+  const out = new Map<string, RecordPathInfo>();
+  for (const path of new Set(records.map((record) => record.worktreePath))) {
+    if (!path || out.has(path)) continue;
+    out.set(path, await resolveRecordPathInfo(path, probe));
+  }
+  return out;
 }
 
 async function measureSize(path: string): Promise<number | null> {
@@ -975,6 +1302,7 @@ export function createOpenCodeGcDeps(
   // project-scoped and carry their own directory instead.
   const cwd = config.worktreeDir;
   let dbPath: string | null = null;
+  let processArgsOnce: Promise<readonly string[] | null> | undefined;
 
   return {
     resolveStore: async () => {
@@ -1007,7 +1335,8 @@ export function createOpenCodeGcDeps(
         return null;
       }
     },
-    realpath,
+    probe: REAL_DIRECTORY_PROBE,
+    processArgs: readProcessArgs,
     freeBytes: async (path) => {
       const freeKb = await readFreeKb(path);
       return freeKb === undefined ? null : freeKb * 1024;
@@ -1022,6 +1351,16 @@ export function createOpenCodeGcDeps(
     measureSize,
     removePath: (path) => rm(path, { recursive: true, force: true }),
     readRecords: (ids) => ids.map((id) => readSession(config.dataDir, id)),
+    recheckDirectory: (entry) =>
+      recheckSessionDirectory(entry, {
+        listRecords: () => listSessions(config.dataDir),
+        probe: REAL_DIRECTORY_PROBE,
+        statuses: config.opencodeGc.statuses,
+        // One `ps` per executor run, not per session: 15 processes, and a
+        // per-session re-snapshot would multiply the cost by the session
+        // count for no additional safety inside one run.
+        processArgs: () => (processArgsOnce ??= readProcessArgs()),
+      }),
     deleteSession: async (id, deleteCwd) => {
       await execFileAsync(opencodeCommand(), ["session", "delete", id], {
         cwd: deleteCwd,

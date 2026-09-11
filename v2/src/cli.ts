@@ -1364,6 +1364,14 @@ export function renderOpenCodeGcResult(report: OpenCodeGcReport): string {
   // Two differently-sourced numbers, never summed: file bytes are a du, the
   // db file delta is a stat across the VACUUM. There is no third, estimated
   // number — sizing the selected rows up front would open the store.
+  // How many selections rest on the gone-directory fallback rather than on
+  // a resolved path. A MASS gone transition sharing a path prefix is the
+  // fingerprint of a vanished parent, not of per-session cleanup, and the
+  // dry-run default means nothing moves until a human has looked.
+  const gone = report.sessions.filter((entry) => entry.directoryState === "gone").length;
+  if (gone > 0) {
+    lines.push(`selected via gone-directory: ${gone}`);
+  }
   lines.push(`Freed (files): ${formatBytes(report.totals.freedBytes)} — a floor, not the store's`);
   lines.push(dimText("  total reclaimable size: the listing is project-scoped, not store-wide."));
   lines.push(`DB file bytes returned by VACUUM: ${formatBytes(report.totals.dbFileBytesFreed)}`);

@@ -20,6 +20,7 @@ const SESSION: OpenCodeGcSessionResult = {
   id: "ses_fc843fe5dffegfDFNqCKw6TP4W",
   directory: "/w/a",
   canonicalDirectory: "/w/a",
+  directoryState: "resolved",
   updatedAt: "2026-08-01T00:00:00.000Z",
   ageDays: 40.5,
   recordIds: ["spur-a"],
@@ -132,6 +133,18 @@ describe("renderOpenCodeGcResult", () => {
     expect(blind).toContain("from 0 candidate directories");
     expect(blind).toContain("No candidate directory");
     expect(blind).toContain("Nothing to collect.");
+  });
+
+  it("counts how many selections rest on the gone-directory fallback", () => {
+    const resolved = renderOpenCodeGcResult(report());
+    const gone = renderOpenCodeGcResult(
+      report({ sessions: [{ ...SESSION, directoryState: "gone" }] }),
+    );
+
+    // A mass gone transition is the fingerprint of a vanished parent rather
+    // than per-session cleanup, so the count has to be visible.
+    expect(gone).toContain("selected via gone-directory: 1");
+    expect(resolved).not.toContain("selected via gone-directory");
   });
 
   it("names how many directories failed to list", () => {
