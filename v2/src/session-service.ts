@@ -15448,7 +15448,10 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       } else {
-        const structuredState = await readOpenCodeState(session.agentSessionId);
+        const structuredState = await readOpenCodeState(
+          session.agentSessionId,
+          runtime.tmuxActivityAt?.getTime() ?? null,
+        );
         state = structuredState?.state ?? "working";
         stateSource = "jsonl";
         classifiedDetail = structuredState
