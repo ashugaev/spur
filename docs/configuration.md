@@ -212,7 +212,7 @@ A desk group is any set of sessions sharing one workspace: the children of a `sp
 
 Shared per desk: slots (title/links/tags/PR), session artifacts, non-MCP project sidecars (`isolated-daemon`, `isolated-ui`) — one instance, addressable by any member. Per member: transcript, agent process, status, MCP sidecar (`playwright`), session tool dir.
 
-Worktree and shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. A shared sidecar and its ports are released once no member has a running agent; restoring a member starts it again.
+Worktree and shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. The shared sidecar pane survives the same way — kept until [idle TTL](#sidecar-reaping) reaps it, not tied to a running agent. Its ports are released once no member has a running agent; restoring a member starts it again.
 
 ## Modes
 
@@ -285,12 +285,14 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
-- `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
-- `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.
-- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`. `true` emits a repo's first-poll backlog instead of suppressing it, at most 10 per repo; suppressed items are recorded as seen either way. Parsed but inert for `gitlab`.
+- `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github` and `jira`, `2000` for `service`.
+- `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`. For `jira`, optional JQL; absent, the source is connection-only (no poller, no event). At most one trigger per source may subscribe to `jira:work_item.new`.
+- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`, `jira` with `query`. `true` emits the first-poll backlog instead of suppressing it, at most 10 per repo (per Jira project for `jira`); suppressed items are recorded as seen either way. Parsed but inert for `gitlab`.
+- `projects.<id>.sources.<sourceId>.maxResults`: optional for `jira`, default `100`, must be a positive number; Spur itself clamps any higher value to `100` (not an Atlassian API limit). Scopes only this source's own `query` poll — the separate `projects.<id>.backlog` fetch path always uses a fixed internal limit of 100, independent of this field. Each poll only records the issues it fetched as seen; an issue that never lands inside the top `maxResults` matches for the JQL's ordering is never recorded, so raising this value only shrinks that gap, it does not close it — bound the match count with the JQL itself (e.g. a tighter `statusCategory`/date filter) for a project with more open issues than `maxResults`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll`: optional for `github`. Enables slow-window polling; omitted entirely by default, which keeps the existing poll-every-tick cadence.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.slowIntervalMs`: optional, default `5 × intervalMs`. Must be greater than `intervalMs`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.activeGraceMs`: optional, default `600000`.
+- `projects.<id>.sources.<sourceId>.maxReviewBatchTargets`: optional for `github`, positive integer, default unset. Caps how many sessions one review poll batches into a single GraphQL call, clamped by the query's node budget (48 bound / 9 unbound targets per call) so it can only lower it.
 - `projects.<id>.sources.<sourceId>.service`: required for `service`; logical id used by `spur service run <serviceId>`.
 - `projects.<id>.sources.<sourceId>.tailLines`: optional for `service`, default `200`.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.match`: required regex for `service`.
@@ -325,6 +327,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.backlog.<backlogId>.query`: required JQL. Items are served at `GET /backlog/available` in fetch order — the server never re-sorts, so include `ORDER BY Rank ASC` for Jira's real backlog rank.
 - `projects.<id>.backlog.<backlogId>.intervalMs`: optional, default `60000`.
 - `projects.<id>.backlog.<backlogId>.runOnStart`: optional, default `false`.
+- `projects.<id>.backlog.<backlogId>.spawn`: parsed and ignored — no code path consumes it. Wire a `jira` source's own `query` plus a `jira:work_item.new` trigger instead.
 - `tags.<name>.description`: required. Sole agent-facing instruction for the tag; conditions (e.g. request-only) live here, not in source. Instance config only — a project-config `tags` block parses without error and is discarded.
 - `tags.<name>.color`: optional CSS color; auto-derived from the tag name (hashed hue) when omitted.
 - `authRotation.autoRotateOnRateLimit`: optional boolean, default `false`. Instance config only.
@@ -390,13 +393,13 @@ A reap kills the sidecar's tmux pane process tree, drops its recorded process, a
 
 A non-MCP sidecar is shared by its whole [desk group](#desk-groups) workspace. Every rule below reads the workspace, not one session.
 
-Active workspace: some member is `running`, `spawning`, or in restore warmup. `stopped`, `paused`, `errored`, `completed`, `killed` count as inactive.
+Active workspace: some member is not `completed`/`killed`, or is in restore warmup. Only an all-`completed`/`killed` workspace counts as inactive — `stopped`, `paused`, `errored` count as active.
 
-Idle time: now minus the newest activity over all members, per member `lastActivityAt` falling back to record `updatedAt`. One active member holds the shared sidecar for the rest.
+Idle time: now minus the newest activity over all members, per member the newer of the cached `lastActivityAt` and record `updatedAt`. One active member holds the shared sidecar for the rest.
 
 Decision per sidecar, first match wins:
 
-1. `sidecarGc.enabled: false` — keep.
+1. `sidecarGc.enabled: false` — keep. No sidecar reaper runs at all; a non-terminal owner's pane is never killed by this pass or the 5-minute orphan loop.
 2. MCP sidecar — keep.
 3. No live pane and no recorded process — keep.
 4. Established TCP connection on any port reserved for this sidecar — keep. Outranks every reap rule below, on any owner status.
@@ -436,12 +439,14 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, `gitlab:merge_conflict`.
-- `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
+- `jira`: `jira:work_item.new` when `query` is set. With no `query` it is connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
 - `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`. `text` also carries a transcribed voice note, see [voice.md](voice.md#telegram-voice-notes).
 
 `github` polls running sessions, matches each to a PR branch, emits changed signals only; state persists under `dataDir`. With `query` set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids. GitHub PR URLs seed the native `session.pr` binding; other review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
+
+`jira` with `query` set polls that JQL on `intervalMs`, fetching at most `maxResults` matches per poll, emits `jira:work_item.new` per unseen issue among those returned, and persists seen `<PROJECT>#<KEY>` ids (e.g. `WEBDEV#WEBDEV-5236`) — an id already in that registry never re-emits, even if the issue later leaves and re-enters the JQL result set. An issue that never falls inside the `maxResults` window is never recorded; if it later rotates into the window (a JQL ordering change, other issues resolving), it emits as new, uncapped by the first-poll backlog cap, which only applies before a project has any seen entries at all. Spawn prompts reference work-item fields with `{{key}}`, `{{title}}`, `{{url}}`, `{{externalId}}`, plus the inherited `{{number}}` (trailing digits of the key) and `{{repo}}` (the key's project prefix). `spawn.autoComplete` is supported on a `jira:work_item.new` trigger; it completes the Spur session only — no Jira issue transition is made.
 
 `github:ci_failed`: retry every 10 minutes, stop after 3 deliveries, reset when the failing signal leaves the snapshot. `github:merge_conflict`: one-shot on becoming conflicting, cleared when mergeable, re-emittable. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is never subject to this terminal-signal pause or the permanent not-found stop below (both require a bound PR number) — it can still be gated by the transient poll-failure backoff described next.
 

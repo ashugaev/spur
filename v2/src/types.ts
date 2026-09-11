@@ -167,11 +167,13 @@ export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
+export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   GITHUB_CI_RUN_COMPLETED_EVENT,
+  JIRA_WORK_ITEM_NEW_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -180,6 +182,10 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export interface JiraWorkItemEventData extends WorkItemEventData {
+  key: string;
 }
 
 export type BacklogProviderId = "jira";
@@ -248,6 +254,10 @@ export interface GitHubAdaptivePollConfig {
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   adaptivePoll?: GitHubAdaptivePollConfig;
+  // Caps how many sessions one review poll batches into a single GraphQL call.
+  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+  maxReviewBatchTargets?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -263,11 +273,15 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
-export interface JiraSourceConfig {
+export interface JiraSourceConfig extends BaseSourceConfig {
   type: "jira";
   baseUrl: string;
   email: string;
   token: string;
+  query?: string;
+  intervalMs: number;
+  emitExisting: boolean;
+  maxResults: number;
 }
 
 export interface BacklogConfig {

@@ -6,6 +6,7 @@ import { EventBus } from "../../src/event-bus.js";
 
 const logSpurEventMock = vi.fn();
 const cronStartMock = vi.fn();
+const jiraStartMock = vi.fn();
 
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
@@ -18,6 +19,13 @@ vi.mock("../../src/event-sources/cron.js", () => ({
   },
 }));
 
+vi.mock("../../src/event-sources/jira.js", () => ({
+  jiraSourceModule: {
+    type: "jira",
+    start: jiraStartMock,
+  },
+}));
+
 async function loadStartConfiguredSources() {
   return import("../../src/event-sources/index.js");
 }
@@ -26,7 +34,7 @@ const MISSING_PATH = "/definitely/not/a/real/path/spur-vanished-project";
 
 interface TestConfigProject {
   path: string;
-  sources: Record<string, { type: string }>;
+  sources: Record<string, { type: string; query?: string }>;
 }
 
 function buildConfig(
@@ -44,6 +52,8 @@ describe("startConfiguredSources", () => {
     logSpurEventMock.mockReset();
     cronStartMock.mockReset();
     cronStartMock.mockResolvedValue({ stop: vi.fn() });
+    jiraStartMock.mockReset();
+    jiraStartMock.mockResolvedValue({ stop: vi.fn() });
   });
 
   afterEach(() => {
@@ -109,6 +119,46 @@ describe("startConfiguredSources", () => {
     expect(entry.details.path).toBe(MISSING_PATH);
 
     await expect(controller.stop()).resolves.toBeUndefined();
+  });
+
+  it("skips a jira source with no query (connection-only)", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { jira: { type: "jira" } },
+      },
+    });
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    expect(jiraStartMock).not.toHaveBeenCalled();
+
+    await controller.stop();
+  });
+
+  it("starts a jira source with a query as a poller", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { jira: { type: "jira", query: "project = WEBDEV" } },
+      },
+    });
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    expect(jiraStartMock).toHaveBeenCalledTimes(1);
+
+    await controller.stop();
   });
 
   it("skips only the vanished project in a mixed config", async () => {

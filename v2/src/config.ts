@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
+  JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
@@ -631,7 +632,7 @@ function expectedEventsForSource(source: SourceConfig): string[] {
     return [TELEGRAM_MESSAGE_EVENT];
   }
   if (source.type === "jira") {
-    return [];
+    return source.query !== undefined ? [JIRA_WORK_ITEM_NEW_EVENT] : [];
   }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
@@ -696,6 +697,10 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     provider === "github"
       ? parseGitHubAdaptivePoll(raw["adaptivePoll"], label, intervalMs)
       : undefined;
+  const maxReviewBatchTargets =
+    provider === "github"
+      ? asOptionalPositiveInteger(raw["maxReviewBatchTargets"], `${label}.maxReviewBatchTargets`)
+      : undefined;
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
@@ -704,6 +709,7 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(query !== undefined ? { query } : {}),
     ...(draft !== undefined ? { draft } : {}),
     ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
+    ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -754,14 +760,20 @@ function parseJiraSource(
   projectEnv: Record<string, string>,
 ): JiraSourceConfig {
   const label = `projects.${projectId}.sources.${sourceId}`;
+  const query = asOptionalString(raw["query"], `${label}.query`);
   return {
     type: "jira",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     baseUrl: asUrlString(
       resolveRequiredEnvString(raw["baseUrl"], `${label}.baseUrl`, projectEnv),
       `${label}.baseUrl`,
     ),
     email: resolveRequiredEnvString(raw["email"], `${label}.email`, projectEnv),
     token: resolveRequiredEnvString(raw["token"], `${label}.token`, projectEnv),
+    ...(query !== undefined ? { query } : {}),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
+    maxResults: asOptionalNumber(raw["maxResults"], `${label}.maxResults`) ?? 100,
   };
 }
 
@@ -790,6 +802,9 @@ function parseBacklog(
     );
   }
 
+  // `spawn` (used by some live configs to document Take-spawn prompts) is
+  // parsed and ignored here — no code path consumes it. See
+  // docs/configuration.md's backlog section.
   return {
     source,
     provider: conn.type,
