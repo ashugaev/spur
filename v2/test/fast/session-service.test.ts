@@ -2592,7 +2592,8 @@ describe("SessionService", () => {
       });
       expect(sessions.get("api-1")?.status).toBe("running");
       const selfDestructFailed = logSpurEventMock.mock.calls.find(
-        ([, entry]) => entry.event === "session.self_destruct.failed" && entry.sessionId === "api-1",
+        ([, entry]) =>
+          entry.event === "session.self_destruct.failed" && entry.sessionId === "api-1",
       );
       expect(selfDestructFailed?.[1].level).toBe("warn");
       expect(selfDestructFailed?.[1].details).toMatchObject({ kind: "todo_ledger_empty" });
@@ -2621,7 +2622,8 @@ describe("SessionService", () => {
         code: "todo_open_work",
       });
       const selfDestructFailed = logSpurEventMock.mock.calls.find(
-        ([, entry]) => entry.event === "session.self_destruct.failed" && entry.sessionId === "api-1",
+        ([, entry]) =>
+          entry.event === "session.self_destruct.failed" && entry.sessionId === "api-1",
       );
       expect(selfDestructFailed?.[1].level).toBe("warn");
       expect(selfDestructFailed?.[1].details).toMatchObject({ kind: "todo_open_work" });

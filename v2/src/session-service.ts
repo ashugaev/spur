@@ -11097,9 +11097,14 @@ export class SessionService {
       if (!session) {
         throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       }
-      return this.applyManualStatusLocked(sessionId, "completed", {
-        prAction: "leave_open",
-      }, { eventAction: "self_destruct" });
+      return this.applyManualStatusLocked(
+        sessionId,
+        "completed",
+        {
+          prAction: "leave_open",
+        },
+        { eventAction: "self_destruct" },
+      );
     });
   }
 
@@ -11891,13 +11896,23 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request?: CompleteSessionRequest,
-    options?: { retainInList?: boolean; skipEnrichment?: false; todoActor?: TodoActor; eventAction?: ManualStatusAction },
+    options?: {
+      retainInList?: boolean;
+      skipEnrichment?: false;
+      todoActor?: TodoActor;
+      eventAction?: ManualStatusAction;
+    },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean; skipEnrichment?: boolean; todoActor?: TodoActor; eventAction?: ManualStatusAction },
+    options?: {
+      retainInList?: boolean;
+      skipEnrichment?: boolean;
+      todoActor?: TodoActor;
+      eventAction?: ManualStatusAction;
+    },
   ): Promise<SessionView | void> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
