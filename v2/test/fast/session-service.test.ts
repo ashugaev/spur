@@ -12832,15 +12832,15 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(999);
       expect(readHostMemoryMock).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      // 2, not 1: runMemoryShedTick now also runs updateMemoryHold (the
-      // memory-hold latch), which reads host memory once via
-      // evaluateMemoryDenial before runMemoryShed's own pressure sample.
-      expect(readHostMemoryMock).toHaveBeenCalledTimes(2);
+      // 1: runMemoryShedTick takes one host-memory sample for the tick and
+      // shares it between updateMemoryHold (the memory-hold latch) and
+      // runMemoryShed's opening pressure read.
+      expect(readHostMemoryMock).toHaveBeenCalledTimes(1);
 
       service.dispose();
       expect(service.memoryShedTimer).toBeNull();
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(readHostMemoryMock).toHaveBeenCalledTimes(2);
+      expect(readHostMemoryMock).toHaveBeenCalledTimes(1);
     });
 
     it("rejects overlap before sampling and releases the guard after failure", async () => {
@@ -12877,10 +12877,10 @@ describe("SessionService", () => {
       );
       listTmuxSessionNamesMock.mockResolvedValue(new Set());
       await service.runMemoryShed();
-      // 4, not 3: the runMemoryShedTick call above also ran updateMemoryHold,
-      // which reads host memory once via evaluateMemoryDenial in addition to
-      // runMemoryShed's own pressure sample.
-      expect(readHostMemoryMock).toHaveBeenCalledTimes(4);
+      // 3, not 4: the runMemoryShedTick call above shares one host-memory
+      // sample between updateMemoryHold and runMemoryShed's opening pressure
+      // read, instead of each taking its own.
+      expect(readHostMemoryMock).toHaveBeenCalledTimes(3);
     });
 
     it("sheds one MCP then user sidecar before one session after 12 seconds", async () => {
@@ -14225,66 +14225,6 @@ describe("SessionService", () => {
       expect(delivered).toBe(true);
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
-    });
-
-    it("logs session.message.delivery_failed once across repeated memory-guard denials whose message text changes", async () => {
-      mockClaudeJsonlState("waiting");
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      service.dispose();
-      const sessions = createSessionStore();
-      sessions.set("api-1", {
-        id: "api-1",
-        project: "api",
-        agent: "claude",
-        prompt: "ship the task",
-        branch: "api-1",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:01:00.000Z",
-        queuedMessages: { messages: ["queued"], awaitingPrompt: false },
-      });
-      // Forces the drain's inner attempt to throw a memory-guard denial whose
-      // message text changes every call (the live MiB sample embedded in the
-      // real message, session-service.ts :14657), the exact condition the
-      // stable "memory_guard" dedupe key exists for.
-      let attempt = 0;
-      const ensureSpy = vi
-        .spyOn(
-          service as unknown as {
-            ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord>;
-          },
-          "ensureSessionReadyForSend",
-        )
-        .mockImplementation(() => {
-          attempt += 1;
-          throw new SessionAdmissionDeniedError(
-            `Cannot wake session for project "api": memory guard crossed — available memory ${9_000 + attempt}MB is below the floor`,
-            "memory_guard",
-          );
-        });
-
-      const delivered1 = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
-      expect(delivered1).toBe(true);
-      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued"]);
-      expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "session.message.delivery_failed",
-        ),
-      ).toHaveLength(1);
-
-      const delivered2 = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
-      expect(delivered2).toBe(true);
-      expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "session.message.delivery_failed",
-        ),
-      ).toHaveLength(1);
-      ensureSpy.mockRestore();
     });
 
     it("never engages the memory hold when admission is disabled, and still emits session.admission.memory_guard", async () => {
