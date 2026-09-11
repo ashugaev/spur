@@ -16175,6 +16175,13 @@ describe("SessionService", () => {
       dead: true,
       unresponsive: true,
     });
+    // Matches production's own consequence of a dead/unreadable pane read
+    // (isProcessRunningInTmux sees no ttys and resolves false), rather than
+    // this suite's ambient default-true stub — with the default the "exited"
+    // verdict would come out false for the WRONG reason (a lying "process
+    // alive" mock) and this fixture would stay green even with the
+    // probeUnresponsive gate deleted from the source.
+    isProcessRunningInTmuxMock.mockReset().mockResolvedValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -40248,7 +40255,22 @@ describe("SessionService", () => {
           dead: true,
           unresponsive: true,
         });
+        // Same non-default stub as the unit-level duplicate above: a dead
+        // pane read means production's own isProcessRunningInTmux would see
+        // no ttys and resolve false, never this suite's ambient default-true
+        // stub — otherwise a false-kill regression here would stay masked by
+        // a mock that always claims the process is alive.
+        isProcessRunningInTmuxMock.mockReset().mockResolvedValue(false);
         sidecarTmuxAliveMock.mockResolvedValue(true);
+        // confirmAgentExited's own retry delay (PIPELINE_POLL_INTERVAL_MS)
+        // goes through this real-timer mock, not the fake-timer clock the
+        // reaper tick advances below — without resolving it immediately the
+        // awaited confirmAgentExited call never settles inside this test, and
+        // both the kill and the ps-probe assertions below would pass
+        // vacuously on an unsettled promise regardless of the source gate.
+        // Same pattern as "AC6b: still kills a completed owner's orphaned
+        // agent AND sidecar tmux" a few lines down.
+        timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
 
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
