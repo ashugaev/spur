@@ -288,12 +288,11 @@ interface CachedDirListing extends FileFingerprint {
 // records keep their object identity.
 const sessionDirListingCache = new Map<string, CachedDirListing>();
 
-// A cached listing is reusable only once the directory has been quiet for this
-// long. Insurance for a filesystem whose directory timestamps are coarse or
-// lazily flushed (a network mount, a fuse layer, a 1-second-granularity
-// export), where a create landing inside the same timestamp tick as our stat
-// would otherwise pin a stale listing indefinitely. On this host's ext4 it
-// costs nothing: 0 of 1841 subdirectories were younger than 1 s.
+// A listing is stored only once the directory mtime is older than this.
+// Measured at STORE time (between readdir and the fingerprint it is keyed on),
+// not at HIT time — so a mutation landing after readdir but inside the same
+// timestamp tick as the pre-readdir stat never gets cached. Insurance for a
+// filesystem whose directory timestamps are coarse or lazily flushed.
 const DIR_LISTING_MIN_AGE_MS = 1_000;
 
 function statFingerprint(path: string): FileFingerprint | null {
@@ -861,8 +860,9 @@ function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<st
 }
 
 // The *.json entries of one subdirectory of dataDir/sessions, served from
-// cache while the directory's own fingerprint is unchanged AND it has been
-// quiet for DIR_LISTING_MIN_AGE_MS. Soundness rests on the directory's mtime
+// cache while the directory's own fingerprint is unchanged. Stored only when
+// the pre-readdir mtime is older than DIR_LISTING_MIN_AGE_MS. Soundness rests
+// on the directory's mtime
 // ADVANCING on every entry mutation — create, rename-over, rename-out and
 // unlink all do, and writeJsonFile's tmp+rename mutates it twice. ino is a
 // cheap extra discriminator only: this ext4 reuses a directory inode across
@@ -877,11 +877,7 @@ function listSessionDirJsonNames(dir: string): readonly string[] {
   }
 
   const cached = sessionDirListingCache.get(dir);
-  if (
-    cached &&
-    sameFingerprint(cached, fingerprint) &&
-    Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS
-  ) {
+  if (cached && sameFingerprint(cached, fingerprint)) {
     return cached.names;
   }
 
@@ -889,12 +885,14 @@ function listSessionDirJsonNames(dir: string): readonly string[] {
   // Keyed on the PRE-readdir fingerprint: a mutation landing between the stat
   // and the readdir stores a listing under the older mtime, so the next call's
   // stat misses and re-reads once. Fails safe, never stale.
-  sessionDirListingCache.set(dir, {
-    ino: fingerprint.ino,
-    mtimeMs: fingerprint.mtimeMs,
-    size: fingerprint.size,
-    names,
-  });
+  if (Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS) {
+    sessionDirListingCache.set(dir, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      names,
+    });
+  }
   return names;
 }
 

@@ -10,10 +10,10 @@
 //
 // Lives in its own file so the module mock cannot leak into metadata.test.ts.
 //
-// FIXTURE RULE: a cache hit requires (now - dir mtimeMs) > 1000 ms, so a
-// fixture built and listed inside one test is too young to ever hit. Every
-// case that expects a HIT ages its subdirectories with utimesSync first. Case
-// 6 is the one that pins the guard itself.
+// FIXTURE RULE: a listing is stored only when (now - dir mtimeMs) > 1000 ms, so a
+// fixture built and listed inside one test is too young to cache. Every case
+// that expects a HIT ages its subdirectories with utimesSync first. Case 6
+// pins the guard itself.
 import type * as NodeFs from "node:fs";
 import { mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
