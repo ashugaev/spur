@@ -467,6 +467,8 @@ Message delivery events: `session.message.sent`, `session.message.delivery_recov
 
 Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff doubles from 2 minutes to a 30-minute cap), `session.todo.nudge_disabled` (give-up; `details.kind` is `ledger_corrupt` or `target_gone`). `session.todo.nudge_disabled` is emitted at most once per session per liveness episode.
 
+Session lifecycle events, one caller-named pair each: `session.complete.completed`, `session.complete.failed`, `session.pause.completed`, `session.pause.failed`, `session.self_destruct.completed`, `session.self_destruct.failed`, `session.desk_complete.completed`, `session.desk_complete.failed`, `session.handoff.completed`, `session.handoff.failed`. A refusal by the ToDo gate (empty ledger or open/held work) logs the `.failed` event at `warn` with `details.kind` `todo_ledger_empty` or `todo_open_work`; every other failure cause logs `.failed` at `error` with no `details.kind`. Cut note: before this change, `self_destruct`, `desk_complete`, and `handoff` all logged under `session.complete.*` — a query over historical `events.jsonl` must union the old and new names to cover events written before the change.
+
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
 
 ## Daemon restarts

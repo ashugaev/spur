@@ -878,6 +878,7 @@ const PLAN_MODE_PROMPT_SUFFIX =
 const RESTRICT_WRITES_PROMPT_SUFFIX =
   "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
+type ManualStatusAction = "complete" | "pause" | "self_destruct" | "desk_complete" | "handoff";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 /**
@@ -11096,9 +11097,14 @@ export class SessionService {
       if (!session) {
         throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       }
-      return this.applyManualStatusLocked(sessionId, "completed", {
-        prAction: "leave_open",
-      });
+      return this.applyManualStatusLocked(
+        sessionId,
+        "completed",
+        {
+          prAction: "leave_open",
+        },
+        { eventAction: "self_destruct" },
+      );
     });
   }
 
@@ -11133,8 +11139,28 @@ export class SessionService {
           }
         }
         if (options?.todoActor?.kind !== "human") {
-          if (emptySessionIds.length > 0) throw new TodoEmptyLedgerError(emptySessionIds);
-          if (unfinishedBlocked.length > 0) throw new TodoOpenWorkError(unfinishedBlocked);
+          if (emptySessionIds.length > 0) {
+            const error = new TodoEmptyLedgerError(emptySessionIds);
+            this.logManualStatusFailure(
+              "desk_complete",
+              "completed",
+              sessionId,
+              session.project,
+              error,
+            );
+            throw error;
+          }
+          if (unfinishedBlocked.length > 0) {
+            const error = new TodoOpenWorkError(unfinishedBlocked);
+            this.logManualStatusFailure(
+              "desk_complete",
+              "completed",
+              sessionId,
+              session.project,
+              error,
+            );
+            throw error;
+          }
         }
         const completedIds: string[] = [];
         for (const candidate of candidates) {
@@ -11142,6 +11168,7 @@ export class SessionService {
           if (isTerminalSessionStatus(current.status)) continue;
           await this.applyManualStatusLocked(candidate.id, "completed", request, {
             ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+            eventAction: "desk_complete",
           });
           completedIds.push(candidate.id);
         }
@@ -11880,23 +11907,67 @@ export class SessionService {
     throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
+  // Classifies a manual-status-gate refusal for the failure event. A ToDo
+  // cause (empty ledger or unfinished work) demotes to `warn` with
+  // `details.kind`, because the gate rejected before any teardown and the
+  // session is untouched. Exception: the `handoff` caller at the
+  // POST-SPAWN site (a successor session already exists at throw time, see
+  // the Handoff double-gate) stays `error` even on a ToDo cause; the
+  // `handoff` PRE-SPAWN gate throws before a successor exists and still
+  // demotes to `warn` like every other caller. Every other cause stays
+  // `error` with no `details`.
+  private logManualStatusFailure(
+    action: ManualStatusAction,
+    targetStatus: ManualSessionStatus,
+    sessionId: string,
+    projectId: string,
+    error: unknown,
+    site: "pre_spawn" | "post_spawn" = "pre_spawn",
+  ): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const isTodoCause = error instanceof TodoEmptyLedgerError || error instanceof TodoOpenWorkError;
+    const isPostSpawnHandoff = action === "handoff" && site === "post_spawn";
+    const level = isTodoCause && !isPostSpawnHandoff ? "warn" : "error";
+    const details =
+      isTodoCause && !isPostSpawnHandoff
+        ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
+        : undefined;
+    this.logEvent(`session.${action}.failed`, {
+      level,
+      sessionId,
+      projectId,
+      message: `Failed to mark ${sessionId} as ${targetStatus}: ${message}`,
+      ...(details ? { details } : {}),
+    });
+  }
+
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
-    options: { retainInList?: boolean; skipEnrichment: true },
+    options: { retainInList?: boolean; skipEnrichment: true; eventAction?: ManualStatusAction },
   ): Promise<void>;
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request?: CompleteSessionRequest,
-    options?: { retainInList?: boolean; skipEnrichment?: false; todoActor?: TodoActor },
+    options?: {
+      retainInList?: boolean;
+      skipEnrichment?: false;
+      todoActor?: TodoActor;
+      eventAction?: ManualStatusAction;
+    },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean; skipEnrichment?: boolean; todoActor?: TodoActor },
+    options?: {
+      retainInList?: boolean;
+      skipEnrichment?: boolean;
+      todoActor?: TodoActor;
+      eventAction?: ManualStatusAction;
+    },
   ): Promise<SessionView | void> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
@@ -11945,7 +12016,8 @@ export class SessionService {
     if (isTerminalSessionStatus(session.status)) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
     }
-    const eventAction = targetStatus === "stopped" ? "pause" : "complete";
+    const eventAction: ManualStatusAction =
+      options?.eventAction ?? (targetStatus === "stopped" ? "pause" : "complete");
 
     try {
       if (targetStatus === "completed") {
@@ -11983,13 +12055,14 @@ export class SessionService {
         deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent(`session.${eventAction}.failed`, {
-        level: "error",
+      this.logManualStatusFailure(
+        eventAction,
+        targetStatus,
         sessionId,
-        projectId: session.project,
-        message: `Failed to mark ${sessionId} as ${targetStatus}: ${message}`,
-      });
+        session.project,
+        error,
+        "post_spawn",
+      );
       throw error;
     }
 
@@ -13675,8 +13748,12 @@ export class SessionService {
     const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
     const handoffBlock = todoLedgerBlock(handoffProjection);
     if (handoffBlock && options?.todoActor?.kind !== "human") {
-      if (handoffBlock === "empty") throw new TodoEmptyLedgerError([sessionId]);
-      throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+      const error =
+        handoffBlock === "empty"
+          ? new TodoEmptyLedgerError([sessionId])
+          : new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+      this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
+      throw error;
     }
     // Gate before any teardown below. The source session is still on-disk as
     // running/spawning here, so a denial leaves it fully untouched — no kill,
@@ -13807,7 +13884,7 @@ export class SessionService {
         session.id,
         "completed",
         { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true },
+        { retainInList: true, eventAction: "handoff" },
       );
 
       return spawned;
