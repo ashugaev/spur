@@ -1,3 +1,4 @@
+import type { Mock } from "vitest";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,7 +58,7 @@ async function setupInstance(
 }
 
 describe("GET /deploy/versions", () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
+  let fetchSpy: Mock<typeof fetch>;
   let originalFetch: typeof fetch;
 
   beforeEach(() => {

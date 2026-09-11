@@ -1,3 +1,4 @@
+import type { Mock } from "vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const fsMockState = vi.hoisted(() => ({
@@ -101,19 +102,19 @@ const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
 
 const mockExecFileAsync = (() => {
   const value = (
-    childProcess.execFile as unknown as Record<symbol, ReturnType<typeof vi.fn> | undefined>
+    childProcess.execFile as unknown as Record<symbol, Mock | undefined>
   )[PROMISIFY_CUSTOM];
   if (!value) {
     throw new Error("Expected execFile mock to expose promisify.custom");
   }
   return value;
 })();
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockLinkSync = linkSync as ReturnType<typeof vi.fn>;
-const mockMkdirSync = mkdirSync as ReturnType<typeof vi.fn>;
-const mockRmSync = rmSync as ReturnType<typeof vi.fn>;
-const mockStatSync = statSync as ReturnType<typeof vi.fn>;
-const mockSymlinkSync = symlinkSync as ReturnType<typeof vi.fn>;
+const mockExistsSync = existsSync as unknown as Mock;
+const mockLinkSync = linkSync as unknown as Mock;
+const mockMkdirSync = mkdirSync as unknown as Mock;
+const mockRmSync = rmSync as unknown as Mock;
+const mockStatSync = statSync as unknown as Mock;
+const mockSymlinkSync = symlinkSync as unknown as Mock;
 
 function mockGitSuccess(stdout = ""): void {
   mockExecFileAsync.mockResolvedValueOnce({ stdout: stdout ? `${stdout}\n` : "", stderr: "" });

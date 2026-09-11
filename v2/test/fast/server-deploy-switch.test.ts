@@ -1,3 +1,4 @@
+import type { Mock } from "vitest";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -112,7 +113,7 @@ function registryResponse(versions: ReadonlyArray<string>): Response {
 }
 
 describe("POST /deploy/switch", () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
+  let fetchSpy: Mock<typeof fetch>;
   let originalFetch: typeof fetch;
 
   beforeEach(() => {

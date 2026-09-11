@@ -1,3 +1,4 @@
+import type { Mock } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:fs", () => ({
@@ -57,8 +58,8 @@ import {
   scanCodexRolloutForMessage,
 } from "../../src/agents/codex.js";
 
-const mockCreateReadStream = createReadStream as ReturnType<typeof vi.fn>;
-const mockCreateInterface = createInterface as ReturnType<typeof vi.fn>;
+const mockCreateReadStream = createReadStream as unknown as Mock;
+const mockCreateInterface = createInterface as unknown as Mock;
 
 function requireValue<T>(value: T | null | undefined, message: string): T {
   if (value === null || value === undefined) {
@@ -67,17 +68,17 @@ function requireValue<T>(value: T | null | undefined, message: string): T {
   return value;
 }
 
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
-const mockCp = cp as ReturnType<typeof vi.fn>;
-const mockReaddir = readdir as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
-const mockLstat = lstat as ReturnType<typeof vi.fn>;
-const mockRm = rm as ReturnType<typeof vi.fn>;
-const mockSymlink = symlink as ReturnType<typeof vi.fn>;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+const mockExistsSync = existsSync as unknown as Mock;
+const mockMkdir = mkdir as unknown as Mock;
+const mockReadFile = readFile as unknown as Mock;
+const mockWriteFile = writeFile as unknown as Mock;
+const mockCp = cp as unknown as Mock;
+const mockReaddir = readdir as unknown as Mock;
+const mockStat = stat as unknown as Mock;
+const mockLstat = lstat as unknown as Mock;
+const mockRm = rm as unknown as Mock;
+const mockSymlink = symlink as unknown as Mock;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock;
 
 beforeEach(() => {
   vi.clearAllMocks();

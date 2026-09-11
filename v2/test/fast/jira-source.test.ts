@@ -34,7 +34,7 @@ function config(overrides: Partial<JiraSourceConfig> = {}): JiraSourceConfig {
   };
 }
 
-async function start(emit: ReturnType<typeof vi.fn>, overrides: Partial<JiraSourceConfig> = {}) {
+async function start(emit: (name: string, data?: unknown) => void, overrides: Partial<JiraSourceConfig> = {}) {
   return jiraSourceModule.start({
     sourceId: "jira",
     projectId: "backend",

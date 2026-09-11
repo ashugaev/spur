@@ -1,6 +1,8 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
+import type { SourceSessionListItem } from "../../src/event-sources/types.js";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
 import { writeTelegramBindings } from "../../src/metadata.js";
@@ -107,28 +109,14 @@ async function startSource(
     resolveWebBaseUrl?: () => Promise<string | null>;
   } = {},
 ) {
-  const listSessions =
-    overrides.listSessions ??
-    vi.fn().mockResolvedValue([
-      {
-        id: "api-1",
-        project: "api",
-        agent: "codex",
-        state: "waiting",
-      },
-      {
-        id: "api-2",
-        project: "api",
-        agent: "claude",
-        state: "working",
-      },
-      {
-        id: "web-1",
-        project: "web",
-        agent: "cursor",
-        state: "waiting",
-      },
-    ]);
+  const defaultListSessions = vi.fn(() =>
+    Promise.resolve([
+      { id: "api-1", project: "api", agent: "codex", state: "waiting" },
+      { id: "api-2", project: "api", agent: "claude", state: "working" },
+      { id: "web-1", project: "web", agent: "cursor", state: "waiting" },
+    ] as SourceSessionListItem[])
+  );
+  const listSessions = (overrides.listSessions ?? defaultListSessions) as unknown as Mock<() => Promise<SourceSessionListItem[]>>;
   const stop = overrides.stop ?? vi.fn().mockResolvedValue(undefined);
   const task = overrides.task ?? vi.fn().mockReturnValue(Promise.resolve());
   const logger = { info: vi.fn(), warn: vi.fn() };

@@ -936,7 +936,7 @@ describe("github source", () => {
     ghMock.mockReset();
   });
 
-  async function startLifecycle(emit: ReturnType<typeof vi.fn>) {
+  async function startLifecycle(emit: (name: string, data?: unknown) => void) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
