@@ -3393,15 +3393,25 @@ export class SessionService {
         // (which excludes the passed-in session by design, for its own
         // sibling-only call sites) — a single-member workspace whose sole
         // session is itself running must read as workspace-running here.
+        // "Running" here means no member is completed/killed (rather than
+        // running|spawning only) — a workspace with a stopped/paused/errored
+        // member is still restorable and must keep its shared pane alive.
         const workspaceMembers = owner ? this.listDeskSessions(owner, sessions) : [];
         const workspaceRunning =
-          workspaceMembers.some((m) => m.status === "running" || m.status === "spawning") ||
+          workspaceMembers.some((m) => !isTerminalSessionStatus(m.status)) ||
           workspaceMembers.some((m) => this.isInRestoreWarmup(m.id));
 
         let lastActivityAtMs: number | null = null;
         for (const member of workspaceMembers) {
-          const iso = this.dashboardCache.get(member.id)?.lastActivityAt ?? member.updatedAt;
-          const ms = Date.parse(iso);
+          const cached = this.dashboardCache.get(member.id)?.lastActivityAt;
+          const cachedMs = cached ? Date.parse(cached) : NaN;
+          const updatedMs = Date.parse(member.updatedAt);
+          const ms =
+            Number.isFinite(cachedMs) && Number.isFinite(updatedMs)
+              ? Math.max(cachedMs, updatedMs)
+              : Number.isFinite(cachedMs)
+                ? cachedMs
+                : updatedMs;
           if (Number.isFinite(ms) && (lastActivityAtMs === null || ms > lastActivityAtMs)) {
             lastActivityAtMs = ms;
           }
@@ -5402,13 +5412,17 @@ export class SessionService {
     }
   }
 
-  // Safety net: a terminal (killed/completed/stopped) session's tmux is
+  // Safety net: a terminal (killed/completed/stopped) session's agent tmux is
   // supposed to already be gone, but restarts, crashes mid-teardown, or races
   // can leave it running. This periodically sweeps for that and kills the
   // orphan — but only after two probes, a second apart, both agree no agent
   // process is alive in it. A live agent under a terminal record is left
-  // untouched (tmux and its sidecars alike) and flagged instead of killed:
-  // killing a live session is the one mistake this loop must never make.
+  // untouched and flagged instead of killed: killing a live session is the
+  // one mistake this loop must never make. Its sidecar half is narrower:
+  // a sidecar pane is reaped here only when the owner is completed/killed
+  // (isTerminalSessionStatus) — a non-terminal owner (including plain
+  // stopped/paused/errored) is restorable, and its sidecar's only reapers
+  // are the idle-TTL policy pass and the connection veto.
   private async reapOrphanedTmux(): Promise<void> {
     if (this.reaperRunning) {
       return;
@@ -5422,11 +5436,9 @@ export class SessionService {
           // kills it) — unlike stale_timeout, whose pane parkStaleSession
           // already confirmed dead before writing the record, so this loop's
           // own dead-pane assumption holds for it exactly as it does for a
-          // plain stopped/killed/completed session. Excluding it here would
-          // leave a sidecar pane orphaned by a teardown that threw mid-park
-          // with no reaper: reapDeadSessionSidecars only picks up project
-          // sidecars on its idle-TTL policy pass (config-gated, sidecarGc.
-          // enabled), and this loop is the only unconditional safety net.
+          // plain stopped/killed/completed session. This carve-out is about
+          // the AGENT pane only; sidecar reaping below is now gated
+          // separately, on terminal owner status.
           session.stopReason !== "manual_pause",
       );
       let reaped = 0;
@@ -5459,12 +5471,21 @@ export class SessionService {
           // under it breaks a live session as surely as killing its tmux would.
           continue;
         }
+        if (!isTerminalSessionStatus(session.status)) {
+          // A non-terminal owner (stopped/paused/errored) can still be
+          // restored, and its sidecars go with it. This loop's sidecar half
+          // only ever removes a completed/killed owner's leftover pane; the
+          // idle-TTL policy pass and the connection veto are the reapers for
+          // everything else.
+          continue;
+        }
         // A desk-shared sidecar's pane is named after the desk anchor, so on a
-        // terminal anchor this loop would otherwise reap the pane a live
-        // sibling is still using. Same rule as teardownSessionSidecars: the
-        // last running member releases it.
+        // terminal anchor this loop would otherwise reap the pane a restorable
+        // sibling is still using. Same active-workspace semantics as the
+        // policy pass (collectSidecarReapCandidates): any non-terminal member
+        // holds the shared pane.
         const deskSiblingsAlive =
-          (session.sidecarNames?.length ?? 0) > 0 && this.hasRunningWorkspaceMembers(session);
+          (session.sidecarNames?.length ?? 0) > 0 && this.hasActiveWorkspaceMembers(session);
         // Resolved unconditionally (not only when deskSiblingsAlive): every
         // sidecar's owner id below needs it, since a desk-shared sidecar's
         // pane is named after the desk anchor/owner, never this session's
