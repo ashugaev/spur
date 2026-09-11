@@ -13924,6 +13924,535 @@ describe("SessionService", () => {
     });
   });
 
+  describe("memory-guard hold", () => {
+    function denyingMemory(availableBytes = 9_000_000_000) {
+      return {
+        totalBytes: 65_000_000 * 1024,
+        availableBytes,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      };
+    }
+
+    function recoveredMemory(availableBytes = 12_000_000_000) {
+      return {
+        totalBytes: 65_000_000 * 1024,
+        availableBytes,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      };
+    }
+
+    it("memory guard denial carries reason memory_guard and cap denial carries reason cap", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        admission: {
+          ...baseConfig().admission,
+          memoryGuard: { ...baseConfig().admission.memoryGuard, enforce: true, enforceFloors: true },
+        },
+      });
+      readHostMemoryMock.mockReturnValue(denyingMemory(100 * 1024));
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toMatchObject({
+        reason: "memory_guard",
+        statusCode: 429,
+      });
+      service.dispose();
+
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        admission: { ...baseConfig().admission, maxLiveSessions: 0 },
+      });
+      readHostMemoryMock.mockReturnValue(null);
+      const service2 = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await expect(service2.spawn({ project: "api", prompt: "hello" })).rejects.toMatchObject({
+        reason: "cap",
+        statusCode: 429,
+      });
+      expect(
+        (await service2.spawn({ project: "api", prompt: "hello" }).catch((error) => error)) instanceof
+          SessionAdmissionDeniedError,
+      ).toBe(true);
+      service2.dispose();
+    });
+
+    it("emits one hold engaged event per episode regardless of tick count, then clears after ten consecutive recovered ticks", async () => {
+      loadConfigMock.mockReturnValue(baseConfig());
+      const sessions: SessionRecord[] = [];
+      for (let i = 0; i < 40; i += 1) {
+        sessions.push(
+          sessionRecord({
+            id: `api-${i}`,
+            status: "stopped",
+            stopReason: "stale_timeout",
+            scheduledWake: { dueAt: "2026-03-18T10:00:00.000Z", message: `wake ${i}` },
+          }),
+        );
+      }
+      listSessionsMock.mockReturnValue(sessions);
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(60);
+
+      const engagedEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "daemon.memory.hold.engaged");
+      expect(engagedEvents).toHaveLength(1);
+      expect(engagedEvents[0]?.details).toEqual({
+        availableBytes: 9_000_000_000,
+        floorBytes: 9_610_612_736,
+        someAvg10: null,
+        cause: "context_floor",
+      });
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.deferred",
+        ),
+      ).toHaveLength(0);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.message.failed",
+        ),
+      ).toHaveLength(0);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "trigger.send.failed",
+        ),
+      ).toHaveLength(0);
+
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      logSpurEventMock.mockClear();
+      await advanceSeconds(10);
+
+      const clearedEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "daemon.memory.hold.cleared");
+      expect(clearedEvents).toHaveLength(1);
+      expect(clearedEvents[0]?.details).toEqual({
+        availableBytes: 12_000_000_000,
+        floorBytes: 9_610_612_736,
+        marginBytes: 1_610_612_736,
+        durationMs: 69_000,
+        engagedCause: "context_floor",
+        reason: "recovered",
+      });
+
+      service.dispose();
+    });
+
+    it("requires ten consecutive clear ticks above the floor plus margin before emitting hold cleared, and a denying tick resets the counter", async () => {
+      loadConfigMock.mockReturnValue(baseConfig());
+      listSessionsMock.mockReturnValue([]);
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.engaged",
+        ),
+      ).toHaveLength(1);
+
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      await advanceSeconds(9);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.cleared",
+        ),
+      ).toHaveLength(0);
+
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+      await advanceSeconds(1);
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      await advanceSeconds(9);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.cleared",
+        ),
+      ).toHaveLength(0);
+      // Interleaved denial never re-emitted engaged: still exactly one total.
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.engaged",
+        ),
+      ).toHaveLength(1);
+
+      await advanceSeconds(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.cleared",
+        ),
+      ).toHaveLength(1);
+
+      service.dispose();
+    });
+
+    it("holds a due scheduled wake without claiming it while the memory hold is engaged and delivers it after the hold clears", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({}));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Engage the hold first, on a session with no due wake yet: the
+      // wake-poll timer and the memory-shed timer are independent 1s
+      // intervals, so on the very first tick either could fire first. Adding
+      // the due wake only after the hold is already confirmed engaged
+      // removes that race from this assertion.
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "reminder" },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.scheduledWake).toEqual({
+        dueAt: "2026-03-18T10:05:00.000Z",
+        message: "reminder",
+      });
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.wake.deferred",
+        ),
+      ).toHaveLength(0);
+
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      // Ten ticks to satisfy MEMORY_HOLD_CLEAR_TICKS, plus one more: the
+      // wake-poll and memory-shed timers are independent 1s intervals, so
+      // the clearing tick itself may fire the wake-poll check before that
+      // same tick's updateMemoryHold has released the hold.
+      await advanceSeconds(11);
+
+      expect(sessions.get("api-1")?.scheduledWake).toBeUndefined();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("reminder"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("still denies a wake below the restore floor when the hold is not engaged", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "stale_timeout",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      // Fresh construction: the 1s memory-shed tick has not fired yet, so the
+      // hold is not (yet) engaged — this proves the guard itself, not the
+      // hold, still refuses.
+      expect(service.memoryHoldEngaged()).toBe(false);
+
+      await expect(service.send("api-1", { message: "resume", queue: false })).rejects.toThrow(
+        SessionAdmissionDeniedError,
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.admission.denied" }),
+      );
+      service.dispose();
+    });
+
+    it("holds a queued message while the memory hold is engaged and delivers it after the hold clears", async () => {
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        queuedMessages: { messages: ["queued while held"], awaitingPrompt: false },
+      });
+
+      // The background loops are disposed (createDisposedSessionService), so
+      // the latch never ticks on its own here: drive it directly to prove
+      // the drain's own gate, deterministically, with no timer race against
+      // the wake-poll or memory-shed intervals.
+      const holdState = service as unknown as { memoryHold: { engaged: boolean } };
+      holdState.memoryHold.engaged = true;
+
+      const held = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+      expect(held).toBe(false);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.message.delivery_failed" }),
+      );
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued while held"]);
+
+      holdState.memoryHold.engaged = false;
+      const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+      expect(delivered).toBe(true);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    });
+
+    it("logs session.message.delivery_failed once across repeated memory-guard denials whose message text changes", async () => {
+      mockClaudeJsonlState("waiting");
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.dispose();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        queuedMessages: { messages: ["queued"], awaitingPrompt: false },
+      });
+      // Forces the drain's inner attempt to throw a memory-guard denial whose
+      // message text changes every call (the live MiB sample embedded in the
+      // real message, session-service.ts :14657), the exact condition the
+      // stable "memory_guard" dedupe key exists for.
+      let attempt = 0;
+      const ensureSpy = vi
+        .spyOn(
+          service as unknown as {
+            ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord>;
+          },
+          "ensureSessionReadyForSend",
+        )
+        .mockImplementation(() => {
+          attempt += 1;
+          throw new SessionAdmissionDeniedError(
+            `Cannot wake session for project "api": memory guard crossed — available memory ${9_000 + attempt}MB is below the floor`,
+            "memory_guard",
+          );
+        });
+
+      const delivered1 = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+      expect(delivered1).toBe(true);
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued"]);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.message.delivery_failed",
+        ),
+      ).toHaveLength(1);
+
+      const delivered2 = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+      expect(delivered2).toBe(true);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.message.delivery_failed",
+        ),
+      ).toHaveLength(1);
+      ensureSpy.mockRestore();
+    });
+
+    it("never engages the memory hold when admission is disabled, and still emits session.admission.memory_guard", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        admission: { ...baseConfig().admission, enabled: false },
+      });
+      readHostMemoryMock.mockReturnValue(denyingMemory(100 * 1024));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await advanceSeconds(60);
+      expect(service.memoryHoldEngaged()).toBe(false);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.engaged",
+        ),
+      ).toHaveLength(0);
+
+      const result = await service.spawn({ project: "api", prompt: "hello" });
+      expect(result.id).toBeTruthy();
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.admission.memory_guard", level: "warn" }),
+      );
+      service.dispose();
+    });
+
+    it("never engages the memory hold when enforce and enforceFloors are both off, and still emits session.admission.memory_guard", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        admission: {
+          ...baseConfig().admission,
+          memoryGuard: {
+            ...baseConfig().admission.memoryGuard,
+            enforce: false,
+            enforceFloors: false,
+          },
+        },
+      });
+      readHostMemoryMock.mockReturnValue(denyingMemory(100 * 1024));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await advanceSeconds(60);
+      expect(service.memoryHoldEngaged()).toBe(false);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.engaged",
+        ),
+      ).toHaveLength(0);
+
+      await service.spawn({ project: "api", prompt: "hello" });
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.admission.memory_guard", level: "warn" }),
+      );
+      service.dispose();
+    });
+
+    it("releases an engaged hold when admission is disabled mid-episode", async () => {
+      loadConfigMock.mockReturnValue(baseConfig());
+      listSessionsMock.mockReturnValue([]);
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      service.applyConfig(
+        {
+          ...baseConfig(),
+          admission: { ...baseConfig().admission, enabled: false },
+        } as unknown as AppConfig,
+        ["/tmp/spur.yaml"],
+      );
+      await advanceSeconds(1);
+
+      expect(service.memoryHoldEngaged()).toBe(false);
+      const clearedEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "daemon.memory.hold.cleared");
+      expect(clearedEvents).toHaveLength(1);
+      expect(clearedEvents[0]?.details).toEqual({
+        reason: "admission_disabled",
+        availableBytes: null,
+        floorBytes: 9_610_612_736,
+        marginBytes: null,
+        durationMs: 1_000,
+        engagedCause: "context_floor",
+      });
+      service.dispose();
+    });
+
+    it("rethrows a memory-guard denial without emitting session.message.failed, and still emits it for a cap denial", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "stale_timeout",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.dispose();
+
+      await expect(
+        service.send("api-1", { message: "resume", queue: false }),
+      ).rejects.toBeInstanceOf(SessionAdmissionDeniedError);
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.message.failed" }),
+      );
+
+      sessions.set("api-2", {
+        id: "api-2",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-2",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-2",
+        tmuxSession: "api-2",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "stale_timeout",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      readHostMemoryMock.mockReturnValue(null);
+      service.applyConfig(
+        {
+          ...baseConfig(),
+          admission: { ...baseConfig().admission, maxLiveSessions: 0 },
+        } as unknown as AppConfig,
+        ["/tmp/spur.yaml"],
+      );
+
+      await expect(
+        service.send("api-2", { message: "resume", queue: false }),
+      ).rejects.toBeInstanceOf(SessionAdmissionDeniedError);
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.message.failed" }),
+      );
+    });
+  });
+
   it("keeps a spawning session alive during boot reconcile before tmux exists", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
