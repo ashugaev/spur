@@ -12141,6 +12141,7 @@ describe("SessionService", () => {
       .mockRejectedValueOnce(
         new SessionAdmissionDeniedError(
           'Cannot restore session for project "api": at the global cap of 1 live sessions (1 live now). Stop one of: api-1 (api).',
+          "cap",
         ),
       );
 

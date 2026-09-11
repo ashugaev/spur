@@ -349,6 +349,7 @@ describe("startServer", () => {
       SessionService.prototype.spawn = async function mockSpawn() {
         throw new SessionAdmissionDeniedError(
           'Cannot spawn session for project "demo": at the global cap of 2 live sessions (2 live now). Stop one of: demo-1 (demo).',
+          "cap",
         );
       };
 

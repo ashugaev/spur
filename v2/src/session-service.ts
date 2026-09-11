@@ -675,6 +675,21 @@ type MemoryShedExhaustedEdge =
   | "swap:sidecar";
 type MemoryGuardConfig = AppConfig["admission"]["memoryGuard"];
 
+// The ungated pair produced by evaluateMemoryDenial. Neither `enforce` nor
+// `enforceFloors` nor `admission.enabled` has been applied — every caller
+// (assertAdmissible, updateMemoryHold) applies its own gates so a condition
+// never counts toward a denial or a hold unless its own flag says it can.
+type MemoryDenialCause = "legacy_available" | "legacy_swap" | "context_floor" | "pressure";
+
+interface MemoryDenialSample {
+  legacyDetail?: string | undefined;
+  legacyCause?: MemoryDenialCause | undefined;
+  floorDetail?: string | undefined;
+  floorCause?: MemoryDenialCause | undefined;
+  availableBytes: number;
+  someAvg10: number | null;
+}
+
 interface MemoryShedEpisode {
   ramContinuousSinceMs: number | null;
   cgroupHighLatched: boolean;
@@ -827,6 +842,12 @@ export class SessionRateLimitedError extends Error {
 // field, so one here would be written and never read.
 export class SessionAdmissionDeniedError extends Error {
   readonly statusCode = 429;
+  readonly reason: "memory_guard" | "cap";
+
+  constructor(message: string, reason: "memory_guard" | "cap") {
+    super(message);
+    this.reason = reason;
+  }
 }
 
 export class SessionNotReopenableError extends Error {
@@ -14626,48 +14647,74 @@ export class SessionService {
   // of it. `admission.enabled: false` is a full escape hatch: neither the
   // cap nor the memory guard can deny, though the guard still logs a
   // report-only warning when crossed so the condition stays visible.
+  // The guard's own condition, extracted so the memory-hold latch (see
+  // updateMemoryHold) can read exactly what assertAdmissible would deny
+  // without a second, driftable copy of the thresholds. Applies NO gate:
+  // `enforce`, `enforceFloors`, and `admission.enabled` are each applied by
+  // the caller, never here.
+  private evaluateMemoryDenial(context: "spawn" | "restore" | "wake"): MemoryDenialSample | null {
+    const admission = this.config.admission;
+    const memory = readHostMemory();
+    if (!memory) return null;
+    const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
+    const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
+    const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
+    const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
+    let legacyDetail: string | undefined;
+    let legacyCause: MemoryDenialCause | undefined;
+    if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
+      legacyDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
+      legacyCause = "legacy_available";
+    } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
+      legacyDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+      legacyCause = "legacy_swap";
+    }
+
+    // A wake reuses the restore floor: it relaunches an already-existing
+    // parked session in place, the same shape of memory pressure as a
+    // restore, not a brand-new spawn.
+    const contextFloor =
+      context === "restore" || context === "wake"
+        ? admission.memoryGuard.restoreFloorBytes
+        : admission.memoryGuard.admissionFloorBytes;
+    let floorDetail: string | undefined;
+    let floorCause: MemoryDenialCause | undefined;
+    let someAvg10: number | null = null;
+    if (memory.availableBytes < contextFloor) {
+      floorDetail = `available memory ${availableMiB}MB is below the ${(
+        contextFloor /
+        (1024 * 1024)
+      ).toFixed(0)}MB ${context} floor`;
+      floorCause = "context_floor";
+    } else {
+      const pressure = readCgroupPressure();
+      if (pressure !== null) {
+        someAvg10 = pressure.someAvg10;
+        if (pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse) {
+          floorDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
+          floorCause = "pressure";
+        }
+      }
+    }
+    return {
+      legacyDetail,
+      legacyCause,
+      floorDetail,
+      floorCause,
+      availableBytes: memory.availableBytes,
+      someAvg10,
+    };
+  }
+
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore" | "wake",
     opts?: { replacingSessionId?: string; admissionReservation?: symbol },
   ): void {
     const admission = this.config.admission;
-    const memory = readHostMemory();
-    let legacyGuardDetail: string | undefined;
-    let floorGuardDetail: string | undefined;
-    if (memory) {
-      const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
-      const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
-      const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
-      const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
-      if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
-        legacyGuardDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
-      } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
-        legacyGuardDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
-      }
-
-      // A wake reuses the restore floor: it relaunches an already-existing
-      // parked session in place, the same shape of memory pressure as a
-      // restore, not a brand-new spawn.
-      const contextFloor =
-        context === "restore" || context === "wake"
-          ? admission.memoryGuard.restoreFloorBytes
-          : admission.memoryGuard.admissionFloorBytes;
-      if (memory.availableBytes < contextFloor) {
-        floorGuardDetail = `available memory ${availableMiB}MB is below the ${(
-          contextFloor /
-          (1024 * 1024)
-        ).toFixed(0)}MB ${context} floor`;
-      } else {
-        const pressure = readCgroupPressure();
-        if (
-          pressure !== null &&
-          pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse
-        ) {
-          floorGuardDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
-        }
-      }
-    }
+    const sample = this.evaluateMemoryDenial(context);
+    const legacyGuardDetail = sample?.legacyDetail;
+    const floorGuardDetail = sample?.floorDetail;
     if (legacyGuardDetail) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
@@ -14684,6 +14731,7 @@ export class SessionService {
     if (denialDetail) {
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
+        "memory_guard",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -14707,6 +14755,7 @@ export class SessionService {
       const projectCandidates = live.records.filter((session) => session.project === projectId);
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
+        "cap",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -14719,6 +14768,7 @@ export class SessionService {
     if (totalLive >= admission.maxLiveSessions) {
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
+        "cap",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
