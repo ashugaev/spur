@@ -101,9 +101,9 @@ import {
 const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
 
 const mockExecFileAsync = (() => {
-  const value = (
-    childProcess.execFile as unknown as Record<symbol, Mock | undefined>
-  )[PROMISIFY_CUSTOM];
+  const value = (childProcess.execFile as unknown as Record<symbol, Mock | undefined>)[
+    PROMISIFY_CUSTOM
+  ];
   if (!value) {
     throw new Error("Expected execFile mock to expose promisify.custom");
   }

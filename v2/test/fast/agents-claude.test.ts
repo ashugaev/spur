@@ -30,11 +30,13 @@ import {
   sessionFileForId,
 } from "../../src/agents/claude.js";
 
-const mockReaddir = readdir as unknown as Mock;
-const mockStat = stat as unknown as Mock;
-const mockMkdir = mkdir as unknown as Mock;
-const mockWriteFile = writeFile as unknown as Mock;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock;
+const mockReaddir = readdir as unknown as Mock<typeof readdir>;
+const mockStat = stat as unknown as Mock<typeof stat>;
+const mockMkdir = mkdir as unknown as Mock<typeof mkdir>;
+const mockWriteFile = writeFile as unknown as Mock<typeof writeFile>;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
+  typeof resolveWorktreePathCandidates
+>;
 
 beforeEach(() => {
   vi.clearAllMocks();

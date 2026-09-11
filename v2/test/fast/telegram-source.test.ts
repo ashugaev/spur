@@ -101,22 +101,21 @@ async function startSource(
   emit = vi.fn(),
   spawnSession = vi.fn(),
   overrides: {
-    listSessions?: ReturnType<typeof vi.fn>;
-    stop?: ReturnType<typeof vi.fn>;
-    task?: ReturnType<typeof vi.fn>;
+    listSessions?: Mock<() => Promise<SourceSessionListItem[]>>;
+    stop?: Mock<(...args: unknown[]) => unknown>;
+    task?: Mock<(...args: unknown[]) => unknown>;
     config?: Record<string, unknown>;
     webBaseUrl?: string | null;
     resolveWebBaseUrl?: () => Promise<string | null>;
   } = {},
 ) {
-  const defaultListSessions = vi.fn(() =>
-    Promise.resolve([
+  const listSessions =
+    overrides.listSessions ??
+    vi.fn().mockResolvedValue([
       { id: "api-1", project: "api", agent: "codex", state: "waiting" },
       { id: "api-2", project: "api", agent: "claude", state: "working" },
       { id: "web-1", project: "web", agent: "cursor", state: "waiting" },
-    ] as SourceSessionListItem[])
-  );
-  const listSessions = (overrides.listSessions ?? defaultListSessions) as unknown as Mock<() => Promise<SourceSessionListItem[]>>;
+    ] as SourceSessionListItem[]);
   const stop = overrides.stop ?? vi.fn().mockResolvedValue(undefined);
   const task = overrides.task ?? vi.fn().mockReturnValue(Promise.resolve());
   const logger = { info: vi.fn(), warn: vi.fn() };
