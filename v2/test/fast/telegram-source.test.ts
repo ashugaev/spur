@@ -961,7 +961,9 @@ describe("telegramSourceModule", () => {
 
     const spawnCtx = telegramContext({ text: "/spawn codex" });
     await bot.emitText(spawnCtx);
-    expect(spawnCtx.reply).toHaveBeenCalledWith("Send task prompt for new codex Spur agent in api.");
+    expect(spawnCtx.reply).toHaveBeenCalledWith(
+      "Send task prompt for new codex Spur agent in api.",
+    );
     expect(spawnSession).not.toHaveBeenCalled();
 
     const promptCtx = telegramContext({ text: "fix the sidecar" });
@@ -973,6 +975,48 @@ describe("telegramSourceModule", () => {
         agent: "codex",
         prompt: expect.stringContaining("fix the sidecar"),
       }),
+    );
+  });
+
+  it("a second /spawn with an inline task overwrites the pending record instead of stacking a spawn", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
+      project: "api",
+      agent: "claude",
+      state: "working",
+    });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-3", project: "api", agent: "claude", state: "waiting" }]);
+    const emit = vi.fn();
+    const { bot } = await startSource(dataDir, emit, spawnSession, { listProjects, listSessions });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/spawn codex" }));
+    await bot.emitText(telegramContext({ text: "/spawn claude do X" }));
+
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project: "api",
+        agent: "claude",
+        prompt: expect.stringContaining("do X"),
+      }),
+    );
+
+    // A leftover "codex" pending record from the first /spawn must not
+    // stack a second, unrequested spawn on the next free text — it should
+    // reach the session the second /spawn just bound instead.
+    const textCtx = telegramContext({ text: "hello there" });
+    await bot.emitText(textCtx);
+
+    expect(spawnSession).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-3", text: "hello there" }),
     );
   });
 
@@ -1010,13 +1054,19 @@ describe("telegramSourceModule", () => {
   it("routes text to the bound session while a project pick is pending", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
-    const spawnSession = vi.fn();
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
+      project: "web",
+      agent: "codex",
+      state: "working",
+    });
     const emit = vi.fn();
     const { bot } = await startSource(dataDir, emit, spawnSession);
     if (!bot) throw new Error("missing bot");
 
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
-    await bot.emitText(telegramContext({ text: "/spawn codex" }));
+    const spawnCtx = telegramContext({ text: "/spawn codex" });
+    await bot.emitText(spawnCtx);
 
     const textCtx = telegramContext({ text: "send this to api-1" });
     await bot.emitText(textCtx);
@@ -1029,24 +1079,78 @@ describe("telegramSourceModule", () => {
         text: "send this to api-1",
       }),
     );
+
+    // The pending project pick must have survived the bound-session delivery
+    // above — a subsequent `spur_sproj:` tap still completes the spawn.
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const pickReply = vi.fn().mockResolvedValue({});
+    await bot.emitCallback({
+      callbackQuery: {
+        data: spawnProjectCallbackData(spawnCtx.reply, 1),
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      reply: pickReply,
+    });
+    expect(pickReply).toHaveBeenCalledWith("Send task prompt for new codex Spur agent in web.");
+
+    const promptCtx = telegramContext({ text: "fix the sidecar" });
+    await bot.emitText(promptCtx);
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({ project: "web", agent: "codex" }),
+    );
   });
 
   it("prompts for the project pick instead of auto-spawning", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
-    const spawnSession = vi.fn();
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
+      project: "web",
+      agent: "codex",
+      state: "working",
+    });
     const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
       config: { autoSpawn: { enabled: true, project: "spur-shepherd", agent: "opencode" } },
     });
     if (!bot) throw new Error("missing bot");
 
-    await bot.emitText(telegramContext({ text: "/spawn codex" }));
+    const spawnCtx = telegramContext({ text: "/spawn codex" });
+    await bot.emitText(spawnCtx);
     const textCtx = telegramContext({ text: "not a project pick" });
     await bot.emitText(textCtx);
 
     expect(spawnSession).not.toHaveBeenCalled();
     expect(textCtx.reply).toHaveBeenCalledWith(
       "Pick a project for the pending /spawn, or run /spawn again.",
+    );
+
+    // The pending record must have survived the skipped autoSpawn above — a
+    // subsequent `spur_sproj:` tap still completes the spawn.
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const pickReply = vi.fn().mockResolvedValue({});
+    await bot.emitCallback({
+      callbackQuery: {
+        data: spawnProjectCallbackData(spawnCtx.reply, 1),
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      reply: pickReply,
+    });
+    expect(pickReply).toHaveBeenCalledWith("Send task prompt for new codex Spur agent in web.");
+
+    const promptCtx = telegramContext({ text: "fix the sidecar" });
+    await bot.emitText(promptCtx);
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({ project: "web", agent: "codex" }),
     );
   });
 
@@ -1100,6 +1204,35 @@ describe("telegramSourceModule", () => {
     await bot.emitCallback({
       callbackQuery: {
         data: "spur_sproj:abc123:0",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      reply: vi.fn().mockResolvedValue({}),
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Spawn expired. Run /spawn again.");
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects a project callback with an empty index instead of resolving it to project 0", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn();
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    const spawnCtx = telegramContext({ text: "/spawn codex" });
+    await bot.emitText(spawnCtx);
+    const validData = spawnProjectCallbackData(spawnCtx.reply, 0);
+    const nonce = validData.split(":")[1];
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    await bot.emitCallback({
+      callbackQuery: {
+        data: `spur_sproj:${nonce}:`,
         message: {
           message_thread_id: 22,
           chat: { id: -1001 },

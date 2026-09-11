@@ -503,6 +503,12 @@ async function requestSpawnProject(
   prompt?: string,
 ): Promise<void> {
   const deps = runtime.deps;
+  // Every `/spawn` (and `spur_spawn:` callback) attempt overwrites whatever
+  // pending record a previous attempt left behind, on every outcome —
+  // otherwise a live record from an earlier `/spawn` can survive an
+  // immediate single-project spawn below and let the NEXT free text spawn a
+  // second, unrequested agent.
+  clearPendingSpawn(runtime, chatId, messageThreadId, userId);
   const projects = deps.listProjects ? await deps.listProjects() : null;
   if (projects === null) {
     await ctx.reply("Cannot list projects.");
@@ -759,7 +765,7 @@ async function handleTelegramCallback(
       await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
       return;
     }
-    const index = Number(indexRaw);
+    const index = indexRaw !== undefined && indexRaw !== "" ? Number(indexRaw) : NaN;
     const project = Number.isInteger(index) ? peeked.projects[index] : undefined;
     if (project === undefined) {
       await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
