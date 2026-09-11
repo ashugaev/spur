@@ -493,6 +493,10 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
+// Consecutive 1s ticks above the restore floor plus margin required before
+// the hold clears. someAvg10 is itself a 10s decayed average, so ten
+// consecutive clear samples cover one full PSI window too.
+const MEMORY_HOLD_CLEAR_TICKS = 10;
 const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
@@ -2573,6 +2577,17 @@ export class SessionService {
   private memoryShedTimer: NodeJS.Timeout | null = null;
   private memoryShedRunning = false;
   private memoryShedEpisode = createMemoryShedEpisode();
+  // Host-wide latch driven by the 1s memory-shed tick (updateMemoryHold): one
+  // "engaged"/"cleared" event pair per episode, read by the wake due-branches,
+  // the trigger flush, and the queued-message drain to hold in place instead
+  // of attempting, failing, and retrying per session. See the memory-guard
+  // wake-storm spec for the full design.
+  private memoryHold: {
+    engaged: boolean;
+    clearTicks: number;
+    engagedAtMs: number | null;
+    engagedCause: MemoryDenialCause | null;
+  } = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   // Local (in-worktree) project config resolved per session. The 2s dashboard
   // tick resolves a project for every session, so without this each tick
@@ -2808,6 +2823,19 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    // Its own try/catch, separate from runMemoryShed's below: without this
+    // isolation a throw inside updateMemoryHold would be mislabeled as
+    // daemon.memory.shed.failed.
+    try {
+      this.updateMemoryHold();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("daemon.memory.hold.failed", {
+        level: "warn",
+        message: `Memory hold update failed: ${message}`,
+        details: { message },
+      });
+    }
     try {
       await this.runMemoryShed();
     } catch (error) {
@@ -2818,6 +2846,106 @@ export class SessionService {
         details: { message },
       });
     }
+  }
+
+  // Host-wide latch: engages when the memory guard would deny a wake and
+  // clears only after MEMORY_HOLD_CLEAR_TICKS consecutive samples clear both
+  // the restore floor and a one-session margin. Runs on the unconditional
+  // memory-shed tick so admission.enabled: false is the only key that can
+  // disable it — memoryGuard.shedEnabled must NOT (runMemoryShed's own
+  // shedEnabled early-return must never reach here).
+  private updateMemoryHold(): void {
+    const admission = this.config.admission;
+    if (!admission.enabled) {
+      // Escape hatch: neither the cap nor the guard can deny, so the hold
+      // must not stall the fleet either. Force-clear an engaged hold (one
+      // cleared event) so flipping this key off mid-episode releases rather
+      // than freezes.
+      if (this.memoryHold.engaged) {
+        const engagedAtMs = this.memoryHold.engagedAtMs;
+        const engagedCause = this.memoryHold.engagedCause;
+        this.memoryHold = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
+        this.logEvent("daemon.memory.hold.cleared", {
+          level: "info",
+          message: "Memory hold released: admission is disabled",
+          details: {
+            reason: "admission_disabled",
+            availableBytes: null,
+            floorBytes: admission.memoryGuard.restoreFloorBytes,
+            marginBytes: null,
+            durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+            engagedCause,
+          },
+        });
+      } else {
+        this.memoryHold.clearTicks = 0;
+      }
+      return;
+    }
+
+    const guard = admission.memoryGuard;
+    const sample = this.evaluateMemoryDenial("wake");
+    const denied =
+      sample !== null &&
+      ((sample.legacyDetail !== undefined && guard.enforce) ||
+        (sample.floorDetail !== undefined && guard.enforceFloors));
+
+    if (denied) {
+      this.memoryHold.clearTicks = 0;
+      if (!this.memoryHold.engaged) {
+        this.memoryHold.engaged = true;
+        this.memoryHold.engagedAtMs = Date.now();
+        this.memoryHold.engagedCause =
+          sample.legacyDetail !== undefined && guard.enforce
+            ? (sample.legacyCause ?? null)
+            : (sample.floorCause ?? null);
+        this.logEvent("daemon.memory.hold.engaged", {
+          level: "warn",
+          message: "Memory hold engaged: due wakes and queued deliveries are held in place",
+          details: {
+            availableBytes: sample.availableBytes,
+            floorBytes: guard.restoreFloorBytes,
+            someAvg10: sample.someAvg10,
+            cause: this.memoryHold.engagedCause,
+          },
+        });
+      }
+      return;
+    }
+
+    if (sample === null) {
+      // A null readHostMemory() read fails open, matching assertAdmissible:
+      // it neither engages nor clears an already-latched hold.
+      return;
+    }
+
+    if (sample.availableBytes >= guard.restoreFloorBytes + admission.perSessionBytes) {
+      this.memoryHold.clearTicks += 1;
+      if (this.memoryHold.engaged && this.memoryHold.clearTicks >= MEMORY_HOLD_CLEAR_TICKS) {
+        const engagedAtMs = this.memoryHold.engagedAtMs;
+        const engagedCause = this.memoryHold.engagedCause;
+        this.memoryHold = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
+        this.logEvent("daemon.memory.hold.cleared", {
+          level: "info",
+          message: "Memory hold cleared: available memory recovered",
+          details: {
+            availableBytes: sample.availableBytes,
+            floorBytes: guard.restoreFloorBytes,
+            marginBytes: admission.perSessionBytes,
+            durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+            engagedCause,
+            reason: "recovered",
+          },
+        });
+      }
+      return;
+    }
+
+    this.memoryHold.clearTicks = 0;
+  }
+
+  memoryHoldEngaged(): boolean {
+    return this.memoryHold.engaged;
   }
 
   private async runSidecarReaper(): Promise<void> {
@@ -3700,7 +3828,7 @@ export class SessionService {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
-        if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
+        if (scheduledWake && !this.memoryHold.engaged && Date.parse(scheduledWake.dueAt) <= now) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
             // Claim the due occurrence BEFORE sending: clear scheduledWake and
             // persist it first. A slow or failing send must not leave the wake
@@ -3823,6 +3951,7 @@ export class SessionService {
         const intervalWake = session.intervalWake;
         if (
           intervalWake &&
+          !this.memoryHold.engaged &&
           Date.parse(intervalWake.nextDueAt) <= now &&
           (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
@@ -4075,6 +4204,7 @@ export class SessionService {
         const dailyWake = session.dailyWake;
         if (
           !dailyWake ||
+          this.memoryHold.engaged ||
           Date.parse(dailyWake.nextDueAt) > now ||
           !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
@@ -10646,7 +10776,11 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
-      if (error instanceof SessionRateLimitedError || error instanceof QueueDeliveryInFlightError) {
+      if (
+        error instanceof SessionRateLimitedError ||
+        error instanceof QueueDeliveryInFlightError ||
+        (error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard")
+      ) {
         throw error;
       }
       const failure = error instanceof Error ? error.message : String(error);
@@ -13884,6 +14018,15 @@ export class SessionService {
     if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
+    // The guard throw on this path originates in ensureSessionReadyForSend's
+    // assertAdmissible("wake") call for a stale-parked session, not in
+    // deliverQueuedMessage below — holding here, before that attempt, is the
+    // only position that keeps the attempt from happening at all. Returning
+    // false is safe: runDeliveryLoop treats true/false identically, and false
+    // is what every other stays-queued path below returns.
+    if (this.memoryHold.engaged) {
+      return false;
+    }
     this.queueDeliveryInFlight.add(sessionId);
     try {
       const session = readSession(this.config.dataDir, sessionId);
@@ -13944,10 +14087,15 @@ export class SessionService {
         // wiped worktree) would otherwise log an error every
         // PIPELINE_POLL_INTERVAL_MS (1s) forever. Only the first occurrence
         // of a given failure message logs; a change (new problem, or
-        // recovery then a fresh failure) logs again.
+        // recovery then a fresh failure) logs again. A memory-guard denial's
+        // message embeds the live MiB sample, so it would defeat this dedupe
+        // on every attempt — key it on a stable literal instead.
+        const isMemoryGuardDenial =
+          error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard";
+        const dedupeKey = isMemoryGuardDenial ? "memory_guard" : failure;
         const lastFailure = this.queuedMessageDeliveryLastFailure.get(sessionId);
-        if (lastFailure !== failure) {
-          this.queuedMessageDeliveryLastFailure.set(sessionId, failure);
+        if (lastFailure !== dedupeKey) {
+          this.queuedMessageDeliveryLastFailure.set(sessionId, dedupeKey);
           this.logEvent("session.message.delivery_failed", {
             level: "error",
             sessionId,

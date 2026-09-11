@@ -12832,12 +12832,15 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(999);
       expect(readHostMemoryMock).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(readHostMemoryMock).toHaveBeenCalledTimes(1);
+      // 2, not 1: runMemoryShedTick now also runs updateMemoryHold (the
+      // memory-hold latch), which reads host memory once via
+      // evaluateMemoryDenial before runMemoryShed's own pressure sample.
+      expect(readHostMemoryMock).toHaveBeenCalledTimes(2);
 
       service.dispose();
       expect(service.memoryShedTimer).toBeNull();
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(readHostMemoryMock).toHaveBeenCalledTimes(1);
+      expect(readHostMemoryMock).toHaveBeenCalledTimes(2);
     });
 
     it("rejects overlap before sampling and releases the guard after failure", async () => {
@@ -12874,7 +12877,10 @@ describe("SessionService", () => {
       );
       listTmuxSessionNamesMock.mockResolvedValue(new Set());
       await service.runMemoryShed();
-      expect(readHostMemoryMock).toHaveBeenCalledTimes(3);
+      // 4, not 3: the runMemoryShedTick call above also ran updateMemoryHold,
+      // which reads host memory once via evaluateMemoryDenial in addition to
+      // runMemoryShed's own pressure sample.
+      expect(readHostMemoryMock).toHaveBeenCalledTimes(4);
     });
 
     it("sheds one MCP then user sidecar before one session after 12 seconds", async () => {
