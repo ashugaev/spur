@@ -214,6 +214,18 @@ describe("session index cache", () => {
     expect(indexReads.count).toBe(1);
   });
 
+  it("drops a stale cache entry when the index stops parsing", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, session("api-1", "api", "ship it"));
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+
+    writeFileSync(indexPath(dataDir), "not-json", "utf-8");
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+
+    writeSession(dataDir, session("api-2", "api", "ship it too"));
+    expect(readSession(dataDir, "api-2")?.id).toBe("api-2");
+  });
+
   it("falls back to the directory scan when .index.json is deleted", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, session("api-1", "api", "ship it"));

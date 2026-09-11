@@ -388,6 +388,7 @@ function readSessionIndex(dataDir: string): Readonly<Record<string, string>> {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
     if (!isRecord(parsed)) {
+      sessionIndexCache.delete(path);
       return {};
     }
     const index = Object.fromEntries(
@@ -406,6 +407,7 @@ function readSessionIndex(dataDir: string): Readonly<Record<string, string>> {
   } catch {
     // A corrupt or torn file is never cached: it must be retried, and the
     // caller must keep seeing an empty index until it parses again.
+    sessionIndexCache.delete(path);
     return {};
   }
 }
