@@ -40049,15 +40049,19 @@ describe("SessionService", () => {
       // not confirmed absence — gated the same way as reconcileUnexpectedStop
       // and confirmAgentExited. Contrast with the preceding test (a genuinely
       // absent agent pane, unresponsive:false, still reaps its orphaned
-      // sidecar exactly as before).
+      // sidecar exactly as before). Fixture status is genuinely terminal
+      // (completed), not merely non-terminal-and-therefore-skipped by the
+      // isTerminalSessionStatus owner guard added alongside AC6b below — a
+      // non-terminal fixture here would stay green even with this loop's own
+      // presence.unresponsive gate deleted, since the newer owner guard would
+      // independently `continue` on it and mask the regression.
       it("leaves a terminal session's sidecars untouched when its tmux probe is killed by its own timeout, rather than reaping them as if the tmux were confirmed gone", async () => {
         const sessions = createSessionStore();
         sessions.set(
           "api-1",
           runningSession({
             id: "api-1",
-            status: "stopped",
-            stopReason: "stale_timeout",
+            status: "completed",
             sidecarNames: ["proxy"],
           }),
         );
