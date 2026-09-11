@@ -12360,6 +12360,12 @@ export class SessionService {
       if (processAlive) {
         return this.captureAgentSessionId(session, 0);
       }
+      const panePresence = await getTmuxPanePresence(session.tmuxSession);
+      if (panePresence.unresponsive && options?.paneAlreadyConfirmedGone !== true) {
+        throw new Error(
+          `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
+        );
+      }
     } else if (presence.unresponsive && options?.paneAlreadyConfirmedGone !== true) {
       // A timeout-killed tmux probe is ambiguous, not confirmed absence: below
       // this point a "not ready" verdict falls into relaunchSessionInPlace,
