@@ -14426,6 +14426,158 @@ describe("SessionService", () => {
         expect.objectContaining({ event: "session.message.failed" }),
       );
     });
+
+    it("skips server-error reactivation while the memory hold is engaged", async () => {
+      // The wake-tick timer fires before the memory-shed timer on any tick where
+      // both are simultaneously due (registration order), so the hold is never
+      // observably engaged before the FIRST wake tick — engagement only becomes
+      // visible to a later tick. serverErrorAt is picked so the 30-minute
+      // reactivation threshold has not yet elapsed at construction (system time
+      // is fixed at 2026-03-18T10:05:00.000Z by the outer beforeEach) and only
+      // crosses it on the second tick, by which point the hold (engaged during
+      // the first tick's memory-shed pass) is confirmed. Without that ordering
+      // the threshold would already be satisfied on tick 1, before the hold has
+      // ever run once, and the assertions below would pass whether or not the
+      // gate exists.
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ serverErrorAt: "2026-03-18T09:35:01.500Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "error",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        serverError: true,
+      });
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+      sendMessageToTmuxMock.mockClear();
+      logSpurEventMock.mockClear();
+
+      // The 30-minute threshold crosses during this window (age reaches it at
+      // the second tick); the hold is already engaged throughout.
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.server_error.reactivated",
+        ),
+      ).toBe(false);
+      expect(sessions.get("api-1")?.serverErrorAt).toBe("2026-03-18T09:35:01.500Z");
+      service.dispose();
+    });
+
+    it("skips the rate-limit auto-rotate while the memory hold is engaged", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0 },
+        authRotation: {
+          autoRotateOnRateLimit: true,
+          cooldownMinutes: 60,
+          maxRotationsPerEpisode: 2,
+        },
+      });
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      // Not yet rate-limited: rotation is gated on liveState==="rate_limited" with
+      // no age threshold, so it would otherwise fire on the very first wake tick,
+      // before the hold (engaged during that same tick's memory-shed pass) is
+      // observable to any tick. Switch to rate-limited only after the hold is
+      // confirmed engaged, so the gate under test is the only thing that can
+      // block the rotation once liveState does flip.
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(2);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        rateLimit: { limited: true, reason: "claude rate_limit" },
+      });
+      logSpurEventMock.mockClear();
+
+      // A dashboard tick (2s cadence) reclassifies to rate_limited within this
+      // window, then a later wake tick evaluates the rotation branch.
+      await advanceSeconds(3);
+
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.auth.auto_rotated",
+        ),
+      ).toBe(false);
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("acc-1");
+      service.dispose();
+    });
+
+    it("skips the rate-limit afterHours nudge while the memory hold is engaged", async () => {
+      // Same ordering constraint as the server-error case above: rateLimitedAt
+      // is picked so the afterHours threshold (3.6s, afterHours: 0.001) has not
+      // yet elapsed at construction and only crosses on the second tick, after
+      // the hold (engaged during the first tick) is confirmed.
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+        authRotation: {
+          autoRotateOnRateLimit: false,
+          cooldownMinutes: 60,
+          maxRotationsPerEpisode: 2,
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:04:57.900Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        rateLimit: { limited: true, reason: "claude rate_limit" },
+      });
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+      logSpurEventMock.mockClear();
+
+      await advanceSeconds(3);
+
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.reactivated",
+        ),
+      ).toBe(false);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:04:57.900Z");
+      service.dispose();
+    });
   });
 
   it("keeps a spawning session alive during boot reconcile before tmux exists", async () => {

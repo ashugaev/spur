@@ -4116,7 +4116,7 @@ export class SessionService {
         // session of its wake this tick. On error treat rotated=false so the
         // afterHours nudge fallback below still runs.
         let rotated = false;
-        if (liveState === "rate_limited") {
+        if (!this.memoryHold.engaged && liveState === "rate_limited") {
           try {
             rotated = await this.tryAutoRotateClaudeAccount(session);
           } catch (error) {
@@ -4131,7 +4131,7 @@ export class SessionService {
         }
 
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (!rotated && afterHours > 0 && session.rateLimitedAt) {
+        if (!this.memoryHold.engaged && !rotated && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
             // Undefined liveState means classification has not populated stateHistory
@@ -4205,7 +4205,7 @@ export class SessionService {
         // tick) or a liveState that already moved on both skip the send —
         // clearing serverErrorAt is updateStateHistory's job alone, not this
         // loop's, so a non-"error" liveState leaves the marker untouched here.
-        if (session.serverErrorAt) {
+        if (!this.memoryHold.engaged && session.serverErrorAt) {
           const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
           if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
             try {
