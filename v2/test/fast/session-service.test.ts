@@ -14093,6 +14093,44 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("releases an engaged hold after ten consecutive unreadable samples, since a null read fails open", async () => {
+      loadConfigMock.mockReturnValue(baseConfig());
+      listSessionsMock.mockReturnValue([]);
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.engaged",
+        ),
+      ).toHaveLength(1);
+
+      readHostMemoryMock.mockReturnValue(null);
+      await advanceSeconds(9);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "daemon.memory.hold.cleared",
+        ),
+      ).toHaveLength(0);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      await advanceSeconds(1);
+      const clearedEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "daemon.memory.hold.cleared");
+      expect(clearedEvents).toHaveLength(1);
+      expect(clearedEvents[0]?.details).toMatchObject({
+        availableBytes: null,
+        reason: "sample_unavailable",
+      });
+      expect(service.memoryHoldEngaged()).toBe(false);
+
+      service.dispose();
+    });
+
     it("holds a due scheduled wake without claiming it while the memory hold is engaged and delivers it after the hold clears", async () => {
       loadConfigMock.mockReturnValue({ ...baseConfig() });
       mockClaudeJsonlState("waiting");

@@ -2856,8 +2856,10 @@ export class SessionService {
   }
 
   // Host-wide latch: engages when the memory guard would deny a wake and
-  // clears only after MEMORY_HOLD_CLEAR_TICKS consecutive samples clear both
-  // the restore floor and a one-session margin. Runs on the unconditional
+  // clears only after MEMORY_HOLD_CLEAR_TICKS consecutive non-denying ticks
+  // — either a sample that clears both the restore floor and a one-session
+  // margin, or an unreadable sample (a null read fails open, so it must not
+  // be able to outlast the condition it mirrors). Runs on the unconditional
   // memory-shed tick so admission.enabled: false is the only key that can
   // disable it — memoryGuard.shedEnabled must NOT (runMemoryShed's own
   // shedEnabled early-return must never reach here).
@@ -2921,8 +2923,38 @@ export class SessionService {
     }
 
     if (sample === null) {
-      // A null readHostMemory() read fails open, matching assertAdmissible:
-      // it neither engages nor clears an already-latched hold.
+      // A null readHostMemory() read fails open in assertAdmissible (no
+      // reading denies nothing), so a persistently unreadable sample must
+      // not be able to strand an engaged hold forever. Feed it into the
+      // same MEMORY_HOLD_CLEAR_TICKS counter as a non-denying tick — one
+      // unreadable sample still can't clear the hold, but ten consecutive
+      // ones (readable-and-clear or unreadable, in any mix) do, via the one
+      // release path below.
+      if (this.memoryHold.engaged) {
+        this.memoryHold.clearTicks += 1;
+        if (this.memoryHold.clearTicks >= MEMORY_HOLD_CLEAR_TICKS) {
+          const engagedAtMs = this.memoryHold.engagedAtMs;
+          const engagedCause = this.memoryHold.engagedCause;
+          this.memoryHold = {
+            engaged: false,
+            clearTicks: 0,
+            engagedAtMs: null,
+            engagedCause: null,
+          };
+          this.logEvent("daemon.memory.hold.cleared", {
+            level: "info",
+            message: "Memory hold released: memory sample is unreadable",
+            details: {
+              availableBytes: null,
+              floorBytes: guard.restoreFloorBytes,
+              marginBytes: null,
+              durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+              engagedCause,
+              reason: "sample_unavailable",
+            },
+          });
+        }
+      }
       return;
     }
 
