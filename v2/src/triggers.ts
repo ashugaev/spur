@@ -24,6 +24,7 @@ import type { EventBus } from "./event-bus.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
+  SessionAdmissionDeniedError,
   SessionRateLimitedError,
   type SessionService,
 } from "./session-service.js";
@@ -42,6 +43,13 @@ interface StartConfiguredTriggersDeps {
   bus: EventBus;
   sessionService: SessionService;
   logger?: TriggerLogger;
+  // Read-only predicate for the host-wide memory-guard hold (see
+  // session-service.ts's updateMemoryHold). Optional with a default of
+  // "never held", the same shape as `logger` above: reached through its own
+  // dep field, never `deps.sessionService.memoryHoldEngaged()`, because
+  // dozens of fixtures build `sessionService` as `as never` and would pass
+  // typecheck while throwing "is not a function" at runtime.
+  memoryHoldEngaged?: () => boolean;
 }
 
 interface PendingBatch {
@@ -70,7 +78,11 @@ interface DeliveryFailure {
 // Rate-limit suppression is deliberately excluded from the failure/backoff
 // path: the target session is still alive and will accept the batch once the
 // rate limit clears, so it must not count toward DELIVERY_MAX_ATTEMPTS or
-// trigger a drop.
+// trigger a drop. A memory-guard denial is the same shape: the host-wide
+// hold (memoryHoldEngaged) already stops flushPending/handleSendEvent before
+// they reach deliverBatch, but a delivery already in flight when the hold
+// engages can still surface the denial here — treated identically to a
+// rate limit, never counted as a failed attempt.
 type DeliveryOutcome =
   | { status: "delivered" }
   | { status: "suppressed" }
@@ -600,6 +612,7 @@ function logTriggerEvent(
 
 export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): TriggerGroupController {
   const logger = deps.logger ?? DEFAULT_TRIGGER_LOGGER;
+  const memoryHoldEngaged = deps.memoryHoldEngaged ?? (() => false);
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
@@ -683,6 +696,21 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           sourceId: batch.sourceId,
           triggerId: batch.triggerId,
           message: `Suppressed queued trigger update to ${batch.batch.sessionId} while rate limited`,
+          details: {
+            interrupt,
+            attempt: options?.attempt ?? null,
+          },
+        });
+        return { status: "suppressed" };
+      }
+      if (error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard") {
+        logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_memory_guard", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Suppressed queued trigger update to ${batch.batch.sessionId} while the memory hold is engaged`,
           details: {
             interrupt,
             attempt: options?.attempt ?? null,
@@ -853,7 +881,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
+    // The memory shed pauses a session by writing status "stopped", which
+    // isClosedState treats as closed. Without this exemption the shed's own
+    // pausing would destroy the batch during the very episode this hold
+    // exists to cover; a session still "stopped" once the hold clears falls
+    // back to the ordinary closed_session drop below.
+    if (
+      isClosedState(session.state) &&
+      !isLiveServerErrorWedge(session) &&
+      !(session.state === "stopped" && memoryHoldEngaged())
+    ) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -875,6 +912,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     if (isBlockedAwaitingRecovery(session)) {
       return; // stays queued; delivered later once the session leaves rate_limited/error
+    }
+
+    // Holds before any attempt accounting: must precede the retryStates
+    // block below (whose pre-increment would otherwise consume an attempt)
+    // and clearBackoffIfRestarted/isInDeliveryBackoff.
+    if (memoryHoldEngaged()) {
+      return;
     }
 
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
@@ -1024,7 +1068,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state) && !isLiveServerErrorWedge(session)) {
+    // Same shed-pause exemption as flushPending: while the memory hold is
+    // engaged a "stopped" session is deferred, not dropped.
+    if (
+      isClosedState(session.state) &&
+      !isLiveServerErrorWedge(session) &&
+      !(session.state === "stopped" && memoryHoldEngaged())
+    ) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -1046,6 +1096,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     if (isBlockedAwaitingRecovery(session)) {
       return; // batch already queued above; explicitly deferred
+    }
+
+    // Same position as flushPending's hold: after isBlockedAwaitingRecovery,
+    // before any attempt accounting. The batch is already persisted above
+    // and the flush loop already scheduled, so the hold loses nothing.
+    if (memoryHoldEngaged()) {
+      return;
     }
 
     if (!isSendTriggerAllowed(session, triggerId)) {
