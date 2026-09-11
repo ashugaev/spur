@@ -25,6 +25,12 @@ const indexReads = { count: 0 };
 // single-process test cannot otherwise reach.
 const foreignAfterRename: { path: string | null } = { path: null };
 
+// Armed with a prepared file path, the readFileSync spy lands that file on
+// .index.json after the read returns — the foreign-writer interleave between
+// the pre-read stat and the cache store that a post-read-stat mutant cannot
+// catch.
+const foreignAfterIndexRead: { path: string | null } = { path: null };
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
 
@@ -32,10 +38,16 @@ vi.mock("node:fs", async (importOriginal) => {
     ...actual,
     readFileSync: ((...args: Parameters<typeof actual.readFileSync>) => {
       const path = args[0];
+      const content = actual.readFileSync(...args);
       if (typeof path === "string" && path.endsWith(".index.json")) {
         indexReads.count += 1;
+        if (foreignAfterIndexRead.path !== null) {
+          const foreign = foreignAfterIndexRead.path;
+          foreignAfterIndexRead.path = null;
+          actual.renameSync(foreign, path);
+        }
       }
-      return actual.readFileSync(...args);
+      return content;
     }) as typeof actual.readFileSync,
     renameSync: ((...args: Parameters<typeof actual.renameSync>) => {
       const result = actual.renameSync(...args);
@@ -59,6 +71,7 @@ const tempDirs: string[] = [];
 beforeEach(() => {
   indexReads.count = 0;
   foreignAfterRename.path = null;
+  foreignAfterIndexRead.path = null;
 });
 
 afterEach(async () => {
@@ -189,6 +202,31 @@ describe("session index cache", () => {
     expect(after.ino).not.toBe(before.ino);
 
     expect(readSession(dataDir, "api-1")?.prompt).toBe("second");
+  });
+
+  it("re-reads when a foreign writer lands on the index inside the read window", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, session("api-1", "apione", "first"));
+    writeSession(dataDir, session("api-1", "apitwo", "second"));
+
+    const path = indexPath(dataDir);
+    const foreignPath = `${path}.foreign-prepared`;
+    writeFileSync(foreignPath, indexJson({ "api-1": "sessions/apitwo/api-1.json" }), "utf-8");
+
+    // Pre-read stat sees apione's inode; read returns apione bytes; the spy
+    // immediately overwrites the destination with the foreign inode mapping
+    // apitwo. Caching against the pre-read stat makes the next read a MISS.
+    // Caching against a post-read stat would pin apione bytes under apitwo's
+    // fingerprint and return the wrong mapping forever.
+    writeFileSync(path, indexJson({ "api-1": "sessions/apione/api-1.json" }), "utf-8");
+    bustCache(dataDir);
+    foreignAfterIndexRead.path = foreignPath;
+    expect(readSession(dataDir, "api-1")?.prompt).toBe("first");
+    expect(foreignAfterIndexRead.path).toBeNull();
+
+    indexReads.count = 0;
+    expect(readSession(dataDir, "api-1")?.prompt).toBe("second");
+    expect(indexReads.count).toBe(1);
   });
 
   it("re-reads when a foreign writer lands on the index right after our own rename", async () => {
