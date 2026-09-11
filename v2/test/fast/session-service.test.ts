@@ -16157,6 +16157,38 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  // Issue #807: the session-list leg above (getTmuxSessionPresence.unresponsive)
+  // was already gated, but the PANE-list leg was not. list-windows answers
+  // (present:true) while list-panes times out — isProcessRunningInTmux would
+  // read the resulting empty/dead pane snapshot as "no matching process" and
+  // confirmAgentExited returned true, false-killing a live agent
+  // (reapOrphanedTmux). Routed through readRuntimeSnapshot, whose
+  // probeUnresponsive already derives from panesUnresponsive, this must stay
+  // false (not exited) on both samples.
+  it("confirmAgentExited returns false (not exited) when the session list succeeds but the pane list times out on both reads", async () => {
+    const session = runningSession({ id: "api-1" });
+    getTmuxSessionPresenceMock.mockReset().mockResolvedValue({
+      present: true,
+      unresponsive: false,
+    });
+    getTmuxPanePresenceMock.mockReset().mockResolvedValue({
+      dead: true,
+      unresponsive: true,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = sessionServiceInternals(service);
+
+    await expect(internals.confirmAgentExited(session)).resolves.toBe(false);
+    // readRuntimeSnapshot only calls agentProcessAlive when paneUsable is
+    // true — a dead/unresponsive pane read short-circuits processAlive to
+    // false without ever forking a ps probe, same guarantee as the
+    // ensureSessionReadyForSend duplicate.
+    expect(isProcessRunningInTmuxMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
   it("runs a bound service and persists its optional port", async () => {
     const workspacePath = resolve(".");
     loadConfigMock.mockReturnValue({
@@ -16537,9 +16569,14 @@ describe("SessionService", () => {
     expect(listed[0]).not.toHaveProperty("branchSource");
     // The strip must not overreach into what the listing renders.
     expect(listed[0]).toMatchObject({ project: "api", prompt: "Ship the feature" });
-    expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1");
-    expect(tmuxSessionExistsMock).toHaveBeenCalledWith("svc-api-1");
-    expect(tmuxSessionExistsMock).not.toHaveBeenCalledWith("api-2");
+    // Checked on the call's session-name argument only (ignoring a trailing
+    // `{ fresh }` options object): confirmAgentExited's background delivery
+    // probe for api-1 (issue #807) now shares readRuntimeSnapshot with every
+    // other caller, so this session's presence reads always carry that
+    // options object where one used to be call-shape-bare.
+    expect(tmuxSessionExistsMock.mock.calls.some((call) => call[0] === "api-1")).toBe(true);
+    expect(tmuxSessionExistsMock.mock.calls.some((call) => call[0] === "svc-api-1")).toBe(true);
+    expect(tmuxSessionExistsMock.mock.calls.every((call) => call[0] !== "api-2")).toBe(true);
     expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "dev");
     expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-1", "preview");
     expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-2", "dev");
@@ -40181,6 +40218,45 @@ describe("SessionService", () => {
         await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
 
         expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      // Issue #807: this loop's own presence.present branch calls
+      // confirmAgentExited (via `agentAlive = !(await this.confirmAgentExited(...))`)
+      // rather than gating on getTmuxSessionPresence.unresponsive directly —
+      // the hole was one level down, on the PANE-list read confirmAgentExited
+      // makes internally. list-windows succeeds (present:true) but
+      // list-panes times out; the false-kill this pins is
+      // reapOrphanedTmux actually calling killTmuxSession on a live agent,
+      // the boundary the unit-level confirmAgentExited test above cannot
+      // cross on its own.
+      it("leaves a terminal session's agent tmux untouched when the session list succeeds but the pane list times out on its own timeout", async () => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            status: "completed",
+            sidecarNames: ["proxy"],
+          }),
+        );
+        getTmuxSessionPresenceMock.mockReset().mockResolvedValue({
+          present: true,
+          unresponsive: false,
+        });
+        getTmuxPanePresenceMock.mockReset().mockResolvedValue({
+          dead: true,
+          unresponsive: true,
+        });
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(isProcessRunningInTmuxMock).not.toHaveBeenCalled();
         service.dispose();
       });
 

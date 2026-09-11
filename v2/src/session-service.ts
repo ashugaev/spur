@@ -14432,21 +14432,21 @@ export class SessionService {
   // false "exited" here surfaces as an errored pipeline
   // (waitForPipelineStep/waitForQueuedMessage's callers), so under a systemic
   // tmux hang this must keep waiting rather than assert the agent left.
+  //
+  // Routed through readRuntimeSnapshot (issue #807) rather than a raw
+  // getTmuxSessionPresence + agentProcessAlive pair: the session-list leg
+  // used to gate on `unresponsive`, but the pane-list leg did not, so a
+  // list-windows success + list-panes TIMEOUT read an empty pane snapshot as
+  // "no matching process" and this returned true — a false exit for a live
+  // agent. readRuntimeSnapshot.probeUnresponsive already covers both legs
+  // (sessionsUnresponsive OR panesUnresponsive), so checking it alongside
+  // processAlive on both samples closes the pane-leg hole the same way
+  // ensureSessionReadyForSend's probe gate does.
   private async confirmAgentExited(
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
-    const first = await getTmuxSessionPresence(session.tmuxSession);
-    if (first.present) {
-      if (
-        await agentProcessAlive({
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-          launchCommand: session.launchCommand,
-        })
-      ) {
-        return false;
-      }
-    } else if (first.unresponsive) {
+    const first = await this.readRuntimeSnapshot(session);
+    if (first.processAlive || first.probeUnresponsive) {
       return false;
     }
     // Retry once after a short delay to guard against transient tmux/ps failures.
@@ -14455,18 +14455,8 @@ export class SessionService {
     // above, making a single transient glitch look like two agreeing reads
     // and erroring a still-live pipeline.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
-    const second = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
-    if (second.present) {
-      return !(await agentProcessAlive(
-        {
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-          launchCommand: session.launchCommand,
-        },
-        { fresh: true },
-      ));
-    }
-    if (second.unresponsive) {
+    const second = await this.readRuntimeSnapshot(session, { fresh: true });
+    if (second.processAlive || second.probeUnresponsive) {
       return false;
     }
     return true;
