@@ -13948,7 +13948,11 @@ describe("SessionService", () => {
         ...baseConfig(),
         admission: {
           ...baseConfig().admission,
-          memoryGuard: { ...baseConfig().admission.memoryGuard, enforce: true, enforceFloors: true },
+          memoryGuard: {
+            ...baseConfig().admission.memoryGuard,
+            enforce: true,
+            enforceFloors: true,
+          },
         },
       });
       readHostMemoryMock.mockReturnValue(denyingMemory(100 * 1024));
@@ -13972,8 +13976,9 @@ describe("SessionService", () => {
         statusCode: 429,
       });
       expect(
-        (await service2.spawn({ project: "api", prompt: "hello" }).catch((error) => error)) instanceof
-          SessionAdmissionDeniedError,
+        (await service2
+          .spawn({ project: "api", prompt: "hello" })
+          .catch((error) => error)) instanceof SessionAdmissionDeniedError,
       ).toBe(true);
       service2.dispose();
     });
@@ -14010,19 +14015,13 @@ describe("SessionService", () => {
         cause: "context_floor",
       });
       expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "session.wake.deferred",
-        ),
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.deferred"),
       ).toHaveLength(0);
       expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "session.message.failed",
-        ),
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.message.failed"),
       ).toHaveLength(0);
       expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "trigger.send.failed",
-        ),
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "trigger.send.failed"),
       ).toHaveLength(0);
 
       readHostMemoryMock.mockReturnValue(recoveredMemory());
@@ -14126,9 +14125,7 @@ describe("SessionService", () => {
       });
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       expect(
-        logSpurEventMock.mock.calls.filter(
-          ([, entry]) => entry.event === "session.wake.deferred",
-        ),
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.wake.deferred"),
       ).toHaveLength(0);
 
       readHostMemoryMock.mockReturnValue(recoveredMemory());
