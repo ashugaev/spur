@@ -139,4 +139,73 @@ describe("startConfiguredSources", () => {
 
     await controller.stop();
   });
+
+  it("forwards listProjects into a source module's start deps", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { nightly: { type: "cron" } },
+      },
+    });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      listProjects,
+    });
+
+    expect(cronStartMock).toHaveBeenCalledTimes(1);
+    const startDeps = cronStartMock.mock.calls[0]?.[0] as { listProjects?: unknown };
+    expect(startDeps.listProjects).toBe(listProjects);
+
+    await controller.stop();
+  });
+
+  it("omits listProjects from a source module's start deps when not supplied", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { nightly: { type: "cron" } },
+      },
+    });
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    const startDeps = cronStartMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect("listProjects" in startDeps).toBe(false);
+
+    await controller.stop();
+  });
+});
+
+describe("spawnableProjects", () => {
+  it("drops shepherd and unconfigured entries and preserves input order", async () => {
+    const { spawnableProjects } = await loadStartConfiguredSources();
+    const entries = [
+      { id: "api", name: "API", configured: true, prefix: "api", path: "/api" },
+      {
+        id: "spur-shepherd",
+        name: "Shepherd",
+        configured: true,
+        prefix: "shp",
+        path: "/shepherd",
+        kind: "shepherd" as const,
+      },
+      { id: "unconf", name: "Unconf", configured: false, prefix: "unc", path: "/unconf" },
+      { id: "web", name: "Web", configured: true, prefix: "web", path: "/web" },
+    ];
+
+    expect(spawnableProjects(entries)).toEqual([
+      { id: "api", name: "API" },
+      { id: "web", name: "Web" },
+    ]);
+  });
 });

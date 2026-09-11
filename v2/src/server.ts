@@ -31,7 +31,7 @@ import {
   type UserActionOrigin,
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
-import { startConfiguredSources } from "./event-sources/index.js";
+import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
@@ -625,6 +625,7 @@ export async function startServer(
             ...(session.slots?.title ? { title: session.slots.title } : {}),
           };
         },
+        listProjects: async () => spawnableProjects(service.listProjects()),
       });
       const nextBacklogs = startConfiguredBacklogs({
         config: service.config,

@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import type { EventBus } from "../event-bus.js";
 import { logSpurEvent } from "../event-log.js";
 import { resolveWebBaseUrl } from "../ports.js";
-import type { AppConfig, SourceType } from "../types.js";
+import type { AppConfig, ProjectListEntry, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubCiSourceModule } from "./github-ci.js";
 import { githubSourceModule } from "./github.js";
@@ -15,6 +15,7 @@ import type {
   SourceHandle,
   SourceLogger,
   SourceModule,
+  SourceProjectListItem,
   SourceSpawnSessionRequest,
   SourceSessionListItem,
 } from "./types.js";
@@ -25,6 +26,18 @@ interface StartConfiguredSourcesDeps {
   logger?: SourceLogger;
   listSessions(): Promise<SourceSessionListItem[]>;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  listProjects?(): Promise<SourceProjectListItem[]>;
+}
+
+/**
+ * The spawnable-project list every source's project picker sees: configured
+ * projects only, never the shepherd project and never a registry-discovered
+ * (unconfigured) one. Pure so it's testable without booting a server.
+ */
+export function spawnableProjects(entries: ProjectListEntry[]): SourceProjectListItem[] {
+  return entries
+    .filter((entry) => entry.configured && entry.kind !== "shepherd")
+    .map(({ id, name }) => ({ id, name }));
 }
 
 interface StartedSource {
@@ -113,6 +126,7 @@ export async function startConfiguredSources(
           deferInitialSync: true,
           listSessions: deps.listSessions,
           ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
+          ...(deps.listProjects ? { listProjects: deps.listProjects } : {}),
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {

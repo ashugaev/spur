@@ -19,6 +19,7 @@ import {
 import type {
   SourceHandle,
   SourceModule,
+  SourceProjectListItem,
   SourceSpawnSessionRequest,
   SourceSessionListItem,
   SourceStartDeps,
@@ -27,10 +28,12 @@ import { telegramStatusEmoji } from "../telegram-status-emoji.js";
 
 const WATCH_CALLBACK_PREFIX = "spur_watch:";
 const SPAWN_CALLBACK_PREFIX = "spur_spawn:";
+const SPAWN_PROJECT_CALLBACK_PREFIX = "spur_sproj:";
 const PROJECT_CALLBACK_PREFIX = "spur_project:";
 const PROJECTS_MENU_CALLBACK = "spur_projects";
 const PENDING_SPAWN_TTL_MS = 10 * 60_000;
 const MAX_PENDING_SPAWNS = 100;
+const SPAWN_EXPIRED_TEXT = "Spawn expired. Run /spawn again.";
 
 const TELEGRAM_COMMANDS = [
   { command: "start", description: "Show Spur bot help" },
@@ -112,9 +115,19 @@ interface TelegramRuntime {
 
 type TelegramAgentName = "claude" | "codex" | "cursor" | "opencode";
 
+/**
+ * Discriminated by `project`: `undefined` means "awaiting a project pick" —
+ * `projects`/`nonce` back the currently displayed `spur_sproj:` keyboard and
+ * a callback with a mismatched nonce or index is rejected. Once `project` is
+ * set, the record is "awaiting a prompt" and free text spawns with it.
+ */
 interface TelegramPendingSpawn {
   agent: TelegramAgentName;
   expiresAt: number;
+  projects: string[];
+  nonce: string;
+  project?: string;
+  prompt?: string;
 }
 
 type TelegramCommand =
@@ -285,19 +298,22 @@ function prunePendingSpawns(runtime: TelegramRuntime): void {
   }
 }
 
-function takePendingSpawn(
+/**
+ * Reads the pending spawn without deleting it, TTL-checked first. Lets
+ * `routeTelegramPrompt` distinguish "awaiting a project pick" (record must
+ * survive free text) from "awaiting a prompt" (record is consumed by it,
+ * via an explicit `clearPendingSpawn`) before deciding what to do with it.
+ */
+function peekPendingSpawn(
   runtime: TelegramRuntime,
   chatId: number,
   messageThreadId: number | undefined,
   userId: number,
 ): TelegramPendingSpawn | "expired" | null {
-  const key = telegramPendingSpawnKey(chatId, messageThreadId, userId);
-  const pending = runtime.pendingSpawns.get(key);
-  if (!pending) {
-    prunePendingSpawns(runtime);
-    return null;
-  }
-  runtime.pendingSpawns.delete(key);
+  const pending = runtime.pendingSpawns.get(
+    telegramPendingSpawnKey(chatId, messageThreadId, userId),
+  );
+  if (!pending) return null;
   return pending.expiresAt >= Date.now() ? pending : "expired";
 }
 
@@ -428,8 +444,8 @@ async function sendHelp(ctx: TelegramTextContext): Promise<void> {
       "/agents - list active agents",
       "/watch - choose an agent for this chat",
       "/watch <sessionId> - bind directly",
-      "/spawn - choose an agent, then send task",
-      "/spawn <agent> <task> - create an agent with a task",
+      "/spawn - choose an agent, then a project, then send task",
+      "/spawn <agent> <task> - choose a project, then create an agent with that task",
       "/unwatch - unbind this chat",
       "",
       "Plain text goes to the bound agent. Commands stay in Telegram.",
@@ -452,33 +468,88 @@ async function sendSpawnMenu(ctx: TelegramTextContext): Promise<void> {
   });
 }
 
-async function requestSpawnPrompt(
+function buildSpawnProjectKeyboard(
+  projects: SourceProjectListItem[],
+  nonce: string,
+): { text: string; callback_data: string }[][] {
+  return projects.map((project, index) => [
+    {
+      text: project.name,
+      callback_data: `${SPAWN_PROJECT_CALLBACK_PREFIX}${nonce}:${index}`,
+    },
+  ]);
+}
+
+function newSpawnNonce(): string {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+/**
+ * Entry point for both `/spawn <agent>` and the `spur_spawn:` callback: lists
+ * the spawnable projects, auto-picks when there's exactly one (no keyboard —
+ * every downstream reply names the project instead), otherwise stores a
+ * fresh `nonce`-tagged snapshot on the pending record and sends the picker.
+ * `prompt`, when supplied (`/spawn <agent> <task>`), is held on the record
+ * and fires the spawn as soon as a project is picked instead of asking for
+ * one.
+ */
+async function requestSpawnProject(
   runtime: TelegramRuntime,
   ctx: Pick<TelegramTextContext, "reply">,
   chatId: number,
   messageThreadId: number | undefined,
   userId: number,
   agent: TelegramAgentName,
+  prompt?: string,
 ): Promise<void> {
+  const deps = runtime.deps;
+  const projects = deps.listProjects ? await deps.listProjects() : null;
+  if (projects === null) {
+    await ctx.reply("Cannot list projects.");
+    return;
+  }
+  if (projects.length === 0) {
+    await ctx.reply("No projects configured.");
+    return;
+  }
   prunePendingSpawns(runtime);
-  runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), {
+  const key = telegramPendingSpawnKey(chatId, messageThreadId, userId);
+  if (projects.length === 1) {
+    const project = projects[0]?.id;
+    if (project === undefined) return;
+    if (prompt !== undefined) {
+      await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, { agent, project, prompt });
+      return;
+    }
+    runtime.pendingSpawns.set(key, {
+      agent,
+      expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
+      projects: [project],
+      nonce: "",
+      project,
+    });
+    await ctx.reply(`Send task prompt for new ${agent} Spur agent in ${project}.`);
+    return;
+  }
+  const nonce = newSpawnNonce();
+  runtime.pendingSpawns.set(key, {
     agent,
     expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
+    projects: projects.map((project) => project.id),
+    nonce,
+    ...(prompt !== undefined ? { prompt } : {}),
   });
-  await ctx.reply(`Send task prompt for new ${agent} Spur agent.`);
+  await ctx.reply(`Select a project for the new ${agent} agent:`, {
+    reply_markup: { inline_keyboard: buildSpawnProjectKeyboard(projects, nonce) },
+  });
 }
-
-type TelegramSpawnRequest = Omit<SourceSpawnSessionRequest, "project"> & { project?: string };
 
 async function spawnTelegramSession(
   runtime: TelegramRuntime,
-  request: TelegramSpawnRequest,
+  request: SourceSpawnSessionRequest,
 ): Promise<SourceSessionListItem | null> {
   if (!runtime.deps.spawnSession) return null;
-  return runtime.deps.spawnSession({
-    ...request,
-    project: request.project ?? runtime.deps.projectId,
-  });
+  return runtime.deps.spawnSession(request);
 }
 
 export function wrapTelegramSpawnPrompt(taskText: string): string {
@@ -513,7 +584,7 @@ async function bindSpawnedSession(
   ctx: Pick<TelegramTextContext, "reply" | "api">,
   chatId: number,
   messageThreadId: number | undefined,
-  request: TelegramSpawnRequest,
+  request: SourceSpawnSessionRequest,
 ): Promise<void> {
   const deps = runtime.deps;
   const status = await ctx.reply(`Spawning ${request.agent} agent...`);
@@ -657,11 +728,11 @@ async function handleTelegramCallback(
     const agent = data.slice(SPAWN_CALLBACK_PREFIX.length);
     if (!isTelegramAgentName(agent)) return;
     await ctx.answerCallbackQuery(`Selected ${agent}.`);
-    await requestSpawnPrompt(
+    await requestSpawnProject(
       runtime,
       {
-        reply: async (text: string) => {
-          await ctx.reply?.(text);
+        reply: async (text: string, options?: unknown) => {
+          await ctx.reply?.(text, options);
           return {};
         },
       },
@@ -670,6 +741,55 @@ async function handleTelegramCallback(
       from.id,
       agent,
     );
+    return;
+  }
+
+  if (data.startsWith(SPAWN_PROJECT_CALLBACK_PREFIX)) {
+    const [nonce, indexRaw] = data.slice(SPAWN_PROJECT_CALLBACK_PREFIX.length).split(":");
+    const chatId = message.chat.id;
+    const messageThreadId = message.message_thread_id;
+    const userId = from.id;
+    const peeked = peekPendingSpawn(runtime, chatId, messageThreadId, userId);
+    if (peeked === "expired") {
+      clearPendingSpawn(runtime, chatId, messageThreadId, userId);
+      await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
+      return;
+    }
+    if (!peeked || peeked.project !== undefined || peeked.nonce !== nonce) {
+      await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
+      return;
+    }
+    const index = Number(indexRaw);
+    const project = Number.isInteger(index) ? peeked.projects[index] : undefined;
+    if (project === undefined) {
+      await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    const replyShim = {
+      reply: async (text: string) => {
+        await ctx.reply?.(text);
+        return {};
+      },
+    };
+    if (peeked.prompt !== undefined) {
+      clearPendingSpawn(runtime, chatId, messageThreadId, userId);
+      await bindSpawnedSession(runtime, replyShim, chatId, messageThreadId, {
+        agent: peeked.agent,
+        project,
+        prompt: peeked.prompt,
+      });
+      return;
+    }
+    prunePendingSpawns(runtime);
+    runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), {
+      agent: peeked.agent,
+      expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
+      projects: [],
+      nonce: "",
+      project,
+    });
+    await replyShim.reply(`Send task prompt for new ${peeked.agent} Spur agent in ${project}.`);
     return;
   }
 
@@ -819,22 +939,15 @@ async function handleTelegramText(
     return;
   }
   if (command?.kind === "spawn") {
-    if (!command.prompt) {
-      await requestSpawnPrompt(
-        runtime,
-        ctx,
-        message.chat.id,
-        message.message_thread_id,
-        from.id,
-        command.agent,
-      );
-      return;
-    }
-    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-    await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
-      agent: command.agent,
-      prompt: command.prompt,
-    });
+    await requestSpawnProject(
+      runtime,
+      ctx,
+      message.chat.id,
+      message.message_thread_id,
+      from.id,
+      command.agent,
+      command.prompt,
+    );
     return;
   }
   if (command?.kind === "invalid_watch") {
@@ -880,23 +993,31 @@ async function routeTelegramPrompt(
   const deps = runtime.deps;
   const key = telegramBindingKey(message.chat.id, message.message_thread_id);
 
-  const pendingSpawn = takePendingSpawn(
+  const peekedSpawn = peekPendingSpawn(
     runtime,
     message.chat.id,
     message.message_thread_id,
     from.id,
   );
-  if (pendingSpawn) {
-    if (pendingSpawn === "expired") {
-      await ctx.reply("Spawn prompt expired. Run /spawn again.");
-      return;
-    }
+  if (peekedSpawn === "expired") {
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+    await ctx.reply("Spawn prompt expired. Run /spawn again.");
+    return;
+  }
+  if (peekedSpawn && peekedSpawn.project !== undefined) {
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
-      agent: pendingSpawn.agent,
+      agent: peekedSpawn.agent,
+      project: peekedSpawn.project,
       prompt: text,
     });
     return;
   }
+  // `peekedSpawn` here, if present, is an awaiting-project record: it never
+  // preempts a live bound session, but it must survive free text and skip
+  // autoSpawn when there's no session to deliver to (see routeTelegramPrompt
+  // doc comment above and spec revision 2 G2).
+  const hasAwaitingProject = peekedSpawn !== null;
 
   let binding = runtime.bindings.get(key);
   if (!binding) {
@@ -904,6 +1025,10 @@ async function routeTelegramPrompt(
     binding = runtime.bindings.get(key);
   }
   if (!binding) {
+    if (hasAwaitingProject) {
+      await ctx.reply("Pick a project for the pending /spawn, or run /spawn again.");
+      return;
+    }
     const acquireResult = tryAcquireAutoSpawn(runtime, key);
     switch (acquireResult.status) {
       case "busy":
@@ -928,6 +1053,10 @@ async function routeTelegramPrompt(
   }
   const session = await findSession(deps, binding.sessionId);
   if (!session) {
+    if (hasAwaitingProject) {
+      await ctx.reply("Pick a project for the pending /spawn, or run /spawn again.");
+      return;
+    }
     const acquireResult = tryAcquireAutoSpawn(runtime, key);
     switch (acquireResult.status) {
       case "busy":
