@@ -1930,6 +1930,14 @@ describe("SessionService", () => {
         TEST_DATA_DIR,
         expect.objectContaining({ status: "completed" }),
       );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.self_destruct.failed",
+          level: "warn",
+          details: { kind: "todo_open_work" },
+        }),
+      );
 
       await service.mutateTodo(
         "api-1",
