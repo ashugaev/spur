@@ -1871,6 +1871,11 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_ledger_empty" });
+      const failedEvent = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.complete.failed" && entry.sessionId === "api-1",
+      );
+      expect(failedEvent?.[1].level).toBe("warn");
+      expect(failedEvent?.[1].details).toMatchObject({ kind: "todo_ledger_empty" });
       await service.complete(
         "api-1",
         { skipPrCheck: true },
@@ -1894,6 +1899,11 @@ describe("SessionService", () => {
       );
 
       await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
+      const failedEvent = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.complete.failed" && entry.sessionId === "api-1",
+      );
+      expect(failedEvent?.[1].level).toBe("warn");
+      expect(failedEvent?.[1].details).toMatchObject({ kind: "todo_open_work" });
       await service.complete(
         "api-1",
         { skipPrCheck: true },
@@ -2581,6 +2591,53 @@ describe("SessionService", () => {
         code: "todo_ledger_empty",
       });
       expect(sessions.get("api-1")?.status).toBe("running");
+      const selfDestructFailed = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.self_destruct.failed" && entry.sessionId === "api-1",
+      );
+      expect(selfDestructFailed?.[1].level).toBe("warn");
+      expect(selfDestructFailed?.[1].details).toMatchObject({ kind: "todo_ledger_empty" });
+      const completeFailed = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.complete.failed" && entry.sessionId === "api-1",
+      );
+      expect(completeFailed).toBeUndefined();
+      service.dispose();
+    });
+
+    it("self-destruct refuses open work, then completes once the items resolve", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const projection = await service.mutateTodo(
+        "api-1",
+        { action: "add", text: "Ship it", reason: "Session objective" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
+      const itemId = projection.items[0]?.id;
+      if (!itemId) throw new Error("Expected added ToDo item");
+
+      await expect(service.selfDestruct("api-1")).rejects.toMatchObject({
+        code: "todo_open_work",
+      });
+      const selfDestructFailed = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.self_destruct.failed" && entry.sessionId === "api-1",
+      );
+      expect(selfDestructFailed?.[1].level).toBe("warn");
+      expect(selfDestructFailed?.[1].details).toMatchObject({ kind: "todo_open_work" });
+
+      await service.mutateTodo(
+        "api-1",
+        { action: "complete", itemId, reason: "Done" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
+      await service.selfDestruct("api-1");
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      const completedEvent = logSpurEventMock.mock.calls.find(
+        ([, entry]) =>
+          entry.event === "session.self_destruct.completed" && entry.sessionId === "api-1",
+      );
+      expect(completedEvent).toBeDefined();
       service.dispose();
     });
 
@@ -18729,6 +18786,11 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(writeSessionMock).not.toHaveBeenCalled();
+    const completeFailed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.complete.failed" && entry.sessionId === "api-1",
+    );
+    expect(completeFailed?.[1].level).toBe("error");
+    expect(completeFailed?.[1].details).toBeUndefined();
   });
 
   it("completes without a pull request action when the worktree is no longer a git repo", async () => {

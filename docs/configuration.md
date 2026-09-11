@@ -467,6 +467,8 @@ Message delivery events: `session.message.sent`, `session.message.delivery_recov
 
 Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff doubles from 2 minutes to a 30-minute cap), `session.todo.nudge_disabled` (give-up; `details.kind` is `ledger_corrupt` or `target_gone`). `session.todo.nudge_disabled` is emitted at most once per session per liveness episode.
 
+Manual status events: self-destruct uses the `session.self_destruct.*` event family (`session.self_destruct.failed`, `session.self_destruct.completed`); agent and human complete use `session.complete.*`; pause uses `session.pause.*` with no failure classification. When a ToDo gate blocks completion or self-destruct, `*.failed` is logged at `warn` with `details.kind` set to `todo_ledger_empty` or `todo_open_work`; all other failures log at `error` with no `details`. To query all terminal-path failures across both families, filter on `session.complete.failed` and `session.self_destruct.failed`.
+
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
 
 ## Daemon restarts

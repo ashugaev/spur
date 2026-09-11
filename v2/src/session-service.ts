@@ -878,6 +878,7 @@ const PLAN_MODE_PROMPT_SUFFIX =
 const RESTRICT_WRITES_PROMPT_SUFFIX =
   "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
+type ManualStatusAction = "complete" | "pause" | "self_destruct";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 /**
@@ -11098,7 +11099,7 @@ export class SessionService {
       }
       return this.applyManualStatusLocked(sessionId, "completed", {
         prAction: "leave_open",
-      });
+      }, { eventAction: "self_destruct" });
     });
   }
 
@@ -11890,13 +11891,13 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request?: CompleteSessionRequest,
-    options?: { retainInList?: boolean; skipEnrichment?: false; todoActor?: TodoActor },
+    options?: { retainInList?: boolean; skipEnrichment?: false; todoActor?: TodoActor; eventAction?: ManualStatusAction },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean; skipEnrichment?: boolean; todoActor?: TodoActor },
+    options?: { retainInList?: boolean; skipEnrichment?: boolean; todoActor?: TodoActor; eventAction?: ManualStatusAction },
   ): Promise<SessionView | void> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
@@ -11945,7 +11946,8 @@ export class SessionService {
     if (isTerminalSessionStatus(session.status)) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
     }
-    const eventAction = targetStatus === "stopped" ? "pause" : "complete";
+    const eventAction: ManualStatusAction =
+      options?.eventAction ?? (targetStatus === "stopped" ? "pause" : "complete");
 
     try {
       if (targetStatus === "completed") {
@@ -11984,11 +11986,18 @@ export class SessionService {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const kind =
+        error instanceof TodoEmptyLedgerError
+          ? "todo_ledger_empty"
+          : error instanceof TodoOpenWorkError
+            ? "todo_open_work"
+            : undefined;
       this.logEvent(`session.${eventAction}.failed`, {
-        level: "error",
+        level: kind !== undefined ? "warn" : "error",
         sessionId,
         projectId: session.project,
         message: `Failed to mark ${sessionId} as ${targetStatus}: ${message}`,
+        ...(kind !== undefined ? { details: { kind } } : {}),
       });
       throw error;
     }
