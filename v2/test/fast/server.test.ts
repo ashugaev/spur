@@ -952,6 +952,9 @@ describe("startServer", () => {
           portId: "http",
           env: "SPUR_RESERVED_PORT_DEV",
           port: 3000,
+          owner: "external",
+          holder: { pid: 4242, cwd: "/tmp/foo" },
+          clearable: false,
         },
       ]);
     };
@@ -976,6 +979,9 @@ describe("startServer", () => {
             portId: "http",
             env: "SPUR_RESERVED_PORT_DEV",
             port: 3000,
+            owner: "external",
+            holder: { pid: 4242, cwd: "/tmp/foo" },
+            clearable: false,
           },
         ],
       });
