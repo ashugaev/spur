@@ -22380,7 +22380,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("emits host.disk.budget_exceeded on the first crossing, and nothing below the ceiling", async () => {
+    it("emits host.disk.budget_exceeded every sweep while over budget, and nothing below the ceiling", async () => {
       createSessionStore();
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
@@ -22423,6 +22423,19 @@ describe("SessionService", () => {
       );
       expect(exceeded).toHaveLength(1);
       expect(exceeded[0]?.[1].level).toBe("warn");
+
+      // No latch: a second sweep still over budget emits again.
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        roots: [{ id: "npm-cacache", sizeBytes: 2 * 1024 * 1024 * 1024 }],
+        totals: { attributableBytes: 2 * 1024 * 1024 * 1024 },
+      });
+      await service.runDiskBudgetSweep();
+      const exceededAfterSecondSweep = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "host.disk.budget_exceeded",
+      );
+      expect(exceededAfterSecondSweep).toHaveLength(2);
       service.dispose();
     });
   });
