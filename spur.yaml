@@ -59,6 +59,7 @@ projects:
             env: SPUR_RESERVED_PORT_LANDING
             start: 5700
             end: 5749
+            url: "http://127.0.0.1:{port}"
     modes:
       manager:
         skill: manager
