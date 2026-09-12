@@ -10912,17 +10912,28 @@ export class SessionService {
   private cloneStartupAttachments(
     sessionId: string,
     attachmentIds: string[] | undefined,
-  ): SendMessageAttachment[] {
-    return (attachmentIds ?? []).map((attachmentId) => {
+  ): { attachments: SendMessageAttachment[]; missingIds: string[] } {
+    const attachments: SendMessageAttachment[] = [];
+    const missingIds: string[] = [];
+    for (const attachmentId of attachmentIds ?? []) {
       const artifact = readSessionArtifact(this.config.dataDir, sessionId, attachmentId);
       if (!artifact) {
-        throw new Error(`Startup attachment not found: ${attachmentId}`);
+        missingIds.push(attachmentId);
+        continue;
       }
-      return {
-        name: baseAttachmentName(artifact.id),
-        data: readFileSync(artifact.path).toString("base64"),
-      };
-    });
+      try {
+        attachments.push({
+          name: baseAttachmentName(artifact.id),
+          data: readFileSync(artifact.path).toString("base64"),
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+        missingIds.push(attachmentId);
+      }
+    }
+    return { attachments, missingIds };
   }
 
   private async findAgentHistoryFile(
@@ -11936,7 +11947,7 @@ export class SessionService {
       "id" | "project" | "workspaceId" | "deskId" | "startupAttachmentIds"
     >,
     options?: { preserveStartup?: boolean },
-  ): void {
+  ): { ranCleanup: boolean } {
     const sessionId = session.id;
     // Per-session cleanup: unconditional, regardless of desk membership.
     deleteAgentHookState(this.config.dataDir, sessionId);
@@ -11964,7 +11975,7 @@ export class SessionService {
       (s) => s.id !== sessionId && s.project === session.project && workspaceIdOf(s) === anchorId,
     );
     if (deskMembers.some((s) => !isTerminalSessionStatus(s.status))) {
-      return;
+      return { ranCleanup: false };
     }
     // Startup attachments of EVERY member live in this one shared dir, and
     // respawn re-clones them, so a member's keep-list is not enough: deleting
@@ -11986,6 +11997,7 @@ export class SessionService {
     // Last member's teardown: the workspace's shared slots/pr state goes
     // with the rest of its shared state.
     deleteWorkspaceState(this.config.dataDir, anchorId);
+    return { ranCleanup: true };
   }
 
   // The single path for killing an agent pane. relaunchSessionInPlace,
@@ -12220,6 +12232,7 @@ export class SessionService {
     }
     const eventAction: ManualStatusAction =
       options?.eventAction ?? (targetStatus === "stopped" ? "pause" : "complete");
+    let startupAttachmentsCleaned = false;
 
     try {
       if (targetStatus === "completed") {
@@ -12240,7 +12253,15 @@ export class SessionService {
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
-        this.removeSessionArtifacts(session);
+        const { ranCleanup } = this.removeSessionArtifacts(session);
+        // removeSessionArtifacts never preserves this session's own startup
+        // ids when preserveStartup is unset (as here) — a live desk sibling
+        // can only keep ITS OWN ids, not this session's. So whenever it ran
+        // (files gone), this record's startupAttachmentIds now name deleted
+        // files and must be cleared, or a later respawn/handoff reports them
+        // missing forever. A skipped cleanup (a still-live desk sibling)
+        // means the files are untouched, so the ids stay.
+        startupAttachmentsCleaned = ranCleanup;
         const replyTargetProjectId =
           readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
         await this.pushTelegramNotice(
@@ -12285,6 +12306,9 @@ export class SessionService {
     }
     if (targetStatus === "stopped") {
       delete record.error;
+    }
+    if (startupAttachmentsCleaned) {
+      delete record.startupAttachmentIds;
     }
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
@@ -13878,10 +13902,17 @@ export class SessionService {
         throw new Error(`Unknown startup attachment id: ${attachmentId}`);
       }
     }
-    const clonedAttachments = this.cloneStartupAttachments(
-      workspaceIdOf(session),
-      requestedStartupAttachmentIds,
-    );
+    const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
+      this.cloneStartupAttachments(workspaceIdOf(session), requestedStartupAttachmentIds);
+    if (missingStartupAttachmentIds.length > 0) {
+      this.logEvent("session.respawn.startup_attachment_missing", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Respawn of ${sessionId} skipped ${missingStartupAttachmentIds.length} startup attachment(s) with no file on disk`,
+        details: { missingIds: missingStartupAttachmentIds },
+      });
+    }
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     const bootstrap = this.isUnconfiguredProjectId(session.project);
     // A completed record is never killed by the branch below (it's gated on
@@ -13974,10 +14005,17 @@ export class SessionService {
           : undefined;
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
-      const clonedAttachments = this.cloneStartupAttachments(
-        workspaceIdOf(session),
-        session.startupAttachmentIds ?? [],
-      );
+      const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
+        this.cloneStartupAttachments(workspaceIdOf(session), session.startupAttachmentIds ?? []);
+      if (missingStartupAttachmentIds.length > 0) {
+        this.logEvent("session.handoff.startup_attachment_missing", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Handoff of ${sessionId} skipped ${missingStartupAttachmentIds.length} startup attachment(s) with no file on disk`,
+          details: { missingIds: missingStartupAttachmentIds },
+        });
+      }
       const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
       const mergedAttachments = [
         ...clonedAttachments,

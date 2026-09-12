@@ -17618,6 +17618,72 @@ describe("SessionService", () => {
     );
   });
 
+  it("clears startupAttachmentIds after completing a solo session whose artifacts dir was deleted", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      startupAttachmentIds: ["1788182593277-image.webp"],
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    const finalWrite = writeSessionMock.mock.calls
+      .map(([, record]) => record as SessionRecord)
+      .filter((record) => record.id === "api-1" && record.status === "completed")
+      .at(-1);
+    expect(finalWrite?.startupAttachmentIds).toBeUndefined();
+  });
+
+  it("keeps startupAttachmentIds after completing a desk member with a live sibling (artifacts preserved)", async () => {
+    const closing = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      startupAttachmentIds: ["1788182593277-image.webp"],
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const sibling = { ...closing, id: "api-2", tmuxSession: "api-2", status: "running" as const };
+    readSessionMock.mockReturnValue(closing);
+    listSessionsMock.mockReturnValue([closing, sibling]);
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    const finalWrite = writeSessionMock.mock.calls
+      .map(([, record]) => record as SessionRecord)
+      .filter((record) => record.id === "api-1" && record.status === "completed")
+      .at(-1);
+    expect(finalWrite?.startupAttachmentIds).toEqual(["1788182593277-image.webp"]);
+  });
+
   it("sends a farewell and closes the topic before unbinding on complete", async () => {
     const { config, telegramSource } = telegramProjectConfig();
     loadConfigMock.mockReturnValue(config);
@@ -30568,6 +30634,42 @@ describe("SessionService", () => {
         }),
       ).rejects.toThrow("Unknown startup attachment id: unknown.png");
     });
+
+    it("respawns successfully when a record-listed startup attachment has no file on disk", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionArtifactMock.mockReturnValue(null);
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        startupAttachmentIds: ["1788182593277-image.webp"],
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.id).toBe("api-1");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.respawn.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1788182593277-image.webp"] },
+        }),
+      );
+    });
   });
 
   describe("handoff", () => {
@@ -31247,6 +31349,240 @@ describe("SessionService", () => {
       const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
       expect(launchPrompt).toContain(
         "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-source.png]",
+      );
+    });
+
+    it("hands off successfully when the source's startup attachment file is missing on disk", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionArtifactMock.mockReturnValue(null);
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1788182593277-image.webp"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(spawned.id).toBe("api-2");
+      expect(sessions.get("api-2")?.startupAttachmentIds ?? []).not.toContain(
+        "1788182593277-image.webp",
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1788182593277-image.webp"] },
+        }),
+      );
+    });
+
+    it("hands off successfully when the startup attachment file is deleted between the artifact lookup and the read (TOCTOU ENOENT)", async () => {
+      mockClaudeJsonlState("waiting");
+      // readSessionArtifact reports the artifact exists (its own stat check
+      // passed), but the file is gone by the time readFileSync runs — never
+      // created here, so the real fs read throws ENOENT.
+      const goneArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "1773828300000-gone.png");
+      readSessionArtifactMock.mockReturnValue({
+        id: "1773828300000-gone.png",
+        path: goneArtifactPath,
+        name: "1773828300000-gone.png",
+        size: 12,
+        mimeType: "image/png",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1773828300000-gone.png"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(spawned.id).toBe("api-2");
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(launchPrompt).not.toContain("[Attached file:");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1773828300000-gone.png"] },
+        }),
+      );
+    });
+
+    it("propagates a non-ENOENT error reading a startup attachment instead of treating it as missing", async () => {
+      mockClaudeJsonlState("waiting");
+      // A directory at the artifact path makes the real readFileSync throw
+      // EISDIR, not ENOENT — this must NOT be swallowed into missingIds.
+      const dirArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "1773828300000-dir.png");
+      mkdirSync(dirArtifactPath, { recursive: true });
+      readSessionArtifactMock.mockReturnValue({
+        id: "1773828300000-dir.png",
+        path: dirArtifactPath,
+        name: "1773828300000-dir.png",
+        size: 12,
+        mimeType: "image/png",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1773828300000-dir.png"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow();
+    });
+
+    it("hands off with one resolvable and one missing startup attachment, carrying only the resolved one into the prompt and warning on only the missing id", async () => {
+      mockClaudeJsonlState("waiting");
+      const startupArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "1773828300000-resolved.png");
+      mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+      writeFileSync(startupArtifactPath, "resolved-bytes");
+      readSessionArtifactMock.mockImplementation(
+        (_dataDir: string, _sessionId: string, attachmentId: string) => {
+          if (attachmentId !== "1773828300000-resolved.png") return null;
+          return {
+            id: "1773828300000-resolved.png",
+            path: startupArtifactPath,
+            name: "1773828300000-resolved.png",
+            size: 14,
+            mimeType: "image/png",
+            kind: "image",
+            origin: "intentional",
+            createdAt: "2026-03-18T10:00:00.000Z",
+            updatedAt: "2026-03-18T10:00:00.000Z",
+          };
+        },
+      );
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1788182593277-image.webp", "1773828300000-resolved.png"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(spawned.id).toBe("api-2");
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(launchPrompt).toContain(
+        "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-resolved.png]",
+      );
+      expect(launchPrompt).not.toContain("1788182593277-image.webp");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1788182593277-image.webp"] },
+        }),
+      );
+    });
+
+    it("emits the missing-startup-attachment warn even when the handoff spawn itself fails", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionArtifactMock.mockReturnValue(null);
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1788182593277-image.webp"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      // Fails the handoff's inner spawn() for a reason unrelated to
+      // attachments (admission/workspace-style failure), simulated here via
+      // the session id reservation.
+      reserveNextSessionIdMock.mockRejectedValue(new Error("no session ids available"));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+        "no session ids available",
+      );
+
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1788182593277-image.webp"] },
+        }),
       );
     });
 
