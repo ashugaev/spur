@@ -40,6 +40,11 @@ rm -f "$HOME/.local/bin/spur" "$HOME"/.local/bin/spur-*
 log "removing agent CLIs installed by the test"
 rm -rf "$HOME/.local/lib/node_modules/@anthropic-ai" "$HOME/.local/lib/node_modules/@openai"
 rm -f "$HOME/.local/bin/claude" "$HOME/.local/bin/codex"
+# opencode too — the install doc installs it only when absent, so a leftover
+# copy silences that line and the box is not pre-install clean.
+rm -rf "$HOME/.local/lib/node_modules/opencode-ai" "$HOME/.config/opencode" \
+  "$HOME/.local/share/opencode" "$HOME/.cache/opencode"
+rm -f "$HOME/.local/bin/opencode"
 
 log "removing node and tailscale"
 sudo apt-get remove -y nodejs >/dev/null 2>&1
@@ -102,6 +107,7 @@ printf '  %-14s %s\n' "spur"          "$([ -e "$HOME/.local/lib/node_modules/@sh
 printf '  %-14s %s\n' "~/.spur"       "$([ -e "$HOME/.spur" ] && echo present || echo absent)"
 printf '  %-14s %s\n' "claude"        "$([ -e "$HOME/.local/bin/claude" ] && echo present || echo absent)"
 printf '  %-14s %s\n' "codex"         "$([ -e "$HOME/.local/bin/codex" ] && echo present || echo absent)"
+printf '  %-14s %s\n' "opencode"      "$([ -e "$HOME/.local/bin/opencode" ] && echo present || echo absent)"
 printf '  %-14s %s\n' "tailscale"     "$(dpkg -s tailscale >/dev/null 2>&1 && echo present || echo absent)"
 printf '  %-14s %s\n' "units-user"    "$(ls "$HOME"/.config/systemd/user/spur-*.service 2>/dev/null | wc -l)"
 printf '  %-14s %s\n' "units-system"  "$(ls /etc/systemd/system/spur-*.service 2>/dev/null | wc -l)"
