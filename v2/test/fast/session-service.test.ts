@@ -7123,6 +7123,8 @@ describe("SessionService", () => {
           details: {
             awaitingStepIndex: 0,
             nextStepIndex: 1,
+            totalSteps: 2,
+            stepsPending: true,
             sessionStatus: "stopped",
           },
         }),
@@ -7325,7 +7327,62 @@ describe("SessionService", () => {
           details: {
             awaitingStepIndex: 0,
             nextStepIndex: 1,
+            totalSteps: 2,
+            stepsPending: true,
             sessionStatus: "errored",
+          },
+        }),
+      ]);
+      service.dispose();
+    });
+
+    it("marks stepsPending false when the drift lands while awaiting the final step", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        parkedPipelineSession({
+          pipeline: {
+            steps: ["research", "test"],
+            nextStepIndex: 2,
+            status: "running",
+            awaitingStepIndex: 1,
+          },
+        }),
+      );
+      listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
+      expect(run).toBeDefined();
+
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
+
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      const outcome = await Promise.race([
+        run?.then((): "retired" => "retired"),
+        realTimers.setTimeout(3_000, "parked" as const),
+      ]);
+
+      expect(outcome).toBe("retired");
+      expect(pipelineStalledCalls()).toEqual([
+        expect.objectContaining({
+          event: "session.pipeline.stalled",
+          level: "warn",
+          sessionId: "api-1",
+          details: {
+            awaitingStepIndex: 1,
+            nextStepIndex: 2,
+            totalSteps: 2,
+            stepsPending: false,
+            sessionStatus: "stopped",
           },
         }),
       ]);
