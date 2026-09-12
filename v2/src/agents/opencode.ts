@@ -361,6 +361,19 @@ function isRateLimit(value: unknown): boolean {
   return /(?:rate[ _-]?limit|too many requests|\b429\b)/i.test(errorText(value));
 }
 
+// NamedError literals that opencode assigns to a user-initiated abort (ESC /
+// interrupt), never to a genuine provider or config failure. Sourced from the
+// opencode-ai 1.18.30 binary: `Ho(s){return s.role==="assistant"&&s.error?.name
+// ==="MessageAbortedError"}`. One-line addition if opencode adds another abort
+// discriminator.
+const OPENCODE_ABORTED_ERROR_NAMES = new Set(["MessageAbortedError"]);
+
+function isAbortedError(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const name = value["name"];
+  return typeof name === "string" && OPENCODE_ABORTED_ERROR_NAMES.has(name);
+}
+
 export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | null {
   const messages = openCodeMessages(value);
   if (messages.length === 0) return null;
@@ -374,6 +387,9 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
   if (record["error"] !== undefined && record["error"] !== null) {
     if (isRateLimit(record["error"])) {
       return { state: "rate_limited", reason: "assistant rate limit" };
+    }
+    if (isAbortedError(record["error"])) {
+      return { state: "waiting", reason: "assistant aborted" };
     }
     return { state: "error", reason: "assistant error" };
   }
