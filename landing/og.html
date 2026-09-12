@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="robots" content="noindex" />
+    <title>Spur OG</title>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      body {
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+        position: relative;
+        background: #0d0d0e;
+        color: #e1e1e1;
+        font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+      }
+      .grid {
+        position: absolute;
+        inset: 0;
+        background-image: radial-gradient(rgba(225, 225, 225, 0.09) 1px, transparent 1px);
+        background-size: 34px 34px;
+      }
+      .in {
+        position: relative;
+        padding: 70px 76px;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      .top {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      .top svg {
+        width: 44px;
+        height: 44px;
+      }
+      .top .nm {
+        font-size: 34px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+      }
+      h1 {
+        margin-top: auto;
+        font-size: 50px;
+        font-weight: 700;
+        letter-spacing: -0.045em;
+        line-height: 1;
+      }
+      h1 em {
+        font-style: normal;
+        color: #ff3d9a;
+      }
+      p {
+        margin-top: 26px;
+        font-size: 22px;
+        color: #a1a1a1;
+        line-height: 1.5;
+        max-width: 36ch;
+      }
+      .foot {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-top: 40px;
+        font-size: 17px;
+        color: #555558;
+      }
+      .foot i {
+        width: 7px;
+        height: 7px;
+        font-style: normal;
+        display: inline-block;
+      }
+      .w {
+        background: #58a6ff;
+      }
+      .r {
+        background: #3fb950;
+      }
+      .a {
+        background: #ffd700;
+      }
+      .chips {
+        display: flex;
+        gap: 10px;
+        margin-left: auto;
+      }
+      .chips span {
+        border: 1px solid rgba(50, 50, 54, 1);
+        padding: 6px 12px;
+        font-size: 16px;
+        color: #a1a1a1;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="grid"></div>
+    <div class="in">
+      <div class="top">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path
+            d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4"
+            stroke="#fff"
+            stroke-width="2"
+            stroke-linecap="round"
+          />
+        </svg>
+        <span class="nm">Spur</span>
+      </div>
+      <h1>The <em>missing layer</em><br />between you and your CLI agents.</h1>
+      <p>
+        A tool for software engineers who already run claude, codex, cursor or opencode. Same
+        binaries, same auth. Nothing to migrate.
+      </p>
+      <div class="foot">
+        <i class="w"></i><i class="r"></i><i class="a"></i>
+        <span>github.com/ashugaev/spur</span>
+        <span class="chips"><span>Apache-2.0</span><span>self-hosted</span></span>
+      </div>
+    </div>
+  </body>
+</html>

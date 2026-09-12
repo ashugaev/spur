@@ -7351,8 +7351,8 @@ export class SessionService {
       // startSidecarInternal operates entirely on that owner record. Only
       // when the caller IS the owner does the running chain (and the value
       // this function returns, persisted onto the caller's own record by
-      // every call site) get updated — a sibling starting an anchor-owned
-      // sidecar must get its own record back unchanged, never the anchor's.
+      // every call site) get updated with owner state. A sibling retains
+      // its own record and registers newly requested names for its UI.
       const owner = this.resolveSidecarOwnerRecord(currentSession, sidecar);
       const wasAlive = await sidecarTmuxAlive(owner.id, sidecarName);
       const updated = await this.startSidecarInternal({
@@ -7365,6 +7365,11 @@ export class SessionService {
       });
       if (owner.id === currentSession.id) {
         currentSession = updated;
+      }
+      const sidecarNames = sessionSidecarNames(currentSession, args.project);
+      if (!sidecarNames.includes(sidecarName)) {
+        currentSession = { ...currentSession, sidecarNames: [...sidecarNames, sidecarName] };
+        writeSession(this.config.dataDir, currentSession);
       }
       if (!wasAlive) {
         args.onStarted(sidecarName, sidecar);
@@ -7408,22 +7413,29 @@ export class SessionService {
     throw new Error(`Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`);
   }
 
+  private canPublishSidecarLinkForSession(session: SessionRecord, sidecarName: string): boolean {
+    if (!isTerminalSessionStatus(session.status)) return true;
+    const sidecar = this.resolveProjectForSession(session)?.sidecars[sidecarName];
+    return Boolean(sidecar && !sidecar.mcp && this.hasRunningWorkspaceMembers(session));
+  }
+
   private async publishSidecarLink(
     sessionId: string,
     sidecarName: string,
     reservedPort: number,
     linkUrl: string,
   ): Promise<void> {
-    const latest = readSession(this.config.dataDir, sessionId);
-    if (!latest) return;
-    if (isTerminalSessionStatus(latest.status)) return;
     if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
+    const latest = readSession(this.config.dataDir, sessionId);
+    if (!latest || !this.canPublishSidecarLinkForSession(latest, sidecarName)) return;
     const resolved = resolveWorkspaceState(this.config.dataDir, latest);
     const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: sidecarName, url: linkUrl }],
       unlinkLabels: [],
     });
-    this.writeWorkspaceStateWithLegacyMirror(latest, {
+    const beforeWrite = readSession(this.config.dataDir, sessionId);
+    if (!beforeWrite || !this.canPublishSidecarLinkForSession(beforeWrite, sidecarName)) return;
+    this.writeWorkspaceStateWithLegacyMirror(beforeWrite, {
       ...(slots ? { slots } : {}),
       ...(resolved.pr ? { pr: resolved.pr } : {}),
     });
