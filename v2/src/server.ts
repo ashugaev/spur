@@ -5,6 +5,7 @@ import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
+import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
@@ -140,6 +141,39 @@ export async function resolveTodoMutationActor(args: {
   }
   if (origin === "cli" || origin === "ui") return { kind: "human", origin };
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
+}
+
+async function authorizeAutoPingTarget(args: {
+  origin: UserActionOrigin;
+  callerHeader: string | string[] | undefined;
+  targetSessionId: string;
+  lookup: (sessionId: string) => Promise<{ id: string }>;
+}): Promise<void> {
+  try {
+    await args.lookup(args.targetSessionId);
+  } catch {
+    throw new AutoPingError("session_not_found", 404, "Auto-ping target session not found");
+  }
+  if (Array.isArray(args.callerHeader)) {
+    throw new AutoPingError("forbidden", 403, "Caller session header is invalid");
+  }
+  if (args.callerHeader) {
+    if (args.origin !== "cli" || args.callerHeader !== args.targetSessionId) {
+      throw new AutoPingError("forbidden", 403, "Caller session does not match auto-ping owner");
+    }
+    return;
+  }
+  if (args.origin !== "cli" && args.origin !== "ui") {
+    throw new AutoPingError("forbidden", 403, "Auto-ping request origin is invalid");
+  }
+}
+
+function decodeAutoPingPathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new AutoPingError("invalid_request", 400, "Auto-ping route identifier is invalid");
+  }
 }
 
 // ToDo state gates the agent, never the person driving Spur: a CLI or UI
@@ -578,6 +612,7 @@ export async function startServer(
     deferBackgroundLoops: true,
     ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
   });
+  const autoPing = new AutoPingService(service.config.dataDir);
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
@@ -603,6 +638,7 @@ export async function startServer(
       config: service.config,
       bus,
       sessionService: service,
+      autoPing,
       memoryHoldEngaged: () => service.memoryHoldEngaged(),
       logger: {
         warn: logger.warn ?? writeStderr,
@@ -1421,6 +1457,66 @@ export async function startServer(
         return;
       }
 
+      const autoPingListMatch = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions$/);
+      if (method === "GET" && autoPingListMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingListMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        sendJson(response, 200, { records: autoPing.list(targetSessionId) });
+        return;
+      }
+
+      const autoPingUnsubscribeMatch = path.match(
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/unsubscribe$/,
+      );
+      if (method === "POST" && autoPingUnsubscribeMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingUnsubscribeMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        const body = await readJsonBody<unknown>(request);
+        if (
+          !isRecord(body) ||
+          (body.scope !== "event" && body.scope !== "thread" && body.scope !== "subscription") ||
+          typeof body.handle !== "string"
+        ) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping unsubscribe body is invalid");
+        }
+        sendJson(
+          response,
+          200,
+          await autoPing.unsubscribe(targetSessionId, body.scope, body.handle),
+        );
+        return;
+      }
+
+      const autoPingResumeMatch = path.match(
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/([^/]+)\/resume$/,
+      );
+      if (method === "POST" && autoPingResumeMatch?.[1] && autoPingResumeMatch[2]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingResumeMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        const suppressionId = decodeAutoPingPathSegment(autoPingResumeMatch[2]);
+        const body = await readJsonBody<unknown>(request);
+        if (!isRecord(body) || Object.keys(body).length !== 0) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping resume body must be empty");
+        }
+        sendJson(response, 200, await autoPing.resume(targetSessionId, suppressionId));
+        return;
+      }
+
       const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
         // An invalid percent-encoding in any segment (decodeURIComponent throws URIError)
@@ -1778,6 +1874,16 @@ export async function startServer(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errorMessage = message;
+      if (error instanceof AutoPingError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendJson(response, error.status, { error: { code: error.code, message } });
+        return;
+      }
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
@@ -1946,6 +2052,7 @@ export async function startServer(
       message: `Spur daemon failed during startup: ${message}`,
     });
     service.dispose();
+    autoPing.dispose();
     await closeServer();
     throw error;
   }
@@ -2067,6 +2174,7 @@ export async function startServer(
         // It also retires the per-session delivery loops, which park on their own
         // poll sleep and would otherwise keep typing into panes after shutdown.
         service.dispose();
+        autoPing.dispose();
         const closePromise = closeServer();
         const sourceController = sources;
         if (sourceController) {

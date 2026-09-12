@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { redactAutoPingHandles } from "./auto-ping.js";
 import { join } from "node:path";
 import { iterArchivedThenLive, iterLiveLines, parseJsonLine, tryRotate } from "./jsonl-log-io.js";
 
@@ -213,6 +214,18 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
   }
 
   if (method === "POST") {
+    const autoPingUnsubscribe = path.match(
+      /^\/sessions\/([^/]+)\/auto-ping-suppressions\/unsubscribe$/,
+    );
+    if (autoPingUnsubscribe?.[1]) {
+      return { action: "session.auto_ping_unsubscribe", sessionId: autoPingUnsubscribe[1] };
+    }
+    const autoPingResume = path.match(
+      /^\/sessions\/([^/]+)\/auto-ping-suppressions\/([^/]+)\/resume$/,
+    );
+    if (autoPingResume?.[1]) {
+      return { action: "session.auto_ping_resume", sessionId: autoPingResume[1] };
+    }
     if (path === "/shepherd/spawn") return { action: "session.spawn_shepherd" };
     if (path === "/sessions/background") return { action: "session.spawn_background" };
     if (path === "/sessions") return { action: "session.spawn" };
@@ -309,6 +322,16 @@ function textFieldForAction(action: string): "message" | "prompt" | undefined {
 function buildParams(action: string, body: unknown): Record<string, unknown> | undefined {
   if (!isRecord(body)) return undefined;
 
+  if (action === "session.auto_ping_unsubscribe") {
+    return body["scope"] === "event" ||
+      body["scope"] === "thread" ||
+      body["scope"] === "subscription"
+      ? { scope: body["scope"] }
+      : undefined;
+  }
+
+  if (action === "session.auto_ping_resume") return undefined;
+
   const textField = textFieldForAction(action);
   if (textField) {
     const text = body[textField];
@@ -350,6 +373,6 @@ export function buildUserActionRecord(input: BuildUserActionInput): UserActionRe
     ...(params ? { params } : {}),
     outcome: { status: input.statusCode, ok },
     latencyMs: input.latencyMs,
-    ...(input.error ? { error: input.error } : {}),
+    ...(input.error ? { error: redactAutoPingHandles(input.error) } : {}),
   };
 }

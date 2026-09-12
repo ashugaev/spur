@@ -18,4 +18,32 @@ describe("published interface contracts", () => {
     expect(commands).toContain("`0` marks non-owners, including read-only and shared-workspace");
     expect(commands).toContain("missing variable preserves standalone hook enforcement");
   });
+
+  it("documents auto-ping CLI, daemon routes, source support, and agent interface", async () => {
+    const [commands, daemonApi, configuration, agentSkill, claudeSkill] = await Promise.all([
+      readRepoFile("docs/commands.md"),
+      readRepoFile("docs/daemon-api.md"),
+      readRepoFile("docs/configuration.md"),
+      readRepoFile(".agents/skills/spur/SKILL.md"),
+      readRepoFile(".claude/skills/spur/SKILL.md"),
+    ]);
+
+    expect(commands).toContain("spur auto-ping unsubscribe --event <handle>");
+    expect(commands).toContain("requires exactly one scope flag");
+    expect(commands).toContain("Inside a session, `SPUR_SESSION` supplies the target session");
+    expect(commands).toContain("never raw handles or handle hashes");
+    expect(commands).toContain("Unredeemed handles expire after 30 days");
+    expect(commands).toContain("Event suppressions expire 24 hours");
+    expect(commands).toContain("grant_not_ready");
+    expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
+    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
+    expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
+    expect(daemonApi).toContain("`409` for pending grants or consumed-then-resumed grants");
+    expect(configuration).toContain("`github-ci`: event and subscription for spawn triggers");
+    expect(configuration).toContain("Cron, Sentry, and GitHub CI send triggers stay unsupported");
+    expect(agentSkill).toContain("Stop unwanted auto-pings with `spur auto-ping unsubscribe`");
+    expect(agentSkill).toContain("Scopes and resume: `docs/commands.md#auto-ping`");
+    expect(agentSkill).toContain("API: `docs/daemon-api.md`");
+    expect(claudeSkill).toBe(agentSkill);
+  });
 });

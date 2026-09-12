@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
 import { logSpurEvent } from "../event-log.js";
 import { resolveWebBaseUrl } from "../ports.js";
@@ -133,6 +134,7 @@ export async function startConfiguredSources(
             });
             deps.bus.emit({
               name,
+              occurrenceId: randomUUID(),
               projectId,
               sourceId,
               ...(data === undefined ? {} : { data }),

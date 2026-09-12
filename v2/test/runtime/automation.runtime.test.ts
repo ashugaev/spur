@@ -1,13 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { loadConfig, loadProjectConfig } from "../../src/config.js";
 import { EventBus } from "../../src/event-bus.js";
+import { AutoPingService } from "../../src/auto-ping.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { SessionService } from "../../src/session-service.js";
-import { startConfiguredTriggers } from "../../src/triggers.js";
+import { startConfiguredTriggers as startTriggerController } from "../../src/triggers.js";
 import type { SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
@@ -26,6 +28,27 @@ const activeContexts: Array<{
   daemonPid?: number;
   sessionPrefix: string;
 }> = [];
+
+function startConfiguredTriggers(
+  deps: Omit<Parameters<typeof startTriggerController>[0], "autoPing">,
+): ReturnType<typeof startTriggerController> {
+  const autoPing = new AutoPingService(deps.config.dataDir);
+  const sessionService = Object.create(deps.sessionService) as Parameters<
+    typeof startTriggerController
+  >[0]["sessionService"];
+  sessionService.deliver = async (sessionId, message, options) =>
+    deps.sessionService.deliver(sessionId, message, {
+      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+    });
+  sessionService.spawn = async (request) => deps.sessionService.spawn(request);
+  const controller = startTriggerController({ ...deps, sessionService, autoPing });
+  return {
+    async stop(): Promise<void> {
+      await controller.stop();
+      autoPing.dispose();
+    },
+  };
+}
 
 function currentActiveContext(): (typeof activeContexts)[number] {
   const current = activeContexts.at(-1);
@@ -487,6 +510,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           emit(name, data) {
             bus.emit({
               name,
+              occurrenceId: randomUUID(),
               projectId: "api",
               sourceId: "pr-watch",
               data,
@@ -629,7 +653,13 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         dataDir: context.dataDir,
         config: config.projects["api"]?.sources["pr-watch"] as never,
         emit(name, data) {
-          bus.emit({ name, projectId: "api", sourceId: "pr-watch", data });
+          bus.emit({
+            name,
+            occurrenceId: randomUUID(),
+            projectId: "api",
+            sourceId: "pr-watch",
+            data,
+          });
         },
         signal: abortController.signal,
         logger: { warn: () => {} },
@@ -770,6 +800,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         emit(name, data) {
           bus.emit({
             name,
+            occurrenceId: randomUUID(),
             projectId: "api",
             sourceId: "pr-watch",
             data,
@@ -1071,6 +1102,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           emit(name, data) {
             bus.emit({
               name,
+              occurrenceId: randomUUID(),
               projectId: "api",
               sourceId: "pr-watch",
               data,
@@ -1218,6 +1250,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           emit(name, data) {
             bus.emit({
               name,
+              occurrenceId: randomUUID(),
               projectId: "api",
               sourceId: "pr-watch",
               data,
