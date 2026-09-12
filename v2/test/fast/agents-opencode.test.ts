@@ -180,7 +180,8 @@ describe("OpenCode adapter", () => {
   });
 
   it("classifies an aborted turn as waiting, not error, so it does not wedge", () => {
-    // Verbatim record from opencode-ai 1.18.30 opencode.db (real aborted turn).
+    // Verbatim from opencode-ai 1.18.30 opencode.db (real aborted turn), minus
+    // `path` (absolute local paths).
     expect(
       parseOpenCodeState({
         messages: [
@@ -234,6 +235,37 @@ describe("OpenCode adapter", () => {
               role: "assistant",
               time: { created: 1, completed: 2 },
               error: { name: "APIError", data: { statusCode: 404, isRetryable: false } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+
+    // Near-miss on name: substring/case matches must NOT be treated as
+    // aborted. The allowlist is exact-match only.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "MessageAbortedErrorLike", data: { message: "Aborted" } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+
+    // Near-miss on case: lower-cased name must NOT be treated as aborted.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "messageabortederror", data: { message: "Aborted" } },
             },
           },
         ],
