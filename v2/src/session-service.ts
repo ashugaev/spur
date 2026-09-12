@@ -6537,6 +6537,46 @@ export class SessionService {
             });
             continue;
           }
+          // A foreign recorded port that falls inside this sidecar's own
+          // configured ranges, whose recording owner's pane is no longer
+          // alive, and whose host port is genuinely free right now is a
+          // stale reservation (a session record that outlived its tmux
+          // pane) rather than a live collision — release it before it
+          // blocks every future start of this sidecar forever. Liveness is
+          // resolved through sidecarOwnerIdForName/sidecarTmuxAlive (never
+          // liveSession.id directly): a desk member's own record can be the
+          // one holding the port while the anchor's pane is what is
+          // actually alive, and this loop iterates raw session records.
+          // The liveness read is forced `fresh` (bypasses the ~2s tmux
+          // fleet cache): ensureSidecarReservation writes sidecarPorts
+          // before createTmuxSidecarSession runs, so a cached read taken
+          // inside that window can see a brand-new sibling reservation's
+          // pane as "gone" before it has bound its port, reclaiming a port
+          // that is about to be live.
+          // Never a reclaim candidate when this record's OWN status is
+          // terminal and it only remains in this scan because a live desk
+          // sibling still needs the shared port (liveDeskAnchors above): a
+          // live member is exactly the case an anchor-owned reservation
+          // must survive, regardless of the anchor's own pane state.
+          const withinOwnRange =
+            !isTerminalSessionStatus(liveSession.status) &&
+            Object.values(sidecar.ports).some(
+              (portConfig) => port >= portConfig.start && port <= portConfig.end,
+            );
+          if (withinOwnRange) {
+            let otherProject: ProjectConfig | undefined;
+            try {
+              otherProject = this.resolveProjectForSession(liveSession);
+            } catch {
+              otherProject = undefined;
+            }
+            const otherOwnerId = this.sidecarOwnerIdForName(liveSession, otherProject, scName);
+            const otherAlive = await sidecarTmuxAlive(otherOwnerId, scName, { fresh: true });
+            if (!otherAlive && (await isHostPortFree(port))) {
+              this.releaseSidecarPortFromSession(liveSession.id, scName, port);
+              continue;
+            }
+          }
           unavailable.add(port);
           portOwnership.set(port, {
             owner: liveSession.id,
