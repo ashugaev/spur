@@ -279,6 +279,7 @@ import {
   resolveSessionCleanupContext,
   type SessionCleanupContext,
 } from "./session-gc.js";
+import { collectOpenCodeGcPlan, createOpenCodeGcDeps, executeOpenCodeGc } from "./opencode-gc.js";
 import {
   deleteWorkspaceState,
   readWorkspaceState,
@@ -392,6 +393,7 @@ import {
   type SendMessageAttachment,
   type SendMessageRequest,
   type SidecarConfig,
+  type OpenCodeLogLevel,
   type SidecarMcpBinding,
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
@@ -1280,6 +1282,11 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   modelsCacheHome: string;
+  // opencodeGc.logLevel, resolved by the caller. Every launch path must pass
+  // it: threading one site would cap spawn and leave restore/resume
+  // uncapped, which is worse than not shipping the cap — the log keeps
+  // growing while the config claims otherwise.
+  opencodeLogLevel: OpenCodeLogLevel;
   mcpBindings?: SidecarMcpBinding[];
   mcpExclude?: string[];
 }) {
@@ -1298,6 +1305,7 @@ async function setupSessionAgentHooks(args: {
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
+    ...(args.agent === "opencode" ? { opencodeLogLevel: args.opencodeLogLevel } : {}),
     ...(args.mcpExclude?.length ? { mcpExclude: args.mcpExclude } : {}),
     ...(claudeConfigDir ? { claudeConfigDir } : {}),
   };
@@ -2570,6 +2578,11 @@ export class SessionService {
   // swept before" as "due immediately" — the first tick after a restart
   // waits out a full intervalMinutes like every other tick.
   private lastSessionGcSweepAt = Date.now();
+  // The opencode store sweep rides the sessionGc tick (no second timer) but
+  // keeps its own clock and re-entrancy guard, so either sweep can be
+  // enabled, disabled, or slow without touching the other.
+  private opencodeGcRunning = false;
+  private lastOpenCodeGcSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -5761,6 +5774,7 @@ export class SessionService {
     }
     this.sessionGcTimer = setInterval(() => {
       void this.runSessionGcSweep();
+      void this.runOpenCodeGcSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
   }
@@ -5833,6 +5847,69 @@ export class SessionService {
       });
     } finally {
       this.sessionGcRunning = false;
+    }
+  }
+
+  // Config-gated daemon sweep for the opencode store. Same shape as
+  // runSessionGcSweep: off unless opencodeGc.enabled, both that flag and
+  // intervalMinutes re-read from this.config every tick, clock seeded from
+  // construction so a restart never sweeps immediately.
+  private async runOpenCodeGcSweep(): Promise<void> {
+    if (this.opencodeGcRunning) {
+      return;
+    }
+    const gcConfig = this.config.opencodeGc;
+    if (!gcConfig.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastOpenCodeGcSweepAt < gcConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    this.opencodeGcRunning = true;
+    this.lastOpenCodeGcSweepAt = Date.now();
+    try {
+      const deps = createOpenCodeGcDeps(this.config);
+      const plan = await collectOpenCodeGcPlan(deps, {
+        now: new Date(),
+        olderThanDays: gcConfig.olderThanDays,
+        statuses: gcConfig.statuses,
+        limit: gcConfig.maxSessionsPerSweep,
+        logMaxBytes: gcConfig.logMaxBytes,
+        logTailBytes: gcConfig.logTailBytes,
+      });
+      // vacuum: false, always. The measured VACUUM is 93 s on a 3.1 GB store
+      // against a 300 s tick; a blocking child that long inside the daemon
+      // process is not acceptable. `spur opencode-gc --execute` returns the
+      // freelist debt this sweep creates.
+      //
+      // Enumeration stays in the sweep: it costs one `opencode session list`
+      // per distinct candidate directory at a measured 2-4 s each, and the
+      // candidate set is opencode-owned terminal records only — 3 directories
+      // on the dev host, so ~12 s worst case inside a 300 s tick. The
+      // opencodeGcRunning guard makes an overrun a skipped tick, never
+      // overlap.
+      const report = await executeOpenCodeGc(plan, deps, {
+        dryRun: false,
+        sizes: true,
+        vacuum: false,
+      });
+      this.logEvent("opencode.gc.completed", {
+        level: "info",
+        message: `OpenCode GC sweep: ${report.totals.sessionsDeleted} store session(s) deleted, ${report.totals.snapshotLeavesRemoved} snapshot leaf/leaves removed, ${report.totals.freedBytes ?? 0} byte(s) freed. Run \`spur opencode-gc --execute\` to VACUUM the freelist debt back.`,
+        details: {
+          totals: report.totals,
+          reason: report.reason,
+          sessionIds: report.sessions.map((entry) => entry.id),
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("opencode.gc.failed", {
+        level: "warn",
+        message: `OpenCode GC sweep failed: ${message}`,
+      });
+    } finally {
+      this.opencodeGcRunning = false;
     }
   }
 
@@ -8929,6 +9006,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        opencodeLogLevel: this.config.opencodeGc.logLevel,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -9948,6 +10026,7 @@ export class SessionService {
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        opencodeLogLevel: this.config.opencodeGc.logLevel,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -12622,6 +12701,7 @@ export class SessionService {
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
       modelsCacheHome: this.config.models.codexHome,
+      opencodeLogLevel: this.config.opencodeGc.logLevel,
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
@@ -12994,6 +13074,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
         modelsCacheHome: this.config.models.codexHome,
+        opencodeLogLevel: this.config.opencodeGc.logLevel,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(restoreProjectConfig.mcp?.exclude.length
           ? { mcpExclude: restoreProjectConfig.mcp.exclude }

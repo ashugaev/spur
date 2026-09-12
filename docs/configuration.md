@@ -342,6 +342,14 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
+- `opencodeGc.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur opencode-gc`](commands.md#opencode-gc) policy on a timer (no `VACUUM` — CLI only); `spur opencode-gc` itself works regardless.
+- `opencodeGc.olderThanDays`: optional, default `14`. Minimum age of an opencode session's last update. Also the `spur opencode-gc --older-than` default.
+- `opencodeGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; rides the 5-minute `sessionGc` tick and skips until the gap has passed.
+- `opencodeGc.maxSessionsPerSweep`: optional positive integer, default `20`. Per-sweep cap on `opencode session delete` calls.
+- `opencodeGc.statuses`: optional non-empty array, default `[completed, killed]`. Accepts `completed`, `killed`, `stopped`; anything else fails config parse. Adding `stopped` destroys the resume path — an opencode session resumes by `--session <agentSessionId>`, and its store rows are gone.
+- `opencodeGc.logLevel`: optional, default `WARN`. One of `DEBUG|INFO|WARN|ERROR` (opencode's enum, no `OFF`). Injected into every opencode launch via `OPENCODE_CONFIG_CONTENT`. Caps future log growth only; the existing log is `logMaxBytes`' job.
+- `opencodeGc.logMaxBytes`: optional, default `134217728` (128MB). `<storeRoot>/log/opencode.log` above this is copy-truncated.
+- `opencodeGc.logTailBytes`: optional, default `16777216` (16MB). Tail retained as `opencode.log.1`, overwriting any prior copy.
 - `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. On by default, unlike `sessionGc`: this reaper kills a restartable sidecar process, never a worktree or a record. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. Workspace idle time that reaps a non-MCP project sidecar. Per-sidecar override: `projects.<id>.sidecars.<name>.idleTtlMinutes`. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. Process age at which a kept sidecar logs `session.sidecar.age_warning`. Warn only — it authorizes no kill.

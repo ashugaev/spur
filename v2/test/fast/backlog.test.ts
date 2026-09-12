@@ -66,6 +66,16 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     },
+    opencodeGc: {
+      enabled: false,
+      olderThanDays: 14,
+      intervalMinutes: 360,
+      maxSessionsPerSweep: 20,
+      statuses: ["completed", "killed"],
+      logLevel: "WARN",
+      logMaxBytes: 134_217_728,
+      logTailBytes: 16_777_216,
+    },
     sidecarGc: {
       enabled: true,
       idleTtlMinutes: 120,

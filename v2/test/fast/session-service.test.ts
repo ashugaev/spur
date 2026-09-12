@@ -142,6 +142,20 @@ const resolvePlaywrightSidecarCommandMock = vi.fn<() => string | undefined>();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const readFreeKbMock = vi.fn<(path: string, timeoutMs?: number) => Promise<number | undefined>>();
+const createOpenCodeGcDepsMock = vi.fn(() => ({}) as never);
+const collectOpenCodeGcPlanMock = vi.fn(async () => ({ reason: null, sessions: [] }) as never);
+const executeOpenCodeGcMock = vi.fn(
+  async (_plan: unknown, _deps: unknown, _options: unknown) =>
+    ({
+      reason: null,
+      sessions: [],
+      totals: {
+        sessionsDeleted: 0,
+        snapshotLeavesRemoved: 0,
+        freedBytes: 0,
+      },
+    }) as never,
+);
 // Default "none": most tests declare no sidecar ports at all, and this must
 // never silently default to "unknown" (which would mask a real assertion
 // that a probe failure keeps rather than reaps) or "established" (which
@@ -632,6 +646,15 @@ vi.mock("../../src/disk-space.js", () => ({
   DISK_PROBE_TIMEOUT_MS: 2_000,
 }));
 
+// The real deps spawn the opencode CLI; the fast tier never forks a vendor
+// binary. The executor options object is what the daemon-boundary assertion
+// reads (vacuum must always be false there).
+vi.mock("../../src/opencode-gc.js", () => ({
+  createOpenCodeGcDeps: createOpenCodeGcDepsMock,
+  collectOpenCodeGcPlan: collectOpenCodeGcPlanMock,
+  executeOpenCodeGc: executeOpenCodeGcMock,
+}));
+
 // Only snapshotProcesses is mocked (a real `ps` fork, the thing the fast
 // tier must never do) — every other export (confirmReaps, reapSidecarPane,
 // signalSidecarPane, reapRecordedIdentity, sweepSidecars, ...) stays the
@@ -806,6 +829,16 @@ function baseConfig() {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    opencodeGc: {
+      enabled: false,
+      olderThanDays: 14,
+      intervalMinutes: 360,
+      maxSessionsPerSweep: 20,
+      statuses: ["completed", "killed"],
+      logLevel: "WARN",
+      logMaxBytes: 134_217_728,
+      logTailBytes: 16_777_216,
     },
     sidecarGc: {
       enabled: true,
@@ -22936,6 +22969,53 @@ describe("SessionService", () => {
     expect(
       logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.gc.completed"),
     ).toBe(false);
+    service.dispose();
+  });
+
+  it("never runs the opencode GC sweep while opencodeGc.enabled is false", async () => {
+    createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runOpenCodeGcSweep(): Promise<void>;
+      lastOpenCodeGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastOpenCodeGcSweepAt = 0;
+
+    await service.runOpenCodeGcSweep();
+
+    expect(collectOpenCodeGcPlanMock).not.toHaveBeenCalled();
+    expect(executeOpenCodeGcMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("I5 the daemon sweep executes with vacuum disabled", async () => {
+    createSessionStore();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      opencodeGc: { ...baseConfig().opencodeGc, enabled: true },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      runOpenCodeGcSweep(): Promise<void>;
+      lastOpenCodeGcSweepAt: number;
+      dispose(): void;
+    };
+    service.lastOpenCodeGcSweepAt = 0;
+
+    await service.runOpenCodeGcSweep();
+
+    expect(executeOpenCodeGcMock).toHaveBeenCalledTimes(1);
+    expect(executeOpenCodeGcMock.mock.calls[0]?.[2]).toEqual({
+      dryRun: false,
+      sizes: true,
+      vacuum: false,
+    });
+    const completed = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "opencode.gc.completed",
+    );
+    expect(completed?.[1].message).toContain("0 store session(s) deleted");
+    expect(completed?.[1].message).toContain("spur opencode-gc --execute");
     service.dispose();
   });
 
