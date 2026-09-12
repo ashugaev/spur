@@ -217,6 +217,7 @@ import {
 } from "./session-mode.js";
 import {
   captureTmuxPane,
+  captureTmuxPaneOrEmpty,
   createTmuxCommandSession,
   createTmuxSidecarSession,
   createTmuxSession,
@@ -602,6 +603,12 @@ const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 // the session is left free to fall through to whatever state the structured
 // source (jsonl/status) actually reports.
 const CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS = 24 * 60 * 60 * 1000;
+// Bounds how long the reactivation guard can skip its clear on sustained
+// capture failure (SCHEDULED_WAKE_POLL_INTERVAL_MS ticks). Fail-closed exists
+// to not type into a possibly-live modal and to let a later tick retry — not
+// to pin an episode forever. 60 consecutive one-second ticks (~1 min) of
+// unbroken capture failure is a tmux-level fault, not a transient fork loss.
+const RATE_LIMIT_REACTIVATION_PANE_UNAVAILABLE_MAX_TICKS = 60;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // Fixed tick cadence for the session GC sweep; the actual sweep frequency is
 // gated inside the tick by sessionGc.intervalMinutes (re-read from
@@ -1855,7 +1862,7 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
   if (!(await tmuxPaneDead(tmuxSession))) return;
-  const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
+  const output = (await captureTmuxPaneOrEmpty(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
   await killTmuxSession(tmuxSession);
   const detail = output ? `\nLast output:\n${output}` : "";
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
@@ -2486,6 +2493,19 @@ export class SessionService {
   // forever; only a CHANGE in the failure (a new problem, or a fresh
   // failure after a successful delivery cleared the entry) logs again.
   private readonly queuedMessageDeliveryLastFailure = new Map<string, string>();
+  // Log-once-per-episode plus a retention bound for the rate-limit
+  // reactivation guard's pane-unavailable skip: keyed by session id, value
+  // tracks which rateLimitedAt episode the skip was last logged against and
+  // how many consecutive one-second ticks in that episode have found the
+  // pane unavailable. session.rate_limit.reactivation_skipped only logs
+  // again when rateLimitedAt changes (a new episode) or the tick count
+  // crosses RATE_LIMIT_REACTIVATION_PANE_UNAVAILABLE_MAX_TICKS (the
+  // give-up log). Cleared whenever the episode ends (the guard's own
+  // rateLimitedAt clear) and in pruneSessionScopedState.
+  private readonly rateLimitReactivationLastSkip = new Map<
+    string,
+    { rateLimitedAt: string; unavailableTicks: number }
+  >();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
   // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
@@ -2505,10 +2525,12 @@ export class SessionService {
   // A sweep can take longer than any fixed TTL to reach a given session (its
   // duration is O(live sessions) of capture-pane forks), so an entry only
   // ends via: a live scanPane:true capture that is non-empty and finds no
-  // menu (deletes it — an empty capture is a failed fork, not evidence, and
-  // leaves the entry alone); or the session leaving liveIds
-  // (pruneSessionScopedState). Both tick kinds — scanPane:true on an empty
-  // capture, and scanPane:false on every read — re-check
+  // menu (deletes it — a `null` capture (fork failed) and a `""` capture
+  // (blank pane) both leave the entry alone: recomputing paneReconfirmedLimit
+  // off nothing would flip the reported state and momentarily reopen the
+  // delivery-suppression window this override exists to hold shut); or the
+  // session leaving liveIds (pruneSessionScopedState). Both tick kinds —
+  // scanPane:true on a null/empty capture, and scanPane:false on every read — re-check
   // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against rateLimit.resetAtMs before
   // applying the entry, so a stalled sweep can't report rate_limited off it
   // forever with neither evidence nor a clock to end it. Residual: under
@@ -4138,6 +4160,7 @@ export class SessionService {
             // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
+              let skipClear = false;
               if (liveState === "rate_limited") {
                 // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
                 // chat prompt: typing the reactivation sentence into it could garble input
@@ -4147,52 +4170,113 @@ export class SessionService {
                 // this menu long before afterHours elapses, so this branch is defense-in-depth
                 // for the rare case that confirm keeps failing (e.g. tmux errors) rather than
                 // the primary path.
-                const isClaudeMenu =
-                  agentStateStrategy(session.agent) === "claude_jsonl" &&
-                  detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
-                if (isClaudeMenu) {
-                  this.logEvent("session.rate_limit.reactivation_skipped", {
-                    level: "info",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
-                    details: {
-                      rateLimitedAt: session.rateLimitedAt,
-                      afterHours,
-                    },
-                  });
+                const isClaudeStrategy = agentStateStrategy(session.agent) === "claude_jsonl";
+                const paneText = isClaudeStrategy ? await captureTmuxPane(session.tmuxSession) : "";
+                if (isClaudeStrategy && paneText === null) {
+                  // A failed fork is not an observation: typing the reactivation
+                  // prompt could land in a pane that may actually be showing the
+                  // arrow-key usage-limit menu (the same hazard the menu branch
+                  // below guards against). Skip the clear too, so a later tick can
+                  // still fire this episode — mirroring the undefined-liveState
+                  // precedent above — but bound it so a session stuck for good
+                  // (not just a transient fork loss) doesn't pin rateLimitedAt
+                  // forever.
+                  const rateLimitedAt = session.rateLimitedAt;
+                  const prior = this.rateLimitReactivationLastSkip.get(session.id);
+                  const unavailableTicks =
+                    prior !== undefined && prior.rateLimitedAt === rateLimitedAt
+                      ? prior.unavailableTicks + 1
+                      : 1;
+                  if (unavailableTicks > RATE_LIMIT_REACTIVATION_PANE_UNAVAILABLE_MAX_TICKS) {
+                    this.rateLimitReactivationLastSkip.delete(session.id);
+                    this.logEvent("session.rate_limit.reactivation_skipped", {
+                      level: "warn",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Giving up on rate-limit reactivation for ${session.id}: pane capture failed for ${unavailableTicks} consecutive ticks`,
+                      details: {
+                        reason: "pane_unavailable_giving_up",
+                        rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                    // The give-up tick sends nothing: only the clear below
+                    // proceeds, ending the episode.
+                  } else {
+                    this.rateLimitReactivationLastSkip.set(session.id, {
+                      rateLimitedAt,
+                      unavailableTicks,
+                    });
+                    if (prior === undefined || prior.rateLimitedAt !== rateLimitedAt) {
+                      this.logEvent("session.rate_limit.reactivation_skipped", {
+                        level: "info",
+                        sessionId: session.id,
+                        projectId: session.project,
+                        message: `Skipped rate-limit reactivation for ${session.id}: pane capture failed`,
+                        details: {
+                          reason: "pane_unavailable",
+                          rateLimitedAt,
+                          afterHours,
+                        },
+                      });
+                    }
+                    skipClear = true;
+                  }
                 } else {
-                  try {
-                    await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
-                    this.logEvent("session.rate_limit.reactivated", {
+                  // paneText is only null when !isClaudeStrategy fell through
+                  // above (it defaults to ""), or the null-pane branch above
+                  // already handled the isClaudeStrategy case — never null
+                  // here when isClaudeStrategy is true.
+                  const isClaudeMenu =
+                    isClaudeStrategy && detectClaudeUsageLimitMenu(paneText ?? "")?.limited;
+                  if (isClaudeMenu) {
+                    this.logEvent("session.rate_limit.reactivation_skipped", {
                       level: "info",
                       sessionId: session.id,
                       projectId: session.project,
-                      message: `Sent rate-limit reactivation to ${session.id}`,
+                      message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
                       details: {
+                        reason: "usage_limit_menu",
                         rateLimitedAt: session.rateLimitedAt,
                         afterHours,
                       },
                     });
-                  } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error);
-                    this.logEvent("session.rate_limit.reactivation_failed", {
-                      level: "error",
-                      sessionId: session.id,
-                      projectId: session.project,
-                      message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
-                      details: {
-                        rateLimitedAt: session.rateLimitedAt,
-                        afterHours,
-                      },
-                    });
+                  } else {
+                    try {
+                      await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                      this.logEvent("session.rate_limit.reactivated", {
+                        level: "info",
+                        sessionId: session.id,
+                        projectId: session.project,
+                        message: `Sent rate-limit reactivation to ${session.id}`,
+                        details: {
+                          rateLimitedAt: session.rateLimitedAt,
+                          afterHours,
+                        },
+                      });
+                    } catch (error) {
+                      const message = error instanceof Error ? error.message : String(error);
+                      this.logEvent("session.rate_limit.reactivation_failed", {
+                        level: "error",
+                        sessionId: session.id,
+                        projectId: session.project,
+                        message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                        details: {
+                          rateLimitedAt: session.rateLimitedAt,
+                          afterHours,
+                        },
+                      });
+                    }
                   }
                 }
               }
-              const current = readSession(this.config.dataDir, session.id) ?? session;
-              if (current.rateLimitedAt === session.rateLimitedAt) {
-                const { rateLimitedAt: _rateLimitedAt, ...base } = current;
-                writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+              if (!skipClear) {
+                this.rateLimitReactivationLastSkip.delete(session.id);
+                const current = readSession(this.config.dataDir, session.id) ?? session;
+                if (current.rateLimitedAt === session.rateLimitedAt) {
+                  const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+                  writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+                }
               }
             }
           }
@@ -5338,6 +5422,11 @@ export class SessionService {
         this.claudeRateLimitReconfirmOverrides.delete(sessionId);
       }
     }
+    for (const sessionId of this.rateLimitReactivationLastSkip.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.rateLimitReactivationLastSkip.delete(sessionId);
+      }
+    }
     for (const sessionId of this.lastClassifiedLogStates.keys()) {
       if (!liveIds.has(sessionId)) {
         this.lastClassifiedLogStates.delete(sessionId);
@@ -6194,7 +6283,7 @@ export class SessionService {
   }
 
   private async buildPaneTail(tmuxSession: string): Promise<string> {
-    const tail = (await captureTmuxPane(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
+    const tail = (await captureTmuxPaneOrEmpty(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
     return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
   }
 
@@ -15716,87 +15805,108 @@ export class SessionService {
       // captureTmuxPane, so it's still O(1) forks per session per TTL window).
       if (scanPane && strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const menuHit = detectClaudeUsageLimitMenu(paneText);
-        if (!rateLimit?.limited) {
-          const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
-          if (tmuxHit?.limited) {
-            rateLimit = tmuxHit;
-          }
-        }
-        if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
-          await this.confirmClaudeUsageLimitMenu(session);
-        }
-        // Re-confirmation: the detection is flagged but its parsed reset has
-        // passed, and a live menu is on the pane. Carried via an evidence-
-        // gated override rather than by overwriting `rateLimit` itself, so
-        // resetAtMs stays observable and the scanPane:false dashboard tick
-        // agrees with this sweep until a live scan actually clears it,
-        // instead of flapping rate_limited -> waiting every time a sweep
-        // takes longer than a fixed TTL to reach this session again. Gated
-        // here on CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never
-        // clears (no fresh output, per confirmClaudeUsageLimitMenu's own
-        // caveat) can't pin the session rate_limited forever — reaching this
-        // branch guarantees resetAtMs is set (rateLimitExpired requires it).
-        if (
-          rateLimit?.limited &&
-          !rateLimitActive(rateLimit, nowMs) &&
-          menuHit?.limited &&
-          rateLimit.resetAtMs !== undefined &&
-          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
-        ) {
-          paneReconfirmedLimit = true;
-          this.claudeRateLimitReconfirmOverrides.add(session.id);
-        } else if (paneText !== "") {
-          // A menu-not-found result only clears the override when it comes
-          // from an actual capture. captureTmuxPane collapses a failed
-          // capture-pane fork into "" (see its own comment), so an empty
-          // paneText here is indistinguishable from a real empty pane at
-          // this call site — clearing on it would treat a failed observation
-          // as evidence the menu is gone. Leave the override in place on an
-          // empty capture; CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS above still
-          // bounds how long it can survive with no fresh confirming scan.
-          // The real fix is upstream, in captureTmuxPane's return contract.
-          this.claudeRateLimitReconfirmOverrides.delete(session.id);
-        } else if (
-          this.claudeRateLimitReconfirmOverrides.has(session.id) &&
-          rateLimit?.resetAtMs !== undefined &&
-          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
-        ) {
-          // Not clearing the override on an empty capture (above) only
-          // protects the NEXT scanPane:false read — this tick's own
-          // paneReconfirmedLimit is otherwise recomputed fresh from menuHit
-          // (null here), so it would still flip the reported state to
+        if (paneText === null || paneText === "") {
+          // One shared "no observation" path for a failed fork (null) and a
+          // genuinely blank pane (""). A blank pane IS a real observation for
+          // claudeCompactingOverrides below (TTL-bounded, no delivery-
+          // suppression side effect), but not for
+          // claudeRateLimitReconfirmOverrides: recomputing paneReconfirmedLimit
+          // fresh off a null menuHit would flip the reported state to
           // "no menu found" off nothing and momentarily reopen the
-          // delivery-suppression window this override exists to hold shut.
-          // An empty capture is not an observation in either direction:
-          // reuse the stored override the same way the scanPane:false path
-          // below does, under the same ceiling gate, so the reported state
-          // doesn't move until a real capture or the ceiling decides it.
-          paneReconfirmedLimit = true;
-        }
-        // Compaction never reaches Claude's persisted status file (it stays
-        // "idle" throughout, which jsonl/hook maps to waiting) and the
-        // transcript only gets a compact record after completion — so the
-        // live pane spinner is the only signal while it's in progress. The
-        // rate-limit override below still wins if a banner or a re-confirmed
-        // menu is also present — skip recording the override in that case so
-        // the scanPane:false dashboard tick doesn't strand a stale "working"
-        // once the rate limit expires (mirrors codexMcpDialogOverrides'
-        // hard-limit delete above). Recorded into claudeCompactingOverrides
-        // (TTL) so the scanPane:false dashboard tick's own idle re-read
-        // doesn't keep refreshing stabilizeState's hold window against this
-        // working transition.
-        if (
-          detectClaudeCompacting(paneText) &&
-          !rateLimitActive(rateLimit, nowMs) &&
-          !paneReconfirmedLimit
-        ) {
-          state = "working";
-          compactingApplied = true;
-          this.claudeCompactingOverrides.set(session.id, nowMs + CLAUDE_COMPACTING_OVERRIDE_TTL_MS);
-          classifiedDetail = "State: working (claude compacting)";
+          // delivery-suppression window this override exists to hold shut
+          // (see :14876-14885-era comment preserved below). So the override
+          // add/delete stays gated on a NON-EMPTY capture; both null and ""
+          // reuse the stored entry the same way the scanPane:false path does,
+          // under the same ceiling gate.
+          if (
+            this.claudeRateLimitReconfirmOverrides.has(session.id) &&
+            rateLimit?.resetAtMs !== undefined &&
+            nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+          ) {
+            paneReconfirmedLimit = true;
+          }
+          if (paneText === null) {
+            // A failed fork never mutates claudeCompactingOverrides (no set,
+            // no delete) — only reapply the stored entry if unexpired, the
+            // same read the scanPane:false branch below does. Reapplying
+            // does NOT refresh the expiry: only the live "detected compacting"
+            // branch below writes it, so the entry still dies
+            // CLAUDE_COMPACTING_OVERRIDE_TTL_MS after the last real
+            // observation no matter how many null ticks reapply it.
+            const expiresAt = this.claudeCompactingOverrides.get(session.id);
+            if (expiresAt !== undefined && expiresAt > nowMs) {
+              state = "working";
+              compactingApplied = true;
+              classifiedDetail = "State: working (claude compacting)";
+            }
+          } else {
+            // A blank pane IS a real observation for this TTL-bounded
+            // override: no spinner on the pane means compaction ended.
+            this.claudeCompactingOverrides.delete(session.id);
+          }
         } else {
-          this.claudeCompactingOverrides.delete(session.id);
+          const menuHit = detectClaudeUsageLimitMenu(paneText);
+          if (!rateLimit?.limited) {
+            const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+            if (tmuxHit?.limited) {
+              rateLimit = tmuxHit;
+            }
+          }
+          if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+            await this.confirmClaudeUsageLimitMenu(session);
+          }
+          // Re-confirmation: the detection is flagged but its parsed reset has
+          // passed, and a live menu is on the pane. Carried via an evidence-
+          // gated override rather than by overwriting `rateLimit` itself, so
+          // resetAtMs stays observable and the scanPane:false dashboard tick
+          // agrees with this sweep until a live scan actually clears it,
+          // instead of flapping rate_limited -> waiting every time a sweep
+          // takes longer than a fixed TTL to reach this session again. Gated
+          // here on CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never
+          // clears (no fresh output, per confirmClaudeUsageLimitMenu's own
+          // caveat) can't pin the session rate_limited forever — reaching this
+          // branch guarantees resetAtMs is set (rateLimitExpired requires it).
+          if (
+            rateLimit?.limited &&
+            !rateLimitActive(rateLimit, nowMs) &&
+            menuHit?.limited &&
+            rateLimit.resetAtMs !== undefined &&
+            nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+          ) {
+            paneReconfirmedLimit = true;
+            this.claudeRateLimitReconfirmOverrides.add(session.id);
+          } else {
+            // A menu-not-found result off a non-empty capture is real
+            // evidence the menu is gone: clear the override.
+            this.claudeRateLimitReconfirmOverrides.delete(session.id);
+          }
+          // Compaction never reaches Claude's persisted status file (it stays
+          // "idle" throughout, which jsonl/hook maps to waiting) and the
+          // transcript only gets a compact record after completion — so the
+          // live pane spinner is the only signal while it's in progress. The
+          // rate-limit override below still wins if a banner or a re-confirmed
+          // menu is also present — skip recording the override in that case so
+          // the scanPane:false dashboard tick doesn't strand a stale "working"
+          // once the rate limit expires (mirrors codexMcpDialogOverrides'
+          // hard-limit delete above). Recorded into claudeCompactingOverrides
+          // (TTL) so the scanPane:false dashboard tick's own idle re-read
+          // doesn't keep refreshing stabilizeState's hold window against this
+          // working transition.
+          if (
+            detectClaudeCompacting(paneText) &&
+            !rateLimitActive(rateLimit, nowMs) &&
+            !paneReconfirmedLimit
+          ) {
+            state = "working";
+            compactingApplied = true;
+            this.claudeCompactingOverrides.set(
+              session.id,
+              nowMs + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
+            );
+            classifiedDetail = "State: working (claude compacting)";
+          } else {
+            this.claudeCompactingOverrides.delete(session.id);
+          }
         }
       } else if (!scanPane && strategy === "claude_jsonl") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
@@ -15833,20 +15943,34 @@ export class SessionService {
         // not a soft rate-limit signal is also present) the session is
         // promoted to needs_input.
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const hardHit = scanTmuxRateLimit(paneText);
-        if (hardHit?.limited) {
-          rateLimit = hardHit;
-          this.codexMcpDialogOverrides.delete(session.id);
-        } else if (detectCodexMcpPermissionDialog(paneText)) {
-          state = "needs_input";
-          rateLimit = null;
-          this.codexMcpDialogOverrides.set(
-            session.id,
-            Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
-          );
-          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
+        if (paneText === null) {
+          // A failed fork never mutates codexMcpDialogOverrides (no hard-hit
+          // promotion, no delete) — only reapply the stored entry if
+          // unexpired, the same read the scanPane:false branch below does.
+          // Reapplying does NOT refresh the expiry: only the live "detected
+          // dialog" branch below writes it.
+          const expiresAt = this.codexMcpDialogOverrides.get(session.id);
+          if (expiresAt !== undefined && expiresAt > Date.now()) {
+            state = "needs_input";
+            rateLimit = null;
+            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
+          }
         } else {
-          this.codexMcpDialogOverrides.delete(session.id);
+          const hardHit = scanTmuxRateLimit(paneText);
+          if (hardHit?.limited) {
+            rateLimit = hardHit;
+            this.codexMcpDialogOverrides.delete(session.id);
+          } else if (detectCodexMcpPermissionDialog(paneText)) {
+            state = "needs_input";
+            rateLimit = null;
+            this.codexMcpDialogOverrides.set(
+              session.id,
+              Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+            );
+            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
+          } else {
+            this.codexMcpDialogOverrides.delete(session.id);
+          }
         }
       } else if (!scanPane && strategy === "hook") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
@@ -15868,7 +15992,9 @@ export class SessionService {
         }
       } else if (scanPane && !rateLimit?.limited && strategy !== "opencode") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const tmuxHit = scanTmuxRateLimit(paneText);
+        // A failed fork takes no observation: it only ever promotes on a hit,
+        // so this is a pure guard.
+        const tmuxHit = paneText === null ? null : scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }

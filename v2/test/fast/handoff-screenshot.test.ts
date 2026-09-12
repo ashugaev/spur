@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-const captureTmuxPaneMock = vi.hoisted(() => vi.fn());
+const captureTmuxPaneOrEmptyMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../src/runtime-tmux.js", () => ({
-  captureTmuxPane: captureTmuxPaneMock,
+  captureTmuxPaneOrEmpty: captureTmuxPaneOrEmptyMock,
 }));
 
 import {
@@ -13,13 +13,13 @@ import {
 
 describe("buildHandoffScreenshotAttachment", () => {
   it("returns null when tmux pane capture is empty", async () => {
-    captureTmuxPaneMock.mockResolvedValueOnce("   \n");
+    captureTmuxPaneOrEmptyMock.mockResolvedValueOnce("   \n");
     await expect(buildHandoffScreenshotAttachment("spur-1")).resolves.toBeNull();
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("spur-1", 400);
+    expect(captureTmuxPaneOrEmptyMock).toHaveBeenCalledWith("spur-1", 400);
   });
 
   it("returns a base64 attachment when tmux pane has content", async () => {
-    captureTmuxPaneMock.mockResolvedValueOnce("agent output\n");
+    captureTmuxPaneOrEmptyMock.mockResolvedValueOnce("agent output\n");
     const attachment = await buildHandoffScreenshotAttachment("spur-1");
     expect(attachment).toEqual({
       name: HANDOFF_SCREENSHOT_NAME,
