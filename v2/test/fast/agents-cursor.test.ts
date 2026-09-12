@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
@@ -39,15 +39,17 @@ import {
   findCursorSessionId,
 } from "../../src/agents/cursor.js";
 
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
-const mockReaddir = readdir as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
-const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockRename = rename as ReturnType<typeof vi.fn>;
-const mockChmod = chmod as ReturnType<typeof vi.fn>;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+const mockExistsSync = existsSync as unknown as Mock<typeof existsSync>;
+const mockMkdir = mkdir as unknown as Mock<typeof mkdir>;
+const mockReaddir = readdir as unknown as Mock;
+const mockStat = stat as unknown as Mock;
+const mockWriteFile = writeFile as unknown as Mock<typeof writeFile>;
+const mockReadFile = readFile as unknown as Mock<typeof readFile>;
+const mockRename = rename as unknown as Mock;
+const mockChmod = chmod as unknown as Mock<typeof chmod>;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
+  typeof resolveWorktreePathCandidates
+>;
 
 function cursorHash(path: string): string {
   return createHash("md5").update(resolve(path)).digest("hex");
