@@ -244,6 +244,14 @@ function baseConfig(): AppConfig {
       idleTtlMinutes: 120,
       maxAgeWarnMinutes: 360,
     },
+    diskBudget: {
+      enabled: false,
+      intervalMinutes: 360,
+      warnAttributableGb: 60,
+      npmCacheMaxGb: 20,
+      buildCacheOlderThanDays: 14,
+      maxWorktreesPerSweep: 20,
+    },
     admission: {
       enabled: true,
       maxLiveSessions: 1000,

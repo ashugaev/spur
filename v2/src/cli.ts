@@ -1001,6 +1001,8 @@ function formatProtectedReason(candidate: CacheCandidate): string {
       return `pinned browser revision (${reason.dirName})`;
     case "pin-unresolved":
       return "no browsers.json pin sources resolved";
+    case "referrer-unresolved":
+      return "a .links referrer is unresolvable; every browser revision is protected";
     case "pin-source":
       return "npx-package is a browsers.json pin source";
     case "spur-owned":

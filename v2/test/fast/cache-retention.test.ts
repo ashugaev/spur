@@ -65,6 +65,7 @@ function makeLiveness(overrides: Partial<LivenessSnapshot> = {}): LivenessSnapsh
     pinSourceCount: 1,
     instanceConfigOk: true,
     pinSourceNpxHashes: new Set(),
+    unresolvedReferrers: false,
     ...overrides,
   };
 }

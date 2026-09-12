@@ -757,6 +757,14 @@ export interface AppConfig {
     idleTtlMinutes: number;
     maxAgeWarnMinutes: number;
   };
+  diskBudget: {
+    enabled: boolean;
+    intervalMinutes: number;
+    warnAttributableGb: number;
+    npmCacheMaxGb: number;
+    buildCacheOlderThanDays: number;
+    maxWorktreesPerSweep: number;
+  };
   admission: AdmissionConfig;
   staleAfterMinutes: number;
   // Never decide off this snapshot: `readAutoUpdateFlag` in

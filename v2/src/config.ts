@@ -1767,6 +1767,46 @@ function parseSidecarGc(value: unknown): AppConfig["sidecarGc"] {
   };
 }
 
+// Destructive (T2 profile/revision dirs, T3 build caches, npm per-key clean)
+// like sessionGc, so it ships off — installing this change changes no host
+// behavior until an operator opts in.
+export const DEFAULT_DISK_BUDGET: AppConfig["diskBudget"] = {
+  enabled: false,
+  intervalMinutes: 360,
+  warnAttributableGb: 60,
+  npmCacheMaxGb: 20,
+  buildCacheOlderThanDays: 14,
+  maxWorktreesPerSweep: 20,
+};
+
+// Instance-only, same footgun as sessionGc/sidecarGc/authRotation: parsed
+// only when mode === "instance", so a per-project diskBudget block is
+// silently ignored.
+function parseDiskBudget(value: unknown): AppConfig["diskBudget"] {
+  if (value === undefined) {
+    return DEFAULT_DISK_BUDGET;
+  }
+  const root = asObject(value, "diskBudget");
+  return {
+    enabled: asOptionalBoolean(root["enabled"], "diskBudget.enabled") ?? DEFAULT_DISK_BUDGET.enabled,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "diskBudget.intervalMinutes") ??
+      DEFAULT_DISK_BUDGET.intervalMinutes,
+    warnAttributableGb:
+      asNonNegativeNumber(root["warnAttributableGb"], "diskBudget.warnAttributableGb") ??
+      DEFAULT_DISK_BUDGET.warnAttributableGb,
+    npmCacheMaxGb:
+      asNonNegativeNumber(root["npmCacheMaxGb"], "diskBudget.npmCacheMaxGb") ??
+      DEFAULT_DISK_BUDGET.npmCacheMaxGb,
+    buildCacheOlderThanDays:
+      asNonNegativeNumber(root["buildCacheOlderThanDays"], "diskBudget.buildCacheOlderThanDays") ??
+      DEFAULT_DISK_BUDGET.buildCacheOlderThanDays,
+    maxWorktreesPerSweep:
+      asOptionalPositiveInteger(root["maxWorktreesPerSweep"], "diskBudget.maxWorktreesPerSweep") ??
+      DEFAULT_DISK_BUDGET.maxWorktreesPerSweep,
+  };
+}
+
 // Opt-in only: this key can make the daemon self-update. Default must stay
 // false so an untouched host never switches versions on its own.
 const DEFAULT_AUTO_UPDATE = false;
@@ -2158,6 +2198,7 @@ function parseConfigFile(
       mode === "instance" ? parseDiskRetention(root["diskRetention"]) : DEFAULT_DISK_RETENTION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
     sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
+    diskBudget: mode === "instance" ? parseDiskBudget(root["diskBudget"]) : DEFAULT_DISK_BUDGET,
     admission: parseAdmission(root["admission"], mode),
     staleAfterMinutes:
       mode === "instance"
