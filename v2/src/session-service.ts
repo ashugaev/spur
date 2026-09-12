@@ -10921,10 +10921,17 @@ export class SessionService {
         missingIds.push(attachmentId);
         continue;
       }
-      attachments.push({
-        name: baseAttachmentName(artifact.id),
-        data: readFileSync(artifact.path).toString("base64"),
-      });
+      try {
+        attachments.push({
+          name: baseAttachmentName(artifact.id),
+          data: readFileSync(artifact.path).toString("base64"),
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+        missingIds.push(attachmentId);
+      }
     }
     return { attachments, missingIds };
   }
