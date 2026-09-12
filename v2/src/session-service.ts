@@ -6443,11 +6443,7 @@ export class SessionService {
       if (!state) {
         continue;
       }
-      if (
-        state.candidates.some(
-          (candidate) => candidate.reservedBy?.startsWith(prefix) ?? false,
-        )
-      ) {
+      if (state.candidates.some((candidate) => candidate.reservedBy?.startsWith(prefix) ?? false)) {
         this.sidecarStartConflictState.delete(key);
       }
     }
@@ -12213,7 +12209,6 @@ export class SessionService {
     const { sidecarPorts: _dropped, ...rest } = session;
     return kept ? { ...rest, sidecarPorts: kept } : rest;
   }
-
 
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     await this.teardownSessionSidecars(session);
