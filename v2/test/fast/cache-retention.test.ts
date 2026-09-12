@@ -918,6 +918,14 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
       ?.verdict;
     const narrowedCacacheVerdict = narrowed.candidates.find((c) => c.entry.rootId === "npm-cacache")
       ?.verdict;
-    expect(narrowedCacacheVerdict).toEqual(fullCacacheVerdict);
+    // Compare verdict shape only, not the exact `ageDays` field: the two
+    // calls measure at slightly different real timestamps (ctime cannot be
+    // back-dated by utimes(), see the comment elsewhere in this file), which
+    // can tip ageDays by one across the millisecond boundary between calls.
+    // `rootIds` narrowing the roots must never change the DECISION.
+    expect(narrowedCacacheVerdict?.kind).toBe(fullCacacheVerdict?.kind);
+    if (narrowedCacacheVerdict?.kind === "protected" && fullCacacheVerdict?.kind === "protected") {
+      expect(narrowedCacacheVerdict.reason.kind).toBe(fullCacacheVerdict.reason.kind);
+    }
   });
 });
