@@ -2687,8 +2687,13 @@ export class SessionService {
   // `0 ?? now` in recordSidecarStartConflict evaluates to 0 (nullish
   // coalescing does not catch zero), which silently backdated a session's
   // first REAL conflict to epoch and skipped its entire retry window
-  // straight to the post-deadline terminal branch. Cleared everywhere
-  // sidecarStartConflictState is cleared (clearSidecarStartConflict).
+  // straight to the post-deadline terminal branch. Cleared by
+  // clearSidecarStartConflict (this session's own success/stop/relaunch/
+  // restore/prune sites) — NOT by the cross-session reservedBy clear in
+  // sessionWithReleasedSidecarPorts, which only ever touches
+  // sidecarStartConflictState: this map is about THIS session's own pane
+  // identity, unrelated to which OTHER session was holding a port it was
+  // waiting on.
   private readonly sidecarStartNoopIdentity = new Map<string, { pid: number; starttime: number }>();
   // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
   // process trees" over the real HTTP /sidecars/sweep route would
@@ -6328,13 +6333,18 @@ export class SessionService {
 
   // Checked BEFORE withSidecarPortLock so a cached refusal never queues on
   // the process-global lock. Never a permanent latch: an explicit
-  // clearPort bypasses this gate entirely (as do stop/relaunch/restore/
-  // prune, which clear the cached state outright), and a post-deadline
-  // re-probe — at most once per backoff window, never on every attempt,
-  // since nextProbeAtMs is re-armed after each terminal refusal and
-  // failures is frozen once the gate starts short-circuiting the body's
-  // catch — runs the full start the moment it finds a blocked port has
-  // freed.
+  // clearPort bypasses this gate entirely, as do stop/complete/relaunch/
+  // restore/prune (this session's own lifecycle) AND sessionWithReleased
+  // SidecarPorts' cross-session clear (any OTHER session whose sidecar
+  // port this one's cached refusal named in reservedBy, the moment that
+  // OTHER session's release ACTUALLY drops the port — kill, stale-timeout
+  // park, worktree rebuild, restore rollback, or reconcileUnexpectedStop's
+  // crashed-holder path, every release site funnels through it). Beyond
+  // all of those, a post-deadline re-probe — at most once per backoff
+  // window, never on every attempt, since nextProbeAtMs is re-armed after
+  // each terminal refusal and failures is frozen once the gate starts
+  // short-circuiting the body's catch — runs the full start the moment it
+  // finds a blocked port has freed.
   private async sidecarStartConflictGate(
     sessionId: string,
     sidecarName: string,
@@ -6431,19 +6441,25 @@ export class SessionService {
     this.sidecarStartNoopIdentity.delete(key);
   }
 
-  // A cached refusal on session B can name session A in a candidate's
-  // reservedBy. Killing A drops its reservations immediately; leaving B's
-  // cache intact would keep returning the cached 409 through the backoff
-  // window even though the reservation-shaped block is gone — the runtime
-  // cli-lifecycle tests retry right after killing the holder.
-  private clearSidecarStartConflictsReferencingSession(deadSessionId: string): void {
-    const prefix = `${deadSessionId}/`;
+  // A cached refusal on session B can name session A's sidecar in a
+  // candidate's reservedBy (built as exactly `${sessionId}/${sidecarName}`,
+  // :6874-6879 — the record id, never a workspace/anchor id, so this is
+  // unrelated to the sidecarOwnerIdForName desk-shared class of bug).
+  // Called only from sessionWithReleasedSidecarPorts, once per sidecar name
+  // that call ACTUALLY drops — never for one it keeps (a kept desk-shared
+  // entry still blocks a waiting sibling; clearing there would let B's
+  // deadline restart on every kill of an unrelated desk member without the
+  // block it was waiting on ever actually lifting, re-arming exactly the
+  // bound this cache exists to enforce). Synchronous, no I/O: preserves
+  // sessionWithReleasedSidecarPorts' own no-await contract, so there is no
+  // withSidecarPortLock interleave hazard.
+  private clearSidecarStartConflictsReferencingReservedBy(reservedBy: string): void {
     for (const key of [...this.sidecarStartConflictState.keys()]) {
       const state = this.sidecarStartConflictState.get(key);
       if (!state) {
         continue;
       }
-      if (state.candidates.some((candidate) => candidate.reservedBy?.startsWith(prefix) ?? false)) {
+      if (state.candidates.some((candidate) => candidate.reservedBy === reservedBy)) {
         this.sidecarStartConflictState.delete(key);
       }
     }
@@ -12196,7 +12212,20 @@ export class SessionService {
   // Strips sidecarPorts from a going-terminal record, keeping only the
   // anchor-owned (non-mcp, desk-shared) entries while another desk member's
   // agent is still running and using them. Route every terminal-write site
-  // through this instead of a wholesale delete.
+  // through this instead of a wholesale delete — the single choke point
+  // for "this session no longer holds this sidecar's port(s)", covering
+  // every release path (kill, stop, complete, stale-timeout park, restore
+  // rollback, relaunch, reconcileUnexpectedStop's crashed-holder path, ...).
+  //
+  // A cached start-conflict refusal on another (waiting) session can name
+  // this session's sidecar in a candidate's reservedBy. As a side effect,
+  // for every sidecar name this call ACTUALLY drops (never one it keeps —
+  // releasableSidecarPorts keeps a whole name or drops it whole, never
+  // partially), clear any such cached refusal: the deadline/backoff bound
+  // (invariant 6, "no permanent latch") is a session's OWN gate, but its
+  // only invalidation hooks are its own lifecycle and its own elapsed
+  // time — nothing else fires just because the OTHER session actually
+  // holding the port went away, whichever of the 9 call sites that was.
   private sessionWithReleasedSidecarPorts(session: SessionRecord): SessionRecord {
     if (!session.sidecarPorts) {
       return session;
@@ -12206,6 +12235,12 @@ export class SessionService {
       this.resolveProjectForSession(session),
       this.hasRunningWorkspaceMembers(session),
     );
+    for (const sidecarName of Object.keys(session.sidecarPorts)) {
+      if (kept?.[sidecarName] !== undefined) {
+        continue;
+      }
+      this.clearSidecarStartConflictsReferencingReservedBy(`${session.id}/${sidecarName}`);
+    }
     const { sidecarPorts: _dropped, ...rest } = session;
     return kept ? { ...rest, sidecarPorts: kept } : rest;
   }
@@ -12659,7 +12694,6 @@ export class SessionService {
     };
     delete record.retainInList;
     writeSession(this.config.dataDir, record);
-    this.clearSidecarStartConflictsReferencingSession(sessionId);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       try {

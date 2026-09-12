@@ -26923,41 +26923,6 @@ describe("SessionService", () => {
       );
     });
 
-    it("clears a cached refusal on other sessions when the reservedBy holder is killed", async () => {
-      isHostPortFreeMock.mockResolvedValue(true);
-      sidecarTmuxAliveMock.mockImplementation(async (id: string) => id === "api-other");
-      loadConfigMock.mockReturnValue(conflictConfig());
-      const sessions = conflictSessions();
-      sessions.set("api-other", {
-        id: "api-other",
-        project: "api",
-        agent: "claude",
-        prompt: "other",
-        branch: "api-other",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-other",
-        tmuxSession: "api-other",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T09:00:00.000Z",
-        updatedAt: "2026-03-18T09:01:00.000Z",
-        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
-      });
-
-      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
-      expect(first).toBeInstanceOf(SidecarPortConflictError);
-      // @ts-expect-error test-only access to a private map
-      expect(service.sidecarStartConflictState.has("api-1\0dev")).toBe(true);
-
-      // @ts-expect-error test-only access to a private method
-      service.clearSidecarStartConflictsReferencingSession("api-other");
-      // @ts-expect-error test-only access to a private map
-      expect(service.sidecarStartConflictState.has("api-1\0dev")).toBe(false);
-    });
-
     it("prune drops the cached refusal for a session no longer live", async () => {
       isHostPortFreeMock.mockResolvedValue(false);
       loadConfigMock.mockReturnValue(conflictConfig());
@@ -27024,6 +26989,122 @@ describe("SessionService", () => {
       expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
         expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
       );
+    });
+
+    it("reconciling a crashed holder's dead runtime to stopped clears a waiting sibling's cached refusal", async () => {
+      // The crashed-holder shape is closer to the measured incident than an
+      // operator kill: the holder's process died on its own (runtime dead),
+      // reconcileUnexpectedStop marks its session stopped and releases its
+      // sidecarPorts through the same sessionWithReleasedSidecarPorts choke
+      // point kill uses — so the waiting sibling's cached refusal must
+      // clear here too, not just on an explicit kill.
+      isHostPortFreeMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockImplementation(async (id: string) => id === "api-other");
+      loadConfigMock.mockReturnValue(conflictConfig());
+      const sessions = conflictSessions();
+      sessions.set("api-other", {
+        id: "api-other",
+        project: "api",
+        agent: "claude",
+        prompt: "other",
+        branch: "api-other",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-other",
+        tmuxSession: "api-other",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
+      });
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // api-other's own agent pane is now gone (crashed) — reconcile marks
+      // it stopped and releases its sidecarPorts.
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const reconciledPromise = service.get("api-other");
+      await vi.advanceTimersByTimeAsync(250);
+      const reconciled = await reconciledPromise;
+      expect(reconciled.status).toBe("stopped");
+
+      isHostPortFreeMock.mockResolvedValue(true);
+      // No time advance beyond the reconcile's own 250ms poll: still well
+      // inside the backoff window. Only the crashed-holder release's clear
+      // can let this retry through.
+      await service.startSidecar("api-1", "dev");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+    });
+
+    it("does not clear a waiting sibling's cached refusal when a killed desk anchor's port is kept for a live member", async () => {
+      // Objection 1's exact shape: killing a desk anchor while a live
+      // member still needs the shared sidecar KEEPS the port
+      // (releasableSidecarPorts) — nothing actually dropped, so the
+      // waiting sibling's cached refusal must survive unchanged (no
+      // re-armed deadline, no reset failure count) rather than clearing on
+      // the anchor's kill alone.
+      isHostPortFreeMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockImplementation(async (id: string) => id === "api-anchor");
+      loadConfigMock.mockReturnValue(conflictConfig());
+      const sessions = conflictSessions();
+      sessions.set("api-anchor", {
+        id: "api-anchor",
+        project: "api",
+        agent: "claude",
+        prompt: "anchor",
+        branch: "api-anchor",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-anchor",
+        tmuxSession: "api-anchor",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
+      });
+      sessions.set("api-member", {
+        id: "api-member",
+        project: "api",
+        agent: "claude",
+        prompt: "member",
+        branch: "api-member",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-anchor",
+        tmuxSession: "api-member",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        workspaceId: "api-anchor",
+      });
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      isHostPortFreeMock.mockResolvedValue(true);
+      await service.kill("api-anchor", { force: true });
+
+      // The anchor's own record keeps the port (live member still needs
+      // it), so the waiting sibling's cache must still be live.
+      expect(sessions.get("api-anchor")?.sidecarPorts).toEqual({
+        dev: { SPUR_RESERVED_PORT_DEV: 3000 },
+      });
+      // @ts-expect-error test-only access to a private map
+      expect(service.sidecarStartConflictState.has("api-1\0dev")).toBe(true);
+
+      const second = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(second).toBeInstanceOf(SidecarPortConflictError);
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
     });
   });
 
