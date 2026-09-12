@@ -20,7 +20,7 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -94,6 +94,29 @@ import {
 } from "./registry.js";
 import { listSessions } from "./metadata.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
+import {
+  measureDiskBudget,
+  readDiskBudgetReport,
+  realDu,
+  writeDiskBudgetReport,
+  type DiskBudgetReport,
+} from "./disk-budget.js";
+import {
+  createDiskGcDeps,
+  executeDiskGc,
+  findBuildCacheDirs,
+  measureBytes as measureDiskGcBytes,
+  planBrowserRevisionCandidates,
+  planBuildCacheGc,
+  planNpmCap,
+  planProfileGc,
+  singletonLockLivePid,
+  type DiskGcPlan,
+  type DiskGcReport,
+} from "./disk-gc.js";
+import { snapshotProcesses } from "./process-tree.js";
+import { readdir as readdirAsync, lstat as lstatAsync } from "node:fs/promises";
+import { homedir } from "node:os";
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
@@ -1294,6 +1317,57 @@ export function renderSessionGcResult(report: GcReport): string {
   return lines.join("\n");
 }
 
+export function renderDiskBudgetReport(report: DiskBudgetReport): string {
+  const lines = [boldText("Disk budget roots")];
+  for (const root of report.roots) {
+    lines.push(
+      `  ${accent(root.id.padEnd(24))}  ${root.status.padEnd(10)}  ${formatBytes(root.sizeBytes).padStart(10)}  reclaimedBy=${root.reclaimedBy}  ${dimText(root.path)}`,
+    );
+  }
+  lines.push("");
+  lines.push(`Total attributable: ${formatBytes(report.totals.attributableBytes)}`);
+  return lines.join("\n");
+}
+
+export function renderDiskGcReport(report: DiskGcReport): string {
+  const lines = [boldText("Disk GC")];
+  lines.push(
+    dimText(
+      `Build caches: ${report.buildCacheRemoved.length} removed, ${report.buildCacheFailures.length} failure(s). Profiles: ${report.profilesRemoved.length} removed, ${report.profilesFailures.length} failure(s).`,
+    ),
+  );
+  for (const path of report.buildCacheRemoved) {
+    lines.push(`  ${accent("build-cache")}  ${path}`);
+  }
+  for (const failure of report.buildCacheFailures) {
+    lines.push(dimText(`  blocked  ${failure.path}  (${failure.message})`));
+  }
+  for (const path of report.profilesRemoved) {
+    lines.push(`  ${accent("mcp-profile")}  ${path}`);
+  }
+  for (const failure of report.profilesFailures) {
+    lines.push(dimText(`  blocked  ${failure.path}  (${failure.message})`));
+  }
+  if (report.npmCap) {
+    lines.push("");
+    lines.push(boldText("npm cache cap (~/.npm/_cacache)"));
+    for (const step of report.npmCap.ranSteps) {
+      lines.push(`  ${step}`);
+    }
+    lines.push(
+      dimText(
+        `${report.npmCap.cleanedKeys} key(s), ${formatBytes(report.npmCap.freedBytes)} freed. The whole-root wipe stays owned by \`spur cache --prune --yes\`.`,
+      ),
+    );
+  }
+  lines.push("");
+  lines.push(`Total freed: ${formatBytes(report.freedBytes)}`);
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
 function parseSessionGcStatusesOption(value: string): SessionGcStatus[] {
   const parts = value
     .split(",")
@@ -1474,6 +1548,20 @@ function helpNotes(command: Command): string[] {
       "Never collects a group with uncommitted changes, unpushed commits, an open PR, or any non-terminal member; blocked groups list their reason.",
       "Worktrees go through `git worktree remove` plus a repo prune; records move to `sessions-archive/` and leave the daemon's 2s tick.",
       "A collected `stopped` session can no longer be restored — `mv` its record back out of `sessions-archive/` to undo.",
+    ];
+  }
+  if (command.name() === "disk") {
+    return [
+      "Read-only: reports the four never-reclaimed Spur stores plus host caches and worktree build caches, and writes `<dataDir>/disk-budget.json` for the daemon's warn sweep.",
+      "`reclaimedBy` names which command owns each root's deletion: `spur cache` owns ~/.npm/*, `disk-gc` owns playwright MCP profiles and worktree build caches, `none` is never reclaimed by this host.",
+    ];
+  }
+  if (command.name() === "disk-gc") {
+    return [
+      "Dry run by default: no flags print the plan only. `--execute` removes stale playwright MCP profile dirs, worktree build caches in fully terminal worktrees, and cleans the oldest `~/.npm/_cacache` entries down to `diskBudget.npmCacheMaxGb`.",
+      "Never deletes a build cache in a worktree with any non-terminal session, or one whose worktreePath resolves outside `worktreeDir` (a `worktree: false` session's real checkout).",
+      "Never wipes `~/.npm/_cacache` itself — that stays `spur cache --prune --yes`'s job; this command only runs `npm cache clean <key>` on the oldest entries plus `npm cache verify`.",
+      "`--browser-revisions` additionally prunes unpinned playwright browser revisions via `spur cache`'s pin resolver (an unresolvable `.links` referrer protects every revision).",
     ];
   }
   if (command.name() === "spawn") {
@@ -2611,6 +2699,154 @@ export function createProgram(cliEntrypoint: string): Command {
         exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
       });
     });
+
+  program
+    .command("disk")
+    .description(
+      "Report Spur-attributable disk usage: report-only stores, host caches, and worktree build caches. Read-only; writes <dataDir>/disk-budget.json for the daemon's warn sweep.",
+    )
+    .option("--json", "Print raw JSON")
+    .action(async (options: { json?: boolean }, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const config = loadConfig(configPath);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "measuring disk budget",
+        action: async () => {
+          const sessions = listSessions(config.dataDir);
+          const worktreePaths = [
+            ...new Set(sessions.map((s) => s.worktreePath.trim()).filter(Boolean)),
+          ];
+          const report = await measureDiskBudget(
+            { du: realDu },
+            { dataDir: config.dataDir, worktreeDir: config.worktreeDir, worktreePaths },
+          );
+          await writeDiskBudgetReport(config.dataDir, report);
+          return report;
+        },
+        render: renderDiskBudgetReport,
+      });
+    });
+
+  program
+    .command("disk-gc")
+    .description(
+      "Reclaim stale playwright MCP profile dirs and worktree build caches in terminal worktrees, and cap ~/.npm/_cacache with npm-native per-key `npm cache clean`. Dry run unless --execute.",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is removed")
+    .option(
+      "--browser-revisions",
+      "Also prune unpinned playwright browser revisions (delegates to `spur cache`'s pin resolver)",
+    )
+    .option("--older-than <days>", "Minimum age in days of a build-cache dir's newest file")
+    .option("--limit <number>", "Maximum worktrees to consider in one run")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        options: {
+          execute?: boolean;
+          browserRevisions?: boolean;
+          olderThan?: string;
+          limit?: string;
+          json?: boolean;
+        },
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const config = loadConfig(configPath);
+        const instanceConfig = loadInstanceConfigReadOnly(configPath);
+        if (instanceConfig.status !== "ok") {
+          throw new Error(
+            `disk-gc requires a resolved instance config (status: ${instanceConfig.status}); run \`spur init\` first`,
+          );
+        }
+        const dryRun = !options.execute;
+        const olderThanDays =
+          options.olderThan === undefined
+            ? config.diskBudget.buildCacheOlderThanDays
+            : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+        const maxWorktrees =
+          options.limit === undefined
+            ? config.diskBudget.maxWorktreesPerSweep
+            : parsePositiveIntegerOption(String(options.limit), "--limit");
+        const home = homedir();
+        await outputResult({
+          json: Boolean(options.json),
+          label: dryRun ? "planning disk gc" : "running disk gc",
+          action: async () => {
+            const sessions = listSessions(config.dataDir);
+            const buildCache = await planBuildCacheGc({
+              sessions,
+              worktreeDir: config.worktreeDir,
+              now: new Date(),
+              olderThanDays,
+              maxWorktrees,
+              listBuildCacheDirs: findBuildCacheDirs,
+              measureBytes: measureDiskGcBytes,
+            });
+
+            const snapshot = await snapshotProcesses();
+            const processes = snapshot.status === "ok" ? snapshot.processes : [];
+            const profiles = await planProfileGc({
+              roots: [
+                { rootId: "playwright-browsers", path: join(home, ".cache", "ms-playwright") },
+                {
+                  rootId: "playwright-mcp-profiles",
+                  path: join(home, ".cache", "ms-playwright-mcp"),
+                },
+              ],
+              now: new Date(),
+              processes,
+              myUid: process.getuid?.(),
+              listProfileDirs: async (rootPath) => {
+                try {
+                  return await readdirAsync(rootPath);
+                } catch {
+                  return [];
+                }
+              },
+              statProfile: async (path) => {
+                const st = await lstatAsync(path);
+                return { uid: st.uid, isSymlink: st.isSymbolicLink(), mtimeMs: st.mtimeMs };
+              },
+              measureBytes: measureDiskGcBytes,
+              singletonLockLivePid,
+            });
+
+            const browserRevisions = options.browserRevisions
+              ? await planBrowserRevisionCandidates(instanceConfig)
+              : [];
+
+            const budgetReport = await readDiskBudgetReport(config.dataDir);
+            const cacacheBytes = budgetReport?.roots.find((r) => r.id === "npm-cacache")?.sizeBytes;
+            const npmCap =
+              cacacheBytes !== undefined && cacacheBytes !== null
+                ? await planNpmCap(
+                    home,
+                    cacacheBytes,
+                    config.diskBudget.npmCacheMaxGb * 1024 * 1024 * 1024,
+                    processes,
+                  )
+                : undefined;
+
+            const plan: DiskGcPlan = {
+              generatedAt: new Date().toISOString(),
+              buildCache,
+              profiles,
+              browserRevisions,
+              npmCap,
+            };
+            const deps = createDiskGcDeps(config, instanceConfig);
+            return executeDiskGc(plan, deps, {
+              dryRun,
+              browserRevisions: Boolean(options.browserRevisions),
+              npmCap: true,
+            });
+          },
+          render: renderDiskGcReport,
+        });
+      },
+    );
 
   program
     .command("spawn")
