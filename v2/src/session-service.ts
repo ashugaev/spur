@@ -6756,15 +6756,6 @@ export class SessionService {
     throw new Error(`Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`);
   }
 
-  private canPublishSidecarLinkForSession(
-    session: SessionRecord,
-    sidecarName: string,
-  ): boolean {
-    if (!isTerminalSessionStatus(session.status)) return true;
-    const sidecar = this.resolveProjectForSession(session)?.sidecars[sidecarName];
-    return Boolean(sidecar && !sidecar.mcp && this.hasRunningWorkspaceMembers(session));
-  }
-
   private async publishSidecarLink(
     sessionId: string,
     sidecarName: string,
@@ -6773,15 +6764,23 @@ export class SessionService {
   ): Promise<void> {
     if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
     const latest = readSession(this.config.dataDir, sessionId);
-    if (!latest || !this.canPublishSidecarLinkForSession(latest, sidecarName)) return;
+    if (!latest) return;
+    if (isTerminalSessionStatus(latest.status)) {
+      const sidecar = this.resolveProjectForSession(latest)?.sidecars[sidecarName];
+      if (!sidecar || sidecar.mcp || !this.hasRunningWorkspaceMembers(latest)) return;
+    }
     const resolved = resolveWorkspaceState(this.config.dataDir, latest);
     const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: sidecarName, url: linkUrl }],
       unlinkLabels: [],
     });
-    const beforeWrite = readSession(this.config.dataDir, sessionId);
-    if (!beforeWrite || !this.canPublishSidecarLinkForSession(beforeWrite, sidecarName)) return;
-    this.writeWorkspaceStateWithLegacyMirror(beforeWrite, {
+    const current = readSession(this.config.dataDir, sessionId);
+    if (!current) return;
+    if (isTerminalSessionStatus(current.status)) {
+      const sidecar = this.resolveProjectForSession(current)?.sidecars[sidecarName];
+      if (!sidecar || sidecar.mcp || !this.hasRunningWorkspaceMembers(current)) return;
+    }
+    this.writeWorkspaceStateWithLegacyMirror(current, {
       ...(slots ? { slots } : {}),
       ...(resolved.pr ? { pr: resolved.pr } : {}),
     });
