@@ -236,6 +236,7 @@ import {
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
+  refreshTmuxFleetSnapshot,
   sendSubmitKeyToTmux,
   sendMenuSelectionKeys,
   setTmuxSocketName,
@@ -6273,6 +6274,36 @@ export class SessionService {
     return Math.max(SIDECAR_START_CONFLICT_DEADLINE_MS, cap);
   }
 
+  // A blocked candidate carrying `reservedBy` (`sessionId/sidecarName`) is
+  // blocked by a live Spur reservation, not raw host occupancy — the port
+  // itself can be perfectly free (isHostPortFree true) while the recording
+  // session still owns it with an alive pane, exactly the reservedBy shape
+  // buildRangeCandidates emits. Re-probing with isHostPortFree alone would
+  // read that as "freed" every time and clear the refusal state before it
+  // ever reaches the terminal event, defeating the whole point of the
+  // bounded-refusal cache (REQ1). Mirrors the same two facts
+  // ensureSidecarReservation's own `unavailable` scan checks: is the port
+  // still recorded there, and is that owner's pane still alive.
+  private async isConflictCandidateStillBlocked(
+    candidate: SidecarPortConflictCandidate,
+  ): Promise<boolean> {
+    const slashIdx = candidate.reservedBy?.indexOf("/") ?? -1;
+    if (candidate.reservedBy && slashIdx > 0) {
+      const ownerId = candidate.reservedBy.slice(0, slashIdx);
+      const scName = candidate.reservedBy.slice(slashIdx + 1);
+      const owner = readSession(this.config.dataDir, ownerId);
+      const stillRecorded = Object.values(owner?.sidecarPorts?.[scName] ?? {}).includes(
+        candidate.port,
+      );
+      if (!stillRecorded) return false;
+      return sidecarTmuxAlive(ownerId, scName);
+    }
+    // No parseable session/sidecar owner (host-occupied, unattributed, or a
+    // service-held port with no session record to consult): the only
+    // available signal is raw host occupancy.
+    return !(await isHostPortFree(candidate.port));
+  }
+
   // Checked BEFORE withSidecarPortLock so a cached refusal never queues on
   // the process-global lock. Deadline is evaluated before the probe window
   // so a pending window can never mask an expired deadline. Never a
@@ -6292,10 +6323,13 @@ export class SessionService {
     const now = Date.now();
     const deadlineAtMs = state.firstConflictAtMs + this.sidecarStartConflictDeadlineMs();
     if (now >= deadlineAtMs) {
-      // Cheap re-probe over only the previously blocked ports — zero forks
-      // beyond isHostPortFree, no listener/attribution work.
-      const freeResults = await Promise.all(state.blockedPorts.map((port) => isHostPortFree(port)));
-      if (freeResults.some(Boolean)) {
+      // Cheap re-probe over only the previously blocked candidates — reuses
+      // the same reservation-or-occupancy predicate the initial scan used,
+      // never raw isHostPortFree alone.
+      const stillBlocked = await Promise.all(
+        state.candidates.map((candidate) => this.isConflictCandidateStillBlocked(candidate)),
+      );
+      if (stillBlocked.some((blocked) => !blocked)) {
         this.sidecarStartConflictState.delete(key);
         return null;
       }
@@ -6646,6 +6680,18 @@ export class SessionService {
         liveDeskAnchors.add(workspaceIdOf(candidate));
       }
     }
+    // At most ONE fresh tmux fleet read per call (never per candidate): the
+    // fleet cache is a single shared entry, so N independent `{fresh: true}`
+    // reads inside the loop below would each discard the previous
+    // candidate's still-fresh snapshot and fork again — measured on this
+    // host as ~29 stale cross-desk duplicates, i.e. ~29 forks on every start
+    // attempt, on the exact retry path this bounded-refusal cache exists to
+    // relieve. One read taken here, before any candidate's liveness is
+    // decided, still closes GAP 1 (a booting sibling's reservation write
+    // races this scan's cached read): every candidate in this pass reads
+    // off the SAME post-refresh snapshot, none older than the instant this
+    // call started deciding.
+    let freshFleetReadDone = false;
     for (const liveSession of allSessions) {
       const holdsSidecarPorts =
         !isTerminalSessionStatus(liveSession.status) ||
@@ -6677,12 +6723,14 @@ export class SessionService {
           // liveSession.id directly): a desk member's own record can be the
           // one holding the port while the anchor's pane is what is
           // actually alive, and this loop iterates raw session records.
-          // The liveness read is forced `fresh` (bypasses the ~2s tmux
-          // fleet cache): ensureSidecarReservation writes sidecarPorts
-          // before createTmuxSidecarSession runs, so a cached read taken
-          // inside that window can see a brand-new sibling reservation's
-          // pane as "gone" before it has bound its port, reclaiming a port
-          // that is about to be live.
+          // Liveness reads off the ONE fleet snapshot refreshed at most
+          // once per call (see freshFleetReadDone above), bypassing the
+          // ~2s tmux fleet cache exactly once, not once per candidate:
+          // ensureSidecarReservation writes sidecarPorts before
+          // createTmuxSidecarSession runs, so a cached read taken inside
+          // that window can see a brand-new sibling reservation's pane as
+          // "gone" before it has bound its port, reclaiming a port that is
+          // about to be live.
           // Never a reclaim candidate when this record's OWN status is
           // terminal and it only remains in this scan because a live desk
           // sibling still needs the shared port (liveDeskAnchors above): a
@@ -6701,8 +6749,19 @@ export class SessionService {
               otherProject = undefined;
             }
             const otherOwnerId = this.sidecarOwnerIdForName(liveSession, otherProject, scName);
-            const otherAlive = await sidecarTmuxAlive(otherOwnerId, scName, { fresh: true });
+            if (!freshFleetReadDone) {
+              await refreshTmuxFleetSnapshot();
+              freshFleetReadDone = true;
+            }
+            const otherAlive = await sidecarTmuxAlive(otherOwnerId, scName);
             if (!otherAlive && (await isHostPortFree(port))) {
+              // The one write in this scan pass that escapes the plan/apply
+              // split below (:6890): it writes liveSession's record
+              // immediately, before this attempt's own reservation is known
+              // to succeed. Benign — the port is proven both pane-dead and
+              // host-free right here, so releasing it can never be
+              // rolled back into a wrong state even if this attempt later
+              // fails for an unrelated portId.
               this.releaseSidecarPortFromSession(liveSession.id, scName, port);
               continue;
             }
@@ -7082,6 +7141,19 @@ export class SessionService {
                 details: { reason: "start_noop", sidecarName: args.sidecarName },
               });
             }
+            // Mirrors the pane-alive early return's call exactly, but the
+            // eventual publishSidecarLink write is gated on
+            // sidecarTmuxAlive(sessionId, sidecarName) (see :7599's real
+            // gate) — and by this path's own definition tmux is gone, so
+            // that gate always blocks the write here. Harmless in the
+            // common case: a recorded sidecarProcs identity implies a
+            // prior successful start that already published the link, and
+            // tmux death alone does not unlink the slot. Narrow real gap:
+            // if an earlier probe failure ran
+            // writeSessionWithUnlinkedSidecarSlot, the link can never come
+            // back through this path — only an explicit stop+start
+            // recovers it. Not fixed here; tracked as
+            // https://github.com/ashugaev/spur/issues/912.
             if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
               this.scheduleSidecarUrlReadyAndPublish(
                 args.session.id,

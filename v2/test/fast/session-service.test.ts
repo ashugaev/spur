@@ -164,6 +164,7 @@ const snapshotProcessesMock = vi
   .fn<SnapshotProcesses>()
   .mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
 const sidecarTmuxAliveMock = vi.fn();
+const refreshTmuxFleetSnapshotMock = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
 const getTmuxSessionActivityMock = vi.fn();
@@ -651,6 +652,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     createTmuxCommandSession: createTmuxCommandSessionMock,
     createTmuxSidecarSession: createTmuxSidecarSessionMock,
     sidecarTmuxAlive: sidecarTmuxAliveMock,
+    refreshTmuxFleetSnapshot: refreshTmuxFleetSnapshotMock,
     sidecarTmuxSession: sidecarTmuxSessionMock,
     listTmuxSessionNames: listTmuxSessionNamesMock,
     getTmuxSessionActivity: getTmuxSessionActivityMock,
@@ -1414,6 +1416,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
+    refreshTmuxFleetSnapshotMock.mockReset().mockResolvedValue(undefined);
     sidecarTmuxSessionMock
       .mockReset()
       .mockImplementation((id: string, name: string) => `${id}--${name}`);
@@ -26311,15 +26314,14 @@ describe("SessionService", () => {
 
     it("schedules the same URL-ready probe on the own-identity no-op path as the pane-alive early return", async () => {
       // Invariant 10 ("a no-op success publishes the link exactly as the
-      // pane-alive return") holds at the CALL level — this asserts
-      // shouldScheduleSidecarUrlProbe/scheduleSidecarUrlReadyAndPublish run
-      // identically. It does NOT reach an actual published link here: that
-      // requires publishSidecarLink's own (pre-existing, out-of-scope)
-      // sidecarTmuxAlive gate to pass, and by this path's own definition
-      // tmux is gone — sidecarTmuxAliveMock stays false throughout. A
-      // dedicated probe-scheduled assertion (fetch invoked) is the honest,
-      // falsifiable check; asserting a published slots.links here would be
-      // asserting something this path can never actually produce.
+      // pane-alive return") holds at the CALL level — see the source
+      // comment at the own-identity no-op's scheduleSidecarUrlReadyAndPublish
+      // call site for why the actual link write is separately gated and the
+      // narrow case (github.com/ashugaev/spur/issues/912) where that
+      // matters. Asserting a published slots.links here would assert
+      // something this path never actually produces (sidecarTmuxAliveMock
+      // stays false throughout) — fetch invocation is the honest,
+      // falsifiable check for "the same probe was scheduled".
       vi.useRealTimers();
       const child = spawnDisposableChild();
       try {
@@ -26620,6 +26622,52 @@ describe("SessionService", () => {
       expect(second).toBeInstanceOf(SidecarPortConflictError);
       const third = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
       expect(third).toBeInstanceOf(SidecarPortConflictError);
+
+      const terminalEvents = logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.sidecar.start_rejected" && entry.details?.terminal === true,
+      );
+      expect(terminalEvents).toHaveLength(1);
+    });
+
+    it("reaches the terminal event for a reservation-blocked port even though the host port itself is free", async () => {
+      // The measured-bug shape: a candidate with reservedBy set (a live
+      // Spur session still holds the port with an alive pane) while the
+      // raw host port is free. A re-probe using isHostPortFree alone would
+      // read this as "freed" forever, reset failures to 1 every deadline
+      // pass, and never reach the terminal event — the exact defeat of
+      // REQ1 this test pins.
+      isHostPortFreeMock.mockResolvedValue(true);
+      sidecarTmuxAliveMock.mockImplementation(async (id: string) => id === "api-other");
+      loadConfigMock.mockReturnValue(conflictConfig());
+      const sessions = conflictSessions();
+      sessions.set("api-other", {
+        id: "api-other",
+        project: "api",
+        agent: "claude",
+        prompt: "other",
+        branch: "api-other",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-other",
+        tmuxSession: "api-other",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
+      });
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // Past the deadline: api-other's reservation is still live (alive
+      // pane, port still recorded), so the re-probe must still refuse.
+      await vi.advanceTimersByTimeAsync(1_800_001);
+      const second = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(second).toBeInstanceOf(SidecarPortConflictError);
 
       const terminalEvents = logSpurEventMock.mock.calls.filter(
         ([, entry]) =>
@@ -27308,6 +27356,58 @@ describe("SessionService", () => {
       owner: "external",
     });
     expect(candidate?.holder).toBeUndefined();
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("pins the known degradation: a port that frees between the scan and the candidate-build pass yields no candidate for it", async () => {
+    // The measured transient-occupancy shape, one step earlier: the
+    // selection scan's isHostPortFree(3000) sees it occupied (no free port
+    // found, so buildRangeCandidates runs), then buildRangeCandidates'
+    // OWN isHostPortFree(3000) call sees it free (occupancy cleared in the
+    // gap between the two calls). The attempt still refuses correctly
+    // (failedPortIds still records "http"), but this specific port drops
+    // out of candidates entirely — an acceptable UI degradation (a
+    // narrower popup, never a false "free" outside a 409), not fixed here,
+    // only pinned so a future change to this ordering is visible.
+    isHostPortFreeMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: { http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 } },
+            },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const conflict = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+    expect(conflict).toBeInstanceOf(SidecarPortConflictError);
+    const payload = (conflict as InstanceType<typeof SidecarPortConflictError>).payload;
+    expect(payload.candidates).toEqual([]);
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
   });
 

@@ -2215,6 +2215,50 @@ describe("SessionDetail voice input", () => {
     expect(unclearable).toBeDisabled();
   });
 
+  it("defaults the clear-port selection to the first clearable candidate, skipping a leading clearable:false one", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              { name: "dev", alive: false, ports: [{ id: "http", env: "PORT", port: 3000 }] },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            code: "sidecar_port_busy",
+            sidecarName: "dev",
+            candidates: [
+              { portId: "http", env: "PORT", port: 3000, owner: "external", clearable: false },
+              { portId: "http", env: "PORT", port: 3001, owner: "external" },
+            ],
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText(":3000")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start sidecar dev" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Port busy" });
+    expect(within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
+      "3001",
+    );
+  });
+
   it("stops a live sidecar from the icon button", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

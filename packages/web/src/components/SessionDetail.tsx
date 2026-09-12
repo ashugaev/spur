@@ -2273,7 +2273,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           const conflict = await readSidecarPortConflict(response.clone());
           if (conflict) {
             setSidecarPortConflict(conflict);
-            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            // Never default onto a clearable:false candidate — it renders
+            // disabled in the dropdown, and submitting it is a silent
+            // repeat 409 (a port already claimed by a sibling portId in the
+            // same attempt never enters the clear path).
+            setSelectedClearPort(
+              conflict.candidates.find((candidate) => candidate.clearable !== false)?.port ?? null,
+            );
             return;
           }
         }

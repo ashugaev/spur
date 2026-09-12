@@ -159,6 +159,19 @@ export async function listTmuxSessionNames(): Promise<Set<string>> {
   return (await getFleetSessionSnapshot()).names;
 }
 
+// Busts the fleet-wide cache and forces exactly one fresh fork, populating
+// the single shared entry for every plain (non-fresh) tmuxSessionExists /
+// sidecarTmuxAlive call made right after — those reuse this one fetch
+// instead of each forcing their own. For a caller that needs one genuinely
+// fresh read shared across a whole batch of liveness checks (e.g. scanning
+// N foreign reservations for staleness), never N independent `{fresh:
+// true}` calls, which would each discard the previous call's still-fresh
+// entry and re-fork.
+export async function refreshTmuxFleetSnapshot(): Promise<void> {
+  fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
+  await getFleetSessionSnapshot();
+}
+
 // `fresh` busts the shared fleet-existence cache before reading, forcing one
 // independent fork instead of reusing whatever the last ~2s tick saw. Only
 // for rare imperative callers that need a genuine re-sample (e.g. a retry
