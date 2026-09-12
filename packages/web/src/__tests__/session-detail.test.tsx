@@ -2181,6 +2181,83 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("surfaces a partial sidecar stop instead of silently reporting a clean reap", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: true }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/stop" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: false }],
+            sidecarStop: { outcome: "partial", survivors: [501, 502] },
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const button = await screen.findByRole("button", { name: "Stop sidecar dev" });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByText(/2 process\(es\) survived/)).toBeInTheDocument();
+    });
+  });
+
+  it("names the unverified port instead of '0 process(es) survived' on a zero-survivor partial stop", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: true }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/stop" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: false }],
+            sidecarStop: { outcome: "partial", survivors: [], unverifiedPorts: [4355] },
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const button = await screen.findByRole("button", { name: "Stop sidecar dev" });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByText(/port\(s\) 4355 could not be confirmed clear/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/0 process\(es\) survived/)).not.toBeInTheDocument();
+  });
+
   it("shows a pending assistant bubble and promotes the header state to working", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -5763,7 +5840,7 @@ describe("SessionDetail links", () => {
     expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
     expect(screen.getByText("Session api-a1 is not restorable")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Force Kill" })).toBeInTheDocument();
-    // Parity with daemon restore() availableActions for an errored session: respawn offered.
+    // Respawn renders regardless of availableActions (canForceKill gates Force Kill instead).
     expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
   });
 
@@ -5790,7 +5867,7 @@ describe("SessionDetail links", () => {
             code: "session_not_restorable",
             sessionId: "api-a1",
             reason: "Session api-a1 is not restorable",
-            availableActions: ["force_kill", "respawn"],
+            availableActions: ["respawn"],
           }),
           { status: 409 },
         );
@@ -5806,6 +5883,80 @@ describe("SessionDetail links", () => {
       expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
     });
     expect(screen.getByText("Session api-a1 is not restorable")).toBeInTheDocument();
+    // The daemon narrowed availableActions to ["respawn"] for this status, but the
+    // dialog's buttons follow web's own handlers (canForceKill), not the wire payload:
+    // the session under test is "stopped" (non-terminal), so Force Kill still renders.
+    expect(screen.getByRole("button", { name: "Force Kill" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
+  });
+
+  it("pins the canForceKill wiring: hides Force Kill in an already-open recover dialog once the polled session turns terminal", async () => {
+    // #813 was exactly a wiring inversion (a hint/button named a command its
+    // own gate rejects). This pins SessionDetail's render-site wiring
+    // (canForceKill={!isTerminalSession(session)}) end to end, not just the
+    // dialog component in isolation: open the dialog while the session is
+    // still "stopped" (Force Kill valid), then let the session poll turn it
+    // "killed" (Force Kill would now throw "already completed" server-side)
+    // and assert the still-open dialog drops Force Kill while keeping
+    // Respawn.
+    let status: "stopped" | "killed" = "stopped";
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(sessionFixture({ status, state: "killed", runtimeAlive: false })),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/restore") {
+        return new Response(
+          JSON.stringify({
+            code: "session_not_restorable",
+            sessionId: "api-a1",
+            reason: "Session api-a1 is not restorable",
+            availableActions: ["force_kill", "respawn"],
+          }),
+          { status: 409 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    // Fake timers must be active before mount so the polling setInterval it
+    // registers is one we can advance deterministically.
+    vi.useFakeTimers();
+    try {
+      render(<SessionDetail sessionId="api-a1" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Force Kill" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
+
+      status = "killed";
+      // Matches SessionDetail's internal POLL_INTERVAL_MS for the session refetch.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+
+      expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Force Kill" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reopens a completed session with a single POST", async () => {

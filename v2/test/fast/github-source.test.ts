@@ -266,9 +266,14 @@ describe("github source", () => {
 
     expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
     expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("failed to poll api-a1b2: gh offline"),
-    );
+    // Message shape now wraps the classified cause in a GitHubReviewBatchError
+    // (batch key + member count), so the raw "gh offline" is a substring, not the
+    // whole tail. Pin both substrings to the SAME call rather than asserting each
+    // independently, which any warn call could satisfy.
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const warnMessage = logger.warn.mock.calls[0]?.[0] as string;
+    expect(warnMessage).toContain("failed to poll api-a1b2: GitHub review batch");
+    expect(warnMessage).toContain("gh offline");
 
     handle.stop();
   });
@@ -3326,6 +3331,184 @@ describe("github source", () => {
         expect.anything(),
       );
       expect(disabledEvents()).toHaveLength(1);
+
+      handle.stop();
+    });
+  });
+
+  describe("batch failure containment", () => {
+    it("keeps the review snapshot when the batch fails at envelope level", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null },
+          },
+          errors: [{ message: "Something went wrong while executing your query." }],
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => (entry as { event?: string }).event === "source.poll.error",
+        ),
+      ).toBe(true);
+
+      handle.stop();
+    });
+
+    it.each([
+      ["a bare-string envelope error", () => ["boom"]],
+      ["a pathed error with no message", () => [{ type: "NOT_FOUND", path: ["r", "a0"] }]],
+    ])("keeps the review snapshot when the batch fails on %s", async (_name, buildErrors) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null },
+          },
+          errors: buildErrors(),
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => (entry as { event?: string }).event === "source.poll.error",
+        ),
+      ).toBe(true);
+
+      handle.stop();
+    });
+
+    it("logs one source.poll.error for a failed batch of three sessions", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      const sessions = [0, 1, 2].map((offset) =>
+        makeSession({
+          id: `api-${offset}`,
+          workspaceId: `api-${offset}`,
+          pr: {
+            number: 40 + offset,
+            repo: "acme/api",
+            url: `https://github.com/acme/api/pull/${40 + offset}`,
+          },
+        }),
+      );
+      listSessionsMock.mockReturnValue(sessions);
+      const rawError = Object.assign(
+        new Error(
+          "Command failed: gh api --hostname github.com graphql -f query=query($owner:String!...) -F n0=1",
+        ),
+        {
+          stderr:
+            "gh: HTTP 503\nupstream connect error or disconnect/reset before headers. reset reason: connection termination",
+          stdout: "",
+        },
+      );
+      ghTransportMock.mockRejectedValueOnce(rawError);
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      const errorEventsAll = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry as { event?: string; message?: string })
+        .filter((entry) => entry.event === "source.poll.error");
+      expect(errorEventsAll).toHaveLength(1);
+      expect(errorEventsAll[0]?.message).toContain("acme/api");
+      expect(errorEventsAll[0]?.message).toContain("3 sessions");
+      expect(errorEventsAll[0]?.message).toContain("HTTP 503");
+      expect(errorEventsAll[0]?.message).not.toContain("query=");
+      expect(errorEventsAll[0]?.message).not.toContain("-F n0=");
+      expect(errorEventsAll[0]?.message).not.toContain("query(");
+
+      // I9: every member still backs off even though only one event was logged.
+      ghTransportMock.mockClear();
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).not.toHaveBeenCalled();
+
+      handle.stop();
+    });
+
+    // S1: bound and unbound legs of the SAME repo run as two separate batch calls in
+    // one cycle (byRepo shares repoKey across both axes). Their dedupeKeys must stay
+    // distinct or one leg's failure would silently swallow the other's event.
+    it("logs two events when a bound-leg and unbound-leg batch fail on the same repo in one cycle", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      const boundOnly = makeSession({ id: "api-bound", workspaceId: "api-bound" });
+      const unboundOnly = makeUnboundSession({
+        id: "api-unbound",
+        workspaceId: "api-unbound",
+      });
+      listSessionsMock.mockReturnValue([boundOnly, unboundOnly]);
+      ghTransportMock
+        .mockRejectedValueOnce(new Error("gh offline bound"))
+        .mockRejectedValueOnce(new Error("gh offline unbound"));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      const errorEventsAll = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry as { event?: string })
+        .filter((entry) => entry.event === "source.poll.error");
+      expect(errorEventsAll).toHaveLength(2);
 
       handle.stop();
     });

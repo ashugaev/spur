@@ -20,9 +20,13 @@ const { startConfiguredBacklogs } = await import("../../src/backlog/index.js");
 
 const connection: JiraSourceConfig = {
   type: "jira",
+  runOnStart: false,
   baseUrl: "https://jira.example.com/",
   email: "bot@example.com",
   token: "token",
+  intervalMs: 60_000,
+  emitExisting: false,
+  maxResults: 50,
 };
 
 function binding(overrides: Partial<BacklogConfig> = {}): BacklogConfig {

@@ -115,6 +115,7 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarStopResponse,
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
@@ -2280,10 +2281,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
         );
       }
-      const payload = (await response.json()) as SpurSessionView;
+      const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
+      if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        const { survivors, unverifiedPorts = [] } = payload.sidecarStop;
+        showErrorToast(
+          survivors.length === 0 && unverifiedPorts.length > 0
+            ? `Stopped sidecar ${sidecarName}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Run \`spur sidecar sweep\`.`
+            : `Stopped sidecar ${sidecarName}, but ${survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+        );
+      }
     } catch (sidecarError) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
@@ -3572,7 +3581,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
-                            {sc.alive && canAttach ? (
+                            {(sc.alive || sc.deadPane) && canAttach ? (
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
@@ -3682,6 +3691,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {recoverPayload ? (
             <RecoverActionDialog
               busy={busyAction !== null}
+              canForceKill={!isTerminalSession(session)}
               onCancel={() => setRecoverPayload(null)}
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}

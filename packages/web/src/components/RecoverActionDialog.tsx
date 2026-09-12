@@ -4,6 +4,7 @@ import type { SessionNotRestorablePayload } from "@/lib/types";
 interface RecoverActionDialogProps {
   payload: SessionNotRestorablePayload;
   busy?: boolean;
+  canForceKill: boolean;
   onForceKill: () => void;
   onRespawn: () => void;
   onCancel: () => void;
@@ -12,6 +13,7 @@ interface RecoverActionDialogProps {
 export function RecoverActionDialog({
   payload,
   busy = false,
+  canForceKill,
   onForceKill,
   onRespawn,
   onCancel,
@@ -41,24 +43,24 @@ export function RecoverActionDialog({
           />
         </div>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
-          {payload.availableActions.includes("respawn") ? (
-            <button
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-              disabled={busy}
-              onClick={onRespawn}
-              type="button"
-            >
-              Respawn
-            </button>
-          ) : null}
           <button
-            className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
+            className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
             disabled={busy}
-            onClick={onForceKill}
+            onClick={onRespawn}
             type="button"
           >
-            Force Kill
+            Respawn
           </button>
+          {canForceKill ? (
+            <button
+              className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
+              disabled={busy}
+              onClick={onForceKill}
+              type="button"
+            >
+              Force Kill
+            </button>
+          ) : null}
           <button
             className="border border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
             disabled={busy}

@@ -104,6 +104,7 @@ vi.mock("../../src/workspace.js", async () => {
 });
 
 import {
+  _formatLeakedSidecarsCheckForTests as formatLeakedSidecarsCheck,
   checkConfigRegistry,
   checkHostSkillSymlinks,
   checkServiceHealth,
@@ -116,6 +117,7 @@ import {
   satisfiesNodeEngineRange,
   type SystemdScope,
 } from "../../src/host-install.js";
+import type { LeakedSidecarTree } from "../../src/sidecars/reap.js";
 import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
 import { createProgram } from "../../src/cli.js";
@@ -759,6 +761,32 @@ describe("collectHostInstallChecks", () => {
     });
   });
 
+  // #826: pins doctor against a later parseVersionTuple tightening — cannot
+  // fail pre-fix (Number.parseInt("0-nightly...", 10) already degraded to 0
+  // and the check was already ok:true), but pins the stated contract now
+  // that the strip is explicit.
+  describe("node-version check with a prerelease process.version", () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(process, "version");
+
+    afterEach(() => {
+      if (originalDescriptor) {
+        Object.defineProperty(process, "version", originalDescriptor);
+      }
+    });
+
+    it("reports node-version ok:true for a nightly prerelease interpreter", async () => {
+      Object.defineProperty(process, "version", {
+        value: "v25.0.0-nightly20260101abcdef",
+        configurable: true,
+      });
+      const checks = await collectHostInstallChecks("/tmp/spur-host-install-test");
+      const check = checks.find((c) => c.id === "node-version");
+      expect(check).toMatchObject({ ok: true, severity: "error" });
+      expect(check?.detail).toMatch(/satisfies/);
+      expect(check?.detail).not.toMatch(/skipped/);
+    });
+  });
+
   // Folded-in regression guard: a genuine npm install resolves `engines.node`
   // from `dist/../package.json` (this package's own installed root, mirroring
   // `version.ts`'s own resolution) — on a real npm-published package lacking
@@ -1016,6 +1044,27 @@ describe("satisfiesNodeEngineRange", () => {
     // And the pinned range must actually admit a version inside it.
     expect(satisfiesNodeEngineRange(range, "v20.19.0")).toBe(true);
   });
+
+  // #826: a prerelease/build suffix never changes the verdict — only the
+  // release triple is evaluated against the root range.
+  it("ignores a prerelease/build suffix, deciding on the release triple alone", () => {
+    const range = "^20.19.0 || ^22.13.0 || >=24";
+    expect(satisfiesNodeEngineRange(range, "v25.0.0-nightly20260101abcdef")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v26.0.0-pre")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v24.0.0-rc.1")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v22.13.0+build.5")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v20.19.0-rc.0")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v21.0.0-rc.0")).toBe(false);
+    expect(satisfiesNodeEngineRange(range, "vgarbage")).toBe(false);
+  });
+
+  // #826: strip-before-split, not split-before-strip — reversing the order
+  // would let a garbage suffix on the FIRST segment leak digits into the
+  // parsed tuple (`v20.19-x.9` pre-strip parses as [20,19,9], which
+  // satisfies `^20.19.5`; post-strip it is [20,19,0], which does not).
+  it("strips the suffix before splitting on '.', not after", () => {
+    expect(satisfiesNodeEngineRange("^20.19.5", "v20.19-x.9")).toBe(false);
+  });
 });
 
 describe("checkSpurOnPath", () => {
@@ -1167,6 +1216,19 @@ describe("checkServiceHealth", () => {
     const conflict = result.checks.find((check) => check.id === "daemon-port-conflict");
     expect(conflict).toMatchObject({ ok: false, severity: "error" });
     expect(conflict?.detail).toContain("9999");
+  });
+
+  // D2: isHostPortFree already proved the port occupied before this branch
+  // runs — losing the pid probe (no lsof/ss) must not downgrade a proven
+  // conflict to a check that leaves doctor's exit code green.
+  it("still reports a port-conflict as an error when the pid probe itself fails (no lsof/ss)", async () => {
+    probeInfoMock.mockResolvedValue({ ok: false, reason: "connection-refused" });
+    isHostPortFreeMock.mockResolvedValue(false);
+    findListenerPidsMock.mockRejectedValue(new Error("neither lsof nor ss is available"));
+    const result = await checkServiceHealth(scope, false, false, false);
+    const conflict = result.checks.find((check) => check.id === "daemon-port-conflict");
+    expect(conflict).toMatchObject({ ok: false, severity: "error" });
+    expect(conflict?.detail).toContain("lsof/ss unavailable");
   });
 
   it("reports warn severity when the service simply has not started yet", async () => {
@@ -1817,6 +1879,13 @@ describe("collectHostInstallChecks: reclaimable-caches", () => {
 });
 
 describe("collectHostInstallChecks: sidecar-orphans", () => {
+  // 859/AC18: this fixture's worktreeDir is deliberately empty — the
+  // worktree-tree pass can never produce a row — so the assertion is
+  // meaningful only when nothing ELSE can produce one either. Without an
+  // injected empty snapshot, `checkLeakedSidecars` scans the REAL host
+  // process table, and any leftover orphan isolated daemon (the exact
+  // population #811 exists to surface — measured present on this host,
+  // 2026-09-09) turns this into a false failure unrelated to the fixture.
   it("reports ok:true when no leaked sidecar process trees exist", async () => {
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
     const worktreeDir = await mkdtemp(join(tmpdir(), "spur-host-install-worktree-"));
@@ -1834,7 +1903,11 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
     );
     execState.systemctlAvailable = true;
 
-    const checks = await collectHostInstallChecks(fakeHome);
+    const checks = await collectHostInstallChecks(fakeHome, async () => ({
+      ok: true,
+      byPid: new Map(),
+      byPgid: new Map(),
+    }));
 
     expect(checks.find((check) => check.id === "sidecar-orphans")).toMatchObject({
       ok: true,
@@ -1865,6 +1938,105 @@ describe("collectHostInstallChecks: sidecar-orphans", () => {
       severity: "warn",
       detail: "sidecar-orphans: worktree dir unreadable, sweep skipped",
     });
+  });
+
+  it("AC12: an orphan-daemon-only leak set is ok:false, severity:warn, never calls it a leaked sidecar tree, and never suggests --reap", () => {
+    const { detail, fix } = formatLeakedSidecarsCheck([
+      {
+        kind: "orphan-daemon",
+        rootPid: 900,
+        pgid: 900,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.xyz/config.yaml daemon start",
+        tree: [900],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.xyz/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: null,
+        liveness: "unknown",
+      },
+    ]);
+    expect(detail).toContain("1 orphan daemon(s)");
+    expect(detail).not.toContain("leaked sidecar process tree");
+    expect(fix).not.toContain("--reap");
+  });
+
+  it("859/AC13: a serving orphan row never carries 'genuinely dead' or 'before killing', and fix names daemon stop with its config path", () => {
+    const { detail, fix } = formatLeakedSidecarsCheck([
+      {
+        kind: "orphan-daemon",
+        rootPid: 900,
+        pgid: 900,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.xyz/config.yaml daemon start",
+        tree: [900],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.xyz/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: 4342,
+        liveness: "serving",
+      },
+    ]);
+    expect(detail).not.toContain("genuinely dead");
+    expect(detail).not.toContain("before killing");
+    expect(detail).toContain("SERVING on 4342");
+    expect(fix).toContain("daemon stop");
+    expect(fix).toContain("/tmp/spur-isolated-daemon.xyz/config.yaml");
+  });
+
+  it("859/AC13: with no serving row and unresolved liveness, the row and fix both flag the probe as unconfirmed, not genuinely dead", () => {
+    const notServingLeaked: LeakedSidecarTree[] = [
+      {
+        kind: "orphan-daemon",
+        rootPid: 901,
+        pgid: 901,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.abc/config.yaml daemon start",
+        tree: [901],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.abc/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: null,
+        liveness: "unknown",
+      },
+    ];
+    const { detail, fix } = formatLeakedSidecarsCheck(notServingLeaked);
+    // "unknown" (the probe itself could not run) must never render like a
+    // completed, negative liveness check — that would tell an operator to
+    // kill a pid that could actually still be serving.
+    expect(detail).toContain("[report-only, liveness unknown — verify manually before killing]");
+    expect(detail).not.toContain("[report-only, verify before killing]");
+    expect(fix).not.toBe("verify each row is genuinely dead, then `kill <pid>` by hand");
+    expect(fix).toContain("could not be confirmed");
+  });
+
+  it("859/AC13: a genuinely not-serving row (probe ran, no match) keeps the byte-identical original wording", () => {
+    const notServingLeaked: LeakedSidecarTree[] = [
+      {
+        kind: "orphan-daemon",
+        rootPid: 902,
+        pgid: 902,
+        ageSeconds: 3600,
+        worktreePath: "/tmp/gone-checkout",
+        args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/spur-isolated-daemon.def/config.yaml daemon start",
+        tree: [902],
+        treeRssKb: 1000,
+        reapable: false,
+        configPath: "/tmp/spur-isolated-daemon.def/config.yaml",
+        cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+        port: 4343,
+        liveness: "not-serving",
+      },
+    ];
+    const { detail, fix } = formatLeakedSidecarsCheck(notServingLeaked);
+    expect(detail).toContain("[report-only, verify before killing]");
+    expect(fix).toBe("verify each row is genuinely dead, then `kill <pid>` by hand");
   });
 
   it("never writes or signals — collectHostInstallChecks stays read-only", async () => {
