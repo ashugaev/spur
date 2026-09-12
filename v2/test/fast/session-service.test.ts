@@ -26190,6 +26190,245 @@ describe("SessionService", () => {
     ).toBe(false);
   });
 
+  describe("own-identity no-op", () => {
+    // A real, disposable, group-isolated child (never the test runner's own
+    // pid/pgid) so a bug that falls through to the real reapRecordedIdentity
+    // path signals something disposable instead of this worker.
+    function spawnDisposableChild(): { pid: number; kill(): void } {
+      const child = spawnChildProcess("bash", ["-c", "sleep 30"], {
+        stdio: "ignore",
+        detached: true,
+      });
+      const pid = child.pid;
+      if (pid === undefined) {
+        throw new Error("expected a disposable child pid");
+      }
+      return {
+        pid,
+        kill: () => {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            // already gone
+          }
+        },
+      };
+    }
+
+    async function realStarttime(pid: number): Promise<number> {
+      const actual = await vi.importActual<typeof reapModule>("../../src/sidecars/reap.js");
+      const starttime = await actual.readProcessStarttime(pid);
+      if (starttime === null) {
+        throw new Error("expected a readable starttime for this test process");
+      }
+      return starttime;
+    }
+
+    function ownIdentitySession(identity: { pid: number; pgid: number; starttime: number }) {
+      return {
+        id: "api-1",
+        project: "api",
+        agent: "claude" as const,
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running" as const,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
+        sidecarProcs: { dev: identity },
+      };
+    }
+
+    function devSidecarConfig() {
+      return {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              dev: {
+                command: "pnpm dev",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 } },
+              },
+            },
+          },
+        },
+      };
+    }
+
+    it("skips reap/relaunch when the recorded identity is still the live listener (pid match)", async () => {
+      const child = spawnDisposableChild();
+      try {
+        loadConfigMock.mockReturnValue(devSidecarConfig());
+        const starttime = await realStarttime(child.pid);
+        readSessionMock.mockReturnValue(
+          ownIdentitySession({ pid: child.pid, pgid: child.pid, starttime }),
+        );
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        isHostPortFreeMock.mockResolvedValue(false);
+        findListenerPidsMock.mockResolvedValue([child.pid]);
+        snapshotProcessesMock.mockResolvedValue({
+          ok: true,
+          byPid: new Map([
+            [
+              child.pid,
+              { pid: child.pid, ppid: 1, pgid: child.pid, rssKb: 10, etimes: 1, args: "x" },
+            ],
+          ]),
+          byPgid: new Map(),
+        });
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.startSidecar("api-1", "dev");
+
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(
+          writeSessionMock.mock.calls.some((call) => {
+            const record = call[1] as { sidecarProcs?: Record<string, unknown> } | undefined;
+            return record?.sidecarProcs?.["dev"] === undefined;
+          }),
+        ).toBe(false);
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, entry]) => entry.event === "session.sidecar.start_rejected",
+          ),
+        ).toBe(true);
+      } finally {
+        child.kill();
+      }
+    });
+
+    it("emits start_noop at most once across repeated no-op starts on the same identity", async () => {
+      const child = spawnDisposableChild();
+      try {
+        loadConfigMock.mockReturnValue(devSidecarConfig());
+        const starttime = await realStarttime(child.pid);
+        readSessionMock.mockReturnValue(
+          ownIdentitySession({ pid: child.pid, pgid: child.pid, starttime }),
+        );
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        isHostPortFreeMock.mockResolvedValue(false);
+        findListenerPidsMock.mockResolvedValue([child.pid]);
+        snapshotProcessesMock.mockResolvedValue({
+          ok: true,
+          byPid: new Map([
+            [
+              child.pid,
+              { pid: child.pid, ppid: 1, pgid: child.pid, rssKb: 10, etimes: 1, args: "x" },
+            ],
+          ]),
+          byPgid: new Map(),
+        });
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.startSidecar("api-1", "dev");
+        await service.startSidecar("api-1", "dev");
+        await service.startSidecar("api-1", "dev");
+
+        const noopEvents = logSpurEventMock.mock.calls.filter(
+          ([, entry]) =>
+            entry.event === "session.sidecar.start_rejected" &&
+            entry.details?.reason === "start_noop",
+        );
+        expect(noopEvents).toHaveLength(1);
+      } finally {
+        child.kill();
+      }
+    });
+
+    it("never no-ops on a starttime mismatch (pid reuse guard)", async () => {
+      const child = spawnDisposableChild();
+      try {
+        loadConfigMock.mockReturnValue(devSidecarConfig());
+        readSessionMock.mockReturnValue(
+          ownIdentitySession({ pid: child.pid, pgid: child.pid, starttime: 1 }),
+        );
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        // Free, so the fallback reservation this test expects can succeed;
+        // the starttime mismatch alone must decide this case.
+        isHostPortFreeMock.mockResolvedValue(true);
+        findListenerPidsMock.mockResolvedValue([child.pid]);
+        snapshotProcessesMock.mockResolvedValue({
+          ok: true,
+          byPid: new Map([
+            [
+              child.pid,
+              { pid: child.pid, ppid: 1, pgid: child.pid, rssKb: 10, etimes: 1, args: "x" },
+            ],
+          ]),
+          byPgid: new Map(),
+        });
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.startSidecar("api-1", "dev");
+
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+        );
+      } finally {
+        child.kill();
+      }
+    });
+
+    it("never no-ops when a listener pid resolves but its pgid cannot be attributed", async () => {
+      const child = spawnDisposableChild();
+      try {
+        // A wider range so the recorded port (3000) stays occupied for the
+        // own-identity occupancy check while a second port (3001) is free
+        // for the fallback reservation this test expects to succeed —
+        // occupancy alone must not decide this case, attribution must.
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: {
+                dev: {
+                  command: "pnpm dev",
+                  autoStart: false,
+                  ports: { http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3001 } },
+                },
+              },
+            },
+          },
+        });
+        const starttime = await realStarttime(child.pid);
+        readSessionMock.mockReturnValue(
+          ownIdentitySession({ pid: child.pid, pgid: child.pid, starttime }),
+        );
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        isHostPortFreeMock.mockImplementation(async (port: number) => port !== 3000);
+        // A different, unattributable listener pid — absent from the
+        // snapshot, so its pgid can never be resolved.
+        findListenerPidsMock.mockResolvedValue([child.pid + 1_000_000]);
+        snapshotProcessesMock.mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.startSidecar("api-1", "dev");
+
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+        );
+      } finally {
+        child.kill();
+      }
+    });
+  });
+
   it("startSidecar does not launch the requested sidecar when a dependency fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

@@ -2646,6 +2646,11 @@ export class SessionService {
     string,
     { failures: number; nextRetryAtMs: number }
   >();
+  // Temporary (commit 2): dedupes the own-identity-no-op start_rejected
+  // "start_noop" event so a retry loop against a live own-identity sidecar
+  // logs it once per identity, never once per retry. Folded into the
+  // bounded-refusal map in the next commit.
+  private readonly sidecarStartNoopSeen = new Map<string, { pid: number; starttime: number }>();
   // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
   // process trees" over the real HTTP /sidecars/sweep route would
   // otherwise scan the real host process table — on a host with even one
@@ -6840,6 +6845,73 @@ export class SessionService {
         // old instance keeps running under the reused port.
         const owner = readSession(this.config.dataDir, args.session.id);
         const identity = owner?.sidecarProcs?.[args.sidecarName];
+        // Own-identity no-op: the tmux supervisor is gone, but the recorded
+        // process is still the exact one genuinely serving the recorded
+        // ports — a retry against a repeat-failing caller (e.g. a wake
+        // retry loop) must not reap and relaunch a healthy instance out
+        // from under itself. Order is load-bearing: staleness -> occupancy
+        // -> one snapshot for listener attribution, never a snapshot
+        // before staleness/occupancy have narrowed the candidate, and never
+        // before this point (a match here skips reapRecordedIdentity
+        // entirely, so it must run first).
+        const recordedPorts = Object.values(owner?.sidecarPorts?.[args.sidecarName] ?? {});
+        if (owner && identity && recordedPorts.length > 0) {
+          const starttime = await readProcessStarttime(identity.pid);
+          const stillSameProcess = starttime !== null && starttime === identity.starttime;
+          const stillOccupied =
+            stillSameProcess &&
+            (await Promise.all(recordedPorts.map((port) => isHostPortFree(port)))).every(
+              (free) => !free,
+            );
+          if (stillOccupied) {
+            const snapshot = await snapshotProcesses();
+            const attributed =
+              snapshot.ok &&
+              (
+                await Promise.all(
+                  recordedPorts.map(async (port) => {
+                    let listenerPids: number[];
+                    try {
+                      listenerPids = await findListenerPids(port);
+                    } catch {
+                      return false;
+                    }
+                    return listenerPids.some(
+                      (pid) =>
+                        pid === identity.pid || snapshot.byPid.get(pid)?.pgid === identity.pgid,
+                    );
+                  }),
+                )
+              ).every(Boolean);
+            if (attributed) {
+              const noopKey = `${args.session.id}\0${args.sidecarName}`;
+              const seen = this.sidecarStartNoopSeen.get(noopKey);
+              if (seen?.pid !== identity.pid || seen.starttime !== identity.starttime) {
+                this.sidecarStartNoopSeen.set(noopKey, {
+                  pid: identity.pid,
+                  starttime: identity.starttime,
+                });
+                this.logEvent("session.sidecar.start_rejected", {
+                  level: "info",
+                  sessionId: args.session.id,
+                  message: `Sidecar ${args.sidecarName} start is a no-op: the recorded process is still serving its reserved ports`,
+                  details: { reason: "start_noop", sidecarName: args.sidecarName },
+                });
+              }
+              if (
+                this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)
+              ) {
+                this.scheduleSidecarUrlReadyAndPublish(
+                  args.session.id,
+                  args.sidecarName,
+                  args.sidecar,
+                  args.session,
+                );
+              }
+              return args.session;
+            }
+          }
+        }
         if (owner && identity) {
           const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
           this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
