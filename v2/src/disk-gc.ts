@@ -8,7 +8,7 @@ import {
   planCachePrune,
   type CacheCandidate,
 } from "./cache-retention.js";
-import { findBuildCacheDirs, type BuildCacheDirFact } from "./build-cache-scan.js";
+import type { BuildCacheDirFact } from "./build-cache-scan.js";
 import { readSession } from "./metadata.js";
 import { planNpmCacheCap } from "./npm-cache-cap.js";
 import type { ProcessSnapshotEntry } from "./process-tree.js";
@@ -16,8 +16,6 @@ import { isTerminalSessionStatus, type AppConfig, type SessionRecord } from "./t
 import type { InstanceConfigReadResult } from "./config.js";
 
 const execFileAsync = promisify(execFile);
-
-export { findBuildCacheDirs, type BuildCacheDirFact };
 
 // ---------------------------------------------------------------------------
 // T3: worktree build caches — planner
@@ -588,7 +586,29 @@ export async function executeDiskGc(
           freedBytes: npmFreed,
         };
       } else {
-        for (const victim of npmCapPlan.plan.victims) {
+        // The victim list was ranked oldest-first against the PRE-verify
+        // size (npm-cache-cap.ts's planNpmCacheVictims). `npm cache verify`
+        // may have already collected enough orphaned/corrupt content on its
+        // own that fewer victims are needed now — re-walk that SAME ranking
+        // against the POST-verify size and clean only the prefix still
+        // required to clear the cap. Cleaning the full pre-verify list here
+        // would delete already-under-cap, still-valid entries a second time
+        // (measured on this host: 14381260894 bytes of orphan content verify
+        // alone reclaims). When the post-verify size is unknown
+        // (`afterVerify === null`), fall back to the full ranked list — the
+        // only safe choice when there is no measurement to rank against.
+        let toClean = npmCapPlan.plan.victims;
+        if (afterVerify !== null) {
+          const prefix: typeof npmCapPlan.plan.victims = [];
+          let projected = afterVerify;
+          for (const victim of npmCapPlan.plan.victims) {
+            if (projected <= npmCapPlan.capBytes) break;
+            prefix.push(victim);
+            projected -= victim.size;
+          }
+          toClean = prefix;
+        }
+        for (const victim of toClean) {
           await deps.npmClean(victim.key);
           ranSteps.push(`npm cache clean ${victim.key}`);
         }
@@ -600,9 +620,11 @@ export async function executeDiskGc(
         npmCapReport = {
           status: "planned",
           overCapBytes: npmCapPlan.overCapBytes,
+          // Dry-run contract is unchanged: the report always names the FULL
+          // planned victim set, never just the cleaned prefix.
           victims,
           ranSteps,
-          cleanedKeys: npmCapPlan.plan.victims.length,
+          cleanedKeys: toClean.length,
           freedBytes: npmFreed,
         };
       }

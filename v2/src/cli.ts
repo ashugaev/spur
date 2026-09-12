@@ -103,7 +103,6 @@ import {
 import {
   createDiskGcDeps,
   executeDiskGc,
-  findBuildCacheDirs,
   measureBytes as measureDiskGcBytes,
   planBrowserRevisionCandidates,
   planBuildCacheGc,
@@ -114,6 +113,7 @@ import {
   type DiskGcReport,
   type DiskGcReportCandidate,
 } from "./disk-gc.js";
+import { findBuildCacheDirs } from "./build-cache-scan.js";
 import { snapshotProcesses } from "./process-tree.js";
 import { readdir as readdirAsync, lstat as lstatAsync } from "node:fs/promises";
 import { homedir } from "node:os";

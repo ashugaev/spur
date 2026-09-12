@@ -16,10 +16,20 @@ export interface BuildCacheDirFact {
   newestMtimeMs: number;
 }
 
-async function newestMtimeMs(dirPath: string): Promise<number> {
-  let newest = 0;
-  const st = await lstat(dirPath);
-  newest = Math.max(newest, st.mtimeMs);
+// Returns null when `dirPath` itself is gone by the time this runs — a
+// directory can vanish between the caller's own `lstat` (which found it) and
+// this call on a host that churns constantly (worktrees/build caches being
+// created and removed live). That is routine host state, not a fatal error:
+// the caller drops the entry instead of reporting a bogus age or aborting
+// the whole plan (cleanup 2).
+async function newestMtimeMs(dirPath: string): Promise<number | null> {
+  let newest: number;
+  try {
+    const st = await lstat(dirPath);
+    newest = st.mtimeMs;
+  } catch {
+    return null;
+  }
   let entries: string[];
   try {
     entries = await readdir(dirPath);
@@ -66,7 +76,10 @@ export async function findBuildCacheDirs(worktreeRoot: string): Promise<BuildCac
       const isWebpackCache = childPath.endsWith(join(".cache", "webpack"));
       const isNextCache = childPath.endsWith(join(".next", "cache"));
       if (isWebpackCache || isNextCache) {
-        found.push({ path: childPath, newestMtimeMs: await newestMtimeMs(childPath) });
+        const mtimeMs = await newestMtimeMs(childPath);
+        if (mtimeMs !== null) {
+          found.push({ path: childPath, newestMtimeMs: mtimeMs });
+        }
         continue; // do not descend into a matched build-cache dir itself
       }
       await walk(childPath, depth + 1);

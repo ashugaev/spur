@@ -290,9 +290,11 @@ describe("executeDiskGc — AC7/B1 npm cap: verify, RE-MEASURE, gate, clean olde
     let measureCall = 0;
     const measureCacacheBytes = vi.fn(async () => {
       measureCall += 1;
-      // First measurement (post-verify, pre-clean) is STILL over the 3500 cap;
-      // second (post-clean, post-verify) is under it.
-      return measureCall === 1 ? 4200 : 3000;
+      // First measurement (post-verify, pre-clean) is STILL over the 3500 cap
+      // by enough that BOTH ranked victims (1000 + 500) are needed to clear
+      // it (4600 - 1000 = 3600, still over; -500 = 3100, still over — both
+      // consumed); second (post-clean, post-verify) is under it.
+      return measureCall === 1 ? 4600 : 3000;
     });
     const plan = emptyPlan({ npmCap: npmCapPlanned(1500) });
     const deps = makeDeps({ npmVerify, npmClean, measureCacacheBytes });
@@ -306,6 +308,59 @@ describe("executeDiskGc — AC7/B1 npm cap: verify, RE-MEASURE, gate, clean olde
     expect(calls).toEqual(["verify", "clean:pkg-a", "clean:pkg-b", "verify"]);
     expect(report.npmCap).toMatchObject({ status: "planned", cleanedKeys: 2, freedBytes: 2000 });
     expect(report.freedBytes).toBe(2000);
+  });
+
+  it("BLOCKER fix: cleans only the prefix of ranked victims still needed against the POST-verify size", async () => {
+    const calls: string[] = [];
+    const npmVerify = vi.fn(async () => {
+      calls.push("verify");
+    });
+    const npmClean = vi.fn(async (key: string) => {
+      calls.push(`clean:${key}`);
+    });
+    let measureCall = 0;
+    const measureCacacheBytes = vi.fn(async () => {
+      measureCall += 1;
+      // capBytes = 5000 - 2000 = 3000. Post-verify size is 4000: pkg-a alone
+      // (1000) brings the projected total to 3000, at the cap. pkg-b and
+      // pkg-c must NEVER be cleaned — they are still-valid, already-under-cap
+      // content once pkg-a alone clears it, and re-cleaning the whole
+      // pre-verify list would delete them for no reason (the exact bug this
+      // fix closes).
+      return measureCall === 1 ? 4000 : 3000;
+    });
+    const plan = emptyPlan({
+      npmCap: {
+        kind: "planned",
+        currentSizeBytes: 5000,
+        capBytes: 3000,
+        overCapBytes: 2000,
+        plan: {
+          victims: [
+            { key: "pkg-a", size: 1000 },
+            { key: "pkg-b", size: 500 },
+            { key: "pkg-c", size: 300 },
+          ],
+          victimBytes: 1800,
+        },
+      },
+    });
+    const deps = makeDeps({ npmVerify, npmClean, measureCacacheBytes });
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: false,
+      browserRevisions: false,
+      npmCap: true,
+    });
+
+    expect(calls).toEqual(["verify", "clean:pkg-a", "verify"]);
+    expect(npmClean).not.toHaveBeenCalledWith("pkg-b");
+    expect(npmClean).not.toHaveBeenCalledWith("pkg-c");
+    if (report.npmCap.status !== "planned") throw new Error("expected planned");
+    expect(report.npmCap.cleanedKeys).toBe(1);
+    // Dry-run/report contract unchanged: the report still names the FULL
+    // planned victim set, even though only a prefix was actually cleaned.
+    expect(report.npmCap.victims.map((v) => v.path)).toEqual(["pkg-a", "pkg-b", "pkg-c"]);
   });
 
   it("B1: verify alone clears the cap — clean is NEVER called, and no valid entry is touched", async () => {
