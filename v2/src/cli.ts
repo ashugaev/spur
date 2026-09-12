@@ -1185,10 +1185,12 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
             : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
         : (tree.sidecarName ?? "unattributed");
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}  tree [${tree.tree.join(",")}]${survivorsSuffix}`,
     );
   });
-  return lines.join("\n");
+  const totalRssKb = result.leaked.reduce((sum, tree) => sum + tree.treeRssKb, 0);
+  const totalLine = dimText(`Total would-free: ${formatBytes(totalRssKb * 1024)}`);
+  return [...lines, totalLine].join("\n");
 }
 
 // Test-only: exercises the sweep summary's status/survivors formatting

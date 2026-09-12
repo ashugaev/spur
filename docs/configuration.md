@@ -419,6 +419,8 @@ A dev server survives a pass while something holds a connection to one of its re
 
 Each pass logs `session.sidecar.reaped` per kill with the matched rule and freed tree RSS, and `session.sidecar.age_warning` per kept sidecar past `maxAgeWarnMinutes` — once per sidecar per window, not per tick.
 
+The same pass also runs a detect-only step over one shared process-table snapshot: an orphaned process tree under a worktree (an unclaimed pgid the sweep predicate would call leaked) logs `session.sidecar.orphan_detected` with `rootPid`, `pgid`, `treeRssKb`, `ageSeconds`, `worktreePath`, `sidecarName`, and `reapable`. This step never signals or kills anything, and runs even when `sidecarGc.enabled` is `false` — that flag governs killing only, not detection.
+
 `GET /sessions` (the `full` list) and `GET /sessions/<id>` carry each sidecar's `ageSeconds` (omitted when unresolvable) and `ageWarn` (true at `maxAgeWarnMinutes`, the same threshold as the event) in the `sidecars` array. The dashboard view (`GET /sessions?view=dashboard`) carries no `sidecars` array and no per-sidecar age — only `runningSidecarNames`. The session detail page and `spur list` ([list](commands.md#list)) render the age and mark an over-threshold one; the dashboard sidecars row does not.
 
 `deadPane` (omitted when false) marks a sidecar whose tmux session exists but whose pane exited (`remain-on-exit`, same `alive`/`dead` split as [ports](commands.md#sidecars)); the session detail page keeps its Terminal button reachable but shows the Start action.
