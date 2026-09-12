@@ -34040,6 +34040,67 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("updateWakeMessage changes only the selected wake message", async () => {
+      const pastDue = "2026-03-18T09:00:00.000Z";
+      const sessions = seedShepherdSession({
+        scheduledWake: { dueAt: pastDue, message: "One shot" },
+        intervalWake: {
+          nextDueAt: pastDue,
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+        dailyWake: {
+          dailyAt: ["09:00"],
+          nextDueAt: pastDue,
+          message: "Daily msg",
+          stopCondition: "Daily done",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const updated = await service.updateWakeMessage("shp-1", {
+        target: "interval",
+        message: "Updated interval",
+      });
+
+      expect(updated.intervalWake).toEqual({
+        nextDueAt: pastDue,
+        intervalMs: 300_000,
+        message: "Updated interval",
+        stopCondition: "CI green",
+      });
+      expect(updated.scheduledWake).toEqual({ dueAt: pastDue, message: "One shot" });
+      expect(updated.dailyWake).toEqual({
+        dailyAt: ["09:00"],
+        nextDueAt: pastDue,
+        message: "Daily msg",
+        stopCondition: "Daily done",
+      });
+      expect(sessions.get("shp-1")?.intervalWake?.message).toBe("Updated interval");
+      service.dispose();
+    });
+
+    it("updateWakeMessage rejects a missing target without writing", async () => {
+      const sessions = seedShepherdSession({
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:05:00.000Z",
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+      });
+      const { SessionService, WakeTargetMissingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.updateWakeMessage("shp-1", { target: "daily", message: "New daily" }),
+      ).rejects.toBeInstanceOf(WakeTargetMissingError);
+      expect(sessions.get("shp-1")?.intervalWake?.message).toBe("Interval msg");
+      service.dispose();
+    });
+
     it("advances a daily wake past a failed occurrence and keeps the message queued", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {

@@ -354,6 +354,98 @@ describe("SessionDetail wake markers", () => {
     expect(screen.getByText("Wake stop condition")).toBeInTheDocument();
     expect(screen.getByText("Daily checks done")).toBeInTheDocument();
   });
+
+  it("opens wake controls, saves a message, and wakes now without touching composer state", async () => {
+    let intervalWakeMessage = "Check CI";
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/sessions/api-a1" && method === "GET") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              intervalWake: {
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                intervalMs: 300_000,
+                message: intervalWakeMessage,
+                stopCondition: "CI is green",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/wake" && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { target: string; message: string };
+        intervalWakeMessage = body.message;
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              intervalWake: {
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                intervalMs: 300_000,
+                message: intervalWakeMessage,
+                stopCondition: "CI is green",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/send" && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { message: string; queue?: boolean };
+        expect(body).toEqual({ message: "Updated CI", queue: false });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url} ${method}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Interval wake scheduled" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Interval wake scheduled" }));
+    const messageField = screen.getByLabelText("Interval wake message");
+    fireEvent.change(messageField, { target: { value: "Updated CI" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/wake",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ target: "interval", message: "Updated CI" }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Wake now" })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Wake now" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/send",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ message: "Updated CI", queue: false }),
+        }),
+      );
+    });
+
+    expect(screen.getByPlaceholderText("Message...")).toHaveValue("");
+  });
 });
 
 describe("SessionDetail voice input", () => {
