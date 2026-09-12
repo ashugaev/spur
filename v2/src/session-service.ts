@@ -14000,6 +14000,15 @@ export class SessionService {
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
         this.cloneStartupAttachments(workspaceIdOf(session), session.startupAttachmentIds ?? []);
+      if (missingStartupAttachmentIds.length > 0) {
+        this.logEvent("session.handoff.startup_attachment_missing", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Handoff of ${sessionId} skipped ${missingStartupAttachmentIds.length} startup attachment(s) with no file on disk`,
+          details: { missingIds: missingStartupAttachmentIds },
+        });
+      }
       const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
       const mergedAttachments = [
         ...clonedAttachments,
@@ -14044,16 +14053,6 @@ export class SessionService {
         ...(notes ? { notes } : {}),
         ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
       });
-
-      if (missingStartupAttachmentIds.length > 0) {
-        this.logEvent("session.handoff.startup_attachment_missing", {
-          level: "warn",
-          sessionId,
-          projectId: session.project,
-          message: `Handoff of ${sessionId} skipped ${missingStartupAttachmentIds.length} startup attachment(s) with no file on disk`,
-          details: { missingIds: missingStartupAttachmentIds },
-        });
-      }
 
       this.logEvent("session.handoff.started", {
         level: "info",
