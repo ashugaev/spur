@@ -6756,10 +6756,7 @@ export class SessionService {
     throw new Error(`Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`);
   }
 
-  private canPublishSidecarLinkForSession(
-    session: SessionRecord,
-    sidecarName: string,
-  ): boolean {
+  private canPublishSidecarLinkForSession(session: SessionRecord, sidecarName: string): boolean {
     if (!isTerminalSessionStatus(session.status)) return true;
     const sidecar = this.resolveProjectForSession(session)?.sidecars[sidecarName];
     return Boolean(sidecar && !sidecar.mcp && this.hasRunningWorkspaceMembers(session));
