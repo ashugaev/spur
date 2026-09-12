@@ -179,6 +179,100 @@ describe("OpenCode adapter", () => {
     });
   });
 
+  it("classifies an aborted turn as waiting, not error, so it does not wedge", () => {
+    // Verbatim from opencode-ai 1.18.30 opencode.db (real aborted turn), minus
+    // `path` (absolute local paths).
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              parentID: "msg_0278c2c95001O27KIcRuIDMm95",
+              role: "assistant",
+              mode: "build",
+              agent: "build",
+              cost: 0,
+              tokens: {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache: { read: 0, write: 0 },
+              },
+              modelID: "gemini-3.7-flash",
+              providerID: "google",
+              time: { created: 1787369893115, completed: 1787369901319 },
+              error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "waiting", reason: "assistant aborted" });
+
+    // Rate limit takes priority over the abort classification.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              error: {
+                name: "MessageAbortedError",
+                data: { statusCode: 429, message: "Too Many Requests" },
+              },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "rate_limited", reason: "assistant rate limit" });
+
+    // A non-allowlisted error with time.completed set still classifies as
+    // error — proves the fix did not widen into "any completed turn waits".
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "APIError", data: { statusCode: 404, isRetryable: false } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+
+    // Near-miss on name: substring/case matches must NOT be treated as
+    // aborted. The allowlist is exact-match only.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "MessageAbortedErrorLike", data: { message: "Aborted" } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+
+    // Near-miss on case: lower-cased name must NOT be treated as aborted.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "messageabortederror", data: { message: "Aborted" } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+  });
+
   it("classifies real export shapes without inventing live-service state", () => {
     expect(
       parseOpenCodeState({
