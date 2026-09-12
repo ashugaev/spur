@@ -6827,6 +6827,13 @@ export class SessionService {
 
       // The user chose a specific port to clear within this range: assume the
       // clear resolves it (host clear, plus tearing down any owning session).
+      // `!claimed.has(clearPort)` is also the GAP-2 safety guard: a port
+      // already claimed by a sibling portId in THIS attempt (surfaced to the
+      // caller as a conflict candidate with clearable:false) can never enter
+      // this branch, so the crossSession teardown below can never reap
+      // another session's sidecar for a port that attempt is about to use
+      // itself. Do not remove this condition, and do not add a second guard
+      // for the same case elsewhere — one path, already sufficient.
       if (
         clearPort !== undefined &&
         clearPort >= portConfig.start &&
