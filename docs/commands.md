@@ -133,7 +133,7 @@ On each live session's `PATH`. Updates the tmux status-line title and named link
 
 Each live session gets a `spur` wrapper on `PATH`, bound to that session's config, for session-bound sidecars: `spur service run web --port 3000 -- <command>`, `spur service logs`, `spur service status <id>`.
 
-`service run` reads `SPUR_SESSION`, starts the command in a separate tmux sidecar. No stop or restart — stays bound while the session is alive. Pass `--port` so `list` can surface it. `service logs` returns nothing — it filters on `service.output`/`sidecar.output` events that nothing emits. A sidecar's output lives only in its tmux pane.
+`service run` reads `SPUR_SESSION`, starts the command in a separate tmux sidecar. No stop or restart — stays bound while the session is alive. Pass `--port` so `list` can surface it. `service logs` returns nothing — it filters on `service.output`/`sidecar.output` events that nothing emits. `GET /sessions/:id/logs?scope=runtime|sidecar` uses the same filter; default scope `all` still returns other session events. A sidecar's output lives only in its tmux pane.
 
 ## memory
 
