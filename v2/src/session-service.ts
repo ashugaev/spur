@@ -6327,10 +6327,14 @@ export class SessionService {
   }
 
   // Checked BEFORE withSidecarPortLock so a cached refusal never queues on
-  // the process-global lock. Deadline is evaluated before the probe window
-  // so a pending window can never mask an expired deadline. Never a
-  // permanent latch: a post-deadline attempt whose blocked ports have freed
-  // runs the full start.
+  // the process-global lock. Never a permanent latch: an explicit
+  // clearPort bypasses this gate entirely (as do stop/relaunch/restore/
+  // prune, which clear the cached state outright), and a post-deadline
+  // re-probe — at most once per backoff window, never on every attempt,
+  // since nextProbeAtMs is re-armed after each terminal refusal and
+  // failures is frozen once the gate starts short-circuiting the body's
+  // catch — runs the full start the moment it finds a blocked port has
+  // freed.
   private async sidecarStartConflictGate(
     sessionId: string,
     sidecarName: string,
@@ -6349,6 +6353,13 @@ export class SessionService {
     const now = Date.now();
     const deadlineAtMs = state.firstConflictAtMs + this.sidecarStartConflictDeadlineMs();
     if (now >= deadlineAtMs) {
+      // Bounds the post-deadline re-probe to at most once per backoff
+      // window, not once per attempt: an unfreed port past the deadline
+      // still throws the cached payload here without a re-probe until
+      // nextProbeAtMs, which this branch re-arms below every time it stays
+      // blocked (failures is frozen once the gate starts short-circuiting
+      // the body's catch, so that cadence is a fixed
+      // min(base * 2^(failures-1), cap) from here on).
       if (now < state.nextProbeAtMs) {
         return new SidecarPortConflictError(sidecarName, state.candidates);
       }
