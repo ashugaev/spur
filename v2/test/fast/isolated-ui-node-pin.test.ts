@@ -206,14 +206,14 @@ function writeStubNvm(nvmDir: string): void {
 }
 
 // A PATH entry that carries only what ensure_node_ready's early failure
-// paths need to run (bash itself, dirname for SCRIPT_DIR, tr for parsing
-// .nvmrc) and deliberately no `node` — real `/usr/bin` and `/bin` both carry
-// a real node on this host, so a plain fallback PATH can never reproduce
-// "node not found on PATH".
+// paths need to run (bash itself, dirname/realpath for SCRIPT_DIR and
+// SIDECAR_REPO_ROOT, tr for parsing .nvmrc) and deliberately no `node` —
+// real `/usr/bin` and `/bin` both carry a real node on this host, so a plain
+// fallback PATH can never reproduce "node not found on PATH".
 function createNodeFreePathDir(repoDir: string): string {
   const dir = join(repoDir, "no-node-path");
   mkdirSync(dir, { recursive: true });
-  for (const bin of ["bash", "dirname", "tr"]) {
+  for (const bin of ["bash", "dirname", "tr", "realpath"]) {
     symlinkSync(`/usr/bin/${bin}`, join(dir, bin));
   }
   return dir;
@@ -288,7 +288,7 @@ describe("spur-isolated-ui node pin", () => {
     ).resolves.toEqual(["install node=v24.15.0", "dev node=v24.15.0"]);
   });
 
-  it("engines-invalid system node (below the ^20.19.0 floor) activates the pin via nvm", async () => {
+  it("engines-invalid system node (below the ^22.13.0 floor) activates the pin via nvm", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
@@ -311,16 +311,39 @@ describe("spur-isolated-ui node pin", () => {
     });
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\^20\.19\.0/);
+    expect(rejection.stderr).toMatch(/\^22\.13\.0/);
     // Full range, not a prefix of it: NODE_ENGINES_RANGE here is exactly
     // what node_satisfies_engines's `node -e` wrote to stdout and the shell
-    // captured via command substitution — pins that the whole 28-byte
-    // engines.node string (including the trailing `>=24` clause) arrived
-    // intact, not truncated mid-write.
-    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0 \|\| >=24/);
+    // captured via command substitution — pins that the whole engines.node string (including the trailing `>=24` clause) arrived intact, not truncated mid-write.
+    expect(rejection.stderr).toMatch(/\^22\.13\.0 \|\| >=24/);
     expect(rejection.stderr).toMatch(/v21\.7\.3/);
     expect(rejection.stderr).toMatch(/\.nvmrc/);
     expect(rejection.stderr).toMatch(/nvm install 24/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
+  // #826 criterion 3: a prerelease genuinely below the range must still be
+  // rejected as a REAL engines verdict (NODE_CHECK_ERROR empty) so the `nvm
+  // install` remedy still renders — mirrors "fails fast, naming the
+  // range/found version/.nvmrc/nvm install, when nvm exists but the pin
+  // isn't installed" above, just with a prerelease system node instead of a
+  // plain one.
+  it("fails fast with the nvm install remedy still rendering for a prerelease below the range (#826)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+    writeStubNvm(worktree.nvmDir);
+    writeNvmVersion(worktree.nvmDir, "20.12.2");
+
+    const rejection = await runIsolatedUiExpectFailure(worktree, {
+      NVM_DIR: worktree.nvmDir,
+      SPUR_TEST_SYS_NODE: "v21.0.0-rc.0",
+    });
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/\^22\.13\.0 \|\| >=24/);
+    expect(rejection.stderr).toMatch(/v21\.0\.0-rc\.0/);
+    expect(rejection.stderr).toMatch(/nvm install 24/);
+    expect(rejection.stderr).not.toMatch(/unparseable output/);
     expect(existsSync(worktree.logPath)).toBe(false);
   });
 
@@ -344,6 +367,36 @@ describe("spur-isolated-ui node pin", () => {
     ]);
   });
 
+  // #826: a prerelease/build node (nightly, `-pre`, `-rc.N`, `+build.N`)
+  // must satisfy the gate on its release triple alone — the suffix is
+  // stripped, never rejected as unparseable.
+  it("proceeds with no nvm at all on a nightly prerelease node that satisfies the release triple (#826)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+
+    await expect(
+      runIsolatedUi(worktree, { SPUR_TEST_SYS_NODE: "v25.0.0-nightly20260101abcdef" }),
+    ).resolves.toEqual([
+      "install node=v25.0.0-nightly20260101abcdef",
+      "dev node=v25.0.0-nightly20260101abcdef",
+    ]);
+  });
+
+  // #826: unparseable `node -v` output must still fail closed — the widened
+  // regex accepts well-formed prerelease/build suffixes, not garbage.
+  it("fails closed on unparseable node -v output (#826)", async () => {
+    const worktree = createFakeWorktree();
+    writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
+
+    const rejection = await runIsolatedUiExpectFailure(worktree, {
+      SPUR_TEST_SYS_NODE: "vgarbage",
+    });
+
+    expect(rejection).toMatchObject({ code: 1 });
+    expect(rejection.stderr).toMatch(/unparseable output/);
+    expect(existsSync(worktree.logPath)).toBe(false);
+  });
+
   // PR #824 review: a suite that only ever exercises the real `>=24` clause
   // cannot tell "reads engines.node" apart from a `major >= pin` floor —
   // node 21 fails both, so a regression back to the floor would stay green.
@@ -356,14 +409,14 @@ describe("spur-isolated-ui node pin", () => {
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeFileSync(
       join(worktree.repoDir, "package.json"),
-      JSON.stringify({ engines: { node: "^20.19.0 || ^22.13.0" } }),
+      JSON.stringify({ engines: { node: "^22.13.0" } }),
       "utf8",
     );
 
     const rejection = await runIsolatedUiExpectFailure(worktree, { SPUR_TEST_SYS_NODE: "v25.2.0" });
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0/);
+    expect(rejection.stderr).toMatch(/\^22\.13\.0/);
     expect(rejection.stderr).toMatch(/v25\.2\.0/);
     expect(existsSync(worktree.logPath)).toBe(false);
   });
@@ -373,7 +426,7 @@ describe("spur-isolated-ui node pin", () => {
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeFileSync(
       join(worktree.repoDir, "package.json"),
-      JSON.stringify({ engines: { node: "^20.19.0 || ^22.13.0" } }),
+      JSON.stringify({ engines: { node: "^22.13.0" } }),
       "utf8",
     );
 
@@ -390,7 +443,7 @@ describe("spur-isolated-ui node pin", () => {
     const rejection = await runIsolatedUiExpectFailure(worktree);
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\^20\.19\.0/);
+    expect(rejection.stderr).toMatch(/\^22\.13\.0/);
     expect(rejection.stderr).toMatch(/v21\.7\.3/);
     expect(rejection.stderr).toMatch(/\.nvmrc/);
     // PR #824 review LOW 1: no nvm ever ran here, so the remedy must never
@@ -500,7 +553,7 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
 
     expect(rejection).toMatchObject({ code: 1 });
     expect(rejection.stderr).toMatch(/node not found on PATH/);
-    expect(rejection.stderr).not.toMatch(/\^20\.19\.0/);
+    expect(rejection.stderr).not.toMatch(/\^22\.13\.0/);
   });
 
   it("pins a bare major that satisfies the root engines range", () => {
@@ -539,16 +592,32 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
       "24.0.0",
       "24.15.0",
       "25.2.0",
+      "25.0.0-nightly20260101abcdef",
+      "26.0.0-pre",
+      "24.0.0-rc.1",
+      "22.13.0+build.5",
+      "21.0.0-rc.0",
+      "20.19.0-rc.0",
+      "22.12.0-rc.1",
+      // Discriminating case: every other suffix above sits at a segment
+      // boundary, where Number.parseInt truncation on an unstripped value
+      // ("0-rc" -> 0) happens to already match the stripped tuple — that
+      // leaves the shell's own strip (as opposed to the widened regex)
+      // unpinned. Here the suffix starts MID-segment, so an unstripped
+      // parse keeps the "19" and "5" segments ([20,19,5], satisfies
+      // ^20.19.0) while the correct stripped parse collapses to [20,0,0]
+      // (does not satisfy any clause) — only a real strip agrees with TS.
+      "20-x.19.5",
     ];
 
     const worktree = createFakeWorktree();
     const scriptSource = readFileSync(
-      join(worktree.repoDir, "scripts", "spur-isolated-ui.sh"),
+      join(worktree.repoDir, "scripts", "spur-sidecar-common.sh"),
       "utf8",
     );
     const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
     if (!functionMatch) {
-      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+      throw new Error("could not extract node_satisfies_engines from spur-sidecar-common.sh");
     }
 
     for (const version of versions) {
@@ -601,10 +670,10 @@ fi
   // process.exitCode, never an explicit process.exit(satisfied ...) call,
   // so the hazard cannot be silently reintroduced.
   it("regression guard: the engines-range write is never immediately followed by process.exit (finding: #824 LOW 2)", () => {
-    const scriptSource = readFileSync(join(SOURCE_SCRIPT_DIR, "spur-isolated-ui.sh"), "utf8");
+    const scriptSource = readFileSync(join(SOURCE_SCRIPT_DIR, "spur-sidecar-common.sh"), "utf8");
     const functionMatch = /node_satisfies_engines\(\) \{[\s\S]*?\n\}\n/.exec(scriptSource);
     if (!functionMatch) {
-      throw new Error("could not extract node_satisfies_engines from spur-isolated-ui.sh");
+      throw new Error("could not extract node_satisfies_engines from spur-sidecar-common.sh");
     }
 
     expect(functionMatch[0]).not.toMatch(/process\.exit\(satisfied/);

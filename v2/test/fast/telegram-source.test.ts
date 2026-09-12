@@ -1,6 +1,10 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import type {
+  SourceProjectListItem,
+  SourceSessionListItem,
+} from "../../src/event-sources/types.js";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
 import { writeTelegramBindings } from "../../src/metadata.js";
@@ -125,13 +129,13 @@ async function startSource(
   emit = vi.fn(),
   spawnSession = vi.fn(),
   overrides: {
-    listSessions?: ReturnType<typeof vi.fn>;
+    listSessions?: Mock<() => Promise<SourceSessionListItem[]>>;
     // `null` (as opposed to the default `undefined`) omits `listProjects`
     // from the deps passed to `telegramSourceModule.start` entirely, to
     // exercise the "dep not supplied" path.
-    listProjects?: ReturnType<typeof vi.fn> | null;
-    stop?: ReturnType<typeof vi.fn>;
-    task?: ReturnType<typeof vi.fn>;
+    listProjects?: Mock<() => Promise<SourceProjectListItem[]>> | null;
+    stop?: Mock<(...args: unknown[]) => unknown>;
+    task?: Mock<(...args: unknown[]) => unknown>;
     config?: Record<string, unknown>;
     webBaseUrl?: string | null;
     resolveWebBaseUrl?: () => Promise<string | null>;
@@ -140,25 +144,10 @@ async function startSource(
   const listSessions =
     overrides.listSessions ??
     vi.fn().mockResolvedValue([
-      {
-        id: "api-1",
-        project: "api",
-        agent: "codex",
-        state: "waiting",
-      },
-      {
-        id: "api-2",
-        project: "api",
-        agent: "claude",
-        state: "working",
-      },
-      {
-        id: "web-1",
-        project: "web",
-        agent: "cursor",
-        state: "waiting",
-      },
-    ]);
+      { id: "api-1", project: "api", agent: "codex", state: "waiting" },
+      { id: "api-2", project: "api", agent: "claude", state: "working" },
+      { id: "web-1", project: "web", agent: "cursor", state: "waiting" },
+    ] as SourceSessionListItem[]);
   const listProjects =
     overrides.listProjects === null
       ? undefined

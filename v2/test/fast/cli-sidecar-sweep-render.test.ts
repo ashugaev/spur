@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import { _renderSidecarSweepResultForTests as renderSidecarSweepResult } from "../../src/cli.js";
 import type { LeakedSidecarTree, SidecarSweepResult } from "../../src/sidecars/reap.js";
 
-function tree(overrides: Partial<LeakedSidecarTree> & { rootPid: number }): LeakedSidecarTree {
+type WorktreeTree = Extract<LeakedSidecarTree, { kind: "worktree-tree" }>;
+type OrphanDaemonTree = Extract<LeakedSidecarTree, { kind: "orphan-daemon" }>;
+
+function tree(overrides: Partial<WorktreeTree> & { rootPid: number }): WorktreeTree {
   return {
+    kind: "worktree-tree",
     pgid: overrides.rootPid,
     ageSeconds: 120,
     worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -12,6 +16,26 @@ function tree(overrides: Partial<LeakedSidecarTree> & { rootPid: number }): Leak
     tree: [overrides.rootPid],
     treeRssKb: 4096,
     reapable: true,
+    ...overrides,
+  };
+}
+
+function orphanDaemonTree(
+  overrides: Partial<OrphanDaemonTree> & { rootPid: number },
+): OrphanDaemonTree {
+  return {
+    kind: "orphan-daemon",
+    pgid: overrides.rootPid,
+    ageSeconds: 120,
+    worktreePath: "/tmp/gone-checkout",
+    args: "node /tmp/gone-checkout/v2/dist/cli.js --config /tmp/config.yaml daemon start",
+    tree: [overrides.rootPid],
+    treeRssKb: 4096,
+    reapable: false,
+    configPath: "/tmp/config.yaml",
+    cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+    port: null,
+    liveness: "unknown",
     ...overrides,
   };
 }
@@ -62,5 +86,69 @@ describe("renderSidecarSweepResult", () => {
     const output = renderSidecarSweepResult(result);
     expect(output).toContain("[reapable] pid 500");
     expect(output).toContain("[report-only] pid 600");
+  });
+
+  it("AC11: marks an orphan-daemon row report-only, shows its configPath, and warns to verify before killing", () => {
+    const result: SidecarSweepResult = {
+      supported: true,
+      leaked: [
+        orphanDaemonTree({
+          rootPid: 700,
+          configPath: "/tmp/spur-isolated-daemon.abc/config.yaml",
+          cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+          liveness: "not-serving",
+        }),
+      ],
+      reaped: [],
+    };
+    const output = renderSidecarSweepResult(result);
+    expect(output).toContain("[report-only] pid 700");
+    expect(output).toContain("daemon /tmp/spur-isolated-daemon.abc/config.yaml");
+    expect(output).toContain("verify it is genuinely dead before killing");
+  });
+
+  // N3 residual: a port probe that never ran ("unknown") is not proof of
+  // death — it must never share the "genuinely dead"/"before killing"
+  // phrasing with a probe that ran and found nothing (host-install.ts's
+  // doctor check already makes this split; the sweep renderer must match).
+  it("859/AC13: an orphan-daemon row with unresolved liveness never says genuinely dead, and flags itself as unconfirmed", () => {
+    const result: SidecarSweepResult = {
+      supported: true,
+      leaked: [
+        orphanDaemonTree({
+          rootPid: 702,
+          configPath: "/tmp/spur-isolated-daemon.ghi/config.yaml",
+          cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+          liveness: "unknown",
+        }),
+      ],
+      reaped: [],
+    };
+    const output = renderSidecarSweepResult(result);
+    expect(output).not.toContain("genuinely dead");
+    expect(output).toContain("liveness unknown");
+    expect(output).toContain("verify manually before killing");
+  });
+
+  it("859/AC13: a serving orphan-daemon row never says genuinely dead / before killing, and names daemon stop", () => {
+    const result: SidecarSweepResult = {
+      supported: true,
+      leaked: [
+        orphanDaemonTree({
+          rootPid: 701,
+          configPath: "/tmp/spur-isolated-daemon.def/config.yaml",
+          cliEntryPath: "/tmp/gone-checkout/v2/dist/cli.js",
+          port: 4355,
+          liveness: "serving",
+        }),
+      ],
+      reaped: [],
+    };
+    const output = renderSidecarSweepResult(result);
+    expect(output).not.toContain("genuinely dead");
+    expect(output).not.toContain("before killing");
+    expect(output).toContain("serving on 4355");
+    expect(output).toContain("daemon stop");
+    expect(output).toContain("/tmp/spur-isolated-daemon.def/config.yaml");
   });
 });
