@@ -5022,14 +5022,14 @@ describe("startConfiguredTriggers", () => {
         expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
           "trigger.send.dropped",
         );
-        expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+        expect(readPendingSendBatchesMock().size).toBe(1);
 
         held = false;
         await vi.advanceTimersByTimeAsync(5_000);
         expect(
           logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "trigger.send.dropped"),
         ).toHaveLength(1);
-        expect(deletePendingSendBatchMock).toHaveBeenCalled();
+        expect(readPendingSendBatchesMock().size).toBe(0);
         expect(deliverMock).not.toHaveBeenCalled();
       } finally {
         await controller.stop();
