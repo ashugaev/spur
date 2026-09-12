@@ -790,4 +790,134 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     expect(outcome.removed).toEqual([]);
     expect(outcome.failures.every((f) => f.message.includes("Spur data directory"))).toBe(true);
   });
+
+  // `ctime` cannot be back-dated by `utimes()` — see the comment above; these
+  // three tests advance the fake clock instead so the fixtures clear the
+  // 30-day browser-revision floor.
+  it("AC19: a .links referrer outside every project and worktree contributes pins", async () => {
+    const revisionDir = "chromium-1234";
+    await mkdir(join(home, ".cache", "ms-playwright", revisionDir), { recursive: true });
+
+    // A referrer install entirely outside every configured project/worktree
+    // and outside ~/.npm/_npx (the shape P1-P4 cannot see).
+    const referrerDir = join(home, "outside-install");
+    await mkdir(referrerDir, { recursive: true });
+    await writeFile(
+      join(referrerDir, "browsers.json"),
+      JSON.stringify({ browsers: [{ name: "chromium", revision: "1234" }] }),
+    );
+    await mkdir(join(home, ".cache", "ms-playwright", ".links"), { recursive: true });
+    await writeFile(join(home, ".cache", "ms-playwright", ".links", "0".repeat(40)), referrerDir);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let plan: Awaited<ReturnType<typeof planCachePrune>>;
+    try {
+      plan = await planCachePrune({
+        home,
+        tmpPath: tmpRoot,
+        instanceConfig: fakeInstanceConfig(join(home, ".spur"), join(home, ".spur", "worktrees")),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const revisionCandidate = plan.candidates.find(
+      (c) => c.entry.path === join(home, ".cache", "ms-playwright", revisionDir),
+    );
+    expect(revisionCandidate?.verdict).toEqual({
+      kind: "protected",
+      reason: { kind: "pinned-revision", dirName: revisionDir },
+    });
+  });
+
+  it("AC19: an unresolvable .links referrer protects every browser revision", async () => {
+    const pinnedRevisionDir = "chromium-1234";
+    const otherRevisionDir = "firefox-999";
+    await mkdir(join(home, ".cache", "ms-playwright", pinnedRevisionDir), { recursive: true });
+    await mkdir(join(home, ".cache", "ms-playwright", otherRevisionDir), { recursive: true });
+
+    // A referrer whose target no longer exists — same shape as the dead
+    // spur-e8e3 referrer observed on the host.
+    await mkdir(join(home, ".cache", "ms-playwright", ".links"), { recursive: true });
+    await writeFile(
+      join(home, ".cache", "ms-playwright", ".links", "1".repeat(40)),
+      join(home, "gone-install"),
+    );
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let plan: Awaited<ReturnType<typeof planCachePrune>>;
+    try {
+      plan = await planCachePrune({
+        home,
+        tmpPath: tmpRoot,
+        instanceConfig: fakeInstanceConfig(join(home, ".spur"), join(home, ".spur", "worktrees")),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    for (const dirName of [pinnedRevisionDir, otherRevisionDir]) {
+      const candidate = plan.candidates.find(
+        (c) => c.entry.path === join(home, ".cache", "ms-playwright", dirName),
+      );
+      expect(candidate?.verdict).toEqual({
+        kind: "protected",
+        reason: { kind: "referrer-unresolved" },
+      });
+    }
+  });
+
+  it("an absent .links directory changes no existing verdict", async () => {
+    const revisionDir = "chromium-1234";
+    await mkdir(join(home, ".cache", "ms-playwright", revisionDir), { recursive: true });
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let plan: Awaited<ReturnType<typeof planCachePrune>>;
+    try {
+      plan = await planCachePrune({ home, tmpPath: tmpRoot, instanceConfig: { status: "absent" } });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const candidate = plan.candidates.find(
+      (c) => c.entry.path === join(home, ".cache", "ms-playwright", revisionDir),
+    );
+    // No pin sources anywhere -> fails closed on pinSourceCount === 0, same as
+    // before this change; the missing .links dir contributes no NEW protection
+    // path but the pre-existing pin-unresolved protection still applies.
+    expect(candidate?.verdict).toEqual({
+      kind: "protected",
+      reason: { kind: "pin-unresolved" },
+    });
+  });
+
+  it("rootIds narrows the measured roots and leaves verdicts unchanged", async () => {
+    await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
+    await mkdir(join(home, ".npm", "_npx", "somehash"), { recursive: true });
+    const old = new Date(Date.now() - 9999 * DAY_MS);
+    await utimes(join(home, ".npm", "_cacache"), old, old);
+    await utimes(join(home, ".npm", "_npx", "somehash"), old, old);
+
+    const full = await planCachePrune({
+      home,
+      tmpPath: tmpRoot,
+      instanceConfig: { status: "absent" },
+    });
+    const narrowed = await planCachePrune({
+      home,
+      tmpPath: tmpRoot,
+      instanceConfig: { status: "absent" },
+      rootIds: ["npm-cacache"],
+    });
+
+    expect(narrowed.roots.map((r) => r.rootId)).toEqual(["npm-cacache"]);
+    const fullCacacheVerdict = full.candidates.find((c) => c.entry.rootId === "npm-cacache")
+      ?.verdict;
+    const narrowedCacacheVerdict = narrowed.candidates.find((c) => c.entry.rootId === "npm-cacache")
+      ?.verdict;
+    expect(narrowedCacacheVerdict).toEqual(fullCacacheVerdict);
+  });
 });
