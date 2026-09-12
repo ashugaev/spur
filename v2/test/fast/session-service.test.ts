@@ -29916,6 +29916,12 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.link.published",
     );
+
+    // Real timers plus a fire-and-forget probe chain: an undisposed service
+    // here keeps polling past this test's end and can publish the link
+    // during a later test, after that test's beforeEach has reset the event
+    // mock — landing this test's event in the wrong accumulator.
+    service.dispose();
   });
 
   it("sidecar cleanup unlinks the published sidecar slot", async () => {
@@ -29979,6 +29985,8 @@ describe("SessionService", () => {
     await service.kill("api-1", { force: true });
 
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+
+    service.dispose();
   });
 
   it("complete aborts a pending sidecar URL probe without publishing a slot", async () => {
@@ -30209,6 +30217,8 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
       "session.sidecar.link_probe.failed",
     );
+
+    service.dispose();
   });
 
   it("complete reaps sidecar sessions via the tmux teardown path", async () => {
