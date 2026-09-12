@@ -2669,8 +2669,7 @@ export class SessionService {
   // Bounded, self-clearing sidecar-start port-conflict refusal, keyed
   // `${sessionId}\0${sidecarName}`. Read outside withSidecarPortLock,
   // mutated only inside startSidecarInternal's gate (before the lock) or
-  // one of the clear sites. noopIdentity dedupes the own-identity-no-op
-  // start_rejected event per identity tuple (see own-identity no-op).
+  // one of the clear sites.
   private readonly sidecarStartConflictState = new Map<
     string,
     {
@@ -2679,10 +2678,18 @@ export class SessionService {
       firstConflictAtMs: number;
       terminalEmitted: boolean;
       candidates: SidecarPortConflictCandidate[];
-      blockedPorts: number[];
-      noopIdentity?: { pid: number; starttime: number };
     }
   >();
+  // Own-identity-no-op dedup, same key shape, deliberately its OWN map: a
+  // no-op is not a conflict, and an earlier version folded this into
+  // sidecarStartConflictState — sharing one entry meant seeding
+  // firstConflictAtMs with 0 (no-op has no real conflict start time), and
+  // `0 ?? now` in recordSidecarStartConflict evaluates to 0 (nullish
+  // coalescing does not catch zero), which silently backdated a session's
+  // first REAL conflict to epoch and skipped its entire retry window
+  // straight to the post-deadline terminal branch. Cleared everywhere
+  // sidecarStartConflictState is cleared (clearSidecarStartConflict).
+  private readonly sidecarStartNoopIdentity = new Map<string, { pid: number; starttime: number }>();
   // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
   // process trees" over the real HTTP /sidecars/sweep route would
   // otherwise scan the real host process table — on a host with even one
@@ -5174,6 +5181,10 @@ export class SessionService {
       const sessionId = key.split("\0")[0] ?? key;
       if (!liveIds.has(sessionId)) this.sidecarStartConflictState.delete(key);
     }
+    for (const key of this.sidecarStartNoopIdentity.keys()) {
+      const sessionId = key.split("\0")[0] ?? key;
+      if (!liveIds.has(sessionId)) this.sidecarStartNoopIdentity.delete(key);
+    }
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.codexMcpDialogOverrides.delete(sessionId);
@@ -6296,7 +6307,18 @@ export class SessionService {
         candidate.port,
       );
       if (!stillRecorded) return false;
-      return sidecarTmuxAlive(ownerId, scName);
+      // Unreachable at runtime (stillRecorded already required owner to
+      // exist), kept only to narrow `owner` to non-null for
+      // resolveProjectForSession below.
+      if (!owner) return !(await isHostPortFree(candidate.port));
+      let project: ProjectConfig | undefined;
+      try {
+        project = this.resolveProjectForSession(owner);
+      } catch {
+        project = undefined;
+      }
+      const tmuxOwnerId = this.sidecarOwnerIdForName(owner, project, scName);
+      return sidecarTmuxAlive(tmuxOwnerId, scName);
     }
     // No parseable session/sidecar owner (host-occupied, unattributed, or a
     // service-held port with no session record to consult): the only
@@ -6315,14 +6337,24 @@ export class SessionService {
   ): Promise<SidecarPortConflictError | null> {
     const key = this.sidecarConflictKey(sessionId, sidecarName);
     const state = this.sidecarStartConflictState.get(key);
-    // An entry with no recorded conflict (blockedPorts empty) exists only to
-    // carry the own-identity-no-op dedup marker — never an active refusal.
-    if (!state || state.blockedPorts.length === 0) {
+    // A defensive guard, not an active code path: sidecarStartConflictState
+    // now holds only real conflicts (recordSidecarStartConflict is the sole
+    // writer, always called with >=1 candidate per invariant 9 — the
+    // own-identity no-op dedup lives in its own sidecarStartNoopIdentity
+    // map, never here), so an empty candidates list on an existing entry
+    // should never occur.
+    if (!state || state.candidates.length === 0) {
       return null;
     }
     const now = Date.now();
     const deadlineAtMs = state.firstConflictAtMs + this.sidecarStartConflictDeadlineMs();
     if (now >= deadlineAtMs) {
+      if (now < state.nextProbeAtMs) {
+        return new SidecarPortConflictError(sidecarName, state.candidates);
+      }
+      // One fleet refresh for the whole batch — same pattern as the reclaim
+      // scan, never N independent fresh reads.
+      await refreshTmuxFleetSnapshot();
       // Cheap re-probe over only the previously blocked candidates — reuses
       // the same reservation-or-occupancy predicate the initial scan used,
       // never raw isHostPortFree alone.
@@ -6333,6 +6365,9 @@ export class SessionService {
         this.sidecarStartConflictState.delete(key);
         return null;
       }
+      const base = this.sidecarStartConflictBaseMs();
+      const cap = backoffCapMs(SIDECAR_START_CONFLICT_BACKOFF_MAX_MS, base);
+      state.nextProbeAtMs = now + Math.min(base * 2 ** (state.failures - 1), cap);
       if (!state.terminalEmitted) {
         state.terminalEmitted = true;
         this.logEvent("session.sidecar.start_rejected", {
@@ -6369,16 +6404,20 @@ export class SessionService {
     this.sidecarStartConflictState.set(key, {
       failures,
       nextProbeAtMs: now + Math.min(base * 2 ** (failures - 1), cap),
+      // Safe to read via a bare `?? now`: sidecarStartConflictState now
+      // holds ONLY real conflicts (the no-op path writes its own separate
+      // sidecarStartNoopIdentity map), so an `existing` entry here always
+      // carries a genuine prior firstConflictAtMs, never a seeded 0.
       firstConflictAtMs: existing?.firstConflictAtMs ?? now,
       terminalEmitted: existing?.terminalEmitted ?? false,
       candidates,
-      blockedPorts: candidates.map((candidate) => candidate.port),
-      ...(existing?.noopIdentity ? { noopIdentity: existing.noopIdentity } : {}),
     });
   }
 
   private clearSidecarStartConflict(sessionId: string, sidecarName: string): void {
-    this.sidecarStartConflictState.delete(this.sidecarConflictKey(sessionId, sidecarName));
+    const key = this.sidecarConflictKey(sessionId, sidecarName);
+    this.sidecarStartConflictState.delete(key);
+    this.sidecarStartNoopIdentity.delete(key);
   }
 
   private releaseSidecarPortFromSession(
@@ -6795,6 +6834,7 @@ export class SessionService {
       portId: string,
       portConfig: SidecarPortConfig,
       claimedPorts: ReadonlySet<number>,
+      blockedAtSelection: ReadonlySet<number>,
     ): Promise<SidecarPortConflictCandidate[]> => {
       const candidates: SidecarPortConflictCandidate[] = [];
       for (let port = portConfig.start; port <= portConfig.end; port += 1) {
@@ -6823,11 +6863,15 @@ export class SessionService {
           continue;
         }
         if (await isHostPortFree(port)) {
-          // Not a block: a prior sibling portId in this same range-scan
-          // pass already exhausted every free port before reaching here,
-          // so this can only happen for a port outside that scan (never
-          // observed in practice, kept as a defensive skip rather than a
-          // false "occupied" claim).
+          if (!blockedAtSelection.has(port)) {
+            continue;
+          }
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: "external",
+          });
           continue;
         }
         let holder: SidecarPortConflictCandidate["holder"];
@@ -6918,9 +6962,16 @@ export class SessionService {
 
       // Scan the range for a free, unclaimed port.
       let selectedPort: number | undefined;
+      const blockedAtSelection = new Set<number>();
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        if (claimed.has(candidate) || unavailable.has(candidate)) continue;
-        if (!(await isHostPortFree(candidate))) continue;
+        if (claimed.has(candidate) || unavailable.has(candidate)) {
+          blockedAtSelection.add(candidate);
+          continue;
+        }
+        if (!(await isHostPortFree(candidate))) {
+          blockedAtSelection.add(candidate);
+          continue;
+        }
         selectedPort = candidate;
         break;
       }
@@ -6935,7 +6986,9 @@ export class SessionService {
       // by this explicit flag, never by conflictCandidates.length, so a
       // portId that fails after another portId already narrowed candidates
       // can never fall through into the apply pass.
-      conflictCandidates.push(...(await buildRangeCandidates(portId, portConfig, claimed)));
+      conflictCandidates.push(
+        ...(await buildRangeCandidates(portId, portConfig, claimed, blockedAtSelection)),
+      );
       failedPortIds.push(portId);
     }
 
@@ -7122,23 +7175,17 @@ export class SessionService {
             ).every(Boolean);
           if (attributed) {
             const noopKey = this.sidecarConflictKey(args.session.id, args.sidecarName);
-            const state = this.sidecarStartConflictState.get(noopKey);
-            const seen = state?.noopIdentity;
+            const seen = this.sidecarStartNoopIdentity.get(noopKey);
             if (seen?.pid !== identity.pid || seen.starttime !== identity.starttime) {
-              this.sidecarStartConflictState.set(noopKey, {
-                failures: state?.failures ?? 0,
-                nextProbeAtMs: state?.nextProbeAtMs ?? 0,
-                firstConflictAtMs: state?.firstConflictAtMs ?? 0,
-                terminalEmitted: state?.terminalEmitted ?? false,
-                candidates: state?.candidates ?? [],
-                blockedPorts: state?.blockedPorts ?? [],
-                noopIdentity: { pid: identity.pid, starttime: identity.starttime },
+              this.sidecarStartNoopIdentity.set(noopKey, {
+                pid: identity.pid,
+                starttime: identity.starttime,
               });
-              this.logEvent("session.sidecar.start_rejected", {
+              this.logEvent("session.sidecar.start_noop", {
                 level: "info",
                 sessionId: args.session.id,
                 message: `Sidecar ${args.sidecarName} start is a no-op: the recorded process is still serving its reserved ports`,
-                details: { reason: "start_noop", sidecarName: args.sidecarName },
+                details: { sidecarName: args.sidecarName },
               });
             }
             // Mirrors the pane-alive early return's call exactly, but the

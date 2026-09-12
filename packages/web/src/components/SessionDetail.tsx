@@ -115,6 +115,7 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarPortConflictCandidate,
   type SpurSidecarStopResponse,
   type SpurSessionView,
 } from "@/lib/types";
@@ -141,6 +142,21 @@ function displayLinkLabel(label: string, url: string): string {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
   }
   return label;
+}
+
+// Two failing portIds can share an overlapping declared range and both name
+// the same numeric port as a candidate — one <option> per portId would
+// render duplicate values in the busy-port <select>. Keep the first
+// occurrence only.
+function dedupeConflictCandidatesByPort(
+  candidates: SpurSidecarPortConflictCandidate[],
+): SpurSidecarPortConflictCandidate[] {
+  const seen = new Set<number>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.port)) return false;
+    seen.add(candidate.port);
+    return true;
+  });
 }
 
 function splitSessionLinks(
@@ -3795,24 +3811,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }
                       value={conflictClearPort ?? ""}
                     >
-                      {sidecarPortConflict.candidates.map((candidate) => {
-                        const label = candidate.reservedBy
-                          ? `reserved by ${candidate.reservedBy}`
-                          : candidate.holder
-                            ? `pid ${candidate.holder.pid}${candidate.holder.cwd ? ` (${candidate.holder.cwd})` : ""}`
-                            : candidate.owner && candidate.owner !== "external"
-                              ? candidate.owner
-                              : "holder unknown";
-                        return (
-                          <option
-                            key={`${candidate.portId}:${candidate.port}`}
-                            disabled={candidate.clearable === false}
-                            value={candidate.port}
-                          >
-                            {candidate.portId}:{candidate.port} — {label}
-                          </option>
-                        );
-                      })}
+                      {dedupeConflictCandidatesByPort(sidecarPortConflict.candidates).map(
+                        (candidate) => {
+                          const label = candidate.reservedBy
+                            ? `reserved by ${candidate.reservedBy}`
+                            : candidate.holder
+                              ? `pid ${candidate.holder.pid}${candidate.holder.cwd ? ` (${candidate.holder.cwd})` : ""}`
+                              : candidate.owner && candidate.owner !== "external"
+                                ? candidate.owner
+                                : "holder unknown";
+                          return (
+                            <option
+                              key={`${candidate.portId}:${candidate.port}`}
+                              disabled={candidate.clearable === false}
+                              value={candidate.port}
+                            >
+                              {candidate.portId}:{candidate.port} — {label}
+                            </option>
+                          );
+                        },
+                      )}
                     </select>
                   </label>
                   <div className="flex justify-end gap-2">
