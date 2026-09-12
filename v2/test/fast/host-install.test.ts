@@ -1042,7 +1042,7 @@ describe("satisfiesNodeEngineRange", () => {
       ).toMatch(supported);
     }
     // And the pinned range must actually admit a version inside it.
-    expect(satisfiesNodeEngineRange(range, "v20.19.0")).toBe(true);
+    expect(satisfiesNodeEngineRange(range, "v22.13.0")).toBe(true);
   });
 
   // #826: a prerelease/build suffix never changes the verdict — only the

@@ -30,7 +30,10 @@ function config(overrides: Partial<SentrySourceConfig> = {}): SentrySourceConfig
   };
 }
 
-async function start(emit: ReturnType<typeof vi.fn>, overrides: Partial<SentrySourceConfig> = {}) {
+async function start(
+  emit: (name: string, data?: unknown) => void,
+  overrides: Partial<SentrySourceConfig> = {},
+) {
   return sentrySourceModule.start({
     sourceId: "sentry-issues",
     projectId: "api",

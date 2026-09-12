@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
@@ -29,11 +29,13 @@ import {
   sessionFileForId,
 } from "../../src/agents/claude.js";
 
-const mockReaddir = readdir as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
-const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
-const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+const mockReaddir = readdir as unknown as Mock;
+const mockStat = stat as unknown as Mock;
+const mockMkdir = mkdir as unknown as Mock<typeof mkdir>;
+const mockWriteFile = writeFile as unknown as Mock<typeof writeFile>;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
+  typeof resolveWorktreePathCandidates
+>;
 
 beforeEach(() => {
   vi.clearAllMocks();

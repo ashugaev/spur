@@ -13,10 +13,23 @@ import type {
   LivenessSnapshot,
 } from "../../src/cache-retention.js";
 
-const { execFileMock, canReadProcessTreeMock } = vi.hoisted(() => ({
-  execFileMock: vi.fn(),
-  canReadProcessTreeMock: vi.fn(),
-}));
+type ExecFileAsync = (
+  file: string,
+  args: string[],
+  options?: { encoding?: string; timeout?: number; maxBuffer?: number },
+) => Promise<{ stdout: string; stderr: string }>;
+
+const { execFileAsyncMock, execFileMock, canReadProcessTreeMock } = vi.hoisted(() => {
+  const execFileAsyncMock = vi.fn<ExecFileAsync>();
+  const execFileMock = Object.assign(vi.fn(), {
+    [Symbol.for("nodejs.util.promisify.custom")]: execFileAsyncMock,
+  });
+  return {
+    execFileAsyncMock,
+    execFileMock,
+    canReadProcessTreeMock: vi.fn(),
+  };
+});
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof ChildProcess>("node:child_process");
@@ -416,22 +429,14 @@ describe("verdictFor", () => {
 });
 
 describe("snapshotProcesses (real implementation, mocked execFile)", () => {
-  beforeEach(() => execFileMock.mockReset());
+  beforeEach(() => execFileAsyncMock.mockReset());
   afterEach(() => vi.restoreAllMocks());
 
   it("parses pid/ppid/rss/etime/args and skips malformed lines", async () => {
-    execFileMock.mockImplementation(
-      (_file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
-        const callback = (
-          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
-        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
-        callback(null, {
-          stdout: "1 0 100 00:01 /sbin/init\n42 1 200 01:30 node server.js\nbogus-line\n",
-          stderr: "",
-        });
-        return {} as ChildProcess.ChildProcess;
-      },
-    );
+    execFileAsyncMock.mockImplementation(async () => ({
+      stdout: "1 0 100 00:01 /sbin/init\n42 1 200 01:30 node server.js\nbogus-line\n",
+      stderr: "",
+    }));
     const result = await snapshotProcesses();
     expect(result).toEqual({
       status: "ok",
@@ -450,30 +455,22 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "spur-cache-retention-home-"));
     tmpRoot = await mkdtemp(join(tmpdir(), "spur-cache-retention-tmp-"));
-    execFileMock.mockReset();
+    execFileAsyncMock.mockReset();
     canReadProcessTreeMock.mockReset();
     canReadProcessTreeMock.mockResolvedValue(true);
     // A single innocuous row by default — snapshotProcesses returns "ok" with
     // this row, keeping processListReadable: true for tests that don't override it.
-    execFileMock.mockImplementation(
-      (file: string, args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
-        const callback = (
-          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
-        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
-        if (file === "ps") {
-          callback(null, { stdout: "1 0 100 00:01 /sbin/init\n", stderr: "" });
-          return {} as ChildProcess.ChildProcess;
-        }
-        if (file === "du") {
-          const paths = args.slice(1);
-          const stdout = paths.map((p) => `100\t${p}`).join("\n");
-          callback(null, { stdout, stderr: "" });
-          return {} as ChildProcess.ChildProcess;
-        }
-        callback(new Error(`unexpected exec: ${file}`));
-        return {} as ChildProcess.ChildProcess;
-      },
-    );
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "ps") {
+        return { stdout: "1 0 100 00:01 /sbin/init\n", stderr: "" };
+      }
+      if (file === "du") {
+        const paths = args.slice(1);
+        const stdout = paths.map((p) => `100\t${p}`).join("\n");
+        return { stdout, stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file}`);
+    });
   });
 
   afterEach(async () => {
@@ -509,25 +506,17 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
     const old = new Date(Date.now() - 9999 * DAY_MS);
     await utimes(join(home, ".npm", "_cacache"), old, old);
-    execFileMock.mockImplementation(
-      (file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
-        const callback = (
-          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
-        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
-        if (file === "ps") {
-          callback(Object.assign(new Error("ps unavailable"), { code: "ENOENT" }));
-          return {} as ChildProcess.ChildProcess;
-        }
-        if (file === "du") {
-          const paths = (_args as string[]).slice(1);
-          const stdout = paths.map((p) => `100\t${p}`).join("\n");
-          callback(null, { stdout, stderr: "" });
-          return {} as ChildProcess.ChildProcess;
-        }
-        callback(new Error(`unexpected exec: ${file}`));
-        return {} as ChildProcess.ChildProcess;
-      },
-    );
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "ps") {
+        throw Object.assign(new Error("ps unavailable"), { code: "ENOENT" });
+      }
+      if (file === "du") {
+        const paths = args.slice(1);
+        const stdout = paths.map((p) => `100\t${p}`).join("\n");
+        return { stdout, stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file}`);
+    });
 
     const plan = await planCachePrune({
       home,
@@ -548,26 +537,18 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
     const old = new Date(Date.now() - 9999 * DAY_MS);
     await utimes(join(home, ".npm", "_cacache"), old, old);
-    execFileMock.mockImplementation(
-      (file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
-        const callback = (
-          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
-        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
-        if (file === "ps") {
-          // Exit 0 but every row is malformed — zero parseable entries.
-          callback(null, { stdout: "not-a-valid-row\nanother-invalid-line\n", stderr: "" });
-          return {} as ChildProcess.ChildProcess;
-        }
-        if (file === "du") {
-          const paths = (_args as string[]).slice(1);
-          const stdout = paths.map((p) => `100\t${p}`).join("\n");
-          callback(null, { stdout, stderr: "" });
-          return {} as ChildProcess.ChildProcess;
-        }
-        callback(new Error(`unexpected exec: ${file}`));
-        return {} as ChildProcess.ChildProcess;
-      },
-    );
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "ps") {
+        // Exit 0 but every row is malformed — zero parseable entries.
+        return { stdout: "not-a-valid-row\nanother-invalid-line\n", stderr: "" };
+      }
+      if (file === "du") {
+        const paths = args.slice(1);
+        const stdout = paths.map((p) => `100\t${p}`).join("\n");
+        return { stdout, stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file}`);
+    });
 
     const plan = await planCachePrune({
       home,
@@ -589,23 +570,15 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     const old = new Date(Date.now() - 60 * DAY_MS);
     await utimes(join(home, ".npm", "_npx", "somehash"), old, old);
 
-    execFileMock.mockImplementation(
-      (file: string, _args: string[], optionsOrCallback: unknown, maybeCallback?: unknown) => {
-        const callback = (
-          typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback
-        ) as (error: Error | null, result?: { stdout: string; stderr: string }) => void;
-        if (file === "ps") {
-          callback(null, { stdout: "", stderr: "" });
-          return {} as ChildProcess.ChildProcess;
-        }
-        if (file === "du") {
-          callback(Object.assign(new Error("du timed out"), { code: "ETIMEDOUT", killed: true }));
-          return {} as ChildProcess.ChildProcess;
-        }
-        callback(new Error(`unexpected exec: ${file}`));
-        return {} as ChildProcess.ChildProcess;
-      },
-    );
+    execFileAsyncMock.mockImplementation(async (file) => {
+      if (file === "ps") {
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "du") {
+        throw Object.assign(new Error("du timed out"), { code: "ETIMEDOUT", killed: true });
+      }
+      throw new Error(`unexpected exec: ${file}`);
+    });
 
     const plan = await planCachePrune({
       home,
