@@ -279,6 +279,7 @@ import {
   resolveSessionCleanupContext,
   type SessionCleanupContext,
 } from "./session-gc.js";
+import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
   readWorkspaceState,
@@ -2545,6 +2546,9 @@ export class SessionService {
   // swept before" as "due immediately" — the first tick after a restart
   // waits out a full intervalMinutes like every other tick.
   private lastSessionGcSweepAt = Date.now();
+  // Rides the sessionGc timer (same idiom as PR 840's artifactRetention
+  // sweep) rather than a second setInterval — no new wake surface.
+  private lastDiskBudgetSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
@@ -5563,6 +5567,7 @@ export class SessionService {
     }
     this.sessionGcTimer = setInterval(() => {
       void this.runSessionGcSweep();
+      void this.runDiskBudgetSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
   }
@@ -5635,6 +5640,54 @@ export class SessionService {
       });
     } finally {
       this.sessionGcRunning = false;
+    }
+  }
+
+  // The daemon NEVER runs `du` (see cache-retention.ts's call-site comment):
+  // it reads the CLI-written `<dataDir>/disk-budget.json` instead of
+  // measuring anything itself. A missing or stale (older than
+  // 2 * intervalMinutes) measurement is not evidence of a breach and emits
+  // nothing — silence here means "no recent `spur disk` run", not "under
+  // budget". Modelled on warnIfHostDiskLow (report-only, never throws) and
+  // runSessionGcSweep's config-gated cadence.
+  private async runDiskBudgetSweep(): Promise<void> {
+    const budgetConfig = this.config.diskBudget;
+    if (!budgetConfig.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastDiskBudgetSweepAt < budgetConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    this.lastDiskBudgetSweepAt = Date.now();
+    try {
+      const report = await readDiskBudgetReport(this.config.dataDir);
+      if (!report) {
+        return;
+      }
+      const ageMs = Date.now() - new Date(report.generatedAt).getTime();
+      if (!Number.isFinite(ageMs) || ageMs > 2 * budgetConfig.intervalMinutes * 60_000) {
+        return;
+      }
+      const warnBytes = budgetConfig.warnAttributableGb * 1024 * 1024 * 1024;
+      if (report.totals.attributableBytes <= warnBytes) {
+        return;
+      }
+      const attributableGb = report.totals.attributableBytes / (1024 * 1024 * 1024);
+      this.logEvent("host.disk.budget_exceeded", {
+        level: "warn",
+        message: `Spur-attributable disk usage is ${attributableGb.toFixed(1)}GB (above the ${budgetConfig.warnAttributableGb}GB budget)`,
+        details: {
+          attributableGb,
+          warnAttributableGb: budgetConfig.warnAttributableGb,
+          roots: report.roots.map((root) => ({ id: root.id, sizeBytes: root.sizeBytes })),
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("disk.budget.sweep.failed", {
+        level: "warn",
+        message: `Disk budget sweep failed: ${message}`,
+      });
     }
   }
 
