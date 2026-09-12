@@ -225,6 +225,8 @@ import {
   getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
+  getTmuxPanePresence,
+  getTmuxSessionPresence,
   lookupTmuxPanePid,
   isProcessRunningInTmux,
   killTmuxSession,
@@ -933,6 +935,11 @@ interface SessionRuntimeSnapshot {
   paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
+  // True only when a `runtimeAlive`/`paneUsable` false reading came from a
+  // tmux probe killed by its own timeout (isTmuxTimeoutKill), never from a
+  // confirmed-absent tmux server. reconcileUnexpectedStop must not treat this
+  // reading as proof the runtime is gone.
+  probeUnresponsive: boolean;
 }
 interface SessionStateResult {
   session: SessionRecord;
@@ -2540,6 +2547,16 @@ export class SessionService {
   private readonly wakeSuppressionNotified = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
+  // Ticks the re-entrancy guard dropped while the CURRENTLY running sweep was
+  // in flight. Zeroed by pollAttentionStates at the point the guard PASSES
+  // (the sweep that starts owns the counter for its own duration), incremented
+  // in the guard-taken branch, only ever READ by runAttentionMonitor after its
+  // await — never written there. Zeroing on the tick that gets suppressed
+  // would be self-defeating: every tick (including suppressed ones) enters
+  // pollAttentionStates, so a suppressed tick would zero the count mid-flight
+  // and immediately increment it back to 1, capping overlapping-tick counts
+  // at 1 regardless of how many actually overlapped.
+  private attentionMonitorSuppressedTicks = 0;
   // Report-only pre-spawn disk-headroom probe (see `warnIfHostDiskLow`),
   // cached 60s in-memory so a burst of spawns costs at most one `df`.
   private hostDiskProbe?: { checkedAtMs: number; freeKb: number | undefined };
@@ -4984,6 +5001,7 @@ export class SessionService {
   }
 
   private async runAttentionMonitor(baseline: boolean): Promise<void> {
+    const startedAt = Date.now();
     try {
       await runGhPollCycle({ kind: "attention" }, () => this.pollAttentionStates(baseline));
     } catch (error) {
@@ -4991,6 +5009,18 @@ export class SessionService {
       this.logEvent("session.attention_monitor.failed", {
         level: "warn",
         message: `Attention monitor failed: ${message}`,
+      });
+    }
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= ATTENTION_POLL_INTERVAL_MS) {
+      this.logEvent("session.attention_monitor.slow", {
+        level: "warn",
+        message: `Attention sweep took ${durationMs}ms, at or past the ${ATTENTION_POLL_INTERVAL_MS}ms poll interval`,
+        details: {
+          durationMs,
+          intervalMs: ATTENTION_POLL_INTERVAL_MS,
+          suppressedTicks: this.attentionMonitorSuppressedTicks,
+        },
       });
     }
   }
@@ -5174,9 +5204,15 @@ export class SessionService {
 
   private async pollAttentionStates(baseline: boolean): Promise<void> {
     if (this.attentionMonitorRunning) {
+      this.attentionMonitorSuppressedTicks += 1;
       return;
     }
     this.attentionMonitorRunning = true;
+    // Owned by the sweep that starts, not the tick that gets suppressed: every
+    // tick (suppressed or not) enters this function, so zeroing here — only on
+    // the guard-passing branch — is the only point that can't be re-entered
+    // mid-sweep. See the field's own comment.
+    this.attentionMonitorSuppressedTicks = 0;
 
     try {
       const nextStates = new Map<string, AttentionState>();
@@ -5644,7 +5680,8 @@ export class SessionService {
       let liveUnderTerminal = 0;
       for (const session of sessions) {
         let agentAlive = false;
-        if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
+        const presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        if (presence.present) {
           // A lone "process gone" read is inconclusive, not a verdict: a
           // transient tmux/ps failure reads exactly like an exited agent.
           // confirmAgentExited re-samples with fresh:true after a delay, so only
@@ -5664,6 +5701,13 @@ export class SessionService {
             await killTmuxSession(session.tmuxSession);
             reaped += 1;
           }
+        } else if (presence.unresponsive) {
+          // A timeout-killed probe is ambiguous, not confirmed absence — the
+          // one mistake this loop must never make is treating a slow-but-alive
+          // tmux as gone and reaping a live session's sidecars under it.
+          // Leave this session untouched this tick; the next reaper pass
+          // re-probes from scratch.
+          continue;
         }
         if (agentAlive) {
           // Sidecars serve the agent still running in this tmux. Reaping them
@@ -7152,7 +7196,10 @@ export class SessionService {
       reservedPort: link.reservedPort,
       signal: controller.signal,
     })
-      .then(() => this.publishSidecarLink(sessionId, sidecarName, link.reservedPort, link.linkUrl))
+      .then(() => {
+        if (controller.signal.aborted) return;
+        return this.publishSidecarLink(sessionId, sidecarName, link.reservedPort, link.linkUrl);
+      })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         const latest = readSession(this.config.dataDir, sessionId);
@@ -12591,18 +12638,29 @@ export class SessionService {
     return session;
   }
 
-  private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-    let processAlive = false;
-    if (runtimeAlive) {
-      processAlive = await agentProcessAlive({
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        launchCommand: session.launchCommand,
-      });
-      if (processAlive) {
-        return this.captureAgentSessionId(session, 0);
-      }
+  // `paneAlreadyConfirmedGone`: set only by a caller that has JUST killed and
+  // confirmed dead this exact pane itself (switchAuth's relaunch path, via
+  // killAgentPaneAndConfirmExit) — there, a timeout-killed probe right after
+  // is not ambiguous, the caller already knows the pane is gone, and refusing
+  // to relaunch would strand the session pane-dead with the new account
+  // already persisted. Every other caller (the delivery loop, send(),
+  // restore()) has NOT just killed anything, so a timeout-killed probe there
+  // stays ambiguous and defaults to refusing recovery.
+  private async ensureSessionReadyForSend(
+    session: SessionRecord,
+    options?: { paneAlreadyConfirmedGone?: boolean },
+  ): Promise<SessionRecord> {
+    // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
+    // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
+    // cannot be mistaken for a dead agent when list-windows still answers.
+    const runtime = await this.readRuntimeSnapshot(session);
+    if (runtime.processAlive) {
+      return this.captureAgentSessionId(session, 0);
+    }
+    if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
+      throw new Error(
+        `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
+      );
     }
 
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
@@ -12614,8 +12672,8 @@ export class SessionService {
       details: {
         agent: session.agent,
         status: session.status,
-        runtimeAlive,
-        processAlive,
+        runtimeAlive: runtime.runtimeAlive,
+        processAlive: runtime.processAlive,
         workspaceExists: workspacePresent,
         agentSessionId: session.agentSessionId ?? null,
       },
@@ -13732,7 +13790,12 @@ export class SessionService {
     //
     const recoveryTarget = readSession(this.config.dataDir, sessionId) ?? updated;
     await this.killAgentPaneAndConfirmExit(recoveryTarget, { failOnSurvivors: true });
-    const relaunched = await this.ensureSessionReadyForSend(recoveryTarget);
+    // The pane's death is already confirmed above, by this call's own kill —
+    // a timeout-killed probe here is not ambiguous the way it is for every
+    // other ensureSessionReadyForSend caller, so it must not refuse to relaunch.
+    const relaunched = await this.ensureSessionReadyForSend(recoveryTarget, {
+      paneAlreadyConfirmedGone: true,
+    });
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
@@ -14692,19 +14755,28 @@ export class SessionService {
     }
   }
 
+  // A third consumer that reads tmux presence as proof of exit — gated the
+  // same way as reconcileUnexpectedStop's confirmedRuntime.probeUnresponsive
+  // check: a timeout-killed probe is ambiguous, never a confirmed exit. A
+  // false "exited" here surfaces as an errored pipeline
+  // (waitForPipelineStep/waitForQueuedMessage's callers), so under a systemic
+  // tmux hang this must keep waiting rather than assert the agent left.
+  //
+  // Routed through readRuntimeSnapshot (issue #807) rather than a raw
+  // getTmuxSessionPresence + agentProcessAlive pair: the session-list leg
+  // used to gate on `unresponsive`, but the pane-list leg did not, so a
+  // list-windows success + list-panes TIMEOUT read an empty pane snapshot as
+  // "no matching process" and this returned true — a false exit for a live
+  // agent. readRuntimeSnapshot.probeUnresponsive already covers both legs
+  // (sessionsUnresponsive OR panesUnresponsive), so checking it alongside
+  // processAlive on both samples closes the pane-leg hole the same way
+  // ensureSessionReadyForSend's probe gate does.
   private async confirmAgentExited(
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
-    if (await tmuxSessionExists(session.tmuxSession)) {
-      if (
-        await agentProcessAlive({
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-          launchCommand: session.launchCommand,
-        })
-      ) {
-        return false;
-      }
+    const first = await this.readRuntimeSnapshot(session);
+    if (first.processAlive || first.probeUnresponsive) {
+      return false;
     }
     // Retry once after a short delay to guard against transient tmux/ps failures.
     // fresh:true forces an independent re-sample here — otherwise this retry
@@ -14712,15 +14784,9 @@ export class SessionService {
     // above, making a single transient glitch look like two agreeing reads
     // and erroring a still-live pipeline.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
-    if (await tmuxSessionExists(session.tmuxSession, { fresh: true })) {
-      return !(await agentProcessAlive(
-        {
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-          launchCommand: session.launchCommand,
-        },
-        { fresh: true },
-      ));
+    const second = await this.readRuntimeSnapshot(session, { fresh: true });
+    if (second.processAlive || second.probeUnresponsive) {
+      return false;
     }
     return true;
   }
@@ -14861,8 +14927,17 @@ export class SessionService {
     options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
     const fresh = options?.fresh ?? false;
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession, { fresh });
-    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession, { fresh })) : false;
+    // Single read per snapshot (getTmuxSessionPresence/getTmuxPanePresence),
+    // never a second top-level fleet-probe call for the unresponsive flag —
+    // see the "no second memoizedProbe lookup" comment on those exports.
+    const sessionPresence = await getTmuxSessionPresence(session.tmuxSession, { fresh });
+    const runtimeAlive = sessionPresence.present;
+    const panePresence = runtimeAlive
+      ? await getTmuxPanePresence(session.tmuxSession, { fresh })
+      : null;
+    // panePresence is non-null exactly when runtimeAlive (assigned by the same
+    // condition just above) — narrow on the value itself rather than assert.
+    const paneUsable = panePresence ? !panePresence.dead : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive =
       runtimeAlive && paneUsable
@@ -14875,11 +14950,17 @@ export class SessionService {
             { fresh },
           )
         : false;
+    // Guarded so neither call can force a snapshot that was never fetched:
+    // sessionsUnresponsive only matters when the session read itself came up
+    // absent, panesUnresponsive only when the pane read came up dead.
+    const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
+    const panesUnresponsive = panePresence !== null && !paneUsable && panePresence.unresponsive;
     return {
       runtimeAlive,
       paneUsable,
       processAlive,
       tmuxActivityAt,
+      probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
     };
   }
 
@@ -15464,6 +15545,21 @@ export class SessionService {
       ) {
         return { session, runtime: confirmedRuntime };
       }
+      // A timeout-killed tmux probe is ambiguous, not confirmed absence — a
+      // systemic tmux hang must never convert into a false teardown of every
+      // running session in the fleet. Leave the record untouched; the next
+      // sweep tick re-probes from scratch. workspaceGone is filesystem-derived
+      // (never tmux-derived), so that verdict is unaffected and keeps writing.
+      if (confirmedRuntime.probeUnresponsive) {
+        this.logEvent("session.runtime.probe_unresponsive", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Skipped reconciling ${session.id}: tmux probe timed out, runtime state unknown`,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent, reason },
+        });
+        return { session, runtime: confirmedRuntime };
+      }
     }
 
     const latest = readSession(this.config.dataDir, session.id);
@@ -15661,7 +15757,13 @@ export class SessionService {
     ) {
       return {
         session,
-        runtime: { runtimeAlive: true, paneUsable: true, processAlive: true, tmuxActivityAt: null },
+        runtime: {
+          runtimeAlive: true,
+          paneUsable: true,
+          processAlive: true,
+          tmuxActivityAt: null,
+          probeUnresponsive: false,
+        },
         state: "working",
         source: "status",
         historySourcePath: null,
@@ -15676,6 +15778,7 @@ export class SessionService {
           paneUsable: false,
           processAlive: false,
           tmuxActivityAt: null,
+          probeUnresponsive: false,
         }
       : await this.readRuntimeSnapshot(session);
     const workspace = probeWorkspace(session.worktreePath);

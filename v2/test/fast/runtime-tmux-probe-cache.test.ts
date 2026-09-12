@@ -439,4 +439,106 @@ describe("runtime-tmux shared probe cache", () => {
     await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
     await expect(isProcessRunningInTmux("api-1", ["node"])).resolves.toBe(false);
   });
+
+  // Issue #807 / DELTA 1: a single combined reader (present+unresponsive off
+  // ONE fleet-snapshot fetch), not two separate exported readers — a second
+  // top-level call for the unresponsive flag alone would risk missing an
+  // already-expired memoizedProbe cache entry (a timeout kill takes 5s, the
+  // cache TTL is 2s) and re-forking.
+  it("AC1/A1: marks a fleet-session/fleet-pane probe unresponsive only for a timeout kill, never for an ordinary tmux failure", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        throw new Error("no server running on socket");
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        throw new Error("no server running on socket");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getTmuxSessionPresence, getTmuxPanePresence } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
+      present: false,
+      unresponsive: false,
+    });
+    await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
+      dead: true,
+      unresponsive: false,
+    });
+  });
+
+  it("AC1/A1: a list-windows/list-panes fork killed by its own timeout reads unresponsive:true", async () => {
+    const timeoutKill = () =>
+      Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        throw timeoutKill();
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        throw timeoutKill();
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getTmuxSessionPresence, getTmuxPanePresence, tmuxSessionExists, tmuxPaneDead } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
+      present: false,
+      unresponsive: true,
+    });
+    await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
+      dead: true,
+      unresponsive: true,
+    });
+    // tmuxSessionExists/tmuxPaneDead (every OTHER caller in the daemon) still
+    // read the plain boolean off the same underlying snapshot.
+    await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
+    await expect(tmuxPaneDead("api-1")).resolves.toBe(true);
+  });
+
+  // AC11 (rewritten, DELTA 1): a getTmuxSessionPresence/getTmuxPanePresence
+  // read costs no additional tmux fork beyond the ONE that
+  // tmuxSessionExists/tmuxPaneDead already pay for the same fleet snapshot —
+  // including when that one fork is a timeout kill whose swallow-into-
+  // readable:false means memoizedProbe's cache entry is never evicted (see
+  // A2), so a same-tick second reader must reuse it, not re-fork.
+  it("AC11: getTmuxSessionPresence/getTmuxPanePresence issue no extra fork beyond the shared fleet snapshot, even under a timeout-killed probe", async () => {
+    let listWindowsCalls = 0;
+    let listPanesCalls = 0;
+    const timeoutKill = () =>
+      Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        listWindowsCalls += 1;
+        throw timeoutKill();
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        listPanesCalls += 1;
+        throw timeoutKill();
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { tmuxSessionExists, tmuxPaneDead, getTmuxSessionPresence, getTmuxPanePresence } =
+      await import("../../src/runtime-tmux.js");
+
+    // Mirrors readRuntimeSnapshot's real call order: the plain boolean read
+    // first, the combined presence read second, same tick, same TTL window.
+    await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
+    await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
+      present: false,
+      unresponsive: true,
+    });
+    await expect(tmuxPaneDead("api-1")).resolves.toBe(true);
+    await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
+      dead: true,
+      unresponsive: true,
+    });
+
+    expect(listWindowsCalls).toBe(1);
+    expect(listPanesCalls).toBe(1);
+  });
 });
