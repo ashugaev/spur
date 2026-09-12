@@ -18204,6 +18204,9 @@ describe("SessionService", () => {
         status: "completed" as const,
       });
 
+      // Past the bounded refusal's initial backoff, so the retry actually
+      // re-probes instead of throwing the cached conflict.
+      await vi.advanceTimersByTimeAsync(125_000);
       await service.startSidecar("api-3", "daemon");
 
       expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
@@ -26429,6 +26432,255 @@ describe("SessionService", () => {
     });
   });
 
+  describe("bounded sidecar start-conflict refusal", () => {
+    function conflictConfig() {
+      return {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              dev: {
+                command: "pnpm dev",
+                autoStart: false,
+                ports: { http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 } },
+              },
+            },
+          },
+        },
+      };
+    }
+
+    // A pure host-level occupant (isHostPortFreeMock only, no session
+    // record) — matches the measured incident's foreign-holder shape
+    // directly, with no interaction with the unavailable/reclaim scan
+    // (which only ever tracks Spur-recorded reservations).
+    function conflictSessions() {
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      return sessions;
+    }
+
+    it("succeeds on a later attempt once the transient occupancy clears, without a terminal event", async () => {
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(conflictConfig());
+      conflictSessions();
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // Still inside the backoff window: a bare retry throws the cached
+      // payload with no re-probe.
+      findListenerPidsMock.mockClear();
+      snapshotProcessesMock.mockClear();
+      const second = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(second).toBeInstanceOf(SidecarPortConflictError);
+
+      // Past the probe window (not the deadline): a real re-probe runs, the
+      // port is free now, and the start succeeds.
+      isHostPortFreeMock.mockResolvedValue(true);
+      await vi.advanceTimersByTimeAsync(125_000);
+      await service.startSidecar("api-1", "dev");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) =>
+            entry.event === "session.sidecar.start_rejected" && entry.details?.terminal === true,
+        ),
+      ).toBe(false);
+    });
+
+    it("throws the cached payload with no re-probe inside the backoff window", async () => {
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(conflictConfig());
+      conflictSessions();
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      findListenerPidsMock.mockClear();
+      snapshotProcessesMock.mockClear();
+      isHostPortFreeMock.mockClear();
+      const second = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(second).toBeInstanceOf(SidecarPortConflictError);
+      expect(isHostPortFreeMock).not.toHaveBeenCalled();
+      expect(findListenerPidsMock).not.toHaveBeenCalled();
+    });
+
+    it("emits exactly one terminal port-refusal event once the deadline passes with the port still blocked", async () => {
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(conflictConfig());
+      conflictSessions();
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // Past the deadline, port still blocked: one terminal event, then a
+      // repeat attempt neither re-probes nor emits a second terminal event.
+      await vi.advanceTimersByTimeAsync(1_800_001);
+      const second = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(second).toBeInstanceOf(SidecarPortConflictError);
+      const third = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(third).toBeInstanceOf(SidecarPortConflictError);
+
+      const terminalEvents = logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.sidecar.start_rejected" && entry.details?.terminal === true,
+      );
+      expect(terminalEvents).toHaveLength(1);
+    });
+
+    it("derives the deadline from a large configured collapseWindowMs, never below the cap", async () => {
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue({
+        ...conflictConfig(),
+        eventLog: { collapseWindowMs: 1_800_000 },
+      });
+      conflictSessions();
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // base = max(60_000, 1_800_000*2) = 3_600_000; cap = max(900_000, base)
+      // = 3_600_000; deadline = max(1_800_000, cap) = 3_600_000. A fixed
+      // 1_800_000 deadline would already have fired here — it must not.
+      await vi.advanceTimersByTimeAsync(1_800_001);
+      const second = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(second).toBeInstanceOf(SidecarPortConflictError);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) =>
+            entry.event === "session.sidecar.start_rejected" && entry.details?.terminal === true,
+        ),
+      ).toBe(false);
+    });
+
+    it("clearPort bypasses the cached refusal even inside the backoff window", async () => {
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(conflictConfig());
+      conflictSessions();
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      await service.startSidecar("api-1", "dev", { clearPort: 3000 });
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+    });
+
+    it("clears the cached refusal on a successful start, resetting the failure count", async () => {
+      // Distinguishes an actual clear from the backoff merely having
+      // elapsed: if the first conflict's failure count survived a
+      // successful start in between, the second conflict's backoff would
+      // be failures=2 (double length) instead of resetting to failures=1.
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(conflictConfig());
+      conflictSessions();
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // Past the first backoff (failures=1 -> ~120s), port frees: success,
+      // and the refusal state must clear.
+      isHostPortFreeMock.mockResolvedValue(true);
+      await vi.advanceTimersByTimeAsync(125_000);
+      await service.startSidecar("api-1", "dev");
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+
+      // A fresh conflict on the same sidecar.
+      isHostPortFreeMock.mockResolvedValue(false);
+      const second = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(second).toBeInstanceOf(SidecarPortConflictError);
+
+      // 125s clears a failures=1 backoff (~120s) but not a failures=2 one
+      // (~240s) — succeeding here proves the clear reset the counter.
+      isHostPortFreeMock.mockResolvedValue(true);
+      await vi.advanceTimersByTimeAsync(125_000);
+      await service.startSidecar("api-1", "dev");
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("stopping the sidecar clears the cached refusal", async () => {
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(conflictConfig());
+      const sessions = conflictSessions();
+      sessions.set("api-1", { ...(sessions.get("api-1") as SessionRecord), sidecarNames: ["dev"] });
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      await service.stopSidecar("api-1", "dev");
+
+      isHostPortFreeMock.mockResolvedValue(true);
+      await service.startSidecar("api-1", "dev");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+    });
+
+    it("prune drops the cached refusal for a session no longer live", async () => {
+      isHostPortFreeMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(conflictConfig());
+      conflictSessions();
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // @ts-expect-error test-only access to a private method
+      service.pruneSessionScopedState(new Set());
+
+      isHostPortFreeMock.mockResolvedValue(true);
+      await service.startSidecar("api-1", "dev");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+    });
+  });
+
   it("startSidecar does not launch the requested sidecar when a dependency fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -27429,6 +27681,9 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:02:00.000Z",
     });
 
+    // Past the bounded refusal's initial backoff, so the retry actually
+    // re-probes instead of throwing the cached conflict.
+    await vi.advanceTimersByTimeAsync(125_000);
     await service.startSidecar("api-1", "dev");
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
