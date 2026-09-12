@@ -7196,7 +7196,10 @@ export class SessionService {
       reservedPort: link.reservedPort,
       signal: controller.signal,
     })
-      .then(() => this.publishSidecarLink(sessionId, sidecarName, link.reservedPort, link.linkUrl))
+      .then(() => {
+        if (controller.signal.aborted) return;
+        return this.publishSidecarLink(sessionId, sidecarName, link.reservedPort, link.linkUrl);
+      })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         const latest = readSession(this.config.dataDir, sessionId);
