@@ -126,6 +126,9 @@ export interface SpurSidecarPortConflictCandidate {
   env: string;
   port: number;
   owner?: string;
+  reservedBy?: string;
+  holder?: { pid: number; cwd: string | null };
+  clearable?: boolean;
 }
 
 export interface SpurSidecarPortConflict {

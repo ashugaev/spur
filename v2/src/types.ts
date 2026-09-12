@@ -1176,6 +1176,12 @@ export interface SidecarPortConflictCandidate {
   env: string;
   port: number;
   owner?: string;
+  /** Session/sidecar name that recorded a reservation for this port, when known. */
+  reservedBy?: string;
+  /** Attributed foreign listener, when the port is host-occupied by an untracked process. */
+  holder?: { pid: number; cwd: string | null };
+  /** False for a port already claimed by a sibling portId in this same attempt: clearing it would break that other reservation. */
+  clearable?: boolean;
 }
 
 export interface SidecarPortConflictPayload {
