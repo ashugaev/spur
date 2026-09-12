@@ -1138,6 +1138,10 @@ export async function createTmuxSidecarSession(input: {
   });
 }
 
-export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
-  return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
+export async function sidecarTmuxAlive(
+  sessionId: string,
+  sidecarName: string,
+  options?: { fresh?: boolean },
+): Promise<boolean> {
+  return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName), options);
 }
