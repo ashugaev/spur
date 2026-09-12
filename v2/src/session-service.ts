@@ -1273,6 +1273,18 @@ function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): 
   return session.restrictWrites === true;
 }
 
+function resolveCloseoutOwner(args: {
+  restrictWrites: boolean;
+  worktree: boolean;
+  reusesWorkspace: boolean;
+  transferredOwner?: boolean;
+}): boolean {
+  if (args.restrictWrites) return false;
+  if (args.transferredOwner !== undefined) return args.transferredOwner;
+  if (args.reusesWorkspace) return false;
+  return args.worktree;
+}
+
 async function setupSessionAgentHooks(args: {
   agent: AgentName;
   dataDir: string;
@@ -1726,12 +1738,14 @@ function buildSessionEnv(args: {
   dataDir: string;
   repoPath: string;
   symlinks: string[];
+  closeoutOwner?: boolean;
   extraEnv?: Record<string, string>;
 }): Record<string, string> {
   const env: Record<string, string> = {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
+    SPUR_CLOSEOUT_OWNER: args.closeoutOwner === true ? "1" : "0",
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
@@ -6964,6 +6978,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: args.project.path,
         symlinks: args.project.symlinks,
+        closeoutOwner: reservedSession.closeoutOwner === true,
         ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
       });
 
@@ -8624,6 +8639,7 @@ export class SessionService {
       replacingSessionId?: string;
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
+      closeoutOwnerTransfer?: boolean;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -8778,6 +8794,14 @@ export class SessionService {
       const tmuxSession = sessionId;
       createdAt = nowIso();
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+        ...(options?.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
+      });
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -8803,6 +8827,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -9011,6 +9036,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
@@ -9609,6 +9635,11 @@ export class SessionService {
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+      });
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -9618,6 +9649,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
@@ -10004,6 +10036,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -12785,6 +12818,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
+      closeoutOwner: session.closeoutOwner === true,
       ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
     });
 
@@ -13225,6 +13259,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: this.getProject(current.project).path,
         symlinks: this.getProject(current.project).symlinks,
+        closeoutOwner: current.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
@@ -13937,6 +13972,7 @@ export class SessionService {
       }),
       {
         modeResolution: "carried",
+        closeoutOwnerTransfer: session.closeoutOwner === true,
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
@@ -14086,6 +14122,7 @@ export class SessionService {
           replacingSessionId: session.id,
           admissionReservation,
           modeResolution: "carried",
+          closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
           ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
         },
       );

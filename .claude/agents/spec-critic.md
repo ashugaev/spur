@@ -31,4 +31,4 @@ RULES
   - Report only gaps grounded in a `file:line` or a missing/failing verification command.
   - Withhold SPEC_APPROVED only for a gap that changes implementation, never for wording.
   - Architect owns every spec fix; never route a spec gap to developer.
-  - One re-plan cycle. Second pass still failing: return BLOCKED_SPEC.
+  - Return one verdict for current invocation; manager owns rerun limits.
