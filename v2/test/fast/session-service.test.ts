@@ -26923,6 +26923,41 @@ describe("SessionService", () => {
       );
     });
 
+    it("clears a cached refusal on other sessions when the reservedBy holder is killed", async () => {
+      isHostPortFreeMock.mockResolvedValue(true);
+      sidecarTmuxAliveMock.mockImplementation(async (id: string) => id === "api-other");
+      loadConfigMock.mockReturnValue(conflictConfig());
+      const sessions = conflictSessions();
+      sessions.set("api-other", {
+        id: "api-other",
+        project: "api",
+        agent: "claude",
+        prompt: "other",
+        branch: "api-other",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-other",
+        tmuxSession: "api-other",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
+      });
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+      // @ts-expect-error test-only access to a private map
+      expect(service.sidecarStartConflictState.has("api-1\0dev")).toBe(true);
+
+      // @ts-expect-error test-only access to a private method
+      service.clearSidecarStartConflictsReferencingSession("api-other");
+      // @ts-expect-error test-only access to a private map
+      expect(service.sidecarStartConflictState.has("api-1\0dev")).toBe(false);
+    });
+
     it("prune drops the cached refusal for a session no longer live", async () => {
       isHostPortFreeMock.mockResolvedValue(false);
       loadConfigMock.mockReturnValue(conflictConfig());
@@ -26938,6 +26973,52 @@ describe("SessionService", () => {
       service.pruneSessionScopedState(new Set());
 
       isHostPortFreeMock.mockResolvedValue(true);
+      await service.startSidecar("api-1", "dev");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+    });
+
+    it("killing the blocking session clears a waiting sibling's cached refusal for an immediate retry", async () => {
+      // Runtime regression (cli-lifecycle.runtime.test.ts): a session's own
+      // cached refusal is otherwise only invalidated by its own lifecycle
+      // or by its own backoff/deadline elapsing — neither fires just
+      // because a DIFFERENT session (the one actually holding the port)
+      // gets killed. Without clearing on the killed session's port
+      // release, an immediate manual retry right after the operator kills
+      // the blocker still throws the stale cached 409.
+      isHostPortFreeMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockImplementation(async (id: string) => id === "api-other");
+      loadConfigMock.mockReturnValue(conflictConfig());
+      const sessions = conflictSessions();
+      sessions.set("api-other", {
+        id: "api-other",
+        project: "api",
+        agent: "claude",
+        prompt: "other",
+        branch: "api-other",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-other",
+        tmuxSession: "api-other",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
+      });
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      isHostPortFreeMock.mockResolvedValue(true);
+      await service.kill("api-other", { force: true });
+
+      // No time advance: still well inside the backoff window. Only the
+      // kill-triggered clear can let this retry through.
       await service.startSidecar("api-1", "dev");
 
       expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(

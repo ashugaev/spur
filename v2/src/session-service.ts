@@ -6431,6 +6431,28 @@ export class SessionService {
     this.sidecarStartNoopIdentity.delete(key);
   }
 
+  // A cached refusal on session B can name session A in a candidate's
+  // reservedBy. Killing A drops its reservations immediately; leaving B's
+  // cache intact would keep returning the cached 409 through the backoff
+  // window even though the reservation-shaped block is gone — the runtime
+  // cli-lifecycle tests retry right after killing the holder.
+  private clearSidecarStartConflictsReferencingSession(deadSessionId: string): void {
+    const prefix = `${deadSessionId}/`;
+    for (const key of [...this.sidecarStartConflictState.keys()]) {
+      const state = this.sidecarStartConflictState.get(key);
+      if (!state) {
+        continue;
+      }
+      if (
+        state.candidates.some(
+          (candidate) => candidate.reservedBy?.startsWith(prefix) ?? false,
+        )
+      ) {
+        this.sidecarStartConflictState.delete(key);
+      }
+    }
+  }
+
   private releaseSidecarPortFromSession(
     sessionId: string,
     sidecarName: string,
@@ -12192,6 +12214,7 @@ export class SessionService {
     return kept ? { ...rest, sidecarPorts: kept } : rest;
   }
 
+
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     await this.teardownSessionSidecars(session);
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -12641,6 +12664,7 @@ export class SessionService {
     };
     delete record.retainInList;
     writeSession(this.config.dataDir, record);
+    this.clearSidecarStartConflictsReferencingSession(sessionId);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       try {
