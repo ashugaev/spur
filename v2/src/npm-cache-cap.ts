@@ -31,11 +31,16 @@ function isValidRawEntry(raw: object): raw is NpmCacheIndexEntry {
 // whole read (returns undefined) — a partial ranking would be worse than no
 // ranking, since a truncated/corrupt index could silently omit large,
 // legitimately-old entries from the victim list.
+//
+// index-v5 is append-only: cacache writes a new line for a key on every
+// re-insert, so the same key can appear several times across a file's
+// lines. Collapsed here to the newest line per key (by `time`) so a
+// re-fetched key is counted once, not once per historical revision.
 export async function readNpmCacheIndex(
   cacachePath: string,
 ): Promise<NpmCacheIndexEntry[] | undefined> {
   const indexDir = join(cacachePath, "index-v5");
-  const entries: NpmCacheIndexEntry[] = [];
+  const byKey = new Map<string, NpmCacheIndexEntry>();
   let level1: string[];
   try {
     level1 = await readdir(indexDir);
@@ -79,17 +84,20 @@ export async function readNpmCacheIndex(
           if (typeof parsed !== "object" || parsed === null || !isValidRawEntry(parsed)) {
             return undefined;
           }
-          entries.push({
-            key: parsed.key,
-            integrity: parsed.integrity,
-            time: parsed.time,
-            size: parsed.size,
-          });
+          const existing = byKey.get(parsed.key);
+          if (existing === undefined || parsed.time >= existing.time) {
+            byKey.set(parsed.key, {
+              key: parsed.key,
+              integrity: parsed.integrity,
+              time: parsed.time,
+              size: parsed.size,
+            });
+          }
         }
       }
     }
   }
-  return entries;
+  return [...byKey.values()];
 }
 
 export interface NpmCacheCapPlan {
@@ -103,19 +111,30 @@ export interface NpmCacheCapPlan {
   indexedTotalBytes: number;
 }
 
-// Pure — no IO. Sorts ascending by `time` (oldest first) and accumulates
-// until the projection clears the cap or the index is exhausted.
+// Pure — no IO. Sorts ascending by `time` (oldest first), collapses
+// entries that share an `integrity` (cacache content-addresses the blob, so
+// two keys — e.g. a registry tarball and its `pacote:tarball:` alias — can
+// point at the same on-disk bytes; counting both inflates both the victim
+// total and the reported index total) keeping the oldest occurrence, then
+// accumulates until the projection clears the cap or the index is exhausted.
 export function planNpmCacheVictims(
   entries: readonly NpmCacheIndexEntry[],
   currentSizeBytes: number,
   capBytes: number,
 ): NpmCacheCapPlan {
   const sorted = [...entries].sort((a, b) => a.time - b.time);
-  const indexedTotalBytes = sorted.reduce((sum, e) => sum + e.size, 0);
+  const seenIntegrity = new Set<string>();
+  const deduped: NpmCacheIndexEntry[] = [];
+  for (const entry of sorted) {
+    if (seenIntegrity.has(entry.integrity)) continue;
+    seenIntegrity.add(entry.integrity);
+    deduped.push(entry);
+  }
+  const indexedTotalBytes = deduped.reduce((sum, e) => sum + e.size, 0);
   const victims: NpmCacheIndexEntry[] = [];
   let projected = currentSizeBytes;
   let victimBytes = 0;
-  for (const entry of sorted) {
+  for (const entry of deduped) {
     if (projected <= capBytes) break;
     victims.push(entry);
     victimBytes += entry.size;

@@ -20,7 +20,7 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -101,6 +101,7 @@ import {
   type DiskBudgetReport,
 } from "./disk-budget.js";
 import {
+  containmentRel,
   createDiskGcDeps,
   executeDiskGc,
   measureBytes as measureDiskGcBytes,
@@ -1429,6 +1430,14 @@ export function renderDiskGcReport(report: DiskGcReport): string {
       for (const victim of report.npmCap.victims) {
         lines.push(renderDiskGcCandidateLine("npm-key", victim));
       }
+      for (const step of report.npmCap.ranSteps) {
+        lines.push(`  ${step}`);
+      }
+      lines.push(
+        dimText(
+          `  before the failure: ${report.npmCap.cleanedKeys} key(s) cleaned, ${formatBytes(report.npmCap.freedBytes)} freed.`,
+        ),
+      );
       break;
   }
 
@@ -2791,10 +2800,7 @@ export function createProgram(cliEntrypoint: string): Command {
               sessions
                 .map((s) => s.worktreePath.trim())
                 .filter(Boolean)
-                .filter((path) => {
-                  const rel = relative(config.worktreeDir, path);
-                  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-                }),
+                .filter((path) => containmentRel(config.worktreeDir, path) !== undefined),
             ),
           ];
           const report = await measureDiskBudget(

@@ -311,4 +311,17 @@ describe("singletonLockLivePid", () => {
       await rm(profilePath, { recursive: true, force: true });
     }
   });
+
+  it("parses Chrome lock targets with a single-segment hostname (host-789)", async () => {
+    const profilePath = await mkdtemp(join(tmpdir(), "spur-profile-lock-"));
+    try {
+      await symlink("host-789", join(profilePath, "SingletonLock"));
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => undefined as never);
+      expect(await singletonLockLivePid(profilePath)).toBe(789);
+      expect(killSpy).toHaveBeenCalledWith(789, 0);
+      killSpy.mockRestore();
+    } finally {
+      await rm(profilePath, { recursive: true, force: true });
+    }
+  });
 });

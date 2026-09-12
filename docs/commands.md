@@ -50,7 +50,7 @@ Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with t
 
 `spur disk [--json]` reports Spur-attributable disk usage, read-only, daemon-free. Rows: the four never-reclaimed Spur stores (`session-artifacts`, `worktrees`, `session-tools`, `opencode-store` under `~/.local/share/opencode`), `npm-cacache`, `npm-npx`, `playwright-browsers`, `playwright-mcp-profiles`, and an aggregated `worktree-build-caches` row (webpack/`.next` caches found by a bounded depth-3 walk under `worktreeDir`, skipping `node_modules`/`.git`). Each row carries `reclaimedByDiskGc` (this run's `disk-gc` reclaim set includes it) and `reclaimedBy` (`disk-gc`, `spur cache`, `opencode-gc`, `spur gc`, or `none`) so one table names which command owns each root's deletion. A `du` that times out or is aborted reports `status: "unmeasured"`, never `sizeBytes: 0`.
 
-Side effect: every run overwrites `<dataDir>/disk-budget.json` (`{ generatedAt, roots, totals }`). The daemon's warn sweep ([`diskBudget`](configuration.md#field-reference)) reads only this file — it never runs its own `du` — and emits nothing when the file is absent or older than `2 * diskBudget.intervalMinutes`.
+Side effect: every run overwrites `<dataDir>/disk-budget.json` (`{ generatedAt, roots, totals }`). The daemon's warn sweep ([`diskBudget`](configuration.md#field-reference)) reads only this file — it never runs its own `du` — and emits nothing when the file is absent or older than `2 * diskBudget.intervalMinutes`. Nothing runs `spur disk` on a schedule; for the warn sweep to have data, cron it yourself, e.g. `0 * * * * spur disk` for hourly.
 
 ## disk-gc
 

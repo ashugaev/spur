@@ -141,4 +141,20 @@ describe("spur disk CLI", { timeout: 30_000 }, () => {
     expect(output).toContain("reclaimedBy=spur cache");
     expect(output).toContain("reclaimedBy=none");
   });
+
+  it("filters a session worktreePath outside worktreeDir via containmentRel, same rule as disk-gc", async () => {
+    const worktreeDir = join(tempDir, ".spur", "worktrees");
+    listSessionsMock.mockReturnValue([
+      { id: "s1", worktreePath: join(worktreeDir, "abc") },
+      // A `worktree: false` session's real checkout, outside worktreeDir —
+      // must never reach measureDiskBudget's worktreePaths.
+      { id: "s2", worktreePath: "/home/user/some-other-repo" },
+    ] as never);
+
+    await parseDisk([]);
+
+    expect(measureDiskBudgetMock).toHaveBeenCalledTimes(1);
+    const [, input] = measureDiskBudgetMock.mock.calls[0] as [unknown, { worktreePaths: string[] }];
+    expect(input.worktreePaths).toEqual([join(worktreeDir, "abc")]);
+  });
 });

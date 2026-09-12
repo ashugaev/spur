@@ -536,7 +536,43 @@ describe("executeDiskGc — AC7/B1 npm cap: verify, RE-MEASURE, gate, clean olde
     expect(report.npmCap).toMatchObject({
       status: "execution-failed",
       message: "npm verify failed",
+      ranSteps: [],
+      cleanedKeys: 0,
+      freedBytes: null,
     });
     expect(report.buildCache.candidates).toEqual([]);
+  });
+
+  it("a clean that throws mid-loop still reports the keys cleaned ahead of it", async () => {
+    const calls: string[] = [];
+    const npmVerify = vi.fn(async () => {
+      calls.push("verify");
+    });
+    const npmClean = vi.fn(async (key: string) => {
+      if (key === "pkg-b") {
+        throw new Error("clean pkg-b failed");
+      }
+      calls.push(`clean:${key}`);
+    });
+    // Post-verify size stays over cap so both ranked victims are needed.
+    const measureCacacheBytes = vi.fn(async () => 4600);
+    const plan = emptyPlan({ npmCap: npmCapPlanned(1500) });
+    const deps = makeDeps({ npmVerify, npmClean, measureCacacheBytes });
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: false,
+      browserRevisions: false,
+      npmCap: true,
+    });
+
+    expect(calls).toEqual(["verify", "clean:pkg-a"]);
+    expect(report.npmCap).toMatchObject({
+      status: "execution-failed",
+      message: "clean pkg-b failed",
+      ranSteps: ["npm cache verify", "npm cache clean pkg-a"],
+      cleanedKeys: 1,
+      // No post-clean verify/measure ran, so freed bytes are unknown, not 0.
+      freedBytes: null,
+    });
   });
 });

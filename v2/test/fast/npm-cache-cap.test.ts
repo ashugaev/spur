@@ -30,6 +30,21 @@ describe("planNpmCacheVictims (pure)", () => {
     expect(plan.victims).toEqual([]);
     expect(plan.victimBytes).toBe(0);
   });
+
+  it("collapses entries that share an integrity, keeping the oldest occurrence", () => {
+    const entries = [
+      { key: "registry-tarball:a", integrity: "sha512-shared", time: 100, size: 1000 },
+      { key: "pacote:tarball:a", integrity: "sha512-shared", time: 150, size: 1000 },
+      { key: "b", integrity: "sha512-b", time: 200, size: 500 },
+    ];
+    const plan = planNpmCacheVictims(entries, 1500, 600);
+    // Deduped index total counts the shared blob once (1000 + 500 = 1500),
+    // not twice (which would read 2500). Victim selection then only needs
+    // to evict the one shared-integrity entry to clear the 600 cap.
+    expect(plan.indexedTotalBytes).toBe(1500);
+    expect(plan.victims.map((v) => v.key)).toEqual(["registry-tarball:a"]);
+    expect(plan.victimBytes).toBe(1000);
+  });
 });
 
 describe("readNpmCacheIndex / planNpmCacheCap (mkdtemp synthetic tree)", () => {
@@ -71,6 +86,25 @@ describe("readNpmCacheIndex / planNpmCacheCap (mkdtemp synthetic tree)", () => {
     if (result.ok) {
       expect(result.plan.victims.map((v) => v.size)).toEqual([1000]);
     }
+  });
+
+  it("collapses repeated index-v5 lines for one key to the newest by time", async () => {
+    const key = "make-fetch-happen:request-cache:https://registry/a";
+    // cacache's index-v5 is append-only: a re-fetched key gets a second line
+    // in the same bucket file rather than rewriting the first.
+    const dir = join(cacachePath, "index-v5", "aa", "bb");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "aabbccdd"),
+      [
+        `aabbccdd0001\t${JSON.stringify({ key, integrity: "sha512-old", time: 100, size: 1000 })}`,
+        `aabbccdd0002\t${JSON.stringify({ key, integrity: "sha512-new", time: 200, size: 2000 })}`,
+      ].join("\n") + "\n",
+    );
+
+    const entries = await readNpmCacheIndex(cacachePath);
+    expect(entries).toHaveLength(1);
+    expect(entries?.[0]).toEqual({ key, integrity: "sha512-new", time: 200, size: 2000 });
   });
 
   it("a malformed index line fails closed and selects nothing", async () => {

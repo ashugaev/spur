@@ -429,6 +429,13 @@ export interface DiskGcReport {
         status: "execution-failed";
         overCapBytes: number;
         victims: DiskGcReportCandidate[];
+        // What ran before the failure — a `clean` that throws partway
+        // through still frees the keys cleaned ahead of it; the report
+        // must carry that partial progress rather than lose it under the
+        // one error that stopped the rest.
+        ranSteps: string[];
+        cleanedKeys: number;
+        freedBytes: number | null;
         message: string;
       };
 }
@@ -585,10 +592,20 @@ export async function executeDiskGc(
       };
       freedBytes += npmCapPlan.plan.victimBytes;
     } else {
+      // Each npm call is caught individually so a failure partway through
+      // (e.g. `npm cache clean` on the third of five victims) still yields
+      // a report of the steps that ran and the bytes they freed, instead of
+      // losing that progress under the one step that threw.
+      const ranSteps: string[] = [];
+      let cleanedKeys = 0;
+      let failureMessage: string | undefined;
       try {
-        const ranSteps: string[] = [];
         await deps.npmVerify();
         ranSteps.push("npm cache verify");
+      } catch (error) {
+        failureMessage = error instanceof Error ? error.message : String(error);
+      }
+      if (failureMessage === undefined) {
         const afterVerify = await deps.measureCacacheBytes();
         if (afterVerify !== null && afterVerify <= npmCapPlan.capBytes) {
           const npmFreed = Math.max(0, npmCapPlan.currentSizeBytes - afterVerify);
@@ -614,29 +631,57 @@ export async function executeDiskGc(
             toClean = prefix;
           }
           for (const victim of toClean) {
-            await deps.npmClean(victim.key);
-            ranSteps.push(`npm cache clean ${victim.key}`);
+            try {
+              await deps.npmClean(victim.key);
+              ranSteps.push(`npm cache clean ${victim.key}`);
+              cleanedKeys += 1;
+            } catch (error) {
+              failureMessage = error instanceof Error ? error.message : String(error);
+              break;
+            }
           }
-          await deps.npmVerify();
-          ranSteps.push("npm cache verify");
-          const after = await deps.measureCacacheBytes();
+          let after: number | null = null;
+          if (failureMessage === undefined) {
+            try {
+              await deps.npmVerify();
+              ranSteps.push("npm cache verify");
+              after = await deps.measureCacacheBytes();
+            } catch (error) {
+              failureMessage = error instanceof Error ? error.message : String(error);
+            }
+          }
           const npmFreed = after !== null ? Math.max(0, npmCapPlan.currentSizeBytes - after) : null;
           if (npmFreed !== null) freedBytes += npmFreed;
-          npmCapReport = {
-            status: "planned",
-            overCapBytes: npmCapPlan.overCapBytes,
-            victims,
-            ranSteps,
-            cleanedKeys: toClean.length,
-            freedBytes: npmFreed,
-          };
+          if (failureMessage === undefined) {
+            npmCapReport = {
+              status: "planned",
+              overCapBytes: npmCapPlan.overCapBytes,
+              victims,
+              ranSteps,
+              cleanedKeys: toClean.length,
+              freedBytes: npmFreed,
+            };
+          } else {
+            npmCapReport = {
+              status: "execution-failed",
+              overCapBytes: npmCapPlan.overCapBytes,
+              victims,
+              ranSteps,
+              cleanedKeys,
+              freedBytes: npmFreed,
+              message: failureMessage,
+            };
+          }
         }
-      } catch (error) {
+      } else {
         npmCapReport = {
           status: "execution-failed",
           overCapBytes: npmCapPlan.overCapBytes,
           victims,
-          message: error instanceof Error ? error.message : String(error),
+          ranSteps,
+          cleanedKeys,
+          freedBytes: null,
+          message: failureMessage,
         };
       }
     }
