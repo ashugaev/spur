@@ -22,7 +22,7 @@ const {
   loadConfigMock,
   loadInstanceConfigReadOnlyMock,
   snapshotProcessesMock,
-  readDiskBudgetReportMock,
+  realDuMock,
   setTmuxSocketNameMock,
 } = vi.hoisted(() => ({
   executeDiskGcMock: vi.fn(),
@@ -37,7 +37,7 @@ const {
   loadConfigMock: vi.fn(),
   loadInstanceConfigReadOnlyMock: vi.fn(),
   snapshotProcessesMock: vi.fn(),
-  readDiskBudgetReportMock: vi.fn(),
+  realDuMock: vi.fn(),
   setTmuxSocketNameMock: vi.fn(),
 }));
 
@@ -56,7 +56,7 @@ vi.mock("../../src/disk-gc.js", async () => {
 
 vi.mock("../../src/disk-budget.js", async () => {
   const actual = await vi.importActual<typeof DiskBudgetModule>("../../src/disk-budget.js");
-  return { ...actual, readDiskBudgetReport: readDiskBudgetReportMock };
+  return { ...actual, realDu: realDuMock };
 });
 
 vi.mock("../../src/io.js", () => ({
@@ -100,12 +100,10 @@ function emptyReport(dryRun: boolean): DiskGcReport {
   return {
     dryRun,
     freedBytes: 0,
-    buildCacheRemoved: [],
-    buildCacheFailures: [],
-    profilesRemoved: [],
-    profilesFailures: [],
-    browserRevisionsFreedBytes: 0,
-    npmCap: undefined,
+    buildCache: { candidates: [], removed: [], failures: [] },
+    profiles: { candidates: [], removed: [], failures: [] },
+    browserRevisions: { candidates: [], freedBytes: 0 },
+    npmCap: { status: "not-over-cap" },
   };
 }
 
@@ -125,7 +123,7 @@ describe("spur disk-gc CLI", () => {
       loadConfigMock,
       loadInstanceConfigReadOnlyMock,
       snapshotProcessesMock,
-      readDiskBudgetReportMock,
+      realDuMock,
       setTmuxSocketNameMock,
     ]) {
       mock.mockReset();
@@ -153,10 +151,10 @@ describe("spur disk-gc CLI", () => {
     planBuildCacheGcMock.mockResolvedValue({ candidates: [], blocked: [] });
     planProfileGcMock.mockResolvedValue({ candidates: [], blocked: [] });
     planBrowserRevisionCandidatesMock.mockResolvedValue([]);
-    planNpmCapMock.mockResolvedValue(undefined);
-    createDiskGcDepsMock.mockReturnValue({});
+    planNpmCapMock.mockResolvedValue({ kind: "not-over-cap" });
+    createDiskGcDepsMock.mockResolvedValue({});
     snapshotProcessesMock.mockResolvedValue({ status: "ok", processes: [] });
-    readDiskBudgetReportMock.mockResolvedValue(undefined);
+    realDuMock.mockResolvedValue(null);
     executeDiskGcMock.mockResolvedValue(emptyReport(true));
   });
 
@@ -168,14 +166,22 @@ describe("spur disk-gc CLI", () => {
   it("bare disk-gc never calls executeDiskGc with dryRun false", async () => {
     await parseDiskGc([]);
     expect(executeDiskGcMock).toHaveBeenCalledTimes(1);
-    const [, , options] = executeDiskGcMock.mock.calls[0] as [unknown, unknown, { dryRun: boolean }];
+    const [, , options] = executeDiskGcMock.mock.calls[0] as [
+      unknown,
+      unknown,
+      { dryRun: boolean },
+    ];
     expect(options.dryRun).toBe(true);
   });
 
   it("--execute calls executeDiskGc with dryRun false", async () => {
     executeDiskGcMock.mockResolvedValue(emptyReport(false));
     await parseDiskGc(["--execute"]);
-    const [, , options] = executeDiskGcMock.mock.calls[0] as [unknown, unknown, { dryRun: boolean }];
+    const [, , options] = executeDiskGcMock.mock.calls[0] as [
+      unknown,
+      unknown,
+      { dryRun: boolean },
+    ];
     expect(options.dryRun).toBe(false);
   });
 

@@ -894,6 +894,39 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     });
   });
 
+  it("S7: a .links directory that exists but cannot be read (EACCES-shaped) protects every revision, unlike a legitimately absent one", async () => {
+    const revisionDir = "chromium-1234";
+    await mkdir(join(home, ".cache", "ms-playwright", revisionDir), { recursive: true });
+    // A file where a directory is expected reproduces the "exists, wrong
+    // kind of unreadable" case portably (ENOTDIR) — the point is any error
+    // OTHER than ENOENT, not this specific one. resolvePins must not
+    // collapse it into "no .links dir" (linkFiles = [], unresolvedReferrers
+    // false), which would silently drop the one protection P5 exists to add.
+    await mkdir(join(home, ".cache", "ms-playwright"), { recursive: true });
+    await writeFile(join(home, ".cache", "ms-playwright", ".links"), "not a directory");
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 61 * DAY_MS);
+    let plan: Awaited<ReturnType<typeof planCachePrune>>;
+    try {
+      plan = await planCachePrune({
+        home,
+        tmpPath: tmpRoot,
+        instanceConfig: fakeInstanceConfig(join(home, ".spur"), join(home, ".spur", "worktrees")),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const candidate = plan.candidates.find(
+      (c) => c.entry.path === join(home, ".cache", "ms-playwright", revisionDir),
+    );
+    expect(candidate?.verdict).toEqual({
+      kind: "protected",
+      reason: { kind: "referrer-unresolved" },
+    });
+  });
+
   it("rootIds narrows the measured roots and leaves verdicts unchanged", async () => {
     await mkdir(join(home, ".npm", "_cacache"), { recursive: true });
     await mkdir(join(home, ".npm", "_npx", "somehash"), { recursive: true });
@@ -914,10 +947,12 @@ describe("planCachePrune / executePrune (mkdtemp synthetic tree)", () => {
     });
 
     expect(narrowed.roots.map((r) => r.rootId)).toEqual(["npm-cacache"]);
-    const fullCacacheVerdict = full.candidates.find((c) => c.entry.rootId === "npm-cacache")
-      ?.verdict;
-    const narrowedCacacheVerdict = narrowed.candidates.find((c) => c.entry.rootId === "npm-cacache")
-      ?.verdict;
+    const fullCacacheVerdict = full.candidates.find(
+      (c) => c.entry.rootId === "npm-cacache",
+    )?.verdict;
+    const narrowedCacacheVerdict = narrowed.candidates.find(
+      (c) => c.entry.rootId === "npm-cacache",
+    )?.verdict;
     // Compare verdict shape only, not the exact `ageDays` field: the two
     // calls measure at slightly different real timestamps (ctime cannot be
     // back-dated by utimes(), see the comment elsewhere in this file), which

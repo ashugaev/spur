@@ -96,7 +96,6 @@ import { listSessions } from "./metadata.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import {
   measureDiskBudget,
-  readDiskBudgetReport,
   realDu,
   writeDiskBudgetReport,
   type DiskBudgetReport,
@@ -113,6 +112,7 @@ import {
   singletonLockLivePid,
   type DiskGcPlan,
   type DiskGcReport,
+  type DiskGcReportCandidate,
 } from "./disk-gc.js";
 import { snapshotProcesses } from "./process-tree.js";
 import { readdir as readdirAsync, lstat as lstatAsync } from "node:fs/promises";
@@ -1329,37 +1329,90 @@ export function renderDiskBudgetReport(report: DiskBudgetReport): string {
   return lines.join("\n");
 }
 
+function renderDiskGcCandidateLine(label: string, candidate: DiskGcReportCandidate): string {
+  return `  ${accent(label.padEnd(11))}  ${formatBytes(candidate.sizeBytes).padStart(10)}  ${candidate.path}  ${dimText(candidate.reason)}`;
+}
+
+// B3: the operator reads this output to decide whether to run --execute, so
+// it must name every candidate path and its bytes in BOTH dry-run and
+// executed reports — a total with no paths does not meet "printing exactly
+// what it would remove".
 export function renderDiskGcReport(report: DiskGcReport): string {
   const lines = [boldText("Disk GC")];
+  const removedBuildCache = new Set(report.buildCache.removed);
+  const removedProfiles = new Set(report.profiles.removed);
+
   lines.push(
     dimText(
-      `Build caches: ${report.buildCacheRemoved.length} removed, ${report.buildCacheFailures.length} failure(s). Profiles: ${report.profilesRemoved.length} removed, ${report.profilesFailures.length} failure(s).`,
+      `Build caches: ${report.buildCache.candidates.length} candidate(s), ${report.buildCache.removed.length} removed, ${report.buildCache.failures.length} failure(s). Profiles: ${report.profiles.candidates.length} candidate(s), ${report.profiles.removed.length} removed, ${report.profiles.failures.length} failure(s).`,
     ),
   );
-  for (const path of report.buildCacheRemoved) {
-    lines.push(`  ${accent("build-cache")}  ${path}`);
+  for (const candidate of report.buildCache.candidates) {
+    const label = report.dryRun
+      ? "build-cache"
+      : removedBuildCache.has(candidate.path)
+        ? "removed"
+        : "blocked";
+    lines.push(renderDiskGcCandidateLine(label, candidate));
   }
-  for (const failure of report.buildCacheFailures) {
-    lines.push(dimText(`  blocked  ${failure.path}  (${failure.message})`));
+  for (const failure of report.buildCache.failures) {
+    lines.push(dimText(`  blocked      ${failure.path}  (${failure.message})`));
   }
-  for (const path of report.profilesRemoved) {
-    lines.push(`  ${accent("mcp-profile")}  ${path}`);
+  for (const candidate of report.profiles.candidates) {
+    const label = report.dryRun
+      ? "mcp-profile"
+      : removedProfiles.has(candidate.path)
+        ? "removed"
+        : "blocked";
+    lines.push(renderDiskGcCandidateLine(label, candidate));
   }
-  for (const failure of report.profilesFailures) {
-    lines.push(dimText(`  blocked  ${failure.path}  (${failure.message})`));
+  for (const failure of report.profiles.failures) {
+    lines.push(dimText(`  blocked      ${failure.path}  (${failure.message})`));
   }
-  if (report.npmCap) {
+  if (report.browserRevisions.candidates.length > 0) {
     lines.push("");
-    lines.push(boldText("npm cache cap (~/.npm/_cacache)"));
-    for (const step of report.npmCap.ranSteps) {
-      lines.push(`  ${step}`);
+    lines.push(boldText("Browser revisions (--browser-revisions)"));
+    for (const candidate of report.browserRevisions.candidates) {
+      lines.push(renderDiskGcCandidateLine("revision", candidate));
     }
-    lines.push(
-      dimText(
-        `${report.npmCap.cleanedKeys} key(s), ${formatBytes(report.npmCap.freedBytes)} freed. The whole-root wipe stays owned by \`spur cache --prune --yes\`.`,
-      ),
-    );
   }
+
+  lines.push("");
+  lines.push(boldText("npm cache cap (~/.npm/_cacache)"));
+  switch (report.npmCap.status) {
+    case "not-over-cap":
+      lines.push(dimText("  under diskBudget.npmCacheMaxGb — nothing to do."));
+      break;
+    case "skipped-package-manager-active":
+      lines.push(
+        dimText(
+          `  over cap by ${formatBytes(report.npmCap.overCapBytes)} — skipped, a package manager process is running.`,
+        ),
+      );
+      break;
+    case "index-unreadable":
+      lines.push(
+        dimText(
+          `  over cap by ${formatBytes(report.npmCap.overCapBytes)} — index-v5 unreadable, cap not enforced.`,
+        ),
+      );
+      break;
+    case "planned":
+      lines.push(dimText(`  over cap by ${formatBytes(report.npmCap.overCapBytes)}.`));
+      for (const victim of report.npmCap.victims) {
+        lines.push(renderDiskGcCandidateLine("npm-key", victim));
+      }
+      for (const step of report.npmCap.ranSteps) {
+        lines.push(`  ${step}`);
+      }
+      lines.push(
+        dimText(
+          `${report.npmCap.cleanedKeys} key(s), ${formatBytes(report.npmCap.freedBytes)} freed. The whole-root wipe stays owned by \`spur cache --prune --yes\`.`,
+        ),
+      );
+      break;
+  }
+
   lines.push("");
   lines.push(`Total freed: ${formatBytes(report.freedBytes)}`);
   if (report.dryRun) {
@@ -2817,17 +2870,20 @@ export function createProgram(cliEntrypoint: string): Command {
               ? await planBrowserRevisionCandidates(instanceConfig)
               : [];
 
-            const budgetReport = await readDiskBudgetReport(config.dataDir);
-            const cacacheBytes = budgetReport?.roots.find((r) => r.id === "npm-cacache")?.sizeBytes;
+            // B2: a destructive path must never trust a cached, possibly
+            // stale-or-absent measurement (disk-budget.json has no
+            // freshness check at all, unlike the daemon's warn sweep) — it
+            // measures `_cacache` itself via the same `du` the report uses.
+            const cacacheBytes = await realDu(join(home, ".npm", "_cacache"));
             const npmCap =
-              cacacheBytes !== undefined && cacacheBytes !== null
+              cacacheBytes !== null
                 ? await planNpmCap(
                     home,
                     cacacheBytes,
                     config.diskBudget.npmCacheMaxGb * 1024 * 1024 * 1024,
                     processes,
                   )
-                : undefined;
+                : ({ kind: "not-over-cap" } as const);
 
             const plan: DiskGcPlan = {
               generatedAt: new Date().toISOString(),
@@ -2836,7 +2892,7 @@ export function createProgram(cliEntrypoint: string): Command {
               browserRevisions,
               npmCap,
             };
-            const deps = createDiskGcDeps(config, instanceConfig);
+            const deps = await createDiskGcDeps(config, instanceConfig);
             return executeDiskGc(plan, deps, {
               dryRun,
               browserRevisions: Boolean(options.browserRevisions),

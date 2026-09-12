@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { executeDiskGc, type DiskGcExecutorDeps, type DiskGcPlan } from "../../src/disk-gc.js";
 import type { InstanceConfigReadResult } from "../../src/config.js";
 import type { AppConfig, SessionRecord } from "../../src/types.js";
-import type { NpmCacheIndexEntry } from "../../src/npm-cache-cap.js";
 
 function emptyPlan(overrides: Partial<DiskGcPlan> = {}): DiskGcPlan {
   return {
@@ -10,7 +9,7 @@ function emptyPlan(overrides: Partial<DiskGcPlan> = {}): DiskGcPlan {
     buildCache: { candidates: [], blocked: [] },
     profiles: { candidates: [], blocked: [] },
     browserRevisions: [],
-    npmCap: undefined,
+    npmCap: { kind: "not-over-cap" },
     ...overrides,
   };
 }
@@ -59,7 +58,7 @@ function session(overrides: Partial<SessionRecord> & { id: string }): SessionRec
 }
 
 describe("executeDiskGc — AC3 dry run removes nothing", () => {
-  it("dry run removes nothing and reports the projected freed bytes", async () => {
+  it("dry run removes nothing and reports the projected freed bytes and candidate paths", async () => {
     const rm = vi.fn(async () => {});
     const npmClean = vi.fn(async () => {});
     const npmVerify = vi.fn(async () => {});
@@ -78,7 +77,12 @@ describe("executeDiskGc — AC3 dry run removes nothing", () => {
       },
       profiles: {
         candidates: [
-          { path: "/home/user/.cache/ms-playwright/mcp-chrome-x", rootId: "playwright-browsers", sizeBytes: 200, ageDays: 10 },
+          {
+            path: "/home/user/.cache/ms-playwright/mcp-chrome-x",
+            rootId: "playwright-browsers",
+            sizeBytes: 200,
+            ageDays: 10,
+          },
         ],
         blocked: [],
       },
@@ -93,8 +97,25 @@ describe("executeDiskGc — AC3 dry run removes nothing", () => {
 
     expect(report.dryRun).toBe(true);
     expect(report.freedBytes).toBe(700);
-    expect(report.buildCacheRemoved).toEqual([]);
-    expect(report.profilesRemoved).toEqual([]);
+    expect(report.buildCache.removed).toEqual([]);
+    expect(report.profiles.removed).toEqual([]);
+    // B3: the dry-run report must still name every candidate path and its
+    // bytes — a total with no paths is not "printing exactly what it would
+    // remove".
+    expect(report.buildCache.candidates).toEqual([
+      {
+        path: "/data/worktrees/api/s1/.cache/webpack",
+        sizeBytes: 500,
+        reason: expect.any(String),
+      },
+    ]);
+    expect(report.profiles.candidates).toEqual([
+      {
+        path: "/home/user/.cache/ms-playwright/mcp-chrome-x",
+        sizeBytes: 200,
+        reason: expect.any(String),
+      },
+    ]);
     expect(rm).not.toHaveBeenCalled();
     expect(npmClean).not.toHaveBeenCalled();
     expect(npmVerify).not.toHaveBeenCalled();
@@ -128,8 +149,8 @@ describe("executeDiskGc — AC6 execute-time re-read guard", () => {
     });
 
     expect(rm).not.toHaveBeenCalled();
-    expect(report.buildCacheRemoved).toEqual([]);
-    expect(report.buildCacheFailures).toEqual([
+    expect(report.buildCache.removed).toEqual([]);
+    expect(report.buildCache.failures).toEqual([
       { path: "/data/worktrees/api/s1/.cache/webpack", message: "changed_during_run" },
     ]);
   });
@@ -150,7 +171,10 @@ describe("executeDiskGc — AC6 execute-time re-read guard", () => {
         blocked: [],
       },
     });
-    const deps = makeDeps({ rm, readSessionFresh: () => session({ id: "s1", status: "completed" }) });
+    const deps = makeDeps({
+      rm,
+      readSessionFresh: () => session({ id: "s1", status: "completed" }),
+    });
 
     const report = await executeDiskGc(plan, deps, {
       dryRun: false,
@@ -159,7 +183,7 @@ describe("executeDiskGc — AC6 execute-time re-read guard", () => {
     });
 
     expect(rm).toHaveBeenCalledWith("/data/worktrees/api/s1/.cache/webpack");
-    expect(report.buildCacheRemoved).toEqual(["/data/worktrees/api/s1/.cache/webpack"]);
+    expect(report.buildCache.removed).toEqual(["/data/worktrees/api/s1/.cache/webpack"]);
     expect(report.freedBytes).toBe(500);
   });
 });
@@ -195,20 +219,67 @@ describe("executeDiskGc — AC13 executor containment re-check", () => {
     });
 
     expect(rm).not.toHaveBeenCalled();
-    expect(report.buildCacheRemoved).toEqual([]);
-    expect(report.buildCacheFailures).toEqual([
+    expect(report.buildCache.removed).toEqual([]);
+    expect(report.buildCache.failures).toEqual([
       { path: "/data/worktrees/api/s1/.cache/webpack", message: "refused: outside worktreeDir" },
     ]);
   });
+
+  it("B5: an executor deps built with a symlinked-but-realpath-resolved worktreeDir accepts a legitimate candidate", async () => {
+    // worktreeDirReal simulates createDiskGcDeps's realpath() resolution:
+    // the candidate's own realpath lands under the RESOLVED dir even though
+    // the lexical worktreeDir differs (a symlink ancestor). The guard must
+    // compare real-to-real, never lexical-to-real.
+    const rm = vi.fn(async () => {});
+    const plan = emptyPlan({
+      buildCache: {
+        candidates: [
+          {
+            path: "/data/worktrees-symlink/api/s1/.cache/webpack",
+            worktreePath: "/data/worktrees-symlink/api/s1",
+            sizeBytes: 500,
+            ageDays: 30,
+            sessionIds: ["s1"],
+          },
+        ],
+        blocked: [],
+      },
+    });
+    const deps = makeDeps({
+      rm,
+      worktreeDirReal: "/data/real-worktrees",
+      readSessionFresh: () => session({ id: "s1", status: "completed" }),
+      realpath: async () => "/data/real-worktrees/api/s1/.cache/webpack",
+    });
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: false,
+      browserRevisions: false,
+      npmCap: false,
+    });
+
+    expect(rm).toHaveBeenCalledWith("/data/worktrees-symlink/api/s1/.cache/webpack");
+    expect(report.buildCache.removed).toEqual(["/data/worktrees-symlink/api/s1/.cache/webpack"]);
+  });
 });
 
-describe("executeDiskGc — AC7 npm cap: verify, clean oldest keys, verify, never wipes the root", () => {
-  const victims: NpmCacheIndexEntry[] = [
-    { key: "pkg-a", integrity: "sha512-a", time: 100, size: 1000 },
-    { key: "pkg-b", integrity: "sha512-b", time: 200, size: 500 },
-  ];
+describe("executeDiskGc — AC7/B1 npm cap: verify, RE-MEASURE, gate, clean oldest keys, verify", () => {
+  const npmCapPlanned = (overCapBytes = 3000) =>
+    ({
+      kind: "planned" as const,
+      currentSizeBytes: 5000,
+      capBytes: 5000 - overCapBytes,
+      overCapBytes,
+      plan: {
+        victims: [
+          { key: "pkg-a", size: 1000 },
+          { key: "pkg-b", size: 500 },
+        ],
+        victimBytes: 1500,
+      },
+    }) satisfies DiskGcPlan["npmCap"];
 
-  it("runs verify, cleans oldest-first, verifies again, and reports freed bytes", async () => {
+  it("runs verify, cleans oldest-first, verifies again, and reports freed bytes when still over cap after verify", async () => {
     const calls: string[] = [];
     const npmVerify = vi.fn(async () => {
       calls.push("verify");
@@ -219,14 +290,11 @@ describe("executeDiskGc — AC7 npm cap: verify, clean oldest keys, verify, neve
     let measureCall = 0;
     const measureCacacheBytes = vi.fn(async () => {
       measureCall += 1;
-      return measureCall === 1 ? 5000 : 3500;
+      // First measurement (post-verify, pre-clean) is STILL over the 3500 cap;
+      // second (post-clean, post-verify) is under it.
+      return measureCall === 1 ? 4200 : 3000;
     });
-    const plan = emptyPlan({
-      npmCap: {
-        overCapBytes: 3000,
-        capResult: { ok: true, plan: { victims, victimBytes: 1500, indexedTotalBytes: 1500 } },
-      },
-    });
+    const plan = emptyPlan({ npmCap: npmCapPlanned(1500) });
     const deps = makeDeps({ npmVerify, npmClean, measureCacacheBytes });
 
     const report = await executeDiskGc(plan, deps, {
@@ -236,20 +304,35 @@ describe("executeDiskGc — AC7 npm cap: verify, clean oldest keys, verify, neve
     });
 
     expect(calls).toEqual(["verify", "clean:pkg-a", "clean:pkg-b", "verify"]);
-    expect(report.npmCap?.cleanedKeys).toBe(2);
-    expect(report.npmCap?.freedBytes).toBe(1500);
-    expect(report.freedBytes).toBe(1500);
+    expect(report.npmCap).toMatchObject({ status: "planned", cleanedKeys: 2, freedBytes: 2000 });
+    expect(report.freedBytes).toBe(2000);
+  });
+
+  it("B1: verify alone clears the cap — clean is NEVER called, and no valid entry is touched", async () => {
+    const npmVerify = vi.fn(async () => {});
+    const npmClean = vi.fn(async () => {});
+    // capBytes = 5000 - 1500 = 3500. Verify alone (orphan collection) drops
+    // the measured size to 3200, already under cap.
+    const measureCacacheBytes = vi.fn(async () => 3200);
+    const plan = emptyPlan({ npmCap: npmCapPlanned(1500) });
+    const deps = makeDeps({ npmVerify, npmClean, measureCacacheBytes });
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: false,
+      browserRevisions: false,
+      npmCap: true,
+    });
+
+    expect(npmVerify).toHaveBeenCalledTimes(1);
+    expect(npmClean).not.toHaveBeenCalled();
+    expect(report.npmCap).toMatchObject({ status: "planned", cleanedKeys: 0, freedBytes: 1800 });
+    expect(report.freedBytes).toBe(1800);
   });
 
   it("dry run projects the steps without running verify or clean", async () => {
     const npmVerify = vi.fn(async () => {});
     const npmClean = vi.fn(async () => {});
-    const plan = emptyPlan({
-      npmCap: {
-        overCapBytes: 3000,
-        capResult: { ok: true, plan: { victims, victimBytes: 1500, indexedTotalBytes: 1500 } },
-      },
-    });
+    const plan = emptyPlan({ npmCap: npmCapPlanned() });
     const deps = makeDeps({ npmVerify, npmClean });
 
     const report = await executeDiskGc(plan, deps, {
@@ -260,21 +343,36 @@ describe("executeDiskGc — AC7 npm cap: verify, clean oldest keys, verify, neve
 
     expect(npmVerify).not.toHaveBeenCalled();
     expect(npmClean).not.toHaveBeenCalled();
-    expect(report.npmCap?.cleanedKeys).toBe(2);
-    expect(report.npmCap?.freedBytes).toBe(1500);
-    expect(report.npmCap?.ranSteps.every((s) => s.startsWith("[projected, not measured]"))).toBe(
-      true,
-    );
+    if (report.npmCap.status !== "planned") throw new Error("expected planned");
+    expect(report.npmCap.cleanedKeys).toBe(2);
+    expect(report.npmCap.freedBytes).toBe(1500);
+    expect(
+      report.npmCap.ranSteps.every((step: string) => step.startsWith("[projected, not measured]")),
+    ).toBe(true);
   });
 
-  it("an unreadable index-v5 aborts cleanly and cleans nothing", async () => {
+  it("an unreadable index-v5 reports index-unreadable and cleans nothing", async () => {
+    const npmVerify = vi.fn(async () => {});
+    const npmClean = vi.fn(async () => {});
+    const plan = emptyPlan({ npmCap: { kind: "index-unreadable", overCapBytes: 3000 } });
+    const deps = makeDeps({ npmVerify, npmClean });
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: false,
+      browserRevisions: false,
+      npmCap: true,
+    });
+
+    expect(npmVerify).not.toHaveBeenCalled();
+    expect(npmClean).not.toHaveBeenCalled();
+    expect(report.npmCap).toEqual({ status: "index-unreadable", overCapBytes: 3000 });
+  });
+
+  it("S8: a running package manager reports its own status kind, distinct from index-unreadable", async () => {
     const npmVerify = vi.fn(async () => {});
     const npmClean = vi.fn(async () => {});
     const plan = emptyPlan({
-      npmCap: {
-        overCapBytes: 3000,
-        capResult: { ok: false, reason: "npm_index_unreadable" },
-      },
+      npmCap: { kind: "skipped-package-manager-active", overCapBytes: 3000 },
     });
     const deps = makeDeps({ npmVerify, npmClean });
 
@@ -286,6 +384,9 @@ describe("executeDiskGc — AC7 npm cap: verify, clean oldest keys, verify, neve
 
     expect(npmVerify).not.toHaveBeenCalled();
     expect(npmClean).not.toHaveBeenCalled();
-    expect(report.npmCap).toBeUndefined();
+    expect(report.npmCap).toEqual({
+      status: "skipped-package-manager-active",
+      overCapBytes: 3000,
+    });
   });
 });

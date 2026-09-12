@@ -1,13 +1,6 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  classifyOrphanedWorktrees,
-  findBuildCacheDirs,
-  planBuildCacheGc,
-  planProfileGc,
-} from "../../src/disk-gc.js";
+import { describe, expect, it } from "vitest";
+import { classifyOrphanedWorktrees, planBuildCacheGc, planProfileGc } from "../../src/disk-gc.js";
 import type { SessionRecord, SessionStatus } from "../../src/types.js";
 
 const WORKTREE_DIR = "/data/worktrees";
@@ -63,7 +56,9 @@ describe("planBuildCacheGc — AC4 live-session boundary", () => {
       });
 
       expect(result.candidates).toEqual([]);
-      expect(result.blocked).toEqual([{ worktreePath, reason: "live_session", sessionIds: ["s1"] }]);
+      expect(result.blocked).toEqual([
+        { worktreePath, reason: "live_session", sessionIds: ["s1"] },
+      ]);
     },
   );
 
@@ -123,7 +118,9 @@ describe("planBuildCacheGc — AC13 worktreeDir containment", () => {
       now: NOW,
       olderThanDays: 14,
       maxWorktrees: 20,
-      listBuildCacheDirs: fakeListBuildCacheDirs([join(operatorCheckout, "packages/web/.next/cache")]),
+      listBuildCacheDirs: fakeListBuildCacheDirs([
+        join(operatorCheckout, "packages/web/.next/cache"),
+      ]),
       measureBytes: measureBytesFixed,
     });
 
@@ -153,7 +150,9 @@ describe("planBuildCacheGc — AC13 worktreeDir containment", () => {
 
 describe("planBuildCacheGc — AC15 report-only classes", () => {
   it("a worktree with no session record at all is never a candidate (orphaned_no_record)", () => {
-    const knownSessions = [session({ id: "s1", status: "completed", worktreePath: "/data/worktrees/api/s1" })];
+    const knownSessions = [
+      session({ id: "s1", status: "completed", worktreePath: "/data/worktrees/api/s1" }),
+    ];
     const discovered = ["/data/worktrees/api/s1", "/data/worktrees/api/orphan"];
     expect(classifyOrphanedWorktrees(discovered, knownSessions)).toEqual([
       "/data/worktrees/api/orphan",
@@ -161,37 +160,14 @@ describe("planBuildCacheGc — AC15 report-only classes", () => {
   });
 });
 
-describe("findBuildCacheDirs (real fs, mkdtemp)", () => {
-  let root: string;
-
-  beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "spur-disk-gc-buildcache-"));
-  });
-
-  afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  it("finds .cache/webpack and .next/cache, skips node_modules, never the worktree root", async () => {
-    await mkdir(join(root, "front", ".cache", "webpack"), { recursive: true });
-    await mkdir(join(root, "packages", "web", ".next", "cache"), { recursive: true });
-    await mkdir(join(root, "front", "node_modules", "webpack"), { recursive: true });
-    await mkdir(join(root, "front", "node_modules", "@svgr", "webpack"), { recursive: true });
-    await writeFile(join(root, "front", ".cache", "webpack", "data.pack"), "x");
-
-    const found = await findBuildCacheDirs(root);
-    const paths = found.map((f) => f.path).sort();
-
-    expect(paths).toEqual(
-      [join(root, "front", ".cache", "webpack"), join(root, "packages", "web", ".next", "cache")].sort(),
-    );
-    expect(paths).not.toContain(root);
-    expect(paths.some((p) => p.includes("node_modules"))).toBe(false);
-  });
-});
+// findBuildCacheDirs itself has its own real-fs test in build-cache-scan.test.ts
+// (it lives in build-cache-scan.ts now, imported here only as an IO seam).
 
 describe("planProfileGc — AC20 mcp profile default target and live-launch protection", () => {
-  const profileRoot = { rootId: "playwright-browsers" as const, path: "/home/user/.cache/ms-playwright" };
+  const profileRoot = {
+    rootId: "playwright-browsers" as const,
+    path: "/home/user/.cache/ms-playwright",
+  };
   const roots = [profileRoot];
 
   it("a live argv match protects the profile dir", async () => {

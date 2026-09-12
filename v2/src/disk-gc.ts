@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readdir, lstat, readlink, realpath, rm } from "node:fs/promises";
+import { readlink, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -8,86 +8,16 @@ import {
   planCachePrune,
   type CacheCandidate,
 } from "./cache-retention.js";
+import { findBuildCacheDirs, type BuildCacheDirFact } from "./build-cache-scan.js";
 import { readSession } from "./metadata.js";
-import { planNpmCacheCap, type NpmCacheCapResult } from "./npm-cache-cap.js";
+import { planNpmCacheCap } from "./npm-cache-cap.js";
 import type { ProcessSnapshotEntry } from "./process-tree.js";
 import { isTerminalSessionStatus, type AppConfig, type SessionRecord } from "./types.js";
 import type { InstanceConfigReadResult } from "./config.js";
 
 const execFileAsync = promisify(execFile);
 
-// ---------------------------------------------------------------------------
-// Shared: bounded build-cache walk (also used by disk-budget.ts's report row)
-// ---------------------------------------------------------------------------
-
-const BUILD_CACHE_MAX_DEPTH = 3;
-const BUILD_CACHE_SKIP_NAMES = new Set(["node_modules", ".git"]);
-
-export interface BuildCacheDirFact {
-  path: string;
-  newestMtimeMs: number;
-}
-
-async function newestMtimeMs(dirPath: string): Promise<number> {
-  let newest = 0;
-  const st = await lstat(dirPath);
-  newest = Math.max(newest, st.mtimeMs);
-  let entries: string[];
-  try {
-    entries = await readdir(dirPath);
-  } catch {
-    return newest;
-  }
-  for (const name of entries) {
-    try {
-      const childStat = await lstat(join(dirPath, name));
-      if (childStat.mtimeMs > newest) newest = childStat.mtimeMs;
-    } catch {
-      // vanished mid-walk — not a signal either way.
-    }
-  }
-  return newest;
-}
-
-// Bounded, depth-3 walk from a worktree root, skipping node_modules and .git,
-// collecting directories whose path ends `/.cache/webpack` or `/.next/cache`.
-// Never an unbounded filesystem walk (same discipline as cache-retention.ts's
-// pin resolution) — a worktree can contain arbitrarily deep node_modules
-// trees, which BUILD_CACHE_SKIP_NAMES prunes before depth even matters.
-export async function findBuildCacheDirs(worktreeRoot: string): Promise<BuildCacheDirFact[]> {
-  const found: BuildCacheDirFact[] = [];
-
-  async function walk(dirPath: string, depth: number): Promise<void> {
-    if (depth > BUILD_CACHE_MAX_DEPTH) return;
-    let names: string[];
-    try {
-      names = await readdir(dirPath);
-    } catch {
-      return;
-    }
-    for (const name of names) {
-      if (BUILD_CACHE_SKIP_NAMES.has(name)) continue;
-      const childPath = join(dirPath, name);
-      let st: Awaited<ReturnType<typeof lstat>>;
-      try {
-        st = await lstat(childPath);
-      } catch {
-        continue;
-      }
-      if (!st.isDirectory()) continue;
-      const isWebpackCache = childPath.endsWith(join(".cache", "webpack"));
-      const isNextCache = childPath.endsWith(join(".next", "cache"));
-      if (isWebpackCache || isNextCache) {
-        found.push({ path: childPath, newestMtimeMs: await newestMtimeMs(childPath) });
-        continue; // do not descend into a matched build-cache dir itself
-      }
-      await walk(childPath, depth + 1);
-    }
-  }
-
-  await walk(worktreeRoot, 0);
-  return found;
-}
+export { findBuildCacheDirs, type BuildCacheDirFact };
 
 // ---------------------------------------------------------------------------
 // T3: worktree build caches — planner
@@ -188,10 +118,17 @@ export async function planBuildCacheGc(input: PlanBuildCacheInput): Promise<{
 
     consideredWorktrees += 1;
     const dirs = await input.listBuildCacheDirs(worktreePath);
+    // S12: one `too_recent` row per WORKTREE, not per dir — a worktree with
+    // several too-recent build-cache dirs previously duplicated the same
+    // group row once per dir.
+    let tooRecentReported = false;
     for (const dir of dirs) {
       const ageDays = ageInDays(dir.newestMtimeMs, input.now);
       if (ageDays < input.olderThanDays) {
-        blocked.push({ worktreePath, reason: "too_recent", sessionIds });
+        if (!tooRecentReported) {
+          blocked.push({ worktreePath, reason: "too_recent", sessionIds });
+          tooRecentReported = true;
+        }
         continue;
       }
       const sizeBytes = await input.measureBytes(dir.path);
@@ -315,28 +252,48 @@ export async function planBrowserRevisionCandidates(
 // T1: npm per-key cap — plan only; deletion always via npm's own command.
 // ---------------------------------------------------------------------------
 
-export interface NpmCapPlanResult {
-  overCapBytes: number;
-  capResult: NpmCacheCapResult;
-  skippedReason?: "package_manager_active";
-}
+// A dedicated discriminant per outcome (S8) — "index unreadable" and
+// "skipped because a package manager is running" are different causes and
+// must never share one reason string; a report or JSON consumer needs to
+// tell them apart.
+export type NpmCapPlanResult =
+  | { kind: "not-over-cap" }
+  | { kind: "skipped-package-manager-active"; overCapBytes: number }
+  | { kind: "index-unreadable"; overCapBytes: number }
+  | {
+      kind: "planned";
+      currentSizeBytes: number;
+      capBytes: number;
+      overCapBytes: number;
+      plan: { victims: { key: string; size: number }[]; victimBytes: number };
+    };
 
 export async function planNpmCap(
   home: string,
   currentSizeBytes: number,
   capBytes: number,
   processes: readonly ProcessSnapshotEntry[],
-): Promise<NpmCapPlanResult | undefined> {
-  if (currentSizeBytes <= capBytes) return undefined;
+): Promise<NpmCapPlanResult> {
+  if (currentSizeBytes <= capBytes) return { kind: "not-over-cap" };
+  const overCapBytes = currentSizeBytes - capBytes;
   if (processes.some(isPackageManagerProcess)) {
-    return {
-      overCapBytes: currentSizeBytes - capBytes,
-      capResult: { ok: false, reason: "npm_index_unreadable" },
-      skippedReason: "package_manager_active",
-    };
+    return { kind: "skipped-package-manager-active", overCapBytes };
   }
-  const capResult = await planNpmCacheCap(join(home, ".npm", "_cacache"), currentSizeBytes, capBytes);
-  return { overCapBytes: currentSizeBytes - capBytes, capResult };
+  const capResult = await planNpmCacheCap(
+    join(home, ".npm", "_cacache"),
+    currentSizeBytes,
+    capBytes,
+  );
+  if (!capResult.ok) {
+    return { kind: "index-unreadable", overCapBytes };
+  }
+  return {
+    kind: "planned",
+    currentSizeBytes,
+    capBytes,
+    overCapBytes,
+    plan: { victims: capResult.plan.victims, victimBytes: capResult.plan.victimBytes },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -348,24 +305,48 @@ export interface DiskGcPlan {
   buildCache: { candidates: BuildCacheCandidate[]; blocked: BuildCacheBlockedGroup[] };
   profiles: { candidates: ProfileCandidate[]; blocked: ProfileBlockedEntry[] };
   browserRevisions: CacheCandidate[];
-  npmCap: NpmCapPlanResult | undefined;
+  npmCap: NpmCapPlanResult;
 }
 
 // ---------------------------------------------------------------------------
 // Executor
 // ---------------------------------------------------------------------------
 
+// Every candidate the operator would need to read to decide whether to
+// re-run with --execute — path, bytes, and the justification line — printed
+// in BOTH dry-run and executed reports (B3: a dry run that prints only a
+// total and no paths does not meet "printing exactly what it would remove").
+export interface DiskGcReportCandidate {
+  path: string;
+  sizeBytes: number;
+  reason: string;
+}
+
 export interface DiskGcReport {
   dryRun: boolean;
   freedBytes: number;
-  buildCacheRemoved: string[];
-  buildCacheFailures: { path: string; message: string }[];
-  profilesRemoved: string[];
-  profilesFailures: { path: string; message: string }[];
-  browserRevisionsFreedBytes: number;
+  buildCache: {
+    candidates: DiskGcReportCandidate[];
+    removed: string[];
+    failures: { path: string; message: string }[];
+  };
+  profiles: {
+    candidates: DiskGcReportCandidate[];
+    removed: string[];
+    failures: { path: string; message: string }[];
+  };
+  browserRevisions: {
+    candidates: DiskGcReportCandidate[];
+    freedBytes: number;
+  };
   npmCap:
-    | undefined
+    | { status: "not-over-cap" }
+    | { status: "skipped-package-manager-active"; overCapBytes: number }
+    | { status: "index-unreadable"; overCapBytes: number }
     | {
+        status: "planned";
+        overCapBytes: number;
+        victims: DiskGcReportCandidate[];
         ranSteps: string[];
         cleanedKeys: number;
         freedBytes: number | null;
@@ -389,6 +370,11 @@ export async function executeDiskGc(
   options: { dryRun: boolean; browserRevisions: boolean; npmCap: boolean },
 ): Promise<DiskGcReport> {
   let freedBytes = 0;
+  const buildCacheCandidates: DiskGcReportCandidate[] = plan.buildCache.candidates.map((c) => ({
+    path: c.path,
+    sizeBytes: c.sizeBytes,
+    reason: `worktree build cache, ${c.ageDays}d old, terminal session(s) ${c.sessionIds.join(",")}`,
+  }));
   const buildCacheRemoved: string[] = [];
   const buildCacheFailures: { path: string; message: string }[] = [];
 
@@ -429,6 +415,11 @@ export async function executeDiskGc(
     }
   }
 
+  const profileCandidates: DiskGcReportCandidate[] = plan.profiles.candidates.map((c) => ({
+    path: c.path,
+    sizeBytes: c.sizeBytes,
+    reason: `mcp profile dir, ${c.ageDays}d old, no live argv/SingletonLock match`,
+  }));
   const profilesRemoved: string[] = [];
   const profilesFailures: { path: string; message: string }[] = [];
   for (const candidate of plan.profiles.candidates) {
@@ -448,11 +439,19 @@ export async function executeDiskGc(
     }
   }
 
+  const browserRevisionCandidates: DiskGcReportCandidate[] = plan.browserRevisions.map((c) => ({
+    path: c.entry.path,
+    sizeBytes: c.entry.sizeKb * 1024,
+    reason:
+      c.entry.entryClass.kind === "browser-revision"
+        ? `unpinned browser revision, ${c.entry.ageDays}d old`
+        : "unpinned browser revision",
+  }));
   let browserRevisionsFreedBytes = 0;
   if (options.browserRevisions && plan.browserRevisions.length > 0) {
     if (options.dryRun) {
-      browserRevisionsFreedBytes = plan.browserRevisions.reduce(
-        (sum, c) => sum + c.entry.sizeKb * 1024,
+      browserRevisionsFreedBytes = browserRevisionCandidates.reduce(
+        (sum, c) => sum + c.sizeBytes,
         0,
       );
     } else {
@@ -463,40 +462,97 @@ export async function executeDiskGc(
   }
 
   let npmCapReport: DiskGcReport["npmCap"];
-  if (options.npmCap && plan.npmCap && plan.npmCap.capResult.ok) {
-    const victims = plan.npmCap.capResult.plan.victims;
+  if (!options.npmCap || plan.npmCap.kind === "not-over-cap") {
+    npmCapReport = { status: "not-over-cap" };
+  } else if (plan.npmCap.kind === "skipped-package-manager-active") {
+    npmCapReport = {
+      status: "skipped-package-manager-active",
+      overCapBytes: plan.npmCap.overCapBytes,
+    };
+  } else if (plan.npmCap.kind === "index-unreadable") {
+    npmCapReport = { status: "index-unreadable", overCapBytes: plan.npmCap.overCapBytes };
+  } else {
+    const npmCapPlan = plan.npmCap;
+    const victims: DiskGcReportCandidate[] = npmCapPlan.plan.victims.map((v) => ({
+      path: v.key,
+      sizeBytes: v.size,
+      reason: "oldest index-v5 entry, ranked for npm cache clean",
+    }));
     if (options.dryRun) {
       npmCapReport = {
-        ranSteps: ["[projected, not measured] npm cache verify", ...victims.map((v) => `[projected, not measured] npm cache clean ${v.key}`), "[projected, not measured] npm cache verify"],
+        status: "planned",
+        overCapBytes: npmCapPlan.overCapBytes,
+        victims,
+        ranSteps: [
+          "[projected, not measured] npm cache verify",
+          ...victims.map((v) => `[projected, not measured] npm cache clean ${v.path}`),
+          "[projected, not measured] npm cache verify (only if step 2 above still runs)",
+        ],
         cleanedKeys: victims.length,
-        freedBytes: plan.npmCap.capResult.plan.victimBytes,
+        freedBytes: npmCapPlan.plan.victimBytes,
       };
     } else {
+      // R3-D's real gate: verify -> RE-MEASURE -> stop if under cap -> only
+      // THEN clean the ranked victims -> verify again. The victim list is
+      // computed at plan time against the PRE-verify size, so it must never
+      // be cleaned unconditionally — verify alone may already have cleared
+      // the cap by collecting orphaned/corrupt content, and every victim
+      // byte cleaned past that point is a needless refetch of still-valid
+      // content.
       const ranSteps: string[] = [];
       await deps.npmVerify();
       ranSteps.push("npm cache verify");
-      const before = await deps.measureCacacheBytes();
-      for (const victim of victims) {
-        await deps.npmClean(victim.key);
-        ranSteps.push(`npm cache clean ${victim.key}`);
+      const afterVerify = await deps.measureCacacheBytes();
+      if (afterVerify !== null && afterVerify <= npmCapPlan.capBytes) {
+        const npmFreed = Math.max(0, npmCapPlan.currentSizeBytes - afterVerify);
+        freedBytes += npmFreed;
+        npmCapReport = {
+          status: "planned",
+          overCapBytes: npmCapPlan.overCapBytes,
+          victims,
+          ranSteps,
+          cleanedKeys: 0,
+          freedBytes: npmFreed,
+        };
+      } else {
+        for (const victim of npmCapPlan.plan.victims) {
+          await deps.npmClean(victim.key);
+          ranSteps.push(`npm cache clean ${victim.key}`);
+        }
+        await deps.npmVerify();
+        ranSteps.push("npm cache verify");
+        const after = await deps.measureCacacheBytes();
+        const npmFreed = after !== null ? Math.max(0, npmCapPlan.currentSizeBytes - after) : null;
+        if (npmFreed !== null) freedBytes += npmFreed;
+        npmCapReport = {
+          status: "planned",
+          overCapBytes: npmCapPlan.overCapBytes,
+          victims,
+          ranSteps,
+          cleanedKeys: npmCapPlan.plan.victims.length,
+          freedBytes: npmFreed,
+        };
       }
-      await deps.npmVerify();
-      ranSteps.push("npm cache verify");
-      const after = await deps.measureCacacheBytes();
-      const npmFreed = before !== null && after !== null ? Math.max(0, before - after) : null;
-      if (npmFreed !== null) freedBytes += npmFreed;
-      npmCapReport = { ranSteps, cleanedKeys: victims.length, freedBytes: npmFreed };
     }
   }
 
   return {
     dryRun: options.dryRun,
     freedBytes,
-    buildCacheRemoved,
-    buildCacheFailures,
-    profilesRemoved,
-    profilesFailures,
-    browserRevisionsFreedBytes,
+    buildCache: {
+      candidates: buildCacheCandidates,
+      removed: buildCacheRemoved,
+      failures: buildCacheFailures,
+    },
+    profiles: {
+      candidates: profileCandidates,
+      removed: profilesRemoved,
+      failures: profilesFailures,
+    },
+    browserRevisions: {
+      candidates: browserRevisionCandidates,
+      freedBytes: browserRevisionsFreedBytes,
+    },
     npmCap: npmCapReport,
   };
 }
@@ -541,12 +597,21 @@ async function singletonLockLivePid(profilePath: string): Promise<number | null>
   return null;
 }
 
-export function createDiskGcDeps(
+// D2 requires the executor to re-assert containment of the candidate's
+// REALPATH against a REALPATH'd worktreeDir — a merely lexical worktreeDir
+// mis-fires (refuses every legitimate candidate) the moment `worktreeDir` or
+// any ancestor is itself a symlink, since `relative(lexicalDir, realCandidate)`
+// then starts with "..". Resolved once here, at dep construction, not per
+// candidate. Falls back to the lexical path only if the directory does not
+// exist yet — nothing under a nonexistent worktreeDir can be a real candidate
+// either way.
+export async function createDiskGcDeps(
   config: AppConfig,
   instanceConfig: Extract<InstanceConfigReadResult, { status: "ok" }>,
-): DiskGcExecutorDeps {
+): Promise<DiskGcExecutorDeps> {
+  const worktreeDirReal = await realpath(config.worktreeDir).catch(() => config.worktreeDir);
   return {
-    worktreeDirReal: config.worktreeDir,
+    worktreeDirReal,
     readSessionFresh: (sessionId) => readSession(config.dataDir, sessionId),
     rm: async (path) => {
       await rm(path, { recursive: true, force: true });

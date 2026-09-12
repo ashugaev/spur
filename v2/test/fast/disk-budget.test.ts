@@ -104,4 +104,27 @@ describe("measureDiskBudget", () => {
     expect(row?.sizeBytes).toBe(400);
     expect(row?.status).toBe("measured");
   });
+
+  it("S11: worktree-build-caches bytes are reported but never double-counted into the total", async () => {
+    const du: DiskBudgetDeps["du"] = async (path) => {
+      // The `worktrees` root's own du already includes the build-cache
+      // bytes underneath it (a build cache is a subdirectory of a
+      // worktree) — 200 total, of which 40 is the build cache.
+      if (path === "/data/spur/worktrees") return 200;
+      if (path.endsWith("webpack")) return 40;
+      return null;
+    };
+    const report = await measureDiskBudget(
+      { du },
+      {
+        ...BASE_OPTIONS,
+        worktreePaths: ["/data/spur/worktrees/api/s1"],
+        listBuildCacheDirs: async () => [{ path: "/data/spur/worktrees/api/s1/.cache/webpack" }],
+      },
+    );
+    const buildCacheRow = report.roots.find((r) => r.id === "worktree-build-caches");
+    expect(buildCacheRow?.sizeBytes).toBe(40);
+    // Total must equal 200 (worktrees) alone, never 200 + 40.
+    expect(report.totals.attributableBytes).toBe(200);
+  });
 });

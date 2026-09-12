@@ -5659,36 +5659,33 @@ export class SessionService {
       return;
     }
     this.lastDiskBudgetSweepAt = Date.now();
-    try {
-      const report = await readDiskBudgetReport(this.config.dataDir);
-      if (!report) {
-        return;
-      }
-      const ageMs = Date.now() - new Date(report.generatedAt).getTime();
-      if (!Number.isFinite(ageMs) || ageMs > 2 * budgetConfig.intervalMinutes * 60_000) {
-        return;
-      }
-      const warnBytes = budgetConfig.warnAttributableGb * 1024 * 1024 * 1024;
-      if (report.totals.attributableBytes <= warnBytes) {
-        return;
-      }
-      const attributableGb = report.totals.attributableBytes / (1024 * 1024 * 1024);
-      this.logEvent("host.disk.budget_exceeded", {
-        level: "warn",
-        message: `Spur-attributable disk usage is ${attributableGb.toFixed(1)}GB (above the ${budgetConfig.warnAttributableGb}GB budget)`,
-        details: {
-          attributableGb,
-          warnAttributableGb: budgetConfig.warnAttributableGb,
-          roots: report.roots.map((root) => ({ id: root.id, sizeBytes: root.sizeBytes })),
-        },
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("disk.budget.sweep.failed", {
-        level: "warn",
-        message: `Disk budget sweep failed: ${message}`,
-      });
+    // No try/catch here: readDiskBudgetReport already swallows every read/parse
+    // failure internally and returns undefined (repo rule — fail closed, never
+    // throw), and nothing else below can throw. A catch around a call that
+    // cannot fail is dead code with an event name (`disk.budget.sweep.failed`)
+    // no test could ever exercise honestly — S9.
+    const report = await readDiskBudgetReport(this.config.dataDir);
+    if (!report) {
+      return;
     }
+    const ageMs = Date.now() - new Date(report.generatedAt).getTime();
+    if (!Number.isFinite(ageMs) || ageMs > 2 * budgetConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    const warnBytes = budgetConfig.warnAttributableGb * 1024 * 1024 * 1024;
+    if (report.totals.attributableBytes <= warnBytes) {
+      return;
+    }
+    const attributableGb = report.totals.attributableBytes / (1024 * 1024 * 1024);
+    this.logEvent("host.disk.budget_exceeded", {
+      level: "warn",
+      message: `Spur-attributable disk usage is ${attributableGb.toFixed(1)}GB (above the ${budgetConfig.warnAttributableGb}GB budget)`,
+      details: {
+        attributableGb,
+        warnAttributableGb: budgetConfig.warnAttributableGb,
+        roots: report.roots.map((root) => ({ id: root.id, sizeBytes: root.sizeBytes })),
+      },
+    });
   }
 
   private async refreshDashboardCacheEntry(record: SessionRecord): Promise<void> {

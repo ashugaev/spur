@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { findBuildCacheDirs } from "./disk-gc.js";
+import { findBuildCacheDirs } from "./build-cache-scan.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -132,11 +132,17 @@ export async function measureDiskBudget(
         id: spec.id,
         path: buildCacheAggregatePath(options.worktreeDir),
         sizeBytes: anyMeasured || (options.worktreePaths?.length ?? 0) === 0 ? sizeBytes : null,
-        status: anyMeasured || (options.worktreePaths?.length ?? 0) === 0 ? "measured" : "unmeasured",
+        status:
+          anyMeasured || (options.worktreePaths?.length ?? 0) === 0 ? "measured" : "unmeasured",
         reclaimedByDiskGc: spec.reclaimedByDiskGc,
         reclaimedBy: spec.reclaimedBy,
       });
-      attributableBytes += sizeBytes;
+      // S11: NOT added to attributableBytes. Every one of these bytes
+      // already lives inside the `worktrees` root's own `du` (a build-cache
+      // dir is a subdirectory of a worktree, never outside it) — adding this
+      // aggregate again would double-count it and inflate the number
+      // `warnAttributableGb` is compared against. This row exists to name
+      // disk-gc's T3 reclaim target and its size, not to add to the total.
       continue;
     }
 
@@ -206,8 +212,8 @@ export async function readDiskBudgetReport(dataDir: string): Promise<DiskBudgetR
       parsed === null ||
       typeof (parsed as { generatedAt?: unknown }).generatedAt !== "string" ||
       !Array.isArray((parsed as { roots?: unknown }).roots) ||
-      typeof (parsed as { totals?: { attributableBytes?: unknown } }).totals
-        ?.attributableBytes !== "number"
+      typeof (parsed as { totals?: { attributableBytes?: unknown } }).totals?.attributableBytes !==
+        "number"
     ) {
       return undefined;
     }

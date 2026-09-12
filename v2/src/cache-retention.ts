@@ -32,8 +32,11 @@ const execFileAsync = promisify(execFile);
 // session-service.ts's warnIfHostDiskLow. Only host-install.ts's
 // `reclaimable-caches` doctor check and cli.ts's `cache` command call these
 // functions. disk-budget.ts's daemon-facing sweep preserves this invariant
-// too: it never imports this module and never runs `du` from the daemon
-// process — it reads a CLI-written `<dataDir>/disk-budget.json` instead.
+// too: session-service.ts imports only disk-budget.ts, which imports only
+// build-cache-scan.ts (read-only fs walk, no `rm`/`execFile`) — never this
+// module, and never disk-gc.ts, which is where this module's `rm`/`execFile`
+// surface actually lives. The sweep itself never runs `du` either; it reads
+// a CLI-written `<dataDir>/disk-budget.json` instead.
 
 export type CacheRootId =
   | "npm-cacache"
@@ -330,6 +333,10 @@ function cacheRoots(home: string, tmpPath = "/tmp"): CacheRoot[] {
 // double-measured/double-classified as "generic".
 const XDG_CACHE_EXCLUDED_NAMES = new Set(["ms-playwright", "ms-playwright-mcp"]);
 
+function isNodeErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
 async function readBrowsersJson(browsersJsonPath: string): Promise<unknown | undefined> {
   try {
     const raw = await readFile(browsersJsonPath, "utf8");
@@ -472,8 +479,20 @@ async function resolvePins(
   let linkFiles: string[];
   try {
     linkFiles = await readdir(linksDir);
-  } catch {
-    linkFiles = [];
+  } catch (error) {
+    // ENOENT (no `.links` dir at all) is a legitimate absence and
+    // contributes nothing. Any OTHER error — EACCES, EIO, EMFILE, a
+    // too-many-open-files transient — is indistinguishable from "a
+    // referrer this process cannot currently see", and MUST fail closed
+    // the same way an individual unreadable referrer does (S7): silently
+    // treating it as "empty" would let every revision through unprotected
+    // precisely when the evidence is least trustworthy.
+    if (isNodeErrnoException(error) && error.code === "ENOENT") {
+      linkFiles = [];
+    } else {
+      linkFiles = [];
+      unresolvedReferrers = true;
+    }
   }
   for (const fileName of linkFiles) {
     let referrerPath: string;

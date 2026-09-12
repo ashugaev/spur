@@ -143,6 +143,8 @@ const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const readFreeKbMock = vi.fn<(path: string, timeoutMs?: number) => Promise<number | undefined>>();
 const readDiskBudgetReportMock = vi.fn();
+const measureDiskBudgetMock = vi.fn();
+const realDuMock = vi.fn();
 // Default "none": most tests declare no sidecar ports at all, and this must
 // never silently default to "unknown" (which would mask a real assertion
 // that a probe failure keeps rather than reaps) or "established" (which
@@ -638,6 +640,11 @@ vi.mock("../../src/disk-space.js", () => ({
 // that read is mocked here.
 vi.mock("../../src/disk-budget.js", () => ({
   readDiskBudgetReport: readDiskBudgetReportMock,
+  // Stubbed (never real) so a call to either is provably visible in a test
+  // (S10): the sweep's own contract is "read the file, never measure
+  // anything", and a mock the test never sees called pins nothing.
+  measureDiskBudget: measureDiskBudgetMock,
+  realDu: realDuMock,
 }));
 
 // Only snapshotProcesses is mocked (a real `ps` fork, the thing the fast
@@ -1482,6 +1489,8 @@ describe("SessionService", () => {
     // Same "no test-visible signal unless a test opts in" default as
     // readFreeKb above — absent measurement emits nothing.
     readDiskBudgetReportMock.mockReset().mockResolvedValue(undefined);
+    measureDiskBudgetMock.mockReset();
+    realDuMock.mockReset();
     flushEventLogCollapseMock.mockReset();
     tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
@@ -22362,6 +22371,12 @@ describe("SessionService", () => {
           ([, entry]) => entry.event === "host.disk.budget_exceeded",
         ),
       ).toBe(false);
+      // S10: the title's claim ("runs no du") must be an assertion, not just
+      // a comment — measureDiskBudget/realDu are the only exports that would
+      // ever spawn `du`, and the sweep must never call either.
+      expect(measureDiskBudgetMock).not.toHaveBeenCalled();
+      expect(realDuMock).not.toHaveBeenCalled();
+      expect(readDiskBudgetReportMock).toHaveBeenCalledTimes(2);
       service.dispose();
     });
 

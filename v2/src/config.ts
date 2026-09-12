@@ -1788,7 +1788,8 @@ function parseDiskBudget(value: unknown): AppConfig["diskBudget"] {
   }
   const root = asObject(value, "diskBudget");
   return {
-    enabled: asOptionalBoolean(root["enabled"], "diskBudget.enabled") ?? DEFAULT_DISK_BUDGET.enabled,
+    enabled:
+      asOptionalBoolean(root["enabled"], "diskBudget.enabled") ?? DEFAULT_DISK_BUDGET.enabled,
     intervalMinutes:
       asNonNegativeNumber(root["intervalMinutes"], "diskBudget.intervalMinutes") ??
       DEFAULT_DISK_BUDGET.intervalMinutes,
