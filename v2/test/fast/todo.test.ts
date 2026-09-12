@@ -6,7 +6,6 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import {
   ensureTodoLedger,
   mutateTodo,
-  recordTodoFinishOverride,
   replayTodo,
   TodoLedgerCorruptError,
   InvalidTodoRequestError,
@@ -172,6 +171,44 @@ describe("Spur ToDo ledger", () => {
     expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
   });
 
+  it("classifies missing and truncated replay throws as transient for nudge give-up", async () => {
+    const { dataDir, session } = await fixture();
+    try {
+      replayTodo(dataDir, session.id);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).transient).toBe(true);
+    }
+
+    mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    const content = readFileSync(path, "utf8");
+    writeFileSync(path, content.slice(0, -1), "utf8");
+    try {
+      replayTodo(dataDir, session.id);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).transient).toBe(true);
+    }
+  });
+
+  it("classifies deterministic replay errors as non-transient for nudge give-up", () => {
+    expect(
+      new TodoLedgerCorruptError("s-1", "Event contains an invalid transition").transient,
+    ).toBe(false);
+    expect(new TodoLedgerCorruptError("s-1", "Duplicate item id").transient).toBe(false);
+    expect(new TodoLedgerCorruptError("s-1", "Event references an unknown item").transient).toBe(
+      false,
+    );
+  });
+
   it("rejects blank mutation fields before append", async () => {
     const { dataDir, session } = await fixture();
     mutateTodo(
@@ -190,16 +227,27 @@ describe("Spur ToDo ledger", () => {
     ).toThrow(InvalidTodoRequestError);
   });
 
-  it("records a human override on an empty ledger without throwing", async () => {
+  it("replays a legacy human override on an empty ledger without throwing", async () => {
     const { dataDir, session } = await fixture();
-    const projection = ensureTodoLedger(dataDir, session);
-    const after = recordTodoFinishOverride(
-      dataDir,
-      session.id,
-      "Nothing to track",
-      { kind: "human", origin: "cli" },
-      projection,
+    ensureTodoLedger(dataDir, session);
+    const sessionDir = join(dataDir, "sessions", session.id);
+    mkdirSync(sessionDir, { recursive: true });
+    const path = join(sessionDir, "todo.jsonl");
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        version: 1,
+        eventId: "override-1",
+        sessionId: session.id,
+        at: "2026-08-20T00:01:00.000Z",
+        actor: { kind: "human", origin: "cli" },
+        type: "finish_override_recorded",
+        reason: "Nothing to track",
+        unfinishedItemIds: [],
+      })}\n`,
+      "utf8",
     );
+    const after = replayTodo(dataDir, session.id);
     expect(after.counts.total).toBe(0);
     expect(after.finishOverrides).toHaveLength(1);
   });

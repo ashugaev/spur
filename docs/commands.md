@@ -6,6 +6,12 @@ CLI reference: what to run, what it does, what `--help` skips. Config fields: [c
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
 
+`spur <unknown> --help` reports the unknown command, exits `1`. `spur --help <unknown>`/`spur -h <unknown>` prints root help, exits `0`.
+
+Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config. A missing non-default path is never created — only the default `~/.spur/config.yaml` is bootstrapped, on first boot. Any command that resolves a daemon from `<path>` exits non-zero when it doesn't exist, so a typo'd or stale path can't be seeded from defaults and target the daemon on `4310`.
+
+Commands that never reach that guard: `init`/`reinit` bootstrap the default path only; `doctor` and `cache` never bootstrap; `update`/`update-monitor` fall back to default port resolution rather than failing, so a typo'd `SPUR_CONFIG` there probes `4310` instead of exiting non-zero.
+
 ## Session tools and environment
 
 `$SPUR_SESSION_TOOL_DIR` on `PATH`, holding session-bound wrappers:
@@ -23,7 +29,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 
 Read-only: checks host install, config, daemon/web health; exits non-zero only on a broken host. `--scaffold` writes a minimal local `spur.yaml` when missing, no daemon start, no `~/.spur/config.yaml` write.
 
-- `sidecar-orphans` (warn) — leaked trees `sidecar sweep` reaps, report-only.
+- `sidecar-orphans` (warn) — leaked trees `sidecar sweep` reaps, report-only; also lists reparented Spur daemons whose CLI entrypoint no longer exists on disk (`kind: orphan-daemon`), always report-only, never counted toward `fix: --reap`. Each `orphan-daemon` row carries its own instance config's `port` and a `liveness` of `serving`/`not-serving`/`unknown`; a row marked `serving` never carries kill-verb wording — the `fix` names `daemon stop` instead.
 - `config-registry` (info) — every registered path, alive/dead/worktree-internal state.
 - `session-headroom` (warn, daemon up) — live count vs [cap](configuration.md#admission-control), id+RSS, `fix` names ids to stop.
 - `home-disk-headroom` (warn/info) — `$HOME` space under [`diskRetention.warnFreeGb`](configuration.md), default 10GB.
@@ -49,9 +55,18 @@ Prunable: `vendor-cache` (`~/.npm/_cacache`) — 7d, protected while npm/pnpm/np
 
 ## daemon
 
-`daemon start|stop|restart --config <path>` refuses to bootstrap when `<path>` (or `SPUR_CONFIG`) doesn't exist and isn't the default `~/.spur/config.yaml` — only the default path bootstraps first boot. All three refuse a non-default `<path>` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`, explicit/inherited); read-only check.
+`daemon start|stop|restart` additionally refuse a non-default `--config <path>` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`, explicit/inherited); read-only check.
 
 Any CLI command syncs its `--config` into the daemon's durable registry. Attached configs must agree on `server.host`, `server.port`, `dataDir`, `worktreeDir`; project ids/`sessionPrefix` stay globally unique per daemon. Registry mechanics: [config registry](configuration.md#config-registry).
+
+Implicit auto-start (any command that reaches an unreachable daemon outside `daemon start|stop|restart`) refuses only in these cases, otherwise it forks a detached daemon:
+
+- `$SPUR_SESSION` or `$SPUR_SIDECAR_NAME` set: `systemctl --user restart spur-daemon` or `spur daemon start` from a host shell.
+- `$SPUR_DISABLE_AUTOSTART=1`: applies to every auto-start path, including `daemon restart`'s internal fallback.
+
+A resolved `--config` that isn't the default instance config no longer blocks autostart — a plain host shell running against a non-default config path forks a daemon like any other unreachable-daemon case.
+
+`daemon restart` itself is exempt from the first term.
 
 ## spawn
 
@@ -81,6 +96,8 @@ Fires only while status is restorable (`running`, `stopped`, `paused`); dropped 
 
 TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit, `Ctrl+G` back. The selected session's details pane shows a `queued <N>` field when it holds real queued messages, never a per-row column. Non-TTY prints a one-shot summary, hides `completed`/`killed` by default, and adds a `queued <N>` fact beside the sidecar-age fact for a session holding real queued messages. Neither surface counts a pipeline's own auto-steps. A resolvable-age sidecar shows `sidecar <name> <age>` (oldest, `+N more`); `!` marks one past [`sidecarGc.maxAgeWarnMinutes`](configuration.md#sidecar-reaping).
 
+`spur list --json` (and the non-TTY list row set) comes from `GET /sessions` — the projected list item ([daemon-api.md](daemon-api.md#session-routes)). The interactive selector's details pane (`prompt`/`launch` rows) fetches the full record from `GET /sessions/:id` for the currently selected session, on selection change and on each 2s refresh tick — the pane shows a loading line until that fetch resolves.
+
 `pause` keeps the worktree; `complete`/`kill` tear down the pane, remove an owned worktree (`kill` needs `--force` on dirty/unpushed). Both check for an open PR first: `--pr-action leave_open|close` answers it, `--skip-pr-check` skips it; a failed check fails with retry hint. Shared-workspace sessions keep the project path on `kill`.
 
 `spur restore <sessionId> [--force] [--json]` needs an existing workspace plus: `running`+state `stopped`; `stopped`+state `stopped`/`error`/`stale`; `paused`+state `stopped`/`error`; `errored`+state `error` (`killed`/`completed` never restore). `restore`/`reopen` refuse over a live agent process still carrying the id, or an unreadable process table (skipped off Linux); a first `r` surfaces refusal, a second `r`/`--force` bypasses only the foreign-process refusal. `restore` resumes the session's existing conversation.
@@ -89,9 +106,9 @@ TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r`
 
 ## todo
 
-`spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`. `spur complete <sessionId> --todo-override-reason <reason>`.
+`spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`.
 
-Each session's ToDo ledger starts empty — no code path seeds an item; the agent adds one per step, right before it, and resolves it right after. `add`/`complete`/`cancel`/`hold` require a reason; `--human-action` records a human blocker; `resume` reopens held work; no delete. A human can also `add` through the CLI or session-detail UI. An empty ledger, and open or held work, both block completion, self-destruct, handoff, trigger+desk completion — override with `--todo-override-reason` (item states unchanged, enters audit history; self-destruct and handoff never accept an override; a session can't override itself).
+Each session's ToDo ledger starts empty — no code path seeds an item; the agent adds one per step, right before it, and resolves it right after. `add`/`complete`/`cancel`/`hold` require a reason; `--human-action` records a human blocker; `resume` reopens held work; no delete. A human can also `add` through the CLI or session-detail UI. An empty ledger, and open or held work, both block a session closing itself: completion, self-destruct, handoff, trigger+desk completion. The block is on the agent only — a `complete` or `handoff` a person issues from the CLI or the UI, with no session acting on its own behalf, goes through whatever the ledger holds.
 
 `$SPUR_TODO_COMMAND`: session-bound `spur-todo` wrapper, same actions, no `--session`, can't target another ledger. Routes/error codes: [daemon-api.md](daemon-api.md#session-routes).
 
@@ -125,6 +142,20 @@ Each live session gets a `spur` wrapper on `PATH`, bound to that session's confi
 
 Scopes resolve server-side from the caller's session, never from client input: `task` (`<dataDir>/memory/task/<workspaceId>/<key>.md`, per workspace), `project` (`<dataDir>/memory/project/<projectId>/<key>.md`, per project), `global` (`<dataDir>/memory/global/<key>.md`, one per instance). Spawn prompt tells agents to read `task`/`project` on start, write durable, high-value facts only.
 
+## agent-issue
+
+`spur agent-issue log <text...>` / `spur agent-issue list [--project <id>] [--session <id>] [--limit <n>] [--json]`.
+
+Friction an agent hits operating Spur itself: a sidecar that won't start, an unclear test path, a branch preflight rejection. Boundary — friction blocking the agent's own operation lands here; a code defect in a repo goes to that repo's issue tracker, never here.
+
+`log` needs `SPUR_PROJECT` set to a known project (a live session), stamps the running session id, appends to `<dataDir>/agent-issues.jsonl` (mode `0600`, rotates at 50 MB, keeps 5 archives). `list` prints newest first; `--limit` default `200`.
+
+## comment-seen
+
+`spur comment-seen record <id...>`.
+
+Records inline-review-reply ids as seen so they never re-trigger the GitHub review-comment poll loop. Needs `SPUR_PROJECT` set to a known project (a live session); errors and exits 1 without it or on an unknown project. Ids are raw numeric review-comment ids. Stores each as `review-comment:<id>` in every `github`-type source's registry under `<dataDir>/source-state/github-comment-seen/<projectId>/<sourceId>.json`.
+
 ## subscribe
 
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`.
@@ -135,17 +166,21 @@ A `stopped`/`paused` subscriber resumes to receive delivery (native resume, then
 
 ## Sidecars
 
-Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`, never bare — starts a configured sidecar from `projects.<id>.sidecars`. `autoStart` sidecars return on spawn, restore, or recover. A sidecar starting another is manual-only; nesting stops after one level.
+Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`, never bare — starts a configured sidecar from `projects.<id>.sidecars`. `autoStart` sidecars return on spawn, restore, recover, or a stale-`errored` session healing back to `running` — the last case skips a sidecar the same call just stopped, and its dependents. A sidecar starting another is manual-only; nesting stops after one level.
 
-Ports reserve/probe on the host at start, inject into the sidecar env only — pane env freezes first, no session variable carries it. Read with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (`--name <name>`, `--json`): `<sidecar> <portId> <env> <port> alive|dead` per line. A non-MCP sidecar is desk-shared: one tmux pane/port per [desk group](configuration.md#desk-groups).
+Ports reserve/probe on the host at start, inject into the sidecar env only — pane env freezes first, no session variable carries it. Read with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (`--name <name>`, `--json`): `<sidecar> <portId> <env> <port> alive|dead` per line. `alive` means the sidecar's pane is running; a pane that exited reports `dead` even though its tmux session is retained (`remain-on-exit`). A non-MCP sidecar is desk-shared: one tmux pane/port per [desk group](configuration.md#desk-groups).
 
 Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubuntu, nvm needs `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A remapped `$HOME` still resolves via `$SPUR_REAL_HOME` (from `/etc/passwd`). A long-lived server should start its own command with `exec` — otherwise the pane pid is a shell above the real process, hiding it from pid/args-based reaping and leaving the shell holding unexpanded `$PORT` env.
 
 Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
 
+`sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path, `port`, and `liveness`; never signaled by `--reap`, no matter what). A `serving` row still keeps loading and answering from memory — it prints `[report-only, SERVING on <port>]` and a `daemon stop` pointer instead of the verify-before-killing note. A `liveness: "unknown"` row (the row's own port listener probe itself could not run — neither `lsof` nor `ss` produced a usable result — or its instance config didn't resolve) prints `[report-only, liveness unknown — verify manually before killing]` and never shares the plain not-serving row's "genuinely dead" fix text. A probe that DID run and found zero listeners on the port is `not-serving`, not `unknown` — the probe answered, it just found nobody there.
+
+`sidecar stop` prints the real outcome, never a claimed stop that did not happen, per `sidecarStop.outcome` — causes and the ambiguous-port exclusion rule are in [daemon-api.md](daemon-api.md#session-routes): `reaped` (exit `0`), `partial` — names the survivor pids and points at `spur sidecar sweep` (exit `1`), `nothing-to-stop` (exit `0`). `partial`'s survivors can include a detached daemon still holding the sidecar's reserved port, not just a surviving pane process — `stop` always probes the recorded port even when the pane is already gone. `partial` with zero named survivors means the recorded port could not be confirmed clear by this stop, never reported as `reaped` — the message names the port instead of "0 process(es) survived".
+
 ### Built-in MCP sidecars
 
-A sidecar entry can carry MCP wiring, injecting its port into the launching agent's MCP config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright` is the one built-in: an HTTP playwright MCP sidecar for claude/codex, never cursor, off by default: `sidecars: { playwright: { autoStart: true } }`. YAML only overrides `autoStart`, rejects any other key incl. `dependsOn` (MCP sidecars start before the agent, ahead of the dependency-aware autostart pass). Re-resolved every spawn/restore/recover, no per-session toggle.
+A sidecar entry can carry MCP wiring, injecting its port into the launching agent's MCP config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright` is the one built-in: an HTTP playwright MCP sidecar for claude/codex, never cursor, off by default: `sidecars: { playwright: { autoStart: true } }`. YAML only overrides `autoStart`, rejects any other key incl. `dependsOn` (MCP sidecars start before the agent, ahead of the dependency-aware autostart pass). Re-resolved every spawn/restore/recover, no per-session toggle; the errored-session heal above never restarts one — its MCP config is frozen at launch.
 
 Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
 with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated

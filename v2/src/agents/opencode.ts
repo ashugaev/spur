@@ -388,11 +388,47 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
   return { state: "working", reason: "assistant incomplete" };
 }
 
+// Every export is a subprocess that queries the one multi-gigabyte SQLite DB
+// all opencode sessions share, so its cost scales with fleet size, not with the
+// caller. Callers that cannot tolerate stale data — the launch wait and the
+// submit-ack scan both poll for a *new* message — cannot be served from a
+// cache, so the ceiling that bounds them lives here, on the single funnel every
+// call site passes through. Measured before this gate: a 15-session fleet ran a
+// mean of 4 and a peak of 17 concurrent exports, 3.7 GB resident at the peak.
+// The limit sits at that mean; over it, callers queue rather than fan out.
+export const OPENCODE_EXPORT_MAX_CONCURRENCY = 4;
+let openCodeExportActive = 0;
+const openCodeExportQueue: Array<() => void> = [];
+
+async function acquireOpenCodeExportSlot(): Promise<void> {
+  if (openCodeExportActive < OPENCODE_EXPORT_MAX_CONCURRENCY) {
+    openCodeExportActive += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => openCodeExportQueue.push(resolve));
+}
+
+function releaseOpenCodeExportSlot(): void {
+  // Hand the slot straight to the next waiter; the count only drops when the
+  // queue is empty, so a burst never opens a gap above the limit.
+  const next = openCodeExportQueue.shift();
+  if (next) next();
+  // Clamped for the test seam only: it zeroes the counter under waiters that
+  // release afterwards. The export path releases exactly once, in `finally`,
+  // so nothing here is guarding against a double release in production.
+  else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
+}
+
 async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
-  const stdout = await readOpenCodeJson(["export", sessionId], {
-    timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
-  });
-  return JSON.parse(stdout) as unknown;
+  await acquireOpenCodeExportSlot();
+  try {
+    const stdout = await readOpenCodeJson(["export", sessionId], {
+      timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
+    });
+    return JSON.parse(stdout) as unknown;
+  } finally {
+    releaseOpenCodeExportSlot();
+  }
 }
 
 export interface OpenCodeSubmitBaseline {
@@ -462,14 +498,125 @@ export async function waitForOpenCodeLaunchMessage(
   return false;
 }
 
+// Every other agent classifies from an incremental file read; opencode has no
+// per-session file to stat — all sessions share one multi-gigabyte SQLite DB —
+// so its only state source is `opencode export`, a subprocess that queries that
+// DB and serializes the whole transcript. Left ungated, the 2s dashboard tick
+// spawned one per live opencode session faster than they finished: a
+// 15-session fleet sampled at mean 4 and peak 17 concurrent exports, 3.7 GB
+// resident at the peak, with 40% of the daemon's own CPU in system time.
+//
+// So the derived state is cached — the two-field result, never the transcript
+// that produced it — and concurrent callers share one in-flight export. A
+// session's state is at most OPENCODE_STATE_TTL_MS staler than the export it
+// came from, which was already seconds old by the time it returned.
+// The TTL alone only paces the exports, it never stops them: a 5s TTL polled by
+// a 2s tick means every expiry is met by a waiting caller, so each live opencode
+// session costs a steady export every 5s forever. The lever is the NUMBER of
+// spawns, and the signal is the pane's own output clock — an export that
+// re-derives the state of a pane that has printed nothing since the last export
+// cannot return anything new. So a cached state is served past the TTL while the
+// caller's tmux activity timestamp proves the pane has been silent, up to
+// OPENCODE_STATE_MAX_AGE_MS, which self-heals a state change that produced no
+// pane output at all.
+const OPENCODE_STATE_TTL_MS = 5_000;
+const OPENCODE_STATE_MAX_AGE_MS = 600_000;
+// tmux `window_activity` has ONE-SECOND resolution. A pane painting 0.4s after
+// an export starts reports the same whole second the export already recorded, so
+// `activityAtMs <= cached.activityAtMs` would hold and the transition would hide
+// until the ceiling. The gate is therefore only trusted when the export started
+// more than this margin after the pane's last recorded output second.
+const ACTIVITY_SETTLED_MS = 3_000;
+type OpenCodeStateEntry = {
+  at: number;
+  state: OpenCodeStructuredState | null;
+  /** Activity timestamp observed when this entry's export STARTED. */
+  activityAtMs: number | null;
+  startedAtMs: number;
+};
+const openCodeStateCache = new Map<string, OpenCodeStateEntry>();
+const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredState | null>>();
+
+/** Drops every session's cached state and the export gate's counters. Test seam. */
+export function resetOpenCodeExportState(): void {
+  openCodeStateCache.clear();
+  openCodeStateInFlight.clear();
+  // The gate's counters are module state too. A slot still held when a test
+  // ends shifts the peak concurrency every later test observes, so clear them
+  // here as well — resuming queued waiters rather than dropping them, so a
+  // caller left mid-acquire cannot hang.
+  for (const resume of openCodeExportQueue.splice(0)) resume();
+  openCodeExportActive = 0;
+}
+
+function shouldServeCachedOpenCodeState(
+  cached: OpenCodeStateEntry,
+  now: number,
+  activityAtMs: number | null,
+): boolean {
+  const age = now - cached.at;
+  // Floor: unchanged TTL, no signal consulted.
+  if (age < OPENCODE_STATE_TTL_MS) return true;
+  // Ceiling: self-heal a state change that left no trace in the pane.
+  if (age >= OPENCODE_STATE_MAX_AGE_MS) return false;
+  // A failed export is cached as null and classified as "working" by the
+  // caller. Pinning that for the ceiling would hold a wrong LIVE state, not a
+  // stale one, so it always retries on the TTL.
+  if (cached.state === null) return false;
+  // Unknown activity falls back to TTL-only behaviour.
+  if (activityAtMs === null || cached.activityAtMs === null) return false;
+  return (
+    activityAtMs <= cached.activityAtMs && cached.startedAtMs - activityAtMs > ACTIVITY_SETTLED_MS
+  );
+}
+
 export async function readOpenCodeState(
   sessionId?: string,
+  activityAtMs?: number | null,
 ): Promise<OpenCodeStructuredState | null> {
   if (!sessionId) return null;
+
+  const now = Date.now();
+  const observedActivityAtMs = activityAtMs ?? null;
+  const cached = openCodeStateCache.get(sessionId);
+  if (cached && shouldServeCachedOpenCodeState(cached, now, observedActivityAtMs)) {
+    return cached.state;
+  }
+  const inFlight = openCodeStateInFlight.get(sessionId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const pending = (async (): Promise<OpenCodeStructuredState | null> => {
+    try {
+      return parseOpenCodeState(await exportOpenCodeSession(sessionId));
+    } catch {
+      return null;
+    }
+  })();
+  openCodeStateInFlight.set(sessionId, pending);
+  const startedAtMs = now;
   try {
-    return parseOpenCodeState(await exportOpenCodeSession(sessionId));
-  } catch {
-    return null;
+    const state = await pending;
+    openCodeStateCache.set(sessionId, {
+      at: Date.now(),
+      state,
+      activityAtMs: observedActivityAtMs,
+      startedAtMs,
+    });
+    // Expired entries are evicted here rather than on a timer: the map only
+    // grows when a session is classified, so this is the one place it can. The
+    // bound is the max age, not the TTL — a TTL-bound sweep destroys the very
+    // entry the activity gate needs to consult, and one continuously-painting
+    // pane's completions would wipe every silent session's entry.
+    for (const [id, entry] of openCodeStateCache) {
+      if (Date.now() - entry.at >= OPENCODE_STATE_MAX_AGE_MS) {
+        openCodeStateCache.delete(id);
+      }
+    }
+    return state;
+  } finally {
+    openCodeStateInFlight.delete(sessionId);
   }
 }
 

@@ -49,7 +49,7 @@ PROCESS
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
-  4  Gate retry cap: each gate runs at most 5 times: initial pass plus up to 4 fix/rerun cycles. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. Downstream gates run only when their input changed. Fifth pass still fails: surface it in the run report, no further retry.
+  4  Gate retry cap: each gate runs at most 5 times: initial pass plus up to 4 fix/rerun cycles. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Fifth pass still failing or still silent: name the gate in the run report's Missing section, no further retry.
 
 RULES
 

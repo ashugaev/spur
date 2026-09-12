@@ -11,6 +11,7 @@ import {
   deriveShedCriticalFloorBytes,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
+  isSameInstanceConfigPath,
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
@@ -2085,6 +2086,56 @@ projects:
     expect("adaptivePoll" in (parsed ?? {})).toBe(false);
   });
 
+  it("omits maxReviewBatchTargets when unset", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["pr-watch"];
+    expect(parsed).toBeDefined();
+    expect("maxReviewBatchTargets" in (parsed ?? {})).toBe(false);
+  });
+
+  it.each([0, 2.5, "8"])("rejects maxReviewBatchTargets %s", async (value) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        maxReviewBatchTargets: ${JSON.stringify(value)}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /maxReviewBatchTargets must be a positive integer/,
+    );
+  });
+
+  it("passes an in-range maxReviewBatchTargets value through", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        maxReviewBatchTargets: 16
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      maxReviewBatchTargets: 16,
+    });
+  });
+
   it("parses a sentry source with a resolved token and defaults", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2151,10 +2202,38 @@ projects:
     const config = loadConfig(configPath);
     expect(config.projects["backend"]?.sources["jira"]).toEqual({
       type: "jira",
+      runOnStart: false,
       baseUrl: "https://jira.example.com/",
       email: "bot@example.com",
       token: "secret",
+      intervalMs: 60_000,
+      emitExisting: false,
+      maxResults: 100,
     });
+  });
+
+  it("rejects a jira source with a non-positive maxResults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+        maxResults: 0
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.jira.maxResults must be a positive number",
+    );
   });
 
   it("rejects a jira source whose auth cannot be resolved", async () => {
@@ -2322,7 +2401,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new",
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new or github-ci:run.completed or jira:work_item.new",
     );
   });
 
@@ -2566,6 +2645,185 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(
       'projects.backend: source "ci-green" has 2 triggers subscribed to a work-item event; at most one is allowed',
     );
+  });
+
+  it("parses a jira poller source with defaults and registers jira:work_item.new", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take {{key}}"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira"]).toEqual({
+      type: "jira",
+      runOnStart: false,
+      baseUrl: "https://jira.example.com/",
+      email: "bot@example.com",
+      token: "secret",
+      query: "project = WEBDEV AND statusCategory != Done",
+      intervalMs: 60_000,
+      emitExisting: false,
+      maxResults: 100,
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "jira",
+      event: "jira:work_item.new",
+      spawn: {
+        blocks: [{ prompt: "Take {{key}}" }],
+      },
+    });
+  });
+
+  it("rejects jira:work_item.new triggers when the source has no query", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take this work item."
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.pick-up.event uses unsupported event "jira:work_item.new"',
+    );
+  });
+
+  it("rejects multiple work-item triggers on the same jira source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV"
+    triggers:
+      one:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "first"
+      two:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "second"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend: source "jira" has 2 triggers subscribed to a work-item event; at most one is allowed',
+    );
+  });
+
+  it("parses a backlog spawn block as parsed-and-ignored", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    backlog:
+      my-sprint:
+        source: jira
+        query: "project = WEBDEV AND statusCategory != Done"
+        spawn:
+          prompt: "Take {{key}} {{title}} {{url}}"
+          agent: claude
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.backlog["my-sprint"]).toEqual({
+      source: "jira",
+      provider: "jira",
+      query: "project = WEBDEV AND statusCategory != Done",
+      intervalMs: 60_000,
+      runOnStart: false,
+    });
+  });
+
+  it("keeps a jira source's own poll query and its backlog binding's query independent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+    backlog:
+      my-sprint:
+        source: jira
+        query: "project = WEBDEV ORDER BY Rank ASC"
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take {{key}}"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira"]).toMatchObject({
+      query: "project = WEBDEV AND statusCategory != Done",
+    });
+    expect(config.projects["backend"]?.backlog["my-sprint"]).toMatchObject({
+      query: "project = WEBDEV ORDER BY Rank ASC",
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]?.event).toBe("jira:work_item.new");
   });
 
   it("parses spawn.restrictWrites on trigger spawn configs", async () => {
@@ -4855,6 +5113,29 @@ describe("loadInstanceConfigReadOnly", () => {
     if (result.status === "ok") {
       expect(result.config).toEqual(loadConfig(configPath));
     }
+  });
+});
+
+describe("isSameInstanceConfigPath", () => {
+  it("859/AC10: is true for the same path resolved two different ways", async () => {
+    const dir = await createTempDir("spur-fast-same-config-path-");
+    tempDirs.push(dir);
+    const configPath = join(dir, "config.yaml");
+    await writeFile(configPath, "server:\n  port: 5555\n", "utf8");
+    const realDir = await realpath(dir);
+
+    expect(isSameInstanceConfigPath(configPath, join(realDir, "config.yaml"))).toBe(true);
+  });
+
+  it("is false for two distinct, both-existing paths", async () => {
+    const dir = await createTempDir("spur-fast-same-config-path-");
+    tempDirs.push(dir);
+    const a = join(dir, "a.yaml");
+    const b = join(dir, "b.yaml");
+    await writeFile(a, "server:\n  port: 5555\n", "utf8");
+    await writeFile(b, "server:\n  port: 5556\n", "utf8");
+
+    expect(isSameInstanceConfigPath(a, b)).toBe(false);
   });
 });
 

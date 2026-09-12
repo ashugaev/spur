@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useBackendConnection } from "@/lib/backend-connection-context";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
@@ -180,6 +181,7 @@ function messageForSwitchError(
 export function VersionMenu() {
   const popover = useFooterPopover();
   const { phase: switchPhase, startSwitch, dismiss: dismissVersionSwitch } = useVersionSwitch();
+  const { version: heartbeatVersion } = useBackendConnection();
   const [pending, setPending] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const queryClient = useQueryClient();
@@ -283,13 +285,19 @@ export function VersionMenu() {
   });
 
   const triggerLabel = (() => {
+    // The 5s heartbeat already holds the daemon's current version, far more
+    // often than infoQuery's single per-mount fetch. Ahead of the rest of
+    // the ladder so an out-of-band upgrade moves the label with no reload.
+    if (heartbeatVersion) return heartbeatVersion;
     if (infoQuery.isError) return "dev";
     if (infoQuery.data) return infoQuery.data.version;
     return "…";
   })();
 
   const available = versionsQuery.data?.available ?? [];
-  const current = versionsQuery.data?.current ?? infoQuery.data?.version ?? "";
+  // `||`, not `??`: an empty version from either source must fall through to
+  // the next one, matching the `{current || triggerLabel}` fallback below.
+  const current = heartbeatVersion || versionsQuery.data?.current || infoQuery.data?.version || "";
   const latest = available[0]?.tag ?? "";
   const severity = updateSeverity(latest, current);
   const updateAvailable = severity !== "none";

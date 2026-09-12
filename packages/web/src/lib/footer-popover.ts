@@ -57,7 +57,7 @@ export function useFooterPopover(): FooterPopover {
     onBlur(event: FocusEvent<HTMLDivElement>) {
       if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
         setPinned(false);
-        setDismissed(false);
+        setDismissed(true);
       }
     },
     onMouseEnter() {
