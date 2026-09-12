@@ -28187,6 +28187,7 @@ describe("SessionService", () => {
       env: "SPUR_RESERVED_PORT_DEV",
       port: reservedPort,
       owner: "self",
+      reservedBy: "api-1/dev",
     });
     expect(payload.candidates.map((candidate) => candidate.port)).toEqual([
       3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010,
@@ -28320,7 +28321,13 @@ describe("SessionService", () => {
     const payload = (conflict as InstanceType<typeof SidecarPortConflictError>).payload;
     expect(payload.candidates).toEqual([
       { portId: "http", env: "SPUR_RESERVED_PORT_DEV", port: 3000, owner: "external" },
-      { portId: "http", env: "SPUR_RESERVED_PORT_DEV", port: 3001, owner: "api-other" },
+      {
+        portId: "http",
+        env: "SPUR_RESERVED_PORT_DEV",
+        port: 3001,
+        owner: "api-other",
+        reservedBy: "api-other/dev",
+      },
       { portId: "http", env: "SPUR_RESERVED_PORT_DEV", port: 3002, owner: "external" },
     ]);
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
@@ -28398,8 +28405,20 @@ describe("SessionService", () => {
     expect(conflict).toBeInstanceOf(SidecarPortConflictError);
     const payload = (conflict as InstanceType<typeof SidecarPortConflictError>).payload;
     expect(payload.candidates).toEqual([
-      { portId: "http", env: "SPUR_RESERVED_PORT_DEV", port: 3000, owner: "api-a" },
-      { portId: "http", env: "SPUR_RESERVED_PORT_DEV", port: 3001, owner: "api-b" },
+      {
+        portId: "http",
+        env: "SPUR_RESERVED_PORT_DEV",
+        port: 3000,
+        owner: "api-a",
+        reservedBy: "api-a/dev",
+      },
+      {
+        portId: "http",
+        env: "SPUR_RESERVED_PORT_DEV",
+        port: 3001,
+        owner: "api-b",
+        reservedBy: "api-b/dev",
+      },
     ]);
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
   });
