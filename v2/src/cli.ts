@@ -20,7 +20,7 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -1372,8 +1372,17 @@ export function renderDiskGcReport(report: DiskGcReport): string {
   if (report.browserRevisions.candidates.length > 0) {
     lines.push("");
     lines.push(boldText("Browser revisions (--browser-revisions)"));
+    const removedRevisions = new Set(report.browserRevisions.removed);
     for (const candidate of report.browserRevisions.candidates) {
-      lines.push(renderDiskGcCandidateLine("revision", candidate));
+      const label = report.dryRun
+        ? "revision"
+        : removedRevisions.has(candidate.path)
+          ? "removed"
+          : "blocked";
+      lines.push(renderDiskGcCandidateLine(label, candidate));
+    }
+    for (const failure of report.browserRevisions.failures) {
+      lines.push(dimText(`  blocked      ${failure.path}  (${failure.message})`));
     }
   }
 
@@ -1410,6 +1419,16 @@ export function renderDiskGcReport(report: DiskGcReport): string {
           `${report.npmCap.cleanedKeys} key(s), ${formatBytes(report.npmCap.freedBytes)} freed. The whole-root wipe stays owned by \`spur cache --prune --yes\`.`,
         ),
       );
+      break;
+    case "execution-failed":
+      lines.push(
+        dimText(
+          `  over cap by ${formatBytes(report.npmCap.overCapBytes)} — npm step failed: ${report.npmCap.message}`,
+        ),
+      );
+      for (const victim of report.npmCap.victims) {
+        lines.push(renderDiskGcCandidateLine("npm-key", victim));
+      }
       break;
   }
 
@@ -2768,7 +2787,15 @@ export function createProgram(cliEntrypoint: string): Command {
         action: async () => {
           const sessions = listSessions(config.dataDir);
           const worktreePaths = [
-            ...new Set(sessions.map((s) => s.worktreePath.trim()).filter(Boolean)),
+            ...new Set(
+              sessions
+                .map((s) => s.worktreePath.trim())
+                .filter(Boolean)
+                .filter((path) => {
+                  const rel = relative(config.worktreeDir, path);
+                  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+                }),
+            ),
           ];
           const report = await measureDiskBudget(
             { du: realDu },
@@ -2839,6 +2866,7 @@ export function createProgram(cliEntrypoint: string): Command {
             });
 
             const snapshot = await snapshotProcesses();
+            const processListReadable = snapshot.status === "ok" && snapshot.processes.length > 0;
             const processes = snapshot.status === "ok" ? snapshot.processes : [];
             const profiles = await planProfileGc({
               roots: [
@@ -2882,6 +2910,7 @@ export function createProgram(cliEntrypoint: string): Command {
                     cacacheBytes,
                     config.diskBudget.npmCacheMaxGb * 1024 * 1024 * 1024,
                     processes,
+                    processListReadable,
                   )
                 : ({ kind: "not-over-cap" } as const);
 

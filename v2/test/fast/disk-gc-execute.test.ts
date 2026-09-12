@@ -31,6 +31,7 @@ function makeDeps(overrides: Partial<DiskGcExecutorDeps> = {}): DiskGcExecutorDe
     readSessionFresh: () => null,
     rm: vi.fn(async () => {}),
     realpath: async (path: string) => path,
+    profileDeleteGuard: async () => null,
     npmClean: vi.fn(async () => {}),
     npmVerify: vi.fn(async () => {}),
     measureCacacheBytes: async () => null,
@@ -263,6 +264,79 @@ describe("executeDiskGc — AC13 executor containment re-check", () => {
   });
 });
 
+describe("executeDiskGc — profile execute-time liveness re-check", () => {
+  it("blocks a profile whose argv match appears between plan and execute", async () => {
+    const rm = vi.fn(async () => {});
+    const profilePath = "/home/user/.cache/ms-playwright/mcp-chrome-x";
+    const plan = emptyPlan({
+      profiles: {
+        candidates: [
+          { path: profilePath, rootId: "playwright-browsers", sizeBytes: 200, ageDays: 10 },
+        ],
+        blocked: [],
+      },
+    });
+    const deps = makeDeps({
+      rm,
+      profileDeleteGuard: async () => "in_use_argv",
+    });
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: false,
+      browserRevisions: false,
+      npmCap: false,
+    });
+
+    expect(rm).not.toHaveBeenCalled();
+    expect(report.profiles.removed).toEqual([]);
+    expect(report.profiles.failures).toEqual([{ path: profilePath, message: "in_use_argv" }]);
+  });
+
+  it("dry run total includes browser revisions and npm cap projections", async () => {
+    const plan = emptyPlan({
+      buildCache: {
+        candidates: [
+          {
+            path: "/data/worktrees/api/s1/.cache/webpack",
+            worktreePath: "/data/worktrees/api/s1",
+            sizeBytes: 100,
+            ageDays: 30,
+            sessionIds: ["s1"],
+          },
+        ],
+        blocked: [],
+      },
+      browserRevisions: [
+        {
+          entry: {
+            path: "/home/user/.cache/ms-playwright/chromium-123",
+            sizeKb: 10,
+            ageDays: 40,
+            entryClass: { kind: "browser-revision", revision: "123" },
+          },
+          verdict: { kind: "prunable" },
+        } as never,
+      ],
+      npmCap: {
+        kind: "planned",
+        currentSizeBytes: 5000,
+        capBytes: 2000,
+        overCapBytes: 3000,
+        plan: { victims: [{ key: "pkg-a", size: 500 }], victimBytes: 500 },
+      },
+    });
+    const deps = makeDeps();
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: true,
+      browserRevisions: true,
+      npmCap: true,
+    });
+
+    expect(report.freedBytes).toBe(100 + 10 * 1024 + 500);
+  });
+});
+
 describe("executeDiskGc — AC7/B1 npm cap: verify, RE-MEASURE, gate, clean oldest keys, verify", () => {
   const npmCapPlanned = (overCapBytes = 3000) =>
     ({
@@ -401,6 +475,7 @@ describe("executeDiskGc — AC7/B1 npm cap: verify, RE-MEASURE, gate, clean olde
     if (report.npmCap.status !== "planned") throw new Error("expected planned");
     expect(report.npmCap.cleanedKeys).toBe(2);
     expect(report.npmCap.freedBytes).toBe(1500);
+    expect(report.freedBytes).toBe(1500);
     expect(
       report.npmCap.ranSteps.every((step: string) => step.startsWith("[projected, not measured]")),
     ).toBe(true);
@@ -443,5 +518,25 @@ describe("executeDiskGc — AC7/B1 npm cap: verify, RE-MEASURE, gate, clean olde
       status: "skipped-package-manager-active",
       overCapBytes: 3000,
     });
+  });
+
+  it("records npm cap execution failures without discarding the report", async () => {
+    const npmVerify = vi.fn(async () => {
+      throw new Error("npm verify failed");
+    });
+    const plan = emptyPlan({ npmCap: npmCapPlanned() });
+    const deps = makeDeps({ npmVerify });
+
+    const report = await executeDiskGc(plan, deps, {
+      dryRun: false,
+      browserRevisions: false,
+      npmCap: true,
+    });
+
+    expect(report.npmCap).toMatchObject({
+      status: "execution-failed",
+      message: "npm verify failed",
+    });
+    expect(report.buildCache.candidates).toEqual([]);
   });
 });

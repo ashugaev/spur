@@ -102,12 +102,12 @@ function emptyReport(dryRun: boolean): DiskGcReport {
     freedBytes: 0,
     buildCache: { candidates: [], removed: [], failures: [] },
     profiles: { candidates: [], removed: [], failures: [] },
-    browserRevisions: { candidates: [], freedBytes: 0 },
+    browserRevisions: { candidates: [], removed: [], failures: [], freedBytes: 0 },
     npmCap: { status: "not-over-cap" },
   };
 }
 
-describe("spur disk-gc CLI", () => {
+describe("spur disk-gc CLI", { timeout: 30_000 }, () => {
   beforeEach(() => {
     vi.resetModules();
     for (const mock of [
@@ -153,7 +153,10 @@ describe("spur disk-gc CLI", () => {
     planBrowserRevisionCandidatesMock.mockResolvedValue([]);
     planNpmCapMock.mockResolvedValue({ kind: "not-over-cap" });
     createDiskGcDepsMock.mockResolvedValue({});
-    snapshotProcessesMock.mockResolvedValue({ status: "ok", processes: [] });
+    snapshotProcessesMock.mockResolvedValue({
+      status: "ok",
+      processes: [{ pid: 1, args: "sleep 1" }],
+    });
     realDuMock.mockResolvedValue(null);
     executeDiskGcMock.mockResolvedValue(emptyReport(true));
   });

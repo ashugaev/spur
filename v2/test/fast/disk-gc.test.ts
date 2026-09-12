@@ -1,6 +1,14 @@
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { classifyOrphanedWorktrees, planBuildCacheGc, planProfileGc } from "../../src/disk-gc.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  classifyOrphanedWorktrees,
+  planBuildCacheGc,
+  planNpmCap,
+  planProfileGc,
+  singletonLockLivePid,
+} from "../../src/disk-gc.js";
 import type { SessionRecord, SessionStatus } from "../../src/types.js";
 
 const WORKTREE_DIR = "/data/worktrees";
@@ -277,5 +285,30 @@ describe("planProfileGc — AC20 mcp profile default target and live-launch prot
     });
 
     expect(result.candidates).toEqual([]);
+  });
+});
+
+describe("planNpmCap — process list readability", () => {
+  it("skips when the process snapshot is unreadable or empty", async () => {
+    const result = await planNpmCap("/home/user", 5_000, 2_000, [], false);
+    expect(result).toEqual({
+      kind: "skipped-package-manager-active",
+      overCapBytes: 3_000,
+    });
+  });
+});
+
+describe("singletonLockLivePid", () => {
+  it("parses Chrome lock targets with hyphens in the hostname (openclaw-dev-12345)", async () => {
+    const profilePath = await mkdtemp(join(tmpdir(), "spur-profile-lock-"));
+    try {
+      await symlink("openclaw-dev-12345", join(profilePath, "SingletonLock"));
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => undefined as never);
+      expect(await singletonLockLivePid(profilePath)).toBe(12345);
+      expect(killSpy).toHaveBeenCalledWith(12345, 0);
+      killSpy.mockRestore();
+    } finally {
+      await rm(profilePath, { recursive: true, force: true });
+    }
   });
 });

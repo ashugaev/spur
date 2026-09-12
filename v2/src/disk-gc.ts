@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readlink, realpath, rm } from "node:fs/promises";
+import { lstat, readlink, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -11,7 +11,7 @@ import {
 import type { BuildCacheDirFact } from "./build-cache-scan.js";
 import { readSession } from "./metadata.js";
 import { planNpmCacheCap } from "./npm-cache-cap.js";
-import type { ProcessSnapshotEntry } from "./process-tree.js";
+import { snapshotProcesses, type ProcessSnapshotEntry } from "./process-tree.js";
 import { isTerminalSessionStatus, type AppConfig, type SessionRecord } from "./types.js";
 import type { InstanceConfigReadResult } from "./config.js";
 
@@ -43,7 +43,7 @@ export interface BuildCacheBlockedGroup {
 
 // `rel === ""` additionally rejects the worktrees ROOT itself — the same
 // guard and reason string as session-gc.ts's path_outside_worktree_dir.
-function containmentRel(worktreeDir: string, worktreePath: string): string | undefined {
+export function containmentRel(worktreeDir: string, worktreePath: string): string | undefined {
   const rel = relative(worktreeDir, worktreePath);
   if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
     return undefined;
@@ -344,10 +344,11 @@ export async function planNpmCap(
   currentSizeBytes: number,
   capBytes: number,
   processes: readonly ProcessSnapshotEntry[],
+  processListReadable: boolean,
 ): Promise<NpmCapPlanResult> {
   if (currentSizeBytes <= capBytes) return { kind: "not-over-cap" };
   const overCapBytes = currentSizeBytes - capBytes;
-  if (processes.some(isPackageManagerProcess)) {
+  if (!processListReadable || processes.some(isPackageManagerProcess)) {
     return { kind: "skipped-package-manager-active", overCapBytes };
   }
   const capResult = await planNpmCacheCap(
@@ -408,6 +409,8 @@ export interface DiskGcReport {
   };
   browserRevisions: {
     candidates: DiskGcReportCandidate[];
+    removed: string[];
+    failures: { path: string; message: string }[];
     freedBytes: number;
   };
   npmCap:
@@ -421,6 +424,12 @@ export interface DiskGcReport {
         ranSteps: string[];
         cleanedKeys: number;
         freedBytes: number | null;
+      }
+    | {
+        status: "execution-failed";
+        overCapBytes: number;
+        victims: DiskGcReportCandidate[];
+        message: string;
       };
 }
 
@@ -429,6 +438,8 @@ export interface DiskGcExecutorDeps {
   readSessionFresh: (sessionId: string) => SessionRecord | null;
   rm: (path: string) => Promise<void>;
   realpath: (path: string) => Promise<string>;
+  // Executor re-read guard for profile dirs: null means safe to delete.
+  profileDeleteGuard: (profilePath: string) => Promise<string | null>;
   npmClean: (key: string) => Promise<void>;
   npmVerify: () => Promise<void>;
   measureCacacheBytes: () => Promise<number | null>;
@@ -499,6 +510,11 @@ export async function executeDiskGc(
       continue;
     }
     try {
+      const blockReason = await deps.profileDeleteGuard(candidate.path);
+      if (blockReason !== null) {
+        profilesFailures.push({ path: candidate.path, message: blockReason });
+        continue;
+      }
       await deps.rm(candidate.path);
       profilesRemoved.push(candidate.path);
       freedBytes += candidate.sizeBytes;
@@ -519,16 +535,21 @@ export async function executeDiskGc(
         : "unpinned browser revision",
   }));
   let browserRevisionsFreedBytes = 0;
+  const browserRevisionsRemoved: string[] = [];
+  const browserRevisionsFailures: { path: string; message: string }[] = [];
   if (options.browserRevisions && plan.browserRevisions.length > 0) {
     if (options.dryRun) {
       browserRevisionsFreedBytes = browserRevisionCandidates.reduce(
         (sum, c) => sum + c.sizeBytes,
         0,
       );
+      freedBytes += browserRevisionsFreedBytes;
     } else {
       const outcome = await executePrune(plan.browserRevisions, deps.instanceConfig);
       browserRevisionsFreedBytes = outcome.freedKb * 1024;
       freedBytes += browserRevisionsFreedBytes;
+      browserRevisionsRemoved.push(...outcome.removed.map((entry) => entry.path));
+      browserRevisionsFailures.push(...outcome.failures);
     }
   }
 
@@ -562,70 +583,60 @@ export async function executeDiskGc(
         cleanedKeys: victims.length,
         freedBytes: npmCapPlan.plan.victimBytes,
       };
+      freedBytes += npmCapPlan.plan.victimBytes;
     } else {
-      // R3-D's real gate: verify -> RE-MEASURE -> stop if under cap -> only
-      // THEN clean the ranked victims -> verify again. The victim list is
-      // computed at plan time against the PRE-verify size, so it must never
-      // be cleaned unconditionally — verify alone may already have cleared
-      // the cap by collecting orphaned/corrupt content, and every victim
-      // byte cleaned past that point is a needless refetch of still-valid
-      // content.
-      const ranSteps: string[] = [];
-      await deps.npmVerify();
-      ranSteps.push("npm cache verify");
-      const afterVerify = await deps.measureCacacheBytes();
-      if (afterVerify !== null && afterVerify <= npmCapPlan.capBytes) {
-        const npmFreed = Math.max(0, npmCapPlan.currentSizeBytes - afterVerify);
-        freedBytes += npmFreed;
-        npmCapReport = {
-          status: "planned",
-          overCapBytes: npmCapPlan.overCapBytes,
-          victims,
-          ranSteps,
-          cleanedKeys: 0,
-          freedBytes: npmFreed,
-        };
-      } else {
-        // The victim list was ranked oldest-first against the PRE-verify
-        // size (npm-cache-cap.ts's planNpmCacheVictims). `npm cache verify`
-        // may have already collected enough orphaned/corrupt content on its
-        // own that fewer victims are needed now — re-walk that SAME ranking
-        // against the POST-verify size and clean only the prefix still
-        // required to clear the cap. Cleaning the full pre-verify list here
-        // would delete already-under-cap, still-valid entries a second time
-        // (measured on this host: 14381260894 bytes of orphan content verify
-        // alone reclaims). When the post-verify size is unknown
-        // (`afterVerify === null`), fall back to the full ranked list — the
-        // only safe choice when there is no measurement to rank against.
-        let toClean = npmCapPlan.plan.victims;
-        if (afterVerify !== null) {
-          const prefix: typeof npmCapPlan.plan.victims = [];
-          let projected = afterVerify;
-          for (const victim of npmCapPlan.plan.victims) {
-            if (projected <= npmCapPlan.capBytes) break;
-            prefix.push(victim);
-            projected -= victim.size;
-          }
-          toClean = prefix;
-        }
-        for (const victim of toClean) {
-          await deps.npmClean(victim.key);
-          ranSteps.push(`npm cache clean ${victim.key}`);
-        }
+      try {
+        const ranSteps: string[] = [];
         await deps.npmVerify();
         ranSteps.push("npm cache verify");
-        const after = await deps.measureCacacheBytes();
-        const npmFreed = after !== null ? Math.max(0, npmCapPlan.currentSizeBytes - after) : null;
-        if (npmFreed !== null) freedBytes += npmFreed;
+        const afterVerify = await deps.measureCacacheBytes();
+        if (afterVerify !== null && afterVerify <= npmCapPlan.capBytes) {
+          const npmFreed = Math.max(0, npmCapPlan.currentSizeBytes - afterVerify);
+          freedBytes += npmFreed;
+          npmCapReport = {
+            status: "planned",
+            overCapBytes: npmCapPlan.overCapBytes,
+            victims,
+            ranSteps,
+            cleanedKeys: 0,
+            freedBytes: npmFreed,
+          };
+        } else {
+          let toClean = npmCapPlan.plan.victims;
+          if (afterVerify !== null) {
+            const prefix: typeof npmCapPlan.plan.victims = [];
+            let projected = afterVerify;
+            for (const victim of npmCapPlan.plan.victims) {
+              if (projected <= npmCapPlan.capBytes) break;
+              prefix.push(victim);
+              projected -= victim.size;
+            }
+            toClean = prefix;
+          }
+          for (const victim of toClean) {
+            await deps.npmClean(victim.key);
+            ranSteps.push(`npm cache clean ${victim.key}`);
+          }
+          await deps.npmVerify();
+          ranSteps.push("npm cache verify");
+          const after = await deps.measureCacacheBytes();
+          const npmFreed = after !== null ? Math.max(0, npmCapPlan.currentSizeBytes - after) : null;
+          if (npmFreed !== null) freedBytes += npmFreed;
+          npmCapReport = {
+            status: "planned",
+            overCapBytes: npmCapPlan.overCapBytes,
+            victims,
+            ranSteps,
+            cleanedKeys: toClean.length,
+            freedBytes: npmFreed,
+          };
+        }
+      } catch (error) {
         npmCapReport = {
-          status: "planned",
+          status: "execution-failed",
           overCapBytes: npmCapPlan.overCapBytes,
-          // Dry-run contract is unchanged: the report always names the FULL
-          // planned victim set, never just the cleaned prefix.
           victims,
-          ranSteps,
-          cleanedKeys: toClean.length,
-          freedBytes: npmFreed,
+          message: error instanceof Error ? error.message : String(error),
         };
       }
     }
@@ -646,6 +657,8 @@ export async function executeDiskGc(
     },
     browserRevisions: {
       candidates: browserRevisionCandidates,
+      removed: browserRevisionsRemoved,
+      failures: browserRevisionsFailures,
       freedBytes: browserRevisionsFreedBytes,
     },
     npmCap: npmCapReport,
@@ -675,7 +688,7 @@ async function singletonLockLivePid(profilePath: string): Promise<number | null>
   for (const lockName of ["SingletonLock", "SingletonSocket"]) {
     try {
       const target = await readlink(join(profilePath, lockName));
-      const match = /^[^-]+-(\d+)$/.exec(target);
+      const match = /-(\d+)$/.exec(target);
       const pidStr = match?.[1];
       if (!pidStr) continue;
       const pid = Number.parseInt(pidStr, 10);
@@ -712,6 +725,35 @@ export async function createDiskGcDeps(
       await rm(path, { recursive: true, force: true });
     },
     realpath: (path) => realpath(path),
+    profileDeleteGuard: async (profilePath) => {
+      // Re-`lstat` at execute time — mirrors the build-cache executor's
+      // re-assertion above (D2): a profile swapped for a symlink or handed
+      // to a foreign uid between plan and execute must be refused, same
+      // verdict shape as cache-retention.ts's verdictFor.
+      try {
+        const st = await lstat(profilePath);
+        if (st.isSymbolicLink()) return "symlink";
+        const myUid = process.getuid?.();
+        if (myUid !== undefined && st.uid !== myUid) return "not_owned";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+      // Fail closed: an unreadable or empty process list must never be
+      // read as "nothing has this profile open" — a real `ps -eo` always
+      // lists at least init, so an empty snapshot means ps failed silently.
+      const snapshot = await snapshotProcesses();
+      if (snapshot.status !== "ok" || snapshot.processes.length === 0) {
+        return "process_list_unreadable";
+      }
+      if (snapshot.processes.some((proc) => proc.args.includes(profilePath))) {
+        return "in_use_argv";
+      }
+      const lockPid = await singletonLockLivePid(profilePath);
+      if (lockPid !== null) {
+        return "singleton_lock_live";
+      }
+      return null;
+    },
     npmClean: async (key) => {
       await execFileAsync("npm", ["cache", "clean", key]);
     },

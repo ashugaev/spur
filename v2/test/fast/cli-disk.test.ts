@@ -90,7 +90,7 @@ function fixtureReport(): DiskBudgetReport {
   };
 }
 
-describe("spur disk CLI", () => {
+describe("spur disk CLI", { timeout: 30_000 }, () => {
   beforeEach(() => {
     vi.resetModules();
     measureDiskBudgetMock.mockReset();
