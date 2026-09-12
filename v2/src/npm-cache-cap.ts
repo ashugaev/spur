@@ -15,19 +15,13 @@ export interface NpmCacheIndexEntry {
   size: number;
 }
 
-interface RawIndexLine {
-  key?: unknown;
-  integrity?: unknown;
-  time?: unknown;
-  size?: unknown;
-}
-
-function isValidRawEntry(raw: RawIndexLine): raw is Required<RawIndexLine> {
+function isValidRawEntry(raw: object): raw is NpmCacheIndexEntry {
+  const candidate = raw as Record<string, unknown>;
   return (
-    typeof raw.key === "string" &&
-    typeof raw.integrity === "string" &&
-    typeof raw.time === "number" &&
-    typeof raw.size === "number"
+    typeof candidate["key"] === "string" &&
+    typeof candidate["integrity"] === "string" &&
+    typeof candidate["time"] === "number" &&
+    typeof candidate["size"] === "number"
   );
 }
 
