@@ -49,7 +49,7 @@ function config(overrides: Partial<GitHubCiSourceConfig> = {}): GitHubCiSourceCo
 }
 
 async function start(
-  emit: ReturnType<typeof vi.fn>,
+  emit: (name: string, data?: unknown) => void,
   overrides: Partial<GitHubCiSourceConfig> = {},
 ) {
   return githubCiSourceModule.start({

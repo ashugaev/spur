@@ -181,6 +181,10 @@ With `steps`, Spur sends "step 1/N: research" plus the prompt. Without, it sends
 
 `session.pipeline.step_sent` marks a confirmed step submission, with 1-based `details.stepIndex` and `details.totalSteps`. Spawn logs step 1 (it rides the launch message); the delivery loop logs 2..N. An unconfirmed launch send logs `session.submit.timeout` with `details.freshLaunch` and no `step_sent`.
 
+- `session.pipeline.completed` (level info) — pipeline ran every step.
+- `session.pipeline.errored` (level error) — `details.nextStepIndex`, `details.awaitingStepIndex` (0-based, or `null`).
+- `session.pipeline.stalled` (level warn) — the delivery loop exited because the session left `running` for a non-terminal status with no `stopReason` while a step was still awaited; `details.awaitingStepIndex` (0-based, or `null`), `details.nextStepIndex`, `details.sessionStatus`. Diagnostic only, delivery is not resumed.
+
 ## Desk groups
 
 ```yaml
@@ -208,7 +212,7 @@ A desk group is any set of sessions sharing one workspace: the children of a `sp
 
 Shared per desk: slots (title/links/tags/PR), session artifacts, non-MCP project sidecars (`isolated-daemon`, `isolated-ui`) — one instance, addressable by any member. Per member: transcript, agent process, status, MCP sidecar (`playwright`), session tool dir.
 
-Worktree and shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. A shared sidecar and its ports are released once no member has a running agent; restoring a member starts it again.
+Worktree and shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. The shared sidecar pane survives the same way — kept until [idle TTL](#sidecar-reaping) reaps it, not tied to a running agent. Its ports are released once no member has a running agent; restoring a member starts it again.
 
 ## Modes
 
@@ -281,12 +285,14 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
-- `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github`, `2000` for `service`.
-- `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`.
-- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`. `true` emits a repo's first-poll backlog instead of suppressing it, at most 10 per repo; suppressed items are recorded as seen either way. Parsed but inert for `gitlab`.
+- `projects.<id>.sources.<sourceId>.intervalMs`: optional; default `60000` for `github` and `jira`, `2000` for `service`.
+- `projects.<id>.sources.<sourceId>.query`: optional `github` `gh search prs` query; one session per matched PR, ever. `--draft=false` by default; set `draft: true` to poll drafts only (an `is:draft` qualifier in `query` cannot override the flag). At most one trigger per source may subscribe to `github:work_item.new`. For `jira`, optional JQL; absent, the source is connection-only (no poller, no event). At most one trigger per source may subscribe to `jira:work_item.new`.
+- `projects.<id>.sources.<sourceId>.emitExisting`: optional boolean, default `false`. Applies to `github` with `query`, `sentry`, `github-ci`, `jira` with `query`. `true` emits the first-poll backlog instead of suppressing it, at most 10 per repo (per Jira project for `jira`); suppressed items are recorded as seen either way. Parsed but inert for `gitlab`.
+- `projects.<id>.sources.<sourceId>.maxResults`: optional for `jira`, default `100`, must be a positive number; Spur itself clamps any higher value to `100` (not an Atlassian API limit). Scopes only this source's own `query` poll — the separate `projects.<id>.backlog` fetch path always uses a fixed internal limit of 100, independent of this field. Each poll only records the issues it fetched as seen; an issue that never lands inside the top `maxResults` matches for the JQL's ordering is never recorded, so raising this value only shrinks that gap, it does not close it — bound the match count with the JQL itself (e.g. a tighter `statusCategory`/date filter) for a project with more open issues than `maxResults`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll`: optional for `github`. Enables slow-window polling; omitted entirely by default, which keeps the existing poll-every-tick cadence.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.slowIntervalMs`: optional, default `5 × intervalMs`. Must be greater than `intervalMs`.
 - `projects.<id>.sources.<sourceId>.adaptivePoll.activeGraceMs`: optional, default `600000`.
+- `projects.<id>.sources.<sourceId>.maxReviewBatchTargets`: optional for `github`, positive integer, default unset. Caps how many sessions one review poll batches into a single GraphQL call, clamped by the query's node budget (48 bound / 9 unbound targets per call) so it can only lower it.
 - `projects.<id>.sources.<sourceId>.service`: required for `service`; logical id used by `spur service run <serviceId>`.
 - `projects.<id>.sources.<sourceId>.tailLines`: optional for `service`, default `200`.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.match`: required regex for `service`.
@@ -321,6 +327,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.backlog.<backlogId>.query`: required JQL. Items are served at `GET /backlog/available` in fetch order — the server never re-sorts, so include `ORDER BY Rank ASC` for Jira's real backlog rank.
 - `projects.<id>.backlog.<backlogId>.intervalMs`: optional, default `60000`.
 - `projects.<id>.backlog.<backlogId>.runOnStart`: optional, default `false`.
+- `projects.<id>.backlog.<backlogId>.spawn`: parsed and ignored — no code path consumes it. Wire a `jira` source's own `query` plus a `jira:work_item.new` trigger instead.
 - `tags.<name>.description`: required. Sole agent-facing instruction for the tag; conditions (e.g. request-only) live here, not in source. Instance config only — a project-config `tags` block parses without error and is discarded.
 - `tags.<name>.color`: optional CSS color; auto-derived from the tag name (hashed hue) when omitted.
 - `authRotation.autoRotateOnRateLimit`: optional boolean, default `false`. Instance config only.
@@ -346,13 +353,13 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `userActionLog.hotBytes`: optional, default `134217728` (128MB). Instance config only.
 - `userActionLog.shardHotBytes`: optional, default `16777216` (16MB).
 - `userActionLog.retainArchives`: optional, default `5`.
-- `admission.enabled`: optional boolean, default `true`. `false` disables cap refusal, floor refusal, and critical shedding; legacy `minAvailableBytes` / `minFreeSwapBytes` warnings may still log. Instance config only — project config ignores `admission` before semantic parsing.
+- `admission.enabled`: optional boolean, default `true`. `false` disables cap refusal, floor refusal, critical shedding, and the memory hold; legacy `minAvailableBytes` / `minFreeSwapBytes` warnings may still log. Instance config only — project config ignores `admission` before semantic parsing.
 - `admission.maxLiveSessions`: optional positive integer, default `100`. Global cap on concurrently live (`running`/`spawning`, plus a session mid-restore) sessions. Agent state does not affect the count: a `waiting` or `needs_input` session remains `running` and keeps its slot. An explicit value wins over memory-sizing fields.
 - `admission.perSessionBytes`: optional positive number, default `1610612736` (1.5 GiB). Estimated worst-case memory cost of one live session. Setting this field without `maxLiveSessions` opts into the memory-derived cap.
 - `admission.reserveFraction`: optional number in `(0, 1]`, default `0.7`. Fraction of total host memory reserved for sessions. Setting this field without `maxLiveSessions` opts into the memory-derived cap.
 - `admission.memoryGuard.enforce`: optional boolean, default `false`. Controls only legacy `minAvailableBytes` / `minFreeSwapBytes`: `false` logs `session.admission.memory_guard` and admits; `true` refuses the spawn or restore.
 - `admission.memoryGuard.enforceFloors`: optional boolean, default `true`. Refuses spawn below `admissionFloorBytes`, restore below `restoreFloorBytes`, or either operation above the PSI threshold.
-- `admission.memoryGuard.shedEnabled`: optional boolean, default `true`. Enables the 1-second critical-memory sampler and staged shedding.
+- `admission.memoryGuard.shedEnabled`: optional boolean, default `true`. Enables staged critical-memory shedding. Does not gate the memory hold, which samples on the same 1-second tick regardless.
 - `admission.memoryGuard.minAvailableBytes`: optional non-negative number, default `1073741824` (1 GiB). Guard threshold on `/proc/meminfo`'s `MemAvailable`; `0` effectively disables the available-memory half of the guard.
 - `admission.memoryGuard.minFreeSwapBytes`: optional non-negative number, default `0`. Guard threshold on `/proc/meminfo`'s `SwapFree`; `0` effectively disables the swap half of the guard.
 - `admission.memoryGuard.admissionFloorBytes`: optional non-negative number. Default `max(1073741824, floor(MemTotal / 8))`.
@@ -378,6 +385,10 @@ Below the critical floor each tick stops at most one safe sidecar. Session shedd
 
 Pressure closes at the admission floor (RAM), below the cgroup-high threshold by the smaller of 10% or the emergency threshold, or above twice the emergency headroom (finite max). Swap-only shedding starts disarmed, arms after swap recovers 10 percentage points below `shedSwapUsedFraction`, and spends one sidecar attempt per recovery. Healthy and recovery ticks log nothing. Events: `daemon.memory.shed`, `daemon.memory.shed.failed`, `session.admission.denied`, `session.admission.memory_guard`, startup warning `daemon.memory.unbounded`.
 
+While the guard would deny a wake, a host-wide memory hold engages on the same 1-second tick: due scheduled/interval/daily wakes, queued-message delivery, and pending trigger sends stay in place instead of being attempted. While held, a trigger batch for a `stopped` session is deferred, not dropped. The hold clears after ten consecutive non-denying ticks — sampling at or above the restore floor plus `perSessionBytes`, an unreadable `/proc/meminfo` sample, or a mix of the two — since an unreadable sample also fails open in the admission check the hold mirrors; `admission.enabled: false` force-releases an engaged one.
+
+Hold events: `daemon.memory.hold.engaged` (warn) with `availableBytes`, `floorBytes`, `someAvg10`, `cause` (`legacy_available`, `legacy_swap`, `context_floor`, `pressure`); `daemon.memory.hold.cleared` (info) with `reason` (`recovered`, `admission_disabled`, or `sample_unavailable`), `availableBytes`, `floorBytes`, `marginBytes`, `durationMs`, `engagedCause` — `admission_disabled` and `sample_unavailable` report `availableBytes` and `marginBytes` as `null`; `daemon.memory.hold.failed` (warn) with `message`. A held trigger delivery logs `trigger.send.suppressed_memory_guard` (info) with `interrupt`, `attempt` in place of `trigger.send.failed`.
+
 ## Sidecar reaping
 
 `sidecarGc` kills idle and unowned project sidecar processes. Candidates: non-MCP sidecars under `projects.<id>.sidecars`; a built-in MCP sidecar (`playwright`) never is. Runs on the sidecar-reaper tick and once at boot.
@@ -386,13 +397,13 @@ A reap kills the sidecar's tmux pane process tree, drops its recorded process, a
 
 A non-MCP sidecar is shared by its whole [desk group](#desk-groups) workspace. Every rule below reads the workspace, not one session.
 
-Active workspace: some member is `running`, `spawning`, or in restore warmup. `stopped`, `paused`, `errored`, `completed`, `killed` count as inactive.
+Active workspace: some member is not `completed`/`killed`, or is in restore warmup. Only an all-`completed`/`killed` workspace counts as inactive — `stopped`, `paused`, `errored` count as active.
 
-Idle time: now minus the newest activity over all members, per member `lastActivityAt` falling back to record `updatedAt`. One active member holds the shared sidecar for the rest.
+Idle time: now minus the newest activity over all members, per member the newer of the cached `lastActivityAt` and record `updatedAt`. One active member holds the shared sidecar for the rest.
 
 Decision per sidecar, first match wins:
 
-1. `sidecarGc.enabled: false` — keep.
+1. `sidecarGc.enabled: false` — keep. No sidecar reaper runs at all; a non-terminal owner's pane is never killed by this pass or the 5-minute orphan loop.
 2. MCP sidecar — keep.
 3. No live pane and no recorded process — keep.
 4. Established TCP connection on any port reserved for this sidecar — keep. Outranks every reap rule below, on any owner status.
@@ -408,7 +419,9 @@ A dev server survives a pass while something holds a connection to one of its re
 
 Each pass logs `session.sidecar.reaped` per kill with the matched rule and freed tree RSS, and `session.sidecar.age_warning` per kept sidecar past `maxAgeWarnMinutes` — once per sidecar per window, not per tick.
 
-Every session view (`GET /sessions`, `GET /sessions/<id>`, dashboard) carries each sidecar's `ageSeconds` (omitted when unresolvable) and `ageWarn` (true at `maxAgeWarnMinutes`, the same threshold as the event). The session detail page, the dashboard sidecars row, and `spur list` ([list](commands.md#list)) render the age and mark an over-threshold one.
+`GET /sessions` (the `full` list) and `GET /sessions/<id>` carry each sidecar's `ageSeconds` (omitted when unresolvable) and `ageWarn` (true at `maxAgeWarnMinutes`, the same threshold as the event) in the `sidecars` array. The dashboard view (`GET /sessions?view=dashboard`) carries no `sidecars` array and no per-sidecar age — only `runningSidecarNames`. The session detail page and `spur list` ([list](commands.md#list)) render the age and mark an over-threshold one; the dashboard sidecars row does not.
+
+`deadPane` (omitted when false) marks a sidecar whose tmux session exists but whose pane exited (`remain-on-exit`, same `alive`/`dead` split as [ports](commands.md#sidecars)); the session detail page keeps its Terminal button reachable but shows the Start action.
 
 Cross-workspace port collision: a sidecar start refuses when this workspace's recorded reservation for this sidecar matches a live other workspace's recorded reservation for a non-MCP sidecar in the same project AND that port is free right now. The error names the holding workspace and sidecar; stop that sidecar or its session first — Spur reuses no pane and reaps nothing across a workspace boundary. Refuses nothing: a shared `ports` range alone, an occupied colliding port (the start scans for another free port), a same-workspace sidecar, another project, a holder with no live pane, an explicit `clearPort`.
 
@@ -416,7 +429,7 @@ Cross-workspace port collision: a sidecar start refuses when this workspace's re
 
 `staleAfterMinutes` (instance, default `720`, 12 hours) parks a `running` session idle in state `waiting` that long: pane killed, live sidecars torn down, record written `status: "stopped"`, `stopReason: "stale_timeout"`, `staleSidecars` (names tmux-alive at park time), derived state `stale`. `0` — instance or `projects.<id>.staleAfterMinutes` — disables parking for that scope. Never parked: `working`, `needs_input`, `rate_limited`, queued or in-flight work, Shepherd sessions, and a session with no transcript activity signal at all. The idle clock is the agent's transcript activity, or the parsed reset instant of a claude rate limit that just expired when that is later — still not a routine record write (`agentSessionId` capture, PR field update, slot unlink, `serverError`/`rateLimitedAt` clear), not a tmux attach, so an open web terminal never holds a session unparked.
 
-Waking passes the same [admission gate](#admission-control) as spawn and restore. Refused: a trigger delivery or queued-message drain retries through its own path; a scheduled/interval/daily wake re-arms the same occurrence for the next tick; a manual send or Resume is rejected like an over-cap spawn.
+Waking passes the same [admission gate](#admission-control) as spawn and restore. Refused: a trigger delivery or queued-message drain retries through its own path; a scheduled/interval/daily wake re-arms the same occurrence for the next tick; a manual send or Resume is rejected like an over-cap spawn. A memory-guard crossing instead engages the host-wide [memory hold](#admission-control): automatic paths (scheduled/interval/daily wakes, queued-message delivery, trigger sends) are held in place; manual send and Resume still call `assertAdmissible` and return a 429 while memory is below the floor.
 
 Any system message wakes a parked session silently — GitHub/review event, trigger send, scheduled/interval/daily wake, manual send: pane relaunched, `staleSidecars` replayed, message delivered once the agent process is live, no restore prompt when the native transcript resumes. On a fresh-launch fallback (no native resume, or it failed) the original task prompt is resent first, wrapped as restore does — every fresh-launch fallback, parked or not. The resend waits on the agent's submit ack for claude and cursor, skips it for codex (as `spur restore` does). Ack never confirmed but pane alive: the resend proceeds and logs `session.recover.context_unconfirmed`. Manual Resume (`spur restore`, web Resume) wakes with no message. After a wake the record carries neither `stopReason` nor `staleSidecars`.
 
@@ -448,22 +461,44 @@ Source support:
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, `gitlab:merge_conflict`.
-- `jira`: none. Connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
+- `jira`: `jira:work_item.new` when `query` is set. With no `query` it is connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>` per configured rule.
 - `telegram`: `telegram:message` after an allowed user binds a chat with `/watch`. `text` also carries a transcribed voice note, see [voice.md](voice.md#telegram-voice-notes).
 
 `github` polls running sessions, matches each to a PR branch, emits changed signals only; state persists under `dataDir`. With `query` set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids. GitHub PR URLs seed the native `session.pr` binding; other review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 
-`github:ci_failed`: retry every 10 minutes, stop after 3 deliveries, reset when the failing signal leaves the snapshot. `github:merge_conflict`: one-shot on becoming conflicting, cleared when mergeable, re-emittable. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is always polled.
+`jira` with `query` set polls that JQL on `intervalMs`, fetching at most `maxResults` matches per poll, emits `jira:work_item.new` per unseen issue among those returned, and persists seen `<PROJECT>#<KEY>` ids (e.g. `WEBDEV#WEBDEV-5236`) — an id already in that registry never re-emits, even if the issue later leaves and re-enters the JQL result set. An issue that never falls inside the `maxResults` window is never recorded; if it later rotates into the window (a JQL ordering change, other issues resolving), it emits as new, uncapped by the first-poll backlog cap, which only applies before a project has any seen entries at all. Spawn prompts reference work-item fields with `{{key}}`, `{{title}}`, `{{url}}`, `{{externalId}}`, plus the inherited `{{number}}` (trailing digits of the key) and `{{repo}}` (the key's project prefix). `spawn.autoComplete` is supported on a `jira:work_item.new` trigger; it completes the Spur session only — no Jira issue transition is made.
 
-With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`slowIntervalMs` since the last real poll) passed, the last cycle saw a non-terminal CI check, a tracked session is unpolled, or a session had a `send`/source-reply within `activeGraceMs`. Rate-limit cooldown backoff overrides all of it, here and on plain sources. With `query` also set, discovery runs on the same gated tick; every gate reads already-tracked sessions, so an undiscovered PR cannot re-arm the tick early.
+`github:ci_failed`: retry every 10 minutes, stop after 3 deliveries, reset when the failing signal leaves the snapshot. `github:merge_conflict`: one-shot on becoming conflicting, cleared when mergeable, re-emittable. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is never subject to this terminal-signal pause or the permanent not-found stop below (both require a bound PR number) — it can still be gated by the transient poll-failure backoff described next.
 
-GitHub poll-cost events: `gh.poll_cycle` (one completed poll cycle; `calls`, `graphqlCost`; consecutive zero-call cycles collapse into the first event of the run, the swallowed count lands on the next emitted event as `suppressedZeroCycles`), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known).
+A session bound to a PR number GitHub reports as nonexistent stops signal polling for that PR number after one attempt, logs `source.poll.disabled` once, and re-enables on rebinding away from that PR number (including rebinding back after an intermediate rebind), or on daemon restart — in-memory only, not sticky like the terminal-signal pause above. `source.poll.disabled` on a live PR usually means the token lost repo visibility; fix auth, rebind to a different PR number, or restart the daemon to re-probe once. Any other poll failure retries on a doubling backoff (2 minutes to a 30-minute cap) instead of every cycle.
+
+With `adaptivePoll`, a tick makes zero `gh` calls unless: the slow deadline (`slowIntervalMs` since the last real poll) passed, the last cycle saw a non-terminal CI check, a tracked session is unpolled, or a session had a `send`/source-reply within `activeGraceMs`. A session gated by the permanent not-found stop or by transient poll backoff never counts as "unpolled" and never re-arms the tick. Rate-limit cooldown backoff overrides all of it, here and on plain sources. With `query` also set, discovery runs on the same gated tick; every gate reads already-tracked sessions, so an undiscovered PR cannot re-arm the tick early.
+
+GitHub poll-cost events: `gh.poll_cycle` (`gh` cost of a poll cycle or of a window of them, fields below), `gh.usage` (minute/hour `gh` invocation and GraphQL-cost windows), `gh.poll_budget_paused` (polling skipped to preserve the shared GraphQL reserve; includes remaining budget and reset time when known), `source.poll.disabled` (signal polling stopped for one session because its bound PR number was not found; carries `prNumber`).
+
+`gh.poll_cycle` is keyed by cycle `kind` plus `projectId`/`sourceId`, and emits two shapes in `details`:
+
+- First cycle on a key, even at zero cost: one cycle — `cycle`, `durationMs`, `calls`, `graphqlCost`, `bySubcommand`, plus `errors: 1` when that cycle threw.
+- Later cycles emit nothing and accumulate into a rollup window targeted at 15 minutes, no config key. The first cycle at or past the target emits the window — `cycle`, `windowMs`, `cycles`, `zeroCycles`, `calls`, `graphqlCost`, `bySubcommand` summed over the window, plus `errors` when a cycle in it threw. `windowMs` is the actual elapsed time since the window opened, not the 15-minute target: it reads that low only when a cycle lands right at the boundary, and can read well above it, up to the 60-minute idle ceiling below or, for a window that keeps carrying zero-cost cycles forward under the next bullet, hours.
+- Window with `calls` and `graphqlCost` both 0 and no `errors` emits nothing on close; its counts and window start carry forward, so an idle key stays silent until it spends again. A window with `errors` but no calls or cost still emits — a source that only ever fails stays visible instead of accumulating silently.
+- Key untouched for 60 minutes is dropped, its window closed under the same zero-cost gate; the next cycle on that key emits a single cycle again. Daemon shutdown closes every open window the same way, including a `dispose()` throw or the shutdown force-exit backstop; only `SIGKILL` skips this flush and drops any open window. Both shapes require an event sink; a process with none, such as the CLI, emits neither and tracks nothing for this event.
 
 Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
 
+Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff doubles from 2 minutes to a 30-minute cap), `session.todo.nudge_disabled` (give-up; `details.kind` is `ledger_corrupt` or `target_gone`). `session.todo.nudge_disabled` is emitted at most once per session per liveness episode.
+
+Session lifecycle events: `session.complete.completed`, `session.complete.failed`, `session.pause.completed`, `session.pause.failed`, `session.self_destruct.completed`, `session.self_destruct.failed`, `session.desk_complete.completed`, `session.desk_complete.failed`, `session.handoff.completed`, `session.handoff.failed`.
+
+- A ToDo-gate refusal logs the `.failed` event at `warn` with `details.kind` `todo_ledger_empty` or `todo_open_work`.
+- `session.handoff.failed` after the successor spawned stays `error` with no `details.kind`, ToDo cause or not.
+- Every other failure cause logs `.failed` at `error` with no `details.kind`.
+- Cut note: events written before 2026-09-11 log `self_destruct`, `desk_complete`, and `handoff` under `session.complete.*`; a query over historical `events.jsonl` must union both names.
+
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
+
+Handoff/respawn events: `session.handoff.startup_attachment_missing`, `session.respawn.startup_attachment_missing` (warn when a record-listed startup attachment has no file on disk; handoff/respawn proceed with resolvable attachments only; `details.missingIds`).
 
 ## Daemon restarts
 

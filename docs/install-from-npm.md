@@ -6,7 +6,7 @@ Run Spur on a fresh Linux server. This is the required path for coding-agent ins
 
 Package ships the web UI prebuilt — no on-box build.
 
-Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (Ubuntu's apt build is too old — use nodesource or nvm).
+Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Node version: range in [`package.json`](../package.json) `engines.node` (Ubuntu's apt build is too old — use nodesource or nvm).
 
 ## Requirements
 

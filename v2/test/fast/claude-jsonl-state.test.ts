@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -162,6 +162,37 @@ describe("classifyClaudeJsonlState", () => {
     expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("waiting");
   });
 
+  // ── interrupted turn → waiting (idle prompt) ───────────────────────
+
+  it("returns working for an interrupted record still inside the activity window", () => {
+    const records = [
+      rec({ type: "user", role: "tool_result", interrupted: true, timestampMs: NOW - 5_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
+  it("returns waiting for an interrupted tool_result past the activity window", () => {
+    const records = [
+      rec({ type: "user", role: "tool_result", interrupted: true, timestampMs: NOW - 120_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("waiting");
+  });
+
+  it("returns waiting for a bare interrupted user record past the activity window", () => {
+    const records = [
+      rec({ type: "user", role: "user", interrupted: true, timestampMs: NOW - 120_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("waiting");
+  });
+
+  it("returns working again once a real user message follows the interrupt", () => {
+    const records = [
+      rec({ type: "user", role: "tool_result", interrupted: true, timestampMs: NOW - 20_000 }),
+      rec({ type: "user", role: "user", timestampMs: NOW - 1_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
   // ── progress → working ─────────────────────────────────────────────
 
   it("returns working for progress record", () => {
@@ -223,6 +254,87 @@ describe("classifyClaudeJsonlState", () => {
       rec({ type: "system" }),
     ];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("error");
+  });
+});
+
+// ── parseJsonlRecord: interrupt marker ───────────────────────────────
+
+describe("parseJsonlRecord interrupt detection", () => {
+  const TS = 1_700_000_000_000;
+  const marker = "[Request interrupted by user]";
+  const toolMarker = "[Request interrupted by user for tool use]";
+
+  it("flags a tool_result interrupt record", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: toolMarker }],
+      },
+    });
+    expect(parseJsonlRecord(line, TS)).toMatchObject({
+      type: "user",
+      role: "tool_result",
+      interrupted: true,
+    });
+  });
+
+  it("flags a bare text-block interrupt record", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: marker }] },
+    });
+    expect(parseJsonlRecord(line, TS)).toMatchObject({
+      type: "user",
+      role: "user",
+      interrupted: true,
+    });
+  });
+
+  it("flags a string-content interrupt record", () => {
+    const line = JSON.stringify({ type: "user", message: { role: "user", content: marker } });
+    expect(parseJsonlRecord(line, TS)).toMatchObject({ type: "user", interrupted: true });
+  });
+
+  it("leaves a tool_result whose stdout merely starts with the marker unflagged", () => {
+    // A genuine stalled Bash call whose output quotes the marker: flagging it
+    // would suppress the needs_input alert it must raise.
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_2",
+            content: `${toolMarker}\n${marker}\nmatches in 3 files`,
+          },
+        ],
+      },
+    });
+    const record = parseJsonlRecord(line, TS);
+    expect(record?.interrupted).toBeUndefined();
+  });
+
+  it("leaves an ordinary user message unflagged", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "keep going" }] },
+    });
+    const record = parseJsonlRecord(line, TS);
+    expect(record?.interrupted).toBeUndefined();
+  });
+
+  it("leaves a message that merely quotes the marker mid-text unflagged", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: `the transcript shows ${marker} after an esc` }],
+      },
+    });
+    const record = parseJsonlRecord(line, TS);
+    expect(record?.interrupted).toBeUndefined();
   });
 });
 
@@ -549,6 +661,179 @@ describe("parseConversationBatch", () => {
       }
       expect(result.state).toBe("working");
     } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caps a cold read to the transcript tail instead of allocating the whole file", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "cold-read-cap-"));
+    const tempFile = join(tempDir, "huge.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
+
+    try {
+      // Layout: many small head records, then one record larger than the
+      // cold-read ceiling, then three tail records. The ceiling puts the
+      // window inside the oversized record, so only the three tail records
+      // can be reached. Without the cap the read reaches the head and the
+      // retained tail fills to TAIL_RECORD_LIMIT instead.
+      const headRecord = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T00:00:00.000Z",
+        message: { role: "user", content: "head" },
+      });
+      const oversized = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T08:00:00.000Z",
+        message: { role: "user", content: "x".repeat(1_400_000) },
+      });
+      const tailRecords = [0, 1, 2].map((index) =>
+        JSON.stringify({
+          type: "assistant",
+          timestamp: `2026-05-04T08:26:5${index}.000Z`,
+          message: {
+            role: "assistant",
+            model: "claude-tail",
+            content: [{ type: "text", text: `tail-${index}` }],
+          },
+        }),
+      );
+      const lines = [...new Array(200).fill(headRecord), oversized, ...tailRecords, ""];
+      await writeFile(tempFile, lines.join("\n"), "utf8");
+      const lastActivity = new Date("2026-05-04T08:26:52.000Z");
+      await utimes(tempFile, lastActivity, lastActivity);
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result).not.toBeNull();
+      if (!result) throw new Error("expected a result");
+      // Only the records after the oversized one are reachable through the
+      // capped window; the head is never allocated.
+      expect(result.reader.tailRecords).toHaveLength(3);
+      expect(result.liveModel).toBe("claude-tail");
+      // The reader still ends aligned with the file, so the next incremental
+      // read continues from the right place.
+      expect(result.reader.lastOffset).toBe((await stat(tempFile)).size);
+    } finally {
+      vi.useRealTimers();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads the full incremental delta when lastOffset > 0 even if the gap exceeds the cold-read ceiling", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "warm-incremental-gap-"));
+    const tempFile = join(tempDir, "gap.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
+
+    try {
+      const firstRecord = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T00:00:00.000Z",
+        message: { role: "user", content: "start" },
+      });
+      const gapPrefix = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T01:00:00.000Z",
+        message: { role: "user", content: "p".repeat(500_000) },
+      });
+      const markerRecord = JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-05-04T08:00:00.000Z",
+        message: {
+          role: "assistant",
+          model: "claude-in-skipped-gap",
+          content: [{ type: "text", text: "marker" }],
+        },
+      });
+      const gapSuffix = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T08:20:00.000Z",
+        message: { role: "user", content: "q".repeat(1_100_000) },
+      });
+      await writeFile(
+        tempFile,
+        [firstRecord, gapPrefix, markerRecord, gapSuffix, ""].join("\n"),
+        "utf8",
+      );
+      const fileSize = (await stat(tempFile)).size;
+      const lastOffset = firstRecord.length + 1;
+      expect(fileSize - lastOffset).toBeGreaterThan(1 << 20);
+      expect(lastOffset).toBeLessThan(fileSize - (1 << 20));
+
+      const lastActivity = new Date("2026-05-04T08:26:00.000Z");
+      await utimes(tempFile, lastActivity, lastActivity);
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result).not.toBeNull();
+      if (!result) throw new Error("expected a result");
+      expect(
+        result.reader.tailRecords.some((record) => record.model === "claude-in-skipped-gap"),
+      ).toBe(true);
+      expect(result.reader.lastOffset).toBe(fileSize);
+    } finally {
+      vi.useRealTimers();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a whole record when the capped window opens exactly on a line boundary", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "cold-read-boundary-"));
+    const tempFile = join(tempDir, "boundary.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
+
+    try {
+      // The window starts at size - 1 MiB. Sizing the final record to exactly
+      // one byte under 1 MiB, with its trailing newline, puts that start on
+      // the record's first byte — so the line opening the window is whole, and
+      // dropping it unconditionally would lose it.
+      const build = (padding: string) =>
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-05-04T08:26:40.000Z",
+          message: {
+            role: "assistant",
+            model: "claude-boundary",
+            content: [{ type: "text", text: padding }],
+          },
+        });
+      const target = 1_048_576 - 1;
+      const boundaryRecord = build("b".repeat(target - build("").length));
+      expect(boundaryRecord).toHaveLength(target);
+
+      const filler = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-04T08:00:00.000Z",
+        message: { role: "user", content: "y".repeat(2048) },
+      });
+      await writeFile(tempFile, [filler, boundaryRecord, ""].join("\n"), "utf8");
+      const lastActivity = new Date("2026-05-04T08:26:40.000Z");
+      await utimes(tempFile, lastActivity, lastActivity);
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result).not.toBeNull();
+      if (!result) throw new Error("expected a result");
+      expect(result.liveModel).toBe("claude-boundary");
+    } finally {
+      vi.useRealTimers();
       await rm(tempDir, { recursive: true, force: true });
     }
   });

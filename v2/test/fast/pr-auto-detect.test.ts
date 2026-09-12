@@ -49,6 +49,7 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentResumePlan: vi.fn(),
   findAgentSessionId: vi.fn(),
   agentProcessMatchers: agentProcessMatchersMock,
+  agentLaunchUsesForeignBinary: vi.fn(() => false),
   agentSessionConfig: vi.fn(() => ({})),
   agentStateStrategy: agentStateStrategyMock,
   agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
@@ -180,18 +181,20 @@ vi.mock("../../src/registry.js", () => ({
   isInsideWorktreeDir: vi.fn(() => false),
   removeConfigRegistryPath: vi.fn(() => []),
   // Keep existing per-test buildMergedConfigMock setups driving the merged config.
-  ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
-    invalidateRemovedPaths: vi.fn(),
-    canonicalizePath: vi.fn((path: string) => path),
-    scan: () => {
+  ConfigRegistryScanner: class {
+    invalidateRemovedPaths = vi.fn();
+    canonicalizePath(path: string) {
+      return path;
+    }
+    scan() {
       const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
       return {
         config: merged.config,
         configPaths: merged.configPaths,
         newDiagnostics: [],
       };
-    },
-  })),
+    }
+  },
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,

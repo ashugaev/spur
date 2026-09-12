@@ -191,6 +191,10 @@ interface FleetPaneEntry {
   // targeted before batching) — isProcessRunningInTmux needs all of them
   // since the agent process can be in any pane/window of the session.
   allTtys: string[];
+  // Every pane's pid across the whole session — the pane-child fallback in
+  // isProcessRunningInTmux uses these to recognize a wrapper-exec'd agent by
+  // parentage (ppid is a pane pid) when name matching misses (issue #806).
+  allPanePids: number[];
 }
 
 // `readable: false` means the `list-panes` fork itself failed, so the empty
@@ -232,16 +236,22 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           activePaneDead: true,
           activePanePid: null,
           allTtys: [],
+          allPanePids: [],
         };
         if (paneTty) {
           entry.allTtys.push(paneTty);
         }
+        const parsedPanePid = Number.parseInt(panePid ?? "", 10);
+        const panePidValue =
+          Number.isFinite(parsedPanePid) && parsedPanePid > 0 ? parsedPanePid : null;
+        if (panePidValue !== null) {
+          entry.allPanePids.push(panePidValue);
+        }
         // window_active + pane_active together identify the exact pane a
         // no-window/no-pane target (`=name:`) resolves to.
         if (windowActive === "1" && paneActive === "1") {
-          const pid = Number.parseInt(panePid ?? "", 10);
           entry.activePaneDead = paneDead === "1";
-          entry.activePanePid = Number.isFinite(pid) && pid > 0 ? pid : null;
+          entry.activePanePid = panePidValue;
         }
         panes.set(sessionName, entry);
       }
@@ -551,6 +561,10 @@ export async function lookupTmuxPanePid(
 }
 
 interface PsRow {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  tpgid: number;
   tty: string;
   rssKb: number;
   args: string;
@@ -570,25 +584,48 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
+// RESIDUAL (#857 P1, scoped): isProcessRunningInTmux's pane-child fallback
+// fails CLOSED, per row, when a candidate row's tty has no resolvable
+// foreground process group — see the fgPgid check there. This residual is
+// about a DIFFERENT failure mode: `ps` rejecting the `-eo` column spec
+// outright. That exits nonzero, the catch below returns [], and pass 1 above
+// reads the WHOLE fleet DEAD, not just the pane-child fallback. `pgid`/`tpgid`
+// are Linux procps/BSD ps fields, not POSIX; this repo already assumes a
+// Linux `ps` at runtime (see also process-tree.ts), so this is an existing
+// exposure shape, not a new one — documented here, not solved.
 function getPsSnapshot(): Promise<PsRow[]> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,rss,args"], {
-        timeout: 5_000,
-        maxBuffer: PS_MAX_BUFFER_BYTES,
-      });
+      const { stdout: psOut } = await execFileAsync(
+        "ps",
+        ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"],
+        {
+          timeout: 5_000,
+          maxBuffer: PS_MAX_BUFFER_BYTES,
+        },
+      );
       return psOut
         .split("\n")
         .map((line) => {
           const cols = line.trimStart().split(/\s+/);
-          if (cols.length < 4) {
+          if (cols.length < 7) {
             return null;
           }
-          const rssKb = Number.parseInt(cols[2] ?? "", 10);
+          const pid = Number.parseInt(cols[0] ?? "", 10);
+          const ppid = Number.parseInt(cols[1] ?? "", 10);
+          const pgid = Number.parseInt(cols[2] ?? "", 10);
+          const tpgid = Number.parseInt(cols[3] ?? "", 10);
+          const tty = cols[4] ?? "";
+          const rssKb = Number.parseInt(cols[5] ?? "", 10);
+          const args = cols.slice(6).join(" ");
           return {
-            tty: cols[1] ?? "",
+            pid: Number.isFinite(pid) ? pid : -1,
+            ppid: Number.isFinite(ppid) ? ppid : -1,
+            pgid: Number.isFinite(pgid) ? pgid : -1,
+            tpgid: Number.isFinite(tpgid) ? tpgid : -1,
+            tty,
             rssKb: Number.isFinite(rssKb) ? rssKb : 0,
-            args: cols.slice(3).join(" "),
+            args,
           };
         })
         .filter((row): row is PsRow => row !== null);
@@ -643,7 +680,7 @@ export async function getFleetSessionRssBytes(
 export async function isProcessRunningInTmux(
   sessionName: string,
   processMatchers: string[],
-  options?: { fresh?: boolean },
+  options?: { fresh?: boolean; paneChildFallback?: boolean },
 ): Promise<boolean> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
@@ -651,7 +688,8 @@ export async function isProcessRunningInTmux(
   }
   try {
     const { panes } = await getFleetPaneSnapshot();
-    const ttys = panes.get(sessionName)?.allTtys ?? [];
+    const entry = panes.get(sessionName);
+    const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
       return false;
     }
@@ -672,6 +710,52 @@ export async function isProcessRunningInTmux(
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
         return true;
+      }
+    }
+    // Pane-child fallback (issue #806, hardened against #857 P1): a
+    // SPUR_*_BIN wrapper that exec's a binary whose filename is not one of
+    // the agent's canonical process names never matches pass 1 above. Only
+    // reached when the caller has determined the launch binary is foreign to
+    // the agent (session-service's agentProcessAlive). "Any direct child of
+    // the pane shell" was too wide: after the agent exits, a persistent shell
+    // helper it (or the shell) spawned — gitstatusd, a `sleep 300 &` job —
+    // is still a direct child and kept the session reading ALIVE forever.
+    // The gate is instead the tty's current foreground process group: a live
+    // agent (or its wrapper) is the pane's foreground job, a leftover
+    // background helper is not. fgPgid per tty is read off the row whose pid
+    // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
+    // pgid, shared by every process attached to that tty.
+    const allPanePids = entry?.allPanePids ?? [];
+    if (options?.paneChildFallback && allPanePids.length > 0) {
+      const panePids = new Set(allPanePids);
+      const fgPgidByTty = new Map<string, number>();
+      for (const row of rows) {
+        if (panePids.has(row.pid) && ttySet.has(row.tty)) {
+          fgPgidByTty.set(row.tty, row.tpgid);
+        }
+      }
+      for (const row of rows) {
+        if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
+          continue;
+        }
+        const fgPgid = fgPgidByTty.get(row.tty);
+        // Fail CLOSED on an unresolvable foreground group. Reaching this needs
+        // either the pane pid's own row absent from this ps snapshot, or an
+        // unparseable tpgid (getPsSnapshot normalizes it to -1). Row-absent
+        // means the tty's controlling process is gone — and the kernel then
+        // dissociates that tty from every surviving session member, so their
+        // tty reads `?` and they never pass the ttySet guard above. A live
+        // agent therefore cannot be one of these rows. Admitting one on
+        // parentage alone re-admits the leftover-helper class this gate
+        // exists to exclude (#806 -> #857 P1), and a false ALIVE here
+        // send-keys the user's prose into a shell prompt. Excludes THIS ROW
+        // only; other rows and the session's other ttys still evaluate.
+        if (fgPgid === undefined || fgPgid <= 0) {
+          continue;
+        }
+        if (row.pgid === fgPgid) {
+          return true;
+        }
       }
     }
     return false;

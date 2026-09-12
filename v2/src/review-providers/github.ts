@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { gh, pollBudgetState, recordGraphqlBudgetFromEnvelope, withGhPollBudget } from "../gh.js";
 import {
   readCommentSeenRegistry,
@@ -77,6 +78,149 @@ const reviewBatchCursor = new Map<string, number>();
 
 export function _resetGitHubReviewBatchForTests(): void {
   reviewBatchCursor.clear();
+}
+
+// A batch-level failure (transport error, a pathless GraphQL error, or a mixed-repo
+// caller bug) settles every member of the batch with ONE shared error object instead
+// of smearing the raw cause or a per-alias duplicate. `batchKey` is the reported
+// host/owner/repo identity; `dedupeKey` additionally carries the bound/unbound axis
+// because one repo can run two independent batches (bound and unbound) in the same
+// poll cycle, and those are two distinct failures that must not collapse into one
+// logged event (see event-sources/github.ts's loggedBatchFailures set).
+export class GitHubReviewBatchError extends Error {
+  readonly batchKey: string;
+  readonly dedupeKey: string;
+  readonly memberCount: number;
+
+  constructor(
+    batchKey: string,
+    dedupeKey: string,
+    memberCount: number,
+    cause: string,
+    options?: { cause?: unknown },
+  ) {
+    super(`GitHub review batch ${batchKey} (${memberCount} sessions) failed: ${cause}`, options);
+    this.name = "GitHubReviewBatchError";
+    this.batchKey = batchKey;
+    this.dedupeKey = dedupeKey;
+    this.memberCount = memberCount;
+  }
+}
+
+// Cap on retained GitHub-sourced text (stderr line, joined GraphQL error messages)
+// folded into a GitHubReviewBatchError's message.
+const GITHUB_BATCH_ERROR_TEXT_MAX = 500;
+
+function capBatchErrorText(text: string): string {
+  return text.length > GITHUB_BATCH_ERROR_TEXT_MAX
+    ? text.slice(0, GITHUB_BATCH_ERROR_TEXT_MAX)
+    : text;
+}
+
+function firstNonEmptyLine(text: string): string {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
+}
+
+// Classifies a thrown gh/execFile failure into a short, argv-free cause string.
+// NEVER reads error.message from a raw execFile rejection as a fallback: that
+// message is `Command failed: <full argv>`, which embeds the GraphQL query body.
+function classifyGhBatchFailure(error: unknown): string {
+  if (!isRecord(error)) return "gh call failed";
+  if (error.killed === true || typeof error.signal === "string") {
+    const signal = typeof error.signal === "string" ? error.signal : "unknown";
+    return `timeout after 30s (signal ${signal})`;
+  }
+  const stderr = typeof error.stderr === "string" ? error.stderr : "";
+  if (stderr.trim()) {
+    return capBatchErrorText(firstNonEmptyLine(stderr));
+  }
+  const message = typeof error.message === "string" ? error.message : "";
+  if (message.startsWith("gh cwd does not exist")) {
+    return message;
+  }
+  // A raw execFileAsync rejection's message is always `Command failed: <full argv>`
+  // (gh.ts's execFileAsync call) — that shape, and only that shape, embeds the
+  // GraphQL query body and must never surface. Any other message (a thrown
+  // `new Error("...")` with a short, argv-free reason) is safe to keep.
+  if (message && !message.startsWith("Command failed:")) {
+    return capBatchErrorText(message);
+  }
+  const code = typeof error.code === "string" || typeof error.code === "number" ? error.code : null;
+  return code !== null ? `gh call failed (${code})` : "gh call failed";
+}
+
+// Mirrors gqlErrorsByAlias's own walk (pr-lookup.ts:260-287) but counts every entry
+// that walk drops without attributing to an alias: a non-record entry, an entry with
+// no message or an empty one, an entry with no `path` at all, or a `path` that names
+// none of this batch's aliases. Every one of those shapes can't be attributed to one
+// member, so it must trigger the batch-level branch rather than vanish silently.
+function unattributedGraphqlErrorCount(errorsRaw: unknown, aliases: Set<string>): number {
+  if (!Array.isArray(errorsRaw)) return 0;
+  let count = 0;
+  for (const entry of errorsRaw) {
+    // gqlErrorsByAlias's own walk (pr-lookup.ts:266-272) drops a non-record entry and
+    // an entry with an empty/missing message the same way it drops a pathless or
+    // unmatched-path entry: by `continue`ing without attributing it to any alias. All
+    // four shapes are equally unattributable, so the count must catch all four or an
+    // envelope like `errors: ["boom"]` or `{type:"NOT_FOUND", path:["r","a1"]}` with no
+    // message falls through to the per-alias loop and can settle an absent alias
+    // ok/collected:null — the exact silent snapshot-deletion hole this count exists to
+    // close (I2).
+    if (!isRecord(entry)) {
+      count += 1;
+      continue;
+    }
+    const message = typeof entry.message === "string" ? entry.message.trim() : "";
+    if (!message) {
+      count += 1;
+      continue;
+    }
+    const path = entry.path;
+    if (!Array.isArray(path)) {
+      count += 1;
+      continue;
+    }
+    const alias = path.find((segment) => typeof segment === "string" && aliases.has(segment));
+    if (!alias) count += 1;
+  }
+  return count;
+}
+
+// Configured width can only LOWER the node-derived limit, never raise it — the
+// node-budget derivation stays a hard clamp.
+function effectiveBatchTargetLimit(bound: boolean, maxTargets?: number): number {
+  const nodeLimit = reviewBatchTargetLimit(bound);
+  return maxTargets === undefined ? nodeLimit : Math.min(maxTargets, nodeLimit);
+}
+
+function settleBatchAsError(
+  targets: GitHubBatchTarget[],
+  results: Map<string, GitHubSignalBatchResult>,
+  error: GitHubReviewBatchError,
+): Map<string, GitHubSignalBatchResult> {
+  for (const target of targets) {
+    settleTargetLookup(target, { status: "skipped", reason: "error" });
+    results.set(target.session.id, { status: "error", error });
+  }
+  return results;
+}
+
+// One dead worktree cannot fail the batch: prefer the first member whose worktree
+// still exists on disk over blindly trusting targets[0]. Falls back to targets[0]'s
+// path (possibly "") when none exist. Shared by the main batch call AND the three
+// pagination legs below — a dead targets[0] worktree must not fail the paginating
+// member's requests either, once the batch call itself already resolved a live one.
+function resolveBatchWorktreeCwd(targets: GitHubBatchTarget[]): string {
+  return (
+    targets.find((target) => target.session.worktreePath && existsSync(target.session.worktreePath))
+      ?.session.worktreePath ??
+    targets[0]?.session.worktreePath ??
+    ""
+  );
 }
 
 export function reviewCommentSeenKey(id: number | string): string {
@@ -807,6 +951,8 @@ async function paginateReviewThreads(
   aliases: GitHubBatchAlias[],
   repository: Record<string, unknown>,
   cursors: Map<string, string>,
+  failures: Map<string, string>,
+  cwd: string,
 ): Promise<void> {
   const resumedPullRequests = new Set(
     [...cursors.keys()].filter((key) => key.startsWith("pull-request:")),
@@ -864,30 +1010,40 @@ async function paginateReviewThreads(
     }
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
-    const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
-    assertGraphqlEnvelopeSucceeded(envelope, "GitHub review thread pagination");
-    const data = isRecord(envelope.data) ? envelope.data : null;
-    if (!data) throw new Error("invalid GitHub review thread pagination response");
-    requests += 1;
-    nodes += pages.length * GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET;
-    for (const [index, page] of pages.entries()) {
-      const value = data[`p${index}`];
-      const threads = isRecord(value) && isRecord(value.reviewThreads) ? value.reviewThreads : null;
-      const currentThreads = isRecord(page.pullRequest.reviewThreads)
-        ? page.pullRequest.reviewThreads
-        : null;
-      if (!threads || !currentThreads) throw new Error("invalid GitHub review thread page");
-      currentThreads.nodes = [...connectionNodes(threads), ...connectionNodes(currentThreads)];
-      currentThreads.pageInfo = threads.pageInfo;
-      const nextPage = pullRequestThreadPageToFetch({ id: page.id, reviewThreads: threads });
-      const key = `pull-request:${page.id}`;
-      if (nextPage) {
-        const next = { ...nextPage, pullRequest: page.pullRequest };
-        cursors.set(key, next.before);
-        pending.push(next);
-      } else {
-        cursors.delete(key);
+    try {
+      const envelope = await requestGraphqlEnvelope(cwd, args);
+      assertGraphqlEnvelopeSucceeded(envelope, "GitHub review thread pagination");
+      const data = isRecord(envelope.data) ? envelope.data : null;
+      if (!data) throw new Error("invalid GitHub review thread pagination response");
+      requests += 1;
+      nodes += pages.length * GITHUB_REVIEW_THREAD_PAGE_NODE_BUDGET;
+      for (const [index, page] of pages.entries()) {
+        const value = data[`p${index}`];
+        const threads =
+          isRecord(value) && isRecord(value.reviewThreads) ? value.reviewThreads : null;
+        const currentThreads = isRecord(page.pullRequest.reviewThreads)
+          ? page.pullRequest.reviewThreads
+          : null;
+        if (!threads || !currentThreads) throw new Error("invalid GitHub review thread page");
+        currentThreads.nodes = [...connectionNodes(threads), ...connectionNodes(currentThreads)];
+        currentThreads.pageInfo = threads.pageInfo;
+        const nextPage = pullRequestThreadPageToFetch({ id: page.id, reviewThreads: threads });
+        const key = `pull-request:${page.id}`;
+        if (nextPage) {
+          const next = { ...nextPage, pullRequest: page.pullRequest };
+          cursors.set(key, next.before);
+          pending.push(next);
+        } else {
+          cursors.delete(key);
+        }
       }
+    } catch (error) {
+      // One pagination request failure is attributed only to the pull requests it
+      // was fetching, not the whole batch. cursors already persisted their pre-request
+      // position above, so the next cycle resumes from the same page.
+      const cause = classifyGhBatchFailure(error);
+      for (const page of pages) failures.set(page.id, cause);
+      break;
     }
   }
 }
@@ -926,6 +1082,8 @@ async function paginateReviewThreadComments(
   projectId: string,
   sourceId: string,
   cursors: Map<string, string>,
+  failures: Map<string, string>,
+  cwd: string,
 ): Promise<void> {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const pullRequests = new Map<string, Record<string, unknown>>();
@@ -1017,30 +1175,36 @@ async function paginateReviewThreadComments(
     }
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
-    const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
-    assertGraphqlEnvelopeSucceeded(envelope, "GitHub review comment pagination");
-    const data = isRecord(envelope.data) ? envelope.data : null;
-    if (!data) throw new Error("invalid GitHub review comment pagination response");
-    requests += 1;
-    nodes += pages.length * GITHUB_CONNECTION_PAGE_SIZE;
-    for (const [index, page] of pages.entries()) {
-      const value = data[`t${index}`];
-      const comments = isRecord(value) && isRecord(value.comments) ? value.comments : null;
-      const currentComments = isRecord(page.thread.comments) ? page.thread.comments : null;
-      if (!comments || !currentComments) {
-        throw new Error("invalid GitHub review comment page");
+    try {
+      const envelope = await requestGraphqlEnvelope(cwd, args);
+      assertGraphqlEnvelopeSucceeded(envelope, "GitHub review comment pagination");
+      const data = isRecord(envelope.data) ? envelope.data : null;
+      if (!data) throw new Error("invalid GitHub review comment pagination response");
+      requests += 1;
+      nodes += pages.length * GITHUB_CONNECTION_PAGE_SIZE;
+      for (const [index, page] of pages.entries()) {
+        const value = data[`t${index}`];
+        const comments = isRecord(value) && isRecord(value.comments) ? value.comments : null;
+        const currentComments = isRecord(page.thread.comments) ? page.thread.comments : null;
+        if (!comments || !currentComments) {
+          throw new Error("invalid GitHub review comment page");
+        }
+        currentComments.nodes = [...connectionNodes(comments), ...connectionNodes(currentComments)];
+        currentComments.pageInfo = comments.pageInfo;
+        const nextPage = threadPageToFetch({ id: page.id, comments }, seen, page.pullRequestId);
+        const next = nextPage ? { ...nextPage, thread: page.thread } : null;
+        const cursorKey = reviewThreadCursorKey(page.pullRequestId, page.id);
+        if (next) {
+          cursors.set(cursorKey, next.before);
+          pending.push(next);
+        } else {
+          cursors.delete(cursorKey);
+        }
       }
-      currentComments.nodes = [...connectionNodes(comments), ...connectionNodes(currentComments)];
-      currentComments.pageInfo = comments.pageInfo;
-      const nextPage = threadPageToFetch({ id: page.id, comments }, seen, page.pullRequestId);
-      const next = nextPage ? { ...nextPage, thread: page.thread } : null;
-      const cursorKey = reviewThreadCursorKey(page.pullRequestId, page.id);
-      if (next) {
-        cursors.set(cursorKey, next.before);
-        pending.push(next);
-      } else {
-        cursors.delete(cursorKey);
-      }
+    } catch (error) {
+      const cause = classifyGhBatchFailure(error);
+      for (const page of pages) failures.set(page.pullRequestId, cause);
+      break;
     }
   }
 }
@@ -1101,6 +1265,8 @@ async function paginatePullRequestSignals(
   aliases: GitHubBatchAlias[],
   repository: Record<string, unknown>,
   cursors: Map<string, string>,
+  failures: Map<string, string>,
+  cwd: string,
 ): Promise<void> {
   const pending: PullRequestSignalPage[] = [];
   for (const { alias, target } of aliases) {
@@ -1149,28 +1315,34 @@ async function paginatePullRequestSignals(
     }
     const query = `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} ${fields.join(" ")}}`;
     args.splice(4, 0, "-f", `query=${query}`);
-    const envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
-    assertGraphqlEnvelopeSucceeded(envelope, "GitHub pull request signal pagination");
-    const data = isRecord(envelope.data) ? envelope.data : null;
-    if (!data) throw new Error("invalid GitHub pull request signal pagination response");
-    requests += 1;
-    nodes += pages.length * GITHUB_CONNECTION_PAGE_SIZE;
-    for (const [index, page] of pages.entries()) {
-      const value = data[`s${index}`];
-      if (!isRecord(value)) throw new Error("invalid GitHub pull request signal page");
-      const connection = signalConnection(value, page.kind);
-      const current = signalConnection(page.pullRequest, page.kind);
-      if (!connection || !current) throw new Error("invalid GitHub pull request signal page");
-      current.nodes = [...connectionNodes(connection), ...connectionNodes(current)];
-      current.pageInfo = connection.pageInfo;
-      const next = signalPageToFetch({ ...value, id: page.pullRequestId }, page.kind);
-      const key = signalCursorKey(page.kind, page.pullRequestId);
-      if (next) {
-        cursors.set(key, next.before);
-        pending.push({ ...next, pullRequest: page.pullRequest });
-      } else {
-        cursors.delete(key);
+    try {
+      const envelope = await requestGraphqlEnvelope(cwd, args);
+      assertGraphqlEnvelopeSucceeded(envelope, "GitHub pull request signal pagination");
+      const data = isRecord(envelope.data) ? envelope.data : null;
+      if (!data) throw new Error("invalid GitHub pull request signal pagination response");
+      requests += 1;
+      nodes += pages.length * GITHUB_CONNECTION_PAGE_SIZE;
+      for (const [index, page] of pages.entries()) {
+        const value = data[`s${index}`];
+        if (!isRecord(value)) throw new Error("invalid GitHub pull request signal page");
+        const connection = signalConnection(value, page.kind);
+        const current = signalConnection(page.pullRequest, page.kind);
+        if (!connection || !current) throw new Error("invalid GitHub pull request signal page");
+        current.nodes = [...connectionNodes(connection), ...connectionNodes(current)];
+        current.pageInfo = connection.pageInfo;
+        const next = signalPageToFetch({ ...value, id: page.pullRequestId }, page.kind);
+        const key = signalCursorKey(page.kind, page.pullRequestId);
+        if (next) {
+          cursors.set(key, next.before);
+          pending.push({ ...next, pullRequest: page.pullRequest });
+        } else {
+          cursors.delete(key);
+        }
       }
+    } catch (error) {
+      const cause = classifyGhBatchFailure(error);
+      for (const page of pages) failures.set(page.pullRequestId, cause);
+      break;
     }
   }
 }
@@ -1180,10 +1352,33 @@ async function runReviewRepoBatch(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  maxTargets: number,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
   if (!slug) return results;
+  if (
+    targets.some(
+      (target) =>
+        target.slug.host !== slug.host ||
+        target.slug.owner !== slug.owner ||
+        target.slug.name !== slug.name,
+    )
+  ) {
+    // Fails closed rather than throwing: a throw here would escape to
+    // `void pollCycle(false)` with no unhandledRejection handler anywhere in
+    // v2/src, terminating the daemon. Unreachable today — byRepo's sole insertion
+    // point (collectGitHubSignalsBatch) keys every group off each target's own
+    // slug — but this stays a defense-in-depth guard against a future caller bug.
+    const batchKey = `${slug.host}/${slug.owner}/${slug.name}`;
+    const bound = targets[0]?.number !== null;
+    const dedupeKey = `${batchKey}:${bound ? "bound" : "unbound"}`;
+    return settleBatchAsError(
+      targets,
+      results,
+      new GitHubReviewBatchError(batchKey, dedupeKey, targets.length, "batch mixed repositories"),
+    );
+  }
   const uniqueTargets = [
     ...new Map(
       targets.map((target) => [
@@ -1196,9 +1391,8 @@ async function runReviewRepoBatch(
   if (uniqueTargets.some((target) => (target.number !== null) !== bound)) {
     throw new Error("GitHub review batch mixed bound and unbound targets");
   }
-  const targetLimit = reviewBatchTargetLimit(bound);
-  if (uniqueTargets.length > targetLimit) {
-    throw new Error(`GitHub review batch exceeds ${targetLimit}-target node budget`);
+  if (uniqueTargets.length > maxTargets) {
+    throw new Error(`GitHub review batch exceeds ${maxTargets}-target node budget`);
   }
   const { query, aliases } = buildGitHubReviewBatchQuery(uniqueTargets);
   const args = [
@@ -1221,45 +1415,49 @@ async function runReviewRepoBatch(
     }
   }
 
+  const batchKey = `${slug.host}/${slug.owner}/${slug.name}`;
+  const dedupeKey = `${batchKey}:${bound ? "bound" : "unbound"}`;
+  // Resolved once and reused for the main batch call AND every pagination leg below,
+  // so a dead targets[0] worktree can't fail pagination even after the batch call
+  // itself already succeeded against a live sibling's cwd.
+  const cwd = resolveBatchWorktreeCwd(targets);
+
   let envelope: Record<string, unknown>;
   try {
-    envelope = await requestGraphqlEnvelope(targets[0]?.session.worktreePath ?? "", args);
+    envelope = await requestGraphqlEnvelope(cwd, args);
   } catch (error) {
-    for (const target of targets) {
-      settleTargetLookup(target, { status: "skipped", reason: "error" });
-      results.set(target.session.id, { status: "error", error });
-    }
-    return results;
+    const cause = classifyGhBatchFailure(error);
+    return settleBatchAsError(
+      targets,
+      results,
+      new GitHubReviewBatchError(batchKey, dedupeKey, targets.length, cause, { cause: error }),
+    );
   }
   const data = isRecord(envelope.data) ? envelope.data : null;
-  if (!data || !isRecord(data.r)) {
-    const error = new Error(
-      `invalid GitHub review batch for ${slug.host}/${slug.owner}/${slug.name}`,
+  const aliasSet = new Set(aliases.map((entry) => entry.alias));
+  const aliasErrors = gqlErrorsByAlias(envelope.errors, aliasSet);
+  const hasEnvelopeErrors = Array.isArray(envelope.errors) && envelope.errors.length > 0;
+  const errorText = hasEnvelopeErrors
+    ? capBatchErrorText(graphqlEnvelopeErrorMessage(envelope.errors))
+    : null;
+  const unattributedErrorCount = hasEnvelopeErrors
+    ? unattributedGraphqlErrorCount(envelope.errors, aliasSet)
+    : 0;
+  // ONE ordered decision, three outcomes: (1) no repository record at all, or
+  // (2) at least one envelope error that gqlErrorsByAlias could not attribute to
+  // any alias, are both batch-level failures — settled as error for EVERY member,
+  // never {status:"ok", collected:null} (that shape means "GitHub answered, the PR
+  // is gone" and deletes the session's review snapshot). Otherwise (3) fall
+  // through to the per-alias settlement below, unchanged in logic.
+  if (!data || !isRecord(data.r) || unattributedErrorCount > 0) {
+    const cause = errorText ?? "response carried no repository data";
+    return settleBatchAsError(
+      targets,
+      results,
+      new GitHubReviewBatchError(batchKey, dedupeKey, targets.length, cause),
     );
-    for (const target of targets) {
-      settleTargetLookup(target, { status: "skipped", reason: "error" });
-      results.set(target.session.id, { status: "error", error });
-    }
-    return results;
   }
   const repository = data.r;
-  const aliasErrors = gqlErrorsByAlias(
-    envelope.errors,
-    new Set(aliases.map((entry) => entry.alias)),
-  );
-  if (Array.isArray(envelope.errors) && envelope.errors.length > 0) {
-    const fallback = graphqlEnvelopeErrorMessage(envelope.errors);
-    for (const { alias, target } of aliases) {
-      const error = new Error(aliasErrors.get(alias) ?? fallback);
-      for (const matching of targets.filter(
-        (candidate) => candidate.number === target.number && candidate.branch === target.branch,
-      )) {
-        settleTargetLookup(matching, { status: "skipped", reason: "error" });
-        results.set(matching.session.id, { status: "error", error });
-      }
-    }
-    return results;
-  }
   const invalidAliases = new Set(
     aliases
       .filter(
@@ -1270,25 +1468,61 @@ async function runReviewRepoBatch(
   );
   if (invalidAliases.size === 0) {
     const cursors = readGitHubReviewPagination(dataDir, projectId, sourceId);
-    try {
-      await paginateReviewThreads(targets, aliases, repository, cursors);
-      await paginateReviewThreadComments(
-        targets,
-        aliases,
-        repository,
-        dataDir,
-        projectId,
-        sourceId,
-        cursors,
-      );
-      await paginatePullRequestSignals(targets, aliases, repository, cursors);
+    const paginationFailures = new Map<string, string>();
+    await paginateReviewThreads(targets, aliases, repository, cursors, paginationFailures, cwd);
+    await paginateReviewThreadComments(
+      targets,
+      aliases,
+      repository,
+      dataDir,
+      projectId,
+      sourceId,
+      cursors,
+      paginationFailures,
+      cwd,
+    );
+    await paginatePullRequestSignals(
+      targets,
+      aliases,
+      repository,
+      cursors,
+      paginationFailures,
+      cwd,
+    );
+    // Commit cursors atomically: a failure partway through leaves later legs (or a
+    // resumed page within the failing leg) with progress the failed leg's caller
+    // never confirmed landed. Only a clean pass (no failures at all) persists —
+    // exactly the same effect the old outer try/catch produced by skipping this
+    // write on any thrown error, preserved here even though the three paginate*
+    // functions no longer throw.
+    if (paginationFailures.size === 0) {
       writeGitHubReviewPagination(dataDir, projectId, sourceId, cursors);
-    } catch (error) {
-      for (const target of targets) {
-        settleTargetLookup(target, { status: "skipped", reason: "error" });
-        results.set(target.session.id, { status: "error", error });
+    } else {
+      const idToAlias = new Map<string, string>();
+      for (const { alias, target } of aliases) {
+        const selected = selectSummaryAndNode(repository[alias], target.number !== null);
+        const id = selected ? readString(selected.node.id) : null;
+        if (id) idToAlias.set(id, alias);
       }
-      return results;
+      let unattributedPaginationFailure = false;
+      for (const [id, cause] of paginationFailures) {
+        const alias = idToAlias.get(id);
+        if (alias) {
+          if (!aliasErrors.has(alias)) aliasErrors.set(alias, cause);
+        } else {
+          // An id resolving to no alias can't be attributed to a single member —
+          // fail closed onto the batch-level path rather than silently dropping it.
+          unattributedPaginationFailure = true;
+        }
+      }
+      if (unattributedPaginationFailure) {
+        const cause = [...paginationFailures.values()][0] ?? "pagination failed";
+        return settleBatchAsError(
+          targets,
+          results,
+          new GitHubReviewBatchError(batchKey, dedupeKey, targets.length, cause),
+        );
+      }
     }
   }
   for (const { alias, target } of aliases) {
@@ -1360,6 +1594,7 @@ export async function collectGitHubSignalsBatch(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  maxTargets?: number,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const byRepo = new Map<string, GitHubBatchTarget[]>();
@@ -1404,7 +1639,7 @@ export async function collectGitHubSignalsBatch(
       }
       const cursorKey = `${repoKey}:${bound ? "bound" : "unbound"}`;
       const start = (reviewBatchCursor.get(cursorKey) ?? 0) % groupedTargets.length;
-      const limit = reviewBatchTargetLimit(bound);
+      const limit = effectiveBatchTargetLimit(bound, maxTargets);
       const selectedGroups = Array.from(
         { length: Math.min(limit, groupedTargets.length) },
         (_, offset) => groupedTargets[(start + offset) % groupedTargets.length] ?? [],
@@ -1450,7 +1685,7 @@ export async function collectGitHubSignalsBatch(
       if (selected.length === 0) continue;
       try {
         const admission = await withGhPollBudget(() =>
-          runReviewRepoBatch(selected, dataDir, projectId, sourceId),
+          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit),
         );
         if (admission.status === "blocked") {
           for (const target of selected) {

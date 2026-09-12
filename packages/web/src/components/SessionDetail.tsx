@@ -54,7 +54,6 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { SessionTodo } from "@/components/SessionTodo";
-import { TodoOverrideDialog } from "@/components/TodoOverrideDialog";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
@@ -108,8 +107,6 @@ import {
   isRestorable,
   isSessionNotRestorablePayload,
   isTerminalSession,
-  isTodoLedgerEmptyPayload,
-  isTodoOpenWorkPayload,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
@@ -118,6 +115,7 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarStopResponse,
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
@@ -1604,11 +1602,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
-  const [todoOverride, setTodoOverride] = useState<
-    | { body?: Record<string, unknown>; empty: true }
-    | { body?: Record<string, unknown>; openCount: number; heldCount: number }
-    | null
-  >(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
     action: "complete" | "kill";
     body?: Record<string, unknown>;
@@ -1971,19 +1964,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       const payload = await readResponsePayload(response);
       if (!response.ok) {
-        if (action === "complete" && isTodoOpenWorkPayload(payload)) {
-          const { sessions } = payload;
-          setTodoOverride({
-            body,
-            openCount: sessions.reduce((count, entry) => count + entry.openItemIds.length, 0),
-            heldCount: sessions.reduce((count, entry) => count + entry.heldItemIds.length, 0),
-          });
-          return false;
-        }
-        if (action === "complete" && isTodoLedgerEmptyPayload(payload)) {
-          setTodoOverride({ body, empty: true });
-          return false;
-        }
         if (
           (action === "complete" || action === "kill") &&
           isOpenPrActionRequiredPayload(payload)
@@ -2301,10 +2281,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
         );
       }
-      const payload = (await response.json()) as SpurSessionView;
+      const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
+      if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        const { survivors, unverifiedPorts = [] } = payload.sidecarStop;
+        showErrorToast(
+          survivors.length === 0 && unverifiedPorts.length > 0
+            ? `Stopped sidecar ${sidecarName}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Run \`spur sidecar sweep\`.`
+            : `Stopped sidecar ${sidecarName}, but ${survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+        );
+      }
     } catch (sidecarError) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
@@ -3593,7 +3581,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
-                            {sc.alive && canAttach ? (
+                            {(sc.alive || sc.deadPane) && canAttach ? (
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
@@ -3703,6 +3691,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {recoverPayload ? (
             <RecoverActionDialog
               busy={busyAction !== null}
+              canForceKill={!isTerminalSession(session)}
               onCancel={() => setRecoverPayload(null)}
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
@@ -3725,20 +3714,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
-            />
-          ) : null}
-          {todoOverride ? (
-            <TodoOverrideDialog
-              {...("empty" in todoOverride
-                ? { empty: true }
-                : { openCount: todoOverride.openCount, heldCount: todoOverride.heldCount })}
-              busy={busyAction === "complete"}
-              onCancel={() => setTodoOverride(null)}
-              onSubmit={(reason) => {
-                const body = { ...(todoOverride.body ?? {}), todoOverrideReason: reason };
-                setTodoOverride(null);
-                void handleAction("complete", body);
-              }}
             />
           ) : null}
           {prCheckUnavailable ? (
