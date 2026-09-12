@@ -1906,6 +1906,50 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("self-destruct refuses open work, then completes once the items resolve", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const itemId = (
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: "api-1" },
+        )
+      ).items[0]?.id;
+      if (!itemId) throw new Error("Expected added ToDo item");
+
+      await expect(service.selfDestruct("api-1")).rejects.toMatchObject({
+        code: "todo_open_work",
+      });
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(writeSessionMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ status: "completed" }),
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.self_destruct.failed",
+          level: "warn",
+          details: { kind: "todo_open_work" },
+        }),
+      );
+
+      await service.mutateTodo(
+        "api-1",
+        { action: "complete", itemId, reason: "Done" },
+        { kind: "agent", agent: "claude", sessionId: "api-1" },
+      );
+      await service.selfDestruct("api-1");
+
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      service.dispose();
+    });
+
     it("preflights every current desk member before completing any, empty ledgers", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ workspaceId: "desk-1" }));
@@ -1920,6 +1964,14 @@ describe("SessionService", () => {
       });
       expect(sessions.get("api-1")?.status).toBe("running");
       expect(sessions.get("api-2")?.status).toBe("running");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.desk_complete.failed",
+          level: "warn",
+          details: { kind: "todo_ledger_empty" },
+        }),
+      );
       service.dispose();
     });
 
@@ -2581,6 +2633,18 @@ describe("SessionService", () => {
         code: "todo_ledger_empty",
       });
       expect(sessions.get("api-1")?.status).toBe("running");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.self_destruct.failed",
+          level: "warn",
+          details: { kind: "todo_ledger_empty" },
+        }),
+      );
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.complete.failed" }),
+      );
       service.dispose();
     });
 
@@ -2621,6 +2685,52 @@ describe("SessionService", () => {
         code: "todo_ledger_empty",
       });
       expect(sessions.get(source.id)?.status).toBe("running");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.failed",
+          level: "warn",
+          details: { kind: "todo_ledger_empty" },
+        }),
+      );
+      service.dispose();
+    });
+
+    // Pre-existing double-gate, out of scope here (issue #896): the human
+    // `todoActor` passes the pre-spawn gate above, but the terminal
+    // `applyManualStatusLocked` call at the end of `handoffLocked` does not
+    // forward `todoActor`, so a successor already exists when this second
+    // gate re-trips. That is why it stays `error`, not `warn`.
+    it("handoff post-spawn gate re-trips on a human actor with an empty ledger", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.handoff(
+          source.id,
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "ui" } },
+        ),
+      ).rejects.toMatchObject({ code: "todo_ledger_empty" });
+
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.failed",
+          level: "error",
+        }),
+      );
       service.dispose();
     });
   });
@@ -19392,6 +19502,17 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(writeSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.complete.failed",
+        level: "error",
+      }),
+    );
+    const [, nonTodoFailureEntry] = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.complete.failed",
+    ) as [string, { details?: unknown }];
+    expect(nonTodoFailureEntry.details).toBeUndefined();
   });
 
   it("completes without a pull request action when the worktree is no longer a git repo", async () => {
