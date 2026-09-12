@@ -2686,7 +2686,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [showErrorToast, showSuccessToast],
   );
 
-  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  // Same clearable:false skip as the 409 handler that sets selectedClearPort
+  // (readSidecarPortConflict's caller): if selectedClearPort is null (every
+  // candidate was clearable:false, so the handler set null), this fallback
+  // must not silently re-enable Clear/Retry onto a disabled option.
+  const conflictClearPort =
+    selectedClearPort ??
+    sidecarPortConflict?.candidates.find((candidate) => candidate.clearable !== false)?.port ??
+    null;
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;

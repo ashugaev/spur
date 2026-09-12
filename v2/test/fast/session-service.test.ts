@@ -26676,6 +26676,60 @@ describe("SessionService", () => {
       expect(terminalEvents).toHaveLength(1);
     });
 
+    it("clears a reservation-blocked refusal once the recording pane dies, past the deadline, with zero terminal events", async () => {
+      // The opposite direction of the test above: a reservedBy candidate
+      // whose recording session's pane has since died. isConflictCandidate
+      // StillBlocked must read this as freed (stillRecorded but not alive)
+      // and clear the refusal — the predicate that fixes the "never goes
+      // terminal" bug is precisely the one that could over-correct into a
+      // permanent latch if it only ever reported "still blocked". Both
+      // directions must be pinned.
+      isHostPortFreeMock.mockResolvedValue(true);
+      let apiOtherAlive = true;
+      sidecarTmuxAliveMock.mockImplementation(
+        async (id: string) => id === "api-other" && apiOtherAlive,
+      );
+      loadConfigMock.mockReturnValue(conflictConfig());
+      const sessions = conflictSessions();
+      sessions.set("api-other", {
+        id: "api-other",
+        project: "api",
+        agent: "claude",
+        prompt: "other",
+        branch: "api-other",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-other",
+        tmuxSession: "api-other",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        // The record still lists the port even after the pane dies below —
+        // only the tmux liveness signal changes, not the recorded reservation.
+        sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 3000 } },
+      });
+
+      const { SessionService, SidecarPortConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(SidecarPortConflictError);
+
+      // The pane dies; the record still lists the port.
+      apiOtherAlive = false;
+      await vi.advanceTimersByTimeAsync(1_800_001);
+      await service.startSidecar("api-1", "dev");
+
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+      );
+      const terminalEvents = logSpurEventMock.mock.calls.filter(
+        ([, entry]) =>
+          entry.event === "session.sidecar.start_rejected" && entry.details?.terminal === true,
+      );
+      expect(terminalEvents).toHaveLength(0);
+    });
+
     it("derives the deadline from a large configured collapseWindowMs, never below the cap", async () => {
       isHostPortFreeMock.mockResolvedValue(false);
       loadConfigMock.mockReturnValue({
