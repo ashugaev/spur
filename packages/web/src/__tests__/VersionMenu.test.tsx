@@ -11,6 +11,7 @@ import { type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VersionMenu } from "@/components/VersionMenu";
 import { VersionSwitchOverlay } from "@/components/VersionSwitchOverlay";
+import { BackendConnectionProvider, HEARTBEAT_INTERVAL_MS } from "@/lib/backend-connection-context";
 import { VersionSwitchProvider } from "@/lib/version-switch-context";
 
 function createTestQueryClient() {
@@ -1176,5 +1177,109 @@ describe("VersionMenu", () => {
     // box and the notice honest without a reload. Exact, so a future
     // staleTime/refetchOnMount change that starts a refetch storm shows up here.
     expect(versionsFetchCount).toBe(2);
+  });
+});
+
+describe("live version from the heartbeat", () => {
+  // Scoped to this block on purpose: the shared render() at the top of this
+  // file stays untouched so no existing test gains a heartbeat.
+  function renderWithHeartbeat(ui: ReactElement) {
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>
+        <VersionSwitchProvider>
+          <BackendConnectionProvider>{children}</BackendConnectionProvider>
+        </VersionSwitchProvider>
+      </QueryClientProvider>
+    );
+    return rtlRender(ui, { wrapper: Wrapper });
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, reload: vi.fn() },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("moves the trigger to the version the heartbeat reports, without a remount or an extra poller", async () => {
+    let daemonVersion = "1.4.2";
+    let infoFetches = 0;
+    let versionsFetches = 0;
+    mockFetch({
+      info: () => {
+        infoFetches += 1;
+        return { payload: { version: daemonVersion } };
+      },
+      versions: () => ({ payload: { current: daemonVersion, available: [] } }),
+      onVersionsFetch: () => {
+        versionsFetches += 1;
+      },
+    });
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderWithHeartbeat(<VersionMenu />);
+    const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
+    await waitFor(() => expect(trigger).toHaveTextContent("1.4.2"));
+
+    daemonVersion = "1.5.0";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    // Same captured node: proves the label updated in place, not via a remount.
+    await waitFor(() => expect(trigger).toHaveTextContent("1.5.0"));
+
+    expect(window.location.reload).not.toHaveBeenCalled();
+    // The 60s versions poll never fired inside one 5s heartbeat, so the new
+    // label can only have come from the heartbeat.
+    expect(versionsFetches).toBe(1);
+    // infoQuery mount + provider mount probe + exactly one heartbeat: pins
+    // "no second poller" on the info endpoint.
+    expect(infoFetches).toBe(3);
+  });
+
+  it("keeps the popover header, the severity glyph and the current row on the heartbeat version", async () => {
+    let daemonVersion = "1.4.2";
+    mockFetch({
+      info: () => ({ payload: { version: daemonVersion } }),
+      // Pinned for the whole test: the stale registry-paired value, i.e. the
+      // real <=60s skew window between the heartbeat and the versions poll.
+      versions: {
+        payload: {
+          current: "1.4.2",
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.2", publishedAt: "2026-05-01T00:00:00.000Z" },
+          ],
+        },
+      },
+    });
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderWithHeartbeat(<VersionMenu />);
+    const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
+    fireEvent.click(trigger);
+    await waitFor(() => expect(trigger).toHaveTextContent("1.4.2"));
+    expect(screen.getByTestId("version-alert-icon")).toBeInTheDocument();
+
+    daemonVersion = "1.5.0";
+    // useFooterPopover has no auto-dismiss timer, so advancing fake time
+    // cannot close the popover opened above.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+
+    await waitFor(() => expect(trigger).toHaveTextContent("1.5.0"));
+    expect(screen.getByText("Spur").parentElement).toHaveTextContent("1.5.0");
+    expect(screen.queryByTestId("version-alert-icon")).not.toBeInTheDocument();
+    const currentLabel = screen.getByText("current");
+    expect(currentLabel.closest("li")).toHaveTextContent("1.5.0");
   });
 });

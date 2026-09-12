@@ -495,6 +495,10 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
+// Consecutive 1s ticks above the restore floor plus margin required before
+// the hold clears. someAvg10 is itself a 10s decayed average, so ten
+// consecutive clear samples cover one full PSI window too.
+const MEMORY_HOLD_CLEAR_TICKS = 10;
 const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
@@ -677,6 +681,21 @@ type MemoryShedExhaustedEdge =
   | "swap:sidecar";
 type MemoryGuardConfig = AppConfig["admission"]["memoryGuard"];
 
+// The ungated pair produced by evaluateMemoryDenial. Neither `enforce` nor
+// `enforceFloors` nor `admission.enabled` has been applied — every caller
+// (assertAdmissible, updateMemoryHold) applies its own gates so a condition
+// never counts toward a denial or a hold unless its own flag says it can.
+type MemoryDenialCause = "legacy_available" | "legacy_swap" | "context_floor" | "pressure";
+
+interface MemoryDenialSample {
+  legacyDetail?: string | undefined;
+  legacyCause?: MemoryDenialCause | undefined;
+  floorDetail?: string | undefined;
+  floorCause?: MemoryDenialCause | undefined;
+  availableBytes: number;
+  someAvg10: number | null;
+}
+
 interface MemoryShedEpisode {
   ramContinuousSinceMs: number | null;
   cgroupHighLatched: boolean;
@@ -829,6 +848,12 @@ export class SessionRateLimitedError extends Error {
 // field, so one here would be written and never read.
 export class SessionAdmissionDeniedError extends Error {
   readonly statusCode = 429;
+  readonly reason: "memory_guard" | "cap";
+
+  constructor(message: string, reason: "memory_guard" | "cap") {
+    super(message);
+    this.reason = reason;
+  }
 }
 
 export class SessionNotReopenableError extends Error {
@@ -880,6 +905,7 @@ const PLAN_MODE_PROMPT_SUFFIX =
 const RESTRICT_WRITES_PROMPT_SUFFIX =
   "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
+type ManualStatusAction = "complete" | "pause" | "self_destruct" | "desk_complete" | "handoff";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 /**
@@ -2569,6 +2595,17 @@ export class SessionService {
   private memoryShedTimer: NodeJS.Timeout | null = null;
   private memoryShedRunning = false;
   private memoryShedEpisode = createMemoryShedEpisode();
+  // Host-wide latch driven by the 1s memory-shed tick (updateMemoryHold): one
+  // "engaged"/"cleared" event pair per episode, read by the wake due-branches,
+  // the trigger flush, and the queued-message drain to hold in place instead
+  // of attempting, failing, and retrying per session. See the memory-guard
+  // wake-storm spec for the full design.
+  private memoryHold: {
+    engaged: boolean;
+    clearTicks: number;
+    engagedAtMs: number | null;
+    engagedCause: MemoryDenialCause | null;
+  } = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   // Local (in-worktree) project config resolved per session. The 2s dashboard
   // tick resolves a project for every session, so without this each tick
@@ -2804,8 +2841,28 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    // One host-memory read shared by both calls below: updateMemoryHold's
+    // wake-context check and runMemoryShed's opening pressure sample would
+    // otherwise each take their own /proc read microseconds apart for the
+    // same tick. Only this shared opening sample is reused — runMemoryShed's
+    // later re-reads (after it stops a sidecar or session) still take a
+    // fresh sample, since host memory has actually changed by then.
+    const host = readHostMemory();
+    // Its own try/catch, separate from runMemoryShed's below: without this
+    // isolation a throw inside updateMemoryHold would be mislabeled as
+    // daemon.memory.shed.failed.
     try {
-      await this.runMemoryShed();
+      this.updateMemoryHold(host);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("daemon.memory.hold.failed", {
+        level: "warn",
+        message: `Memory hold update failed: ${message}`,
+        details: { message },
+      });
+    }
+    try {
+      await this.runMemoryShed(host);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("daemon.memory.shed.failed", {
@@ -2814,6 +2871,140 @@ export class SessionService {
         details: { message },
       });
     }
+  }
+
+  // Host-wide latch: engages when the memory guard would deny a wake and
+  // clears only after MEMORY_HOLD_CLEAR_TICKS consecutive non-denying ticks
+  // — either a sample that clears both the restore floor and a one-session
+  // margin, or an unreadable sample (a null read fails open, so it must not
+  // be able to outlast the condition it mirrors). Runs on the unconditional
+  // memory-shed tick so admission.enabled: false is the only key that can
+  // disable it — memoryGuard.shedEnabled must NOT (runMemoryShed's own
+  // shedEnabled early-return must never reach here).
+  private updateMemoryHold(hostSample: HostMemory | null): void {
+    const admission = this.config.admission;
+    if (!admission.enabled) {
+      // Escape hatch: neither the cap nor the guard can deny, so the hold
+      // must not stall the fleet either. Force-clear an engaged hold (one
+      // cleared event) so flipping this key off mid-episode releases rather
+      // than freezes.
+      if (this.memoryHold.engaged) {
+        const engagedAtMs = this.memoryHold.engagedAtMs;
+        const engagedCause = this.memoryHold.engagedCause;
+        this.memoryHold = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
+        this.logEvent("daemon.memory.hold.cleared", {
+          level: "info",
+          message: "Memory hold released: admission is disabled",
+          details: {
+            reason: "admission_disabled",
+            availableBytes: null,
+            floorBytes: admission.memoryGuard.restoreFloorBytes,
+            marginBytes: null,
+            durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+            engagedCause,
+          },
+        });
+      } else {
+        this.memoryHold.clearTicks = 0;
+      }
+      return;
+    }
+
+    const guard = admission.memoryGuard;
+    const sample = this.evaluateMemoryDenial("wake", hostSample);
+    const denied =
+      sample !== null &&
+      ((sample.legacyDetail !== undefined && guard.enforce) ||
+        (sample.floorDetail !== undefined && guard.enforceFloors));
+
+    if (denied) {
+      this.memoryHold.clearTicks = 0;
+      if (!this.memoryHold.engaged) {
+        this.memoryHold.engaged = true;
+        this.memoryHold.engagedAtMs = Date.now();
+        this.memoryHold.engagedCause =
+          sample.legacyDetail !== undefined && guard.enforce
+            ? (sample.legacyCause ?? null)
+            : (sample.floorCause ?? null);
+        this.logEvent("daemon.memory.hold.engaged", {
+          level: "warn",
+          message: "Memory hold engaged: due wakes and queued deliveries are held in place",
+          details: {
+            availableBytes: sample.availableBytes,
+            floorBytes: guard.restoreFloorBytes,
+            someAvg10: sample.someAvg10,
+            cause: this.memoryHold.engagedCause,
+          },
+        });
+      }
+      return;
+    }
+
+    if (sample === null) {
+      // A null readHostMemory() read fails open in assertAdmissible (no
+      // reading denies nothing), so a persistently unreadable sample must
+      // not be able to strand an engaged hold forever. Feed it into the
+      // same MEMORY_HOLD_CLEAR_TICKS counter as a non-denying tick — one
+      // unreadable sample still can't clear the hold, but ten consecutive
+      // ones (readable-and-clear or unreadable, in any mix) do, via the one
+      // release path below.
+      if (this.memoryHold.engaged) {
+        this.memoryHold.clearTicks += 1;
+        if (this.memoryHold.clearTicks >= MEMORY_HOLD_CLEAR_TICKS) {
+          const engagedAtMs = this.memoryHold.engagedAtMs;
+          const engagedCause = this.memoryHold.engagedCause;
+          this.memoryHold = {
+            engaged: false,
+            clearTicks: 0,
+            engagedAtMs: null,
+            engagedCause: null,
+          };
+          this.logEvent("daemon.memory.hold.cleared", {
+            level: "info",
+            message: "Memory hold released: memory sample is unreadable",
+            details: {
+              availableBytes: null,
+              floorBytes: guard.restoreFloorBytes,
+              marginBytes: null,
+              durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+              engagedCause,
+              reason: "sample_unavailable",
+            },
+          });
+        }
+      }
+      return;
+    }
+
+    if (sample.availableBytes >= guard.restoreFloorBytes + admission.perSessionBytes) {
+      if (this.memoryHold.engaged) {
+        this.memoryHold.clearTicks += 1;
+      }
+      if (this.memoryHold.engaged && this.memoryHold.clearTicks >= MEMORY_HOLD_CLEAR_TICKS) {
+        const engagedAtMs = this.memoryHold.engagedAtMs;
+        const engagedCause = this.memoryHold.engagedCause;
+        this.memoryHold = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
+        this.logEvent("daemon.memory.hold.cleared", {
+          level: "info",
+          message: "Memory hold cleared: available memory recovered",
+          details: {
+            availableBytes: sample.availableBytes,
+            floorBytes: guard.restoreFloorBytes,
+            marginBytes: admission.perSessionBytes,
+            durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+            engagedCause,
+            reason: "recovered",
+          },
+        });
+      }
+      return;
+    }
+
+    this.memoryHold.clearTicks = 0;
+  }
+
+  memoryHoldEngaged(): boolean {
+    return this.memoryHold.engaged;
   }
 
   private async runSidecarReaper(): Promise<void> {
@@ -2861,8 +3052,10 @@ export class SessionService {
     }
   }
 
-  private readMemoryPressure(nowMs: number): MemoryPressureState {
-    const host = readHostMemory();
+  // hostSample: reuse an already-taken readHostMemory() sample instead of
+  // taking a second one; omitted by every caller that needs a fresh read.
+  private readMemoryPressure(nowMs: number, hostSample?: HostMemory | null): MemoryPressureState {
+    const host = hostSample !== undefined ? hostSample : readHostMemory();
     const cgroup = readCgroupMemorySnapshot();
     const guard = this.config.admission.memoryGuard;
     const episode = this.memoryShedEpisode;
@@ -3142,7 +3335,11 @@ export class SessionService {
     return edges;
   }
 
-  private async runMemoryShed(): Promise<void> {
+  // hostSample: an opening host-memory sample the tick already took (see
+  // runMemoryShedTick), reused for the opening pressure read only. Every
+  // later re-read within this run stays a fresh readHostMemory() call, since
+  // shedding an action changes the live memory state.
+  private async runMemoryShed(hostSample?: HostMemory | null): Promise<void> {
     if (this.memoryShedRunning) return;
     const guard = this.config.admission.memoryGuard;
     if (!this.config.admission.enabled || !guard.shedEnabled) {
@@ -3157,7 +3354,7 @@ export class SessionService {
     let tier: MemoryShedTier = "mcp_sidecar";
     let candidateProvenExhausted = false;
     try {
-      pressure = this.readMemoryPressure(Date.now());
+      pressure = this.readMemoryPressure(Date.now(), hostSample);
       if (pressure.stage === "none") return;
       const candidates = await this.memoryShedCandidates();
       const liveTmux = await listTmuxSessionNames();
@@ -3696,7 +3893,7 @@ export class SessionService {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
-        if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
+        if (scheduledWake && !this.memoryHold.engaged && Date.parse(scheduledWake.dueAt) <= now) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
             // Claim the due occurrence BEFORE sending: clear scheduledWake and
             // persist it first. A slow or failing send must not leave the wake
@@ -3819,6 +4016,7 @@ export class SessionService {
         const intervalWake = session.intervalWake;
         if (
           intervalWake &&
+          !this.memoryHold.engaged &&
           Date.parse(intervalWake.nextDueAt) <= now &&
           (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
@@ -3936,7 +4134,7 @@ export class SessionService {
         // session of its wake this tick. On error treat rotated=false so the
         // afterHours nudge fallback below still runs.
         let rotated = false;
-        if (liveState === "rate_limited") {
+        if (!this.memoryHold.engaged && liveState === "rate_limited") {
           try {
             rotated = await this.tryAutoRotateClaudeAccount(session);
           } catch (error) {
@@ -3951,7 +4149,7 @@ export class SessionService {
         }
 
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (!rotated && afterHours > 0 && session.rateLimitedAt) {
+        if (!this.memoryHold.engaged && !rotated && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
             // Undefined liveState means classification has not populated stateHistory
@@ -4025,7 +4223,7 @@ export class SessionService {
         // tick) or a liveState that already moved on both skip the send —
         // clearing serverErrorAt is updateStateHistory's job alone, not this
         // loop's, so a non-"error" liveState leaves the marker untouched here.
-        if (session.serverErrorAt) {
+        if (!this.memoryHold.engaged && session.serverErrorAt) {
           const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
           if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
             try {
@@ -4071,6 +4269,7 @@ export class SessionService {
         const dailyWake = session.dailyWake;
         if (
           !dailyWake ||
+          this.memoryHold.engaged ||
           Date.parse(dailyWake.nextDueAt) > now ||
           !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
@@ -10669,7 +10868,11 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
-      if (error instanceof SessionRateLimitedError || error instanceof QueueDeliveryInFlightError) {
+      if (
+        error instanceof SessionRateLimitedError ||
+        error instanceof QueueDeliveryInFlightError ||
+        (error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard")
+      ) {
         throw error;
       }
       const failure = error instanceof Error ? error.message : String(error);
@@ -10753,17 +10956,28 @@ export class SessionService {
   private cloneStartupAttachments(
     sessionId: string,
     attachmentIds: string[] | undefined,
-  ): SendMessageAttachment[] {
-    return (attachmentIds ?? []).map((attachmentId) => {
+  ): { attachments: SendMessageAttachment[]; missingIds: string[] } {
+    const attachments: SendMessageAttachment[] = [];
+    const missingIds: string[] = [];
+    for (const attachmentId of attachmentIds ?? []) {
       const artifact = readSessionArtifact(this.config.dataDir, sessionId, attachmentId);
       if (!artifact) {
-        throw new Error(`Startup attachment not found: ${attachmentId}`);
+        missingIds.push(attachmentId);
+        continue;
       }
-      return {
-        name: baseAttachmentName(artifact.id),
-        data: readFileSync(artifact.path).toString("base64"),
-      };
-    });
+      try {
+        attachments.push({
+          name: baseAttachmentName(artifact.id),
+          data: readFileSync(artifact.path).toString("base64"),
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+        missingIds.push(attachmentId);
+      }
+    }
+    return { attachments, missingIds };
   }
 
   private async findAgentHistoryFile(
@@ -11140,9 +11354,14 @@ export class SessionService {
       if (!session) {
         throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       }
-      return this.applyManualStatusLocked(sessionId, "completed", {
-        prAction: "leave_open",
-      });
+      return this.applyManualStatusLocked(
+        sessionId,
+        "completed",
+        {
+          prAction: "leave_open",
+        },
+        { eventAction: "self_destruct" },
+      );
     });
   }
 
@@ -11177,8 +11396,28 @@ export class SessionService {
           }
         }
         if (options?.todoActor?.kind !== "human") {
-          if (emptySessionIds.length > 0) throw new TodoEmptyLedgerError(emptySessionIds);
-          if (unfinishedBlocked.length > 0) throw new TodoOpenWorkError(unfinishedBlocked);
+          if (emptySessionIds.length > 0) {
+            const error = new TodoEmptyLedgerError(emptySessionIds);
+            this.logManualStatusFailure(
+              "desk_complete",
+              "completed",
+              sessionId,
+              session.project,
+              error,
+            );
+            throw error;
+          }
+          if (unfinishedBlocked.length > 0) {
+            const error = new TodoOpenWorkError(unfinishedBlocked);
+            this.logManualStatusFailure(
+              "desk_complete",
+              "completed",
+              sessionId,
+              session.project,
+              error,
+            );
+            throw error;
+          }
         }
         const completedIds: string[] = [];
         for (const candidate of candidates) {
@@ -11186,6 +11425,7 @@ export class SessionService {
           if (isTerminalSessionStatus(current.status)) continue;
           await this.applyManualStatusLocked(candidate.id, "completed", request, {
             ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+            eventAction: "desk_complete",
           });
           completedIds.push(candidate.id);
         }
@@ -11751,7 +11991,7 @@ export class SessionService {
       "id" | "project" | "workspaceId" | "deskId" | "startupAttachmentIds"
     >,
     options?: { preserveStartup?: boolean },
-  ): void {
+  ): { ranCleanup: boolean } {
     const sessionId = session.id;
     // Per-session cleanup: unconditional, regardless of desk membership.
     deleteAgentHookState(this.config.dataDir, sessionId);
@@ -11779,7 +12019,7 @@ export class SessionService {
       (s) => s.id !== sessionId && s.project === session.project && workspaceIdOf(s) === anchorId,
     );
     if (deskMembers.some((s) => !isTerminalSessionStatus(s.status))) {
-      return;
+      return { ranCleanup: false };
     }
     // Startup attachments of EVERY member live in this one shared dir, and
     // respawn re-clones them, so a member's keep-list is not enough: deleting
@@ -11801,6 +12041,7 @@ export class SessionService {
     // Last member's teardown: the workspace's shared slots/pr state goes
     // with the rest of its shared state.
     deleteWorkspaceState(this.config.dataDir, anchorId);
+    return { ranCleanup: true };
   }
 
   // The single path for killing an agent pane. relaunchSessionInPlace,
@@ -11924,23 +12165,67 @@ export class SessionService {
     throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
+  // Classifies a manual-status-gate refusal for the failure event. A ToDo
+  // cause (empty ledger or unfinished work) demotes to `warn` with
+  // `details.kind`, because the gate rejected before any teardown and the
+  // session is untouched. Exception: the `handoff` caller at the
+  // POST-SPAWN site (a successor session already exists at throw time, see
+  // the Handoff double-gate) stays `error` even on a ToDo cause; the
+  // `handoff` PRE-SPAWN gate throws before a successor exists and still
+  // demotes to `warn` like every other caller. Every other cause stays
+  // `error` with no `details`.
+  private logManualStatusFailure(
+    action: ManualStatusAction,
+    targetStatus: ManualSessionStatus,
+    sessionId: string,
+    projectId: string,
+    error: unknown,
+    site: "pre_spawn" | "post_spawn" = "pre_spawn",
+  ): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const isTodoCause = error instanceof TodoEmptyLedgerError || error instanceof TodoOpenWorkError;
+    const isPostSpawnHandoff = action === "handoff" && site === "post_spawn";
+    const level = isTodoCause && !isPostSpawnHandoff ? "warn" : "error";
+    const details =
+      isTodoCause && !isPostSpawnHandoff
+        ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
+        : undefined;
+    this.logEvent(`session.${action}.failed`, {
+      level,
+      sessionId,
+      projectId,
+      message: `Failed to mark ${sessionId} as ${targetStatus}: ${message}`,
+      ...(details ? { details } : {}),
+    });
+  }
+
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
-    options: { retainInList?: boolean; skipEnrichment: true },
+    options: { retainInList?: boolean; skipEnrichment: true; eventAction?: ManualStatusAction },
   ): Promise<void>;
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request?: CompleteSessionRequest,
-    options?: { retainInList?: boolean; skipEnrichment?: false; todoActor?: TodoActor },
+    options?: {
+      retainInList?: boolean;
+      skipEnrichment?: false;
+      todoActor?: TodoActor;
+      eventAction?: ManualStatusAction;
+    },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest = {},
-    options?: { retainInList?: boolean; skipEnrichment?: boolean; todoActor?: TodoActor },
+    options?: {
+      retainInList?: boolean;
+      skipEnrichment?: boolean;
+      todoActor?: TodoActor;
+      eventAction?: ManualStatusAction;
+    },
   ): Promise<SessionView | void> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
@@ -11989,7 +12274,9 @@ export class SessionService {
     if (isTerminalSessionStatus(session.status)) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
     }
-    const eventAction = targetStatus === "stopped" ? "pause" : "complete";
+    const eventAction: ManualStatusAction =
+      options?.eventAction ?? (targetStatus === "stopped" ? "pause" : "complete");
+    let startupAttachmentsCleaned = false;
 
     try {
       if (targetStatus === "completed") {
@@ -12010,7 +12297,15 @@ export class SessionService {
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
-        this.removeSessionArtifacts(session);
+        const { ranCleanup } = this.removeSessionArtifacts(session);
+        // removeSessionArtifacts never preserves this session's own startup
+        // ids when preserveStartup is unset (as here) — a live desk sibling
+        // can only keep ITS OWN ids, not this session's. So whenever it ran
+        // (files gone), this record's startupAttachmentIds now name deleted
+        // files and must be cleared, or a later respawn/handoff reports them
+        // missing forever. A skipped cleanup (a still-live desk sibling)
+        // means the files are untouched, so the ids stay.
+        startupAttachmentsCleaned = ranCleanup;
         const replyTargetProjectId =
           readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
         await this.pushTelegramNotice(
@@ -12027,13 +12322,14 @@ export class SessionService {
         deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent(`session.${eventAction}.failed`, {
-        level: "error",
+      this.logManualStatusFailure(
+        eventAction,
+        targetStatus,
         sessionId,
-        projectId: session.project,
-        message: `Failed to mark ${sessionId} as ${targetStatus}: ${message}`,
-      });
+        session.project,
+        error,
+        "post_spawn",
+      );
       throw error;
     }
 
@@ -12054,6 +12350,9 @@ export class SessionService {
     }
     if (targetStatus === "stopped") {
       delete record.error;
+    }
+    if (startupAttachmentsCleaned) {
+      delete record.startupAttachmentIds;
     }
     writeSession(this.config.dataDir, record);
     if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
@@ -13663,10 +13962,17 @@ export class SessionService {
         throw new Error(`Unknown startup attachment id: ${attachmentId}`);
       }
     }
-    const clonedAttachments = this.cloneStartupAttachments(
-      workspaceIdOf(session),
-      requestedStartupAttachmentIds,
-    );
+    const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
+      this.cloneStartupAttachments(workspaceIdOf(session), requestedStartupAttachmentIds);
+    if (missingStartupAttachmentIds.length > 0) {
+      this.logEvent("session.respawn.startup_attachment_missing", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Respawn of ${sessionId} skipped ${missingStartupAttachmentIds.length} startup attachment(s) with no file on disk`,
+        details: { missingIds: missingStartupAttachmentIds },
+      });
+    }
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     const bootstrap = this.isUnconfiguredProjectId(session.project);
     // A completed record is never killed by the branch below (it's gated on
@@ -13735,8 +14041,12 @@ export class SessionService {
     const handoffProjection = ensureTodoLedger(this.config.dataDir, session);
     const handoffBlock = todoLedgerBlock(handoffProjection);
     if (handoffBlock && options?.todoActor?.kind !== "human") {
-      if (handoffBlock === "empty") throw new TodoEmptyLedgerError([sessionId]);
-      throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+      const error =
+        handoffBlock === "empty"
+          ? new TodoEmptyLedgerError([sessionId])
+          : new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(handoffProjection) }]);
+      this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
+      throw error;
     }
     // Gate before any teardown below. The source session is still on-disk as
     // running/spawning here, so a denial leaves it fully untouched — no kill,
@@ -13755,10 +14065,17 @@ export class SessionService {
           : undefined;
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
-      const clonedAttachments = this.cloneStartupAttachments(
-        workspaceIdOf(session),
-        session.startupAttachmentIds ?? [],
-      );
+      const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
+        this.cloneStartupAttachments(workspaceIdOf(session), session.startupAttachmentIds ?? []);
+      if (missingStartupAttachmentIds.length > 0) {
+        this.logEvent("session.handoff.startup_attachment_missing", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Handoff of ${sessionId} skipped ${missingStartupAttachmentIds.length} startup attachment(s) with no file on disk`,
+          details: { missingIds: missingStartupAttachmentIds },
+        });
+      }
       const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
       const mergedAttachments = [
         ...clonedAttachments,
@@ -13867,7 +14184,7 @@ export class SessionService {
         session.id,
         "completed",
         { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true },
+        { retainInList: true, eventAction: "handoff" },
       );
 
       return spawned;
@@ -13921,6 +14238,15 @@ export class SessionService {
     // the pane lock — the loop's own sleep-and-continue retry covers it, and
     // this is not an error path (G2).
     if (this.queueDeliveryInFlight.has(sessionId)) {
+      return false;
+    }
+    // While the memory hold is engaged, defer this attempt entirely: it
+    // would otherwise call ensureSessionReadyForSend, which can relaunch the
+    // session in place and write to its pane — real work this loop should
+    // not do under host memory pressure. Returning false is safe:
+    // runDeliveryLoop treats true/false identically, and false is what every
+    // other stays-queued path below returns.
+    if (this.memoryHold.engaged) {
       return false;
     }
     this.queueDeliveryInFlight.add(sessionId);
@@ -14704,48 +15030,80 @@ export class SessionService {
   // of it. `admission.enabled: false` is a full escape hatch: neither the
   // cap nor the memory guard can deny, though the guard still logs a
   // report-only warning when crossed so the condition stays visible.
+  // The guard's own condition, extracted so the memory-hold latch (see
+  // updateMemoryHold) can read exactly what assertAdmissible would deny
+  // without a second, driftable copy of the thresholds. Applies NO gate:
+  // `enforce`, `enforceFloors`, and `admission.enabled` are each applied by
+  // the caller, never here.
+  // hostSample lets updateMemoryHold's tick reuse the single readHostMemory()
+  // it already took for this tick instead of taking a second one; every
+  // other caller omits it and gets its own live read.
+  private evaluateMemoryDenial(
+    context: "spawn" | "restore" | "wake",
+    hostSample?: HostMemory | null,
+  ): MemoryDenialSample | null {
+    const admission = this.config.admission;
+    const memory = hostSample !== undefined ? hostSample : readHostMemory();
+    if (!memory) return null;
+    const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
+    const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
+    const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
+    const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
+    let legacyDetail: string | undefined;
+    let legacyCause: MemoryDenialCause | undefined;
+    if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
+      legacyDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
+      legacyCause = "legacy_available";
+    } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
+      legacyDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+      legacyCause = "legacy_swap";
+    }
+
+    // A wake reuses the restore floor: it relaunches an already-existing
+    // parked session in place, the same shape of memory pressure as a
+    // restore, not a brand-new spawn.
+    const contextFloor =
+      context === "restore" || context === "wake"
+        ? admission.memoryGuard.restoreFloorBytes
+        : admission.memoryGuard.admissionFloorBytes;
+    let floorDetail: string | undefined;
+    let floorCause: MemoryDenialCause | undefined;
+    let someAvg10: number | null = null;
+    if (memory.availableBytes < contextFloor) {
+      floorDetail = `available memory ${availableMiB}MB is below the ${(
+        contextFloor /
+        (1024 * 1024)
+      ).toFixed(0)}MB ${context} floor`;
+      floorCause = "context_floor";
+    } else {
+      const pressure = readCgroupPressure();
+      if (pressure !== null) {
+        someAvg10 = pressure.someAvg10;
+        if (pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse) {
+          floorDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
+          floorCause = "pressure";
+        }
+      }
+    }
+    return {
+      legacyDetail,
+      legacyCause,
+      floorDetail,
+      floorCause,
+      availableBytes: memory.availableBytes,
+      someAvg10,
+    };
+  }
+
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore" | "wake",
     opts?: { replacingSessionId?: string; admissionReservation?: symbol },
   ): void {
     const admission = this.config.admission;
-    const memory = readHostMemory();
-    let legacyGuardDetail: string | undefined;
-    let floorGuardDetail: string | undefined;
-    if (memory) {
-      const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
-      const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
-      const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
-      const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
-      if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
-        legacyGuardDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
-      } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
-        legacyGuardDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
-      }
-
-      // A wake reuses the restore floor: it relaunches an already-existing
-      // parked session in place, the same shape of memory pressure as a
-      // restore, not a brand-new spawn.
-      const contextFloor =
-        context === "restore" || context === "wake"
-          ? admission.memoryGuard.restoreFloorBytes
-          : admission.memoryGuard.admissionFloorBytes;
-      if (memory.availableBytes < contextFloor) {
-        floorGuardDetail = `available memory ${availableMiB}MB is below the ${(
-          contextFloor /
-          (1024 * 1024)
-        ).toFixed(0)}MB ${context} floor`;
-      } else {
-        const pressure = readCgroupPressure();
-        if (
-          pressure !== null &&
-          pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse
-        ) {
-          floorGuardDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
-        }
-      }
-    }
+    const sample = this.evaluateMemoryDenial(context);
+    const legacyGuardDetail = sample?.legacyDetail;
+    const floorGuardDetail = sample?.floorDetail;
     if (legacyGuardDetail) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
@@ -14762,6 +15120,7 @@ export class SessionService {
     if (denialDetail) {
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
+        "memory_guard",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -14785,6 +15144,7 @@ export class SessionService {
       const projectCandidates = live.records.filter((session) => session.project === projectId);
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
+        "cap",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -14797,6 +15157,7 @@ export class SessionService {
     if (totalLive >= admission.maxLiveSessions) {
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
+        "cap",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -15548,7 +15909,10 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       } else {
-        const structuredState = await readOpenCodeState(session.agentSessionId);
+        const structuredState = await readOpenCodeState(
+          session.agentSessionId,
+          runtime.tmuxActivityAt?.getTime() ?? null,
+        );
         state = structuredState?.state ?? "working";
         stateSource = "jsonl";
         classifiedDetail = structuredState

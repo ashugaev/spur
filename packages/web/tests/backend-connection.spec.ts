@@ -164,6 +164,14 @@ test.describe("D6e: Backend-connection gate", () => {
     await expect(page.locator("[inert]")).toHaveCount(0);
     await expect.poll(() => state.healthyServed, { timeout: 10_000 }).toBeGreaterThan(0);
 
+    // /api/runtime/versions is not routed in this spec, so versionsQuery
+    // answers from the live sidecar daemon with an unrelated `current` —
+    // assert text only here, never the severity glyph.
+    const versionTrigger = page
+      .locator("footer")
+      .getByRole("button", { name: /Show Spur version information/ });
+    await expect(versionTrigger).toContainText("1.4.2");
+
     state.alive = false;
     await setTerminalAlive(page, false);
     await expect(page.getByTestId("backend-connection-overlay")).toBeVisible({ timeout: 35_000 });
@@ -191,6 +199,7 @@ test.describe("D6e: Backend-connection gate", () => {
     await expect(page.getByTestId("backend-connection-overlay")).toHaveCount(0, {
       timeout: 10_000,
     });
+    await expect(versionTrigger).toContainText("1.5.0", { timeout: 10_000 });
     await expect(page.locator("[inert]")).toHaveCount(0);
     await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
       "data-ws-status",
