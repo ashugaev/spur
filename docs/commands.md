@@ -60,7 +60,9 @@ Side effect: every run overwrites `<dataDir>/disk-budget.json` (`{ generatedAt, 
 
 npm cap: `disk-gc` measures `~/.npm/_cacache` itself with its own `du` call, independent of any prior `spur disk` run or `<dataDir>/disk-budget.json` — a destructive path never trusts a cached, possibly stale or absent measurement. When it exceeds `diskBudget.npmCacheMaxGb`, `--execute` runs `npm cache verify` (collects orphaned/corrupt content only), re-measures, and — only if still over cap — reads `index-v5` to rank entries oldest-first by `time` and removes exactly enough with `npm cache clean <key>` (one entry per call, never `--force`) to clear the cap, then `npm cache verify` once more. Skipped entirely while any npm/pnpm/npx/yarn process runs. An unreadable/malformed `index-v5` aborts the whole npm target (`npm_index_unreadable`) without touching it. This command never runs `npm cache clean --force` and never deletes `_cacache` itself — that whole-root wipe stays `spur cache --prune --yes`'s job (see below).
 
-Flags: `--execute`, `--browser-revisions`, `--older-than <days>` (default `diskBudget.buildCacheOlderThanDays`), `--limit <n>` (default `diskBudget.maxWorktreesPerSweep`), `--json`. Requires a resolved instance config.
+Build-cache selection: every eligible worktree (already past the terminal-status and `worktreeDir`-containment gates above) is measured, then ranked by reclaimable bytes descending — `--limit` keeps the N LARGEST eligible worktrees, never the first N in path order. Ranking only reorders what already passed both safety gates; it never widens eligibility.
+
+Flags: `--execute`, `--browser-revisions`, `--older-than <days>` (default `diskBudget.buildCacheOlderThanDays`), `--limit <n>` (default `diskBudget.maxWorktreesPerSweep`, the N largest eligible worktrees by reclaimable bytes), `--json`. Requires a resolved instance config.
 
 ## cache
 

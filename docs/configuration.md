@@ -350,7 +350,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `diskBudget.warnAttributableGb`: optional, default `60`. Ceiling in GB of `spur disk`'s `totals.attributableBytes`; crossing it emits `host.disk.budget_exceeded` (warn) on the first crossing.
 - `diskBudget.npmCacheMaxGb`: optional, default `20`. `spur disk-gc --execute`'s per-key `npm cache clean` cap on `~/.npm/_cacache`. Never triggers a whole-root wipe.
 - `diskBudget.buildCacheOlderThanDays`: optional, default `14`. Minimum newest-file age of a worktree build-cache dir before `spur disk-gc` selects it. Also the CLI's `--older-than` default.
-- `diskBudget.maxWorktreesPerSweep`: optional positive integer, default `20`. Per-run worktree cap. Also the CLI's `--limit` default.
+- `diskBudget.maxWorktreesPerSweep`: optional positive integer, default `20`. Per-run cap on how many eligible (terminal, contained) worktrees `disk-gc` SELECTS — the N largest by reclaimable bytes, not the first N in worktree-path order. Every eligible worktree is still measured to compute that ranking; the cap bounds selection, not the measurement pass. Also the CLI's `--limit` default.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 - `eventLog.hotBytes`: optional, default `134217728` (128MB). Instance config only. See [Event log retention](#event-log-retention).
 - `eventLog.shardHotBytes`: optional, default `16777216` (16MB).

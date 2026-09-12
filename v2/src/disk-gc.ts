@@ -58,6 +58,11 @@ export interface PlanBuildCacheInput {
   worktreeDir: string;
   now: Date;
   olderThanDays: number;
+  // Bounds how many of the ELIGIBLE (terminal, contained) worktrees this
+  // sweep selects, ranked by reclaimable bytes descending — the N largest
+  // eligible candidates, never the first N in some incidental order. Every
+  // eligible worktree is still measured to compute that ranking; this caps
+  // the SELECTION, not the measurement pass.
   maxWorktrees: number;
   // Injected IO seam: the bounded fs walk (see findBuildCacheDirs above).
   // Kept injectable so the planner stays a pure function of its inputs in
@@ -89,13 +94,22 @@ export async function planBuildCacheGc(input: PlanBuildCacheInput): Promise<{
     }
   }
 
-  const candidates: BuildCacheCandidate[] = [];
   const blocked: BuildCacheBlockedGroup[] = [];
-  let consideredWorktrees = 0;
 
+  // ---------------------------------------------------------------------
+  // PASS 1 — SAFETY FILTER (never widened by ranking below). Every group
+  // that reaches `eligible` has already cleared both hard invariants:
+  // Invariant 1 (live-session boundary) and Invariant 2 (worktreeDir
+  // containment). Alphabetical order here is only for deterministic
+  // `blocked` output; it plays no role in which worktrees get measured.
+  // ---------------------------------------------------------------------
+  interface EligibleGroup {
+    worktreePath: string;
+    sessionIds: string[];
+  }
+  const eligible: EligibleGroup[] = [];
   const sortedPaths = [...byWorktreePath.keys()].sort();
   for (const worktreePath of sortedPaths) {
-    if (consideredWorktrees >= input.maxWorktrees) break;
     const members = byWorktreePath.get(worktreePath) ?? [];
     const sessionIds = members.map((m) => m.id);
 
@@ -116,24 +130,83 @@ export async function planBuildCacheGc(input: PlanBuildCacheInput): Promise<{
       continue;
     }
 
-    consideredWorktrees += 1;
-    const dirs = await input.listBuildCacheDirs(worktreePath);
-    // S12: one `too_recent` row per WORKTREE, not per dir — a worktree with
-    // several too-recent build-cache dirs previously duplicated the same
-    // group row once per dir.
-    let tooRecentReported = false;
+    eligible.push({ worktreePath, sessionIds });
+  }
+
+  // ---------------------------------------------------------------------
+  // PASS 2 — MEASURE every eligible worktree (post-filter only). This is
+  // a re-ordering step, not a filtering step: it must never make a group
+  // eligible that PASS 1 already blocked, and it runs across the WHOLE
+  // eligible set, not a prefix of it — measuring only the first N
+  // alphabetically (the old behavior) silently excluded the fleet's
+  // largest real caches from every sweep, forever, on a host with more
+  // worktrees than `maxWorktrees`.
+  // ---------------------------------------------------------------------
+  interface MeasuredDir {
+    path: string;
+    sizeBytes: number;
+    ageDays: number;
+  }
+  interface MeasuredGroup {
+    worktreePath: string;
+    sessionIds: string[];
+    dirs: MeasuredDir[];
+    totalBytes: number;
+  }
+  const measuredGroups: MeasuredGroup[] = [];
+  for (const group of eligible) {
+    const dirs = await input.listBuildCacheDirs(group.worktreePath);
+    const sized: MeasuredDir[] = [];
+    // S12: one `too_recent` row per WORKTREE, not per dir.
+    let anyTooRecent = false;
     for (const dir of dirs) {
       const ageDays = ageInDays(dir.newestMtimeMs, input.now);
       if (ageDays < input.olderThanDays) {
-        if (!tooRecentReported) {
-          blocked.push({ worktreePath, reason: "too_recent", sessionIds });
-          tooRecentReported = true;
-        }
+        anyTooRecent = true;
         continue;
       }
       const sizeBytes = await input.measureBytes(dir.path);
       if (sizeBytes === null) continue;
-      candidates.push({ path: dir.path, worktreePath, sizeBytes, ageDays, sessionIds });
+      sized.push({ path: dir.path, sizeBytes, ageDays });
+    }
+    if (anyTooRecent) {
+      blocked.push({
+        worktreePath: group.worktreePath,
+        reason: "too_recent",
+        sessionIds: group.sessionIds,
+      });
+    }
+    if (sized.length === 0) {
+      continue;
+    }
+    measuredGroups.push({
+      worktreePath: group.worktreePath,
+      sessionIds: group.sessionIds,
+      dirs: sized,
+      totalBytes: sized.reduce((sum, d) => sum + d.sizeBytes, 0),
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // PASS 3 — RANK, explicit and separate from both filtering passes above:
+  // descending by total reclaimable bytes per worktree, so `maxWorktrees`
+  // bounds COST (how many worktrees this sweep measures deletion for) and
+  // picks the N most valuable candidates, never an arbitrary alphabetical
+  // prefix.
+  // ---------------------------------------------------------------------
+  measuredGroups.sort((a, b) => b.totalBytes - a.totalBytes);
+  const selected = measuredGroups.slice(0, input.maxWorktrees);
+
+  const candidates: BuildCacheCandidate[] = [];
+  for (const group of selected) {
+    for (const dir of group.dirs) {
+      candidates.push({
+        path: dir.path,
+        worktreePath: group.worktreePath,
+        sizeBytes: dir.sizeBytes,
+        ageDays: dir.ageDays,
+        sessionIds: group.sessionIds,
+      });
     }
   }
 

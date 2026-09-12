@@ -100,6 +100,47 @@ describe("planBuildCacheGc — AC4 live-session boundary", () => {
     expect(result.candidates[0]?.path).toBe(cacheDir);
     expect(result.blocked).toEqual([]);
   });
+
+  it("ranks eligible worktrees by reclaimable bytes descending, not alphabetically — a large cache sorting late alphabetically is still selected within the cap", async () => {
+    // 19 small, alphabetically-early worktrees (aa01..aa19) plus one large,
+    // alphabetically-LAST worktree (zz-big). maxWorktrees is 5: an
+    // alphabetical-then-cap ordering would only ever reach aa01..aa05 and
+    // NEVER measure/select zz-big, no matter how large it is.
+    const smallIds = Array.from({ length: 19 }, (_, i) => `aa${String(i + 1).padStart(2, "0")}`);
+    const bigId = "zz-big";
+    const sessions = [
+      ...smallIds.map((id) =>
+        session({ id, status: "completed", worktreePath: `${WORKTREE_DIR}/${id}` }),
+      ),
+      session({ id: bigId, status: "completed", worktreePath: `${WORKTREE_DIR}/${bigId}` }),
+    ];
+    const sizeByWorktreePath: Record<string, number> = Object.fromEntries([
+      ...smallIds.map((id) => [`${WORKTREE_DIR}/${id}`, 10]),
+      [`${WORKTREE_DIR}/${bigId}`, 100_000_000],
+    ]);
+
+    const result = await planBuildCacheGc({
+      sessions,
+      worktreeDir: WORKTREE_DIR,
+      now: NOW,
+      olderThanDays: 14,
+      maxWorktrees: 5,
+      listBuildCacheDirs: async (worktreePath) => [
+        { path: join(worktreePath, ".cache", "webpack"), newestMtimeMs: OLD_MTIME },
+      ],
+      measureBytes: async (path) => {
+        const worktreePath = path.slice(0, path.indexOf("/.cache/webpack"));
+        return sizeByWorktreePath[worktreePath] ?? null;
+      },
+    });
+
+    expect(result.candidates).toHaveLength(5);
+    expect(result.candidates.some((c) => c.worktreePath === `${WORKTREE_DIR}/${bigId}`)).toBe(true);
+    // The big worktree is ranked first — its bytes account for the bulk of
+    // what this capped sweep selects.
+    const totalSelectedBytes = result.candidates.reduce((sum, c) => sum + c.sizeBytes, 0);
+    expect(totalSelectedBytes).toBe(100_000_000 + 10 * 4);
+  });
 });
 
 describe("planBuildCacheGc — AC13 worktreeDir containment", () => {
