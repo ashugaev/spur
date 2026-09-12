@@ -133,7 +133,7 @@ On each live session's `PATH`. Updates the tmux status-line title and named link
 
 Each live session gets a `spur` wrapper on `PATH`, bound to that session's config, for session-bound sidecars: `spur service run web --port 3000 -- <command>`, `spur service logs`, `spur service status <id>`.
 
-`service run` reads `SPUR_SESSION`, starts the command in a separate tmux sidecar. No stop or restart — stays bound while the session is alive. Pass `--port` so `list` can surface it. Output also lands in the session event log for `service logs`/`/sessions/:id/logs`.
+`service run` reads `SPUR_SESSION`, starts the command in a separate tmux sidecar. No stop or restart — stays bound while the session is alive. Pass `--port` so `list` can surface it. `service logs` returns nothing — it filters on `service.output`/`sidecar.output` events that nothing emits. `GET /sessions/:id/logs?scope=runtime|sidecar|service` uses the same filter; default scope `all` still returns other session events. A sidecar's output lives only in its tmux pane.
 
 ## memory
 
@@ -171,7 +171,7 @@ Ports reserve/probe on the host at start, inject into the sidecar env only — p
 
 Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubuntu, nvm needs `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A remapped `$HOME` still resolves via `$SPUR_REAL_HOME` (from `/etc/passwd`). A long-lived server should start its own command with `exec` — otherwise the pane pid is a shell above the real process, hiding it from pid/args-based reaping and leaving the shell holding unexpanded `$PORT` env.
 
-Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
+Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. Only that tree — anything the command detached from it survives, including docker containers and a compose project. A sidecar that starts detached resources owns tearing them down. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
 
 `sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path, `port`, and `liveness`; never signaled by `--reap`, no matter what). A `serving` row still keeps loading and answering from memory — it prints `[report-only, SERVING on <port>]` and a `daemon stop` pointer instead of the verify-before-killing note. A `liveness: "unknown"` row (the row's own port listener probe itself could not run — neither `lsof` nor `ss` produced a usable result — or its instance config didn't resolve) prints `[report-only, liveness unknown — verify manually before killing]` and never shares the plain not-serving row's "genuinely dead" fix text. A probe that DID run and found zero listeners on the port is `not-serving`, not `unknown` — the probe answered, it just found nobody there.
 
