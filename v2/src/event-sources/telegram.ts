@@ -100,6 +100,9 @@ interface TelegramCallbackContext {
   answerCallbackQuery(text?: string): Promise<unknown>;
   editMessageText?(text: string, options?: unknown): Promise<unknown>;
   reply?(text: string, options?: unknown): Promise<unknown>;
+  api?: {
+    editMessageText(chatId: number, messageId: number, text: string): Promise<unknown>;
+  };
 }
 
 interface TelegramRuntime {
@@ -509,7 +512,13 @@ async function requestSpawnProject(
   // immediate single-project spawn below and let the NEXT free text spawn a
   // second, unrequested agent.
   clearPendingSpawn(runtime, chatId, messageThreadId, userId);
-  const projects = deps.listProjects ? await deps.listProjects() : null;
+  let projects: SourceProjectListItem[] | null;
+  try {
+    projects = deps.listProjects ? await deps.listProjects() : null;
+  } catch (error) {
+    await ctx.reply(`Cannot list projects: ${redactedErrorText(deps, error)}`);
+    return;
+  }
   if (projects === null) {
     await ctx.reply("Cannot list projects.");
     return;
@@ -522,7 +531,10 @@ async function requestSpawnProject(
   const key = telegramPendingSpawnKey(chatId, messageThreadId, userId);
   if (projects.length === 1) {
     const project = projects[0]?.id;
-    if (project === undefined) return;
+    if (project === undefined) {
+      await ctx.reply("Cannot list projects.");
+      return;
+    }
     if (prompt !== undefined) {
       await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, { agent, project, prompt });
       return;
@@ -774,9 +786,10 @@ async function handleTelegramCallback(
     await ctx.answerCallbackQuery();
     const replyShim = {
       reply: async (text: string) => {
-        await ctx.reply?.(text);
-        return {};
+        const sent = await ctx.reply?.(text);
+        return (sent ?? {}) as TelegramSentMessage;
       },
+      ...(ctx.api ? { api: ctx.api } : {}),
     };
     if (peeked.prompt !== undefined) {
       clearPendingSpawn(runtime, chatId, messageThreadId, userId);
@@ -1007,7 +1020,7 @@ async function routeTelegramPrompt(
   );
   if (peekedSpawn === "expired") {
     clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-    await ctx.reply("Spawn prompt expired. Run /spawn again.");
+    await ctx.reply(SPAWN_EXPIRED_TEXT);
     return;
   }
   if (peekedSpawn && peekedSpawn.project !== undefined) {

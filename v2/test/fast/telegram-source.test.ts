@@ -781,7 +781,8 @@ describe("telegramSourceModule", () => {
     expect(spawnSession).not.toHaveBeenCalled();
 
     const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
-    const reply = vi.fn().mockResolvedValue({});
+    const reply = vi.fn().mockResolvedValue({ message_id: 77 });
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
     await bot.emitCallback({
       callbackQuery: {
         data: spawnProjectCallbackData(spawnCtx.reply, 1),
@@ -793,6 +794,7 @@ describe("telegramSourceModule", () => {
       },
       answerCallbackQuery,
       reply,
+      api: { editMessageText },
     });
 
     expect(spawnSession).toHaveBeenCalledWith(
@@ -804,7 +806,12 @@ describe("telegramSourceModule", () => {
     );
     expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
     expect(reply).toHaveBeenCalledWith("Spawning codex agent...");
-    expect(reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
+    // The status message spawned via `reply` gets edited in place through the
+    // callback ctx's `api`, not re-sent as a second `reply` — proves the
+    // project-pick path's `replyShim` now forwards `api` like the direct
+    // `/spawn <agent> <task>` path does.
+    expect(editMessageText).toHaveBeenCalledWith(-1001, 77, "Spawned and bound: api-3.");
+    expect(reply).not.toHaveBeenCalledWith("Spawned and bound: api-3.");
   });
 
   it("asks for a prompt after a spawn callback", async () => {
@@ -1037,6 +1044,22 @@ describe("telegramSourceModule", () => {
     const absentCtx = telegramContext({ text: "/spawn codex" });
     await bot.emitText(absentCtx);
     expect(absentCtx.reply).toHaveBeenCalledWith("Cannot list projects.");
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
+  it("reports when listProjects throws", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn();
+
+    const throwingListProjects = vi.fn().mockRejectedValue(new Error("db unavailable"));
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      listProjects: throwingListProjects,
+    });
+    if (!bot) throw new Error("missing bot");
+    const throwCtx = telegramContext({ text: "/spawn codex" });
+    await bot.emitText(throwCtx);
+    expect(throwCtx.reply).toHaveBeenCalledWith("Cannot list projects: db unavailable");
     expect(spawnSession).not.toHaveBeenCalled();
   });
 
@@ -1785,7 +1808,7 @@ describe("telegramSourceModule", () => {
       vi.setSystemTime(new Date("2026-01-01T00:11:00.000Z"));
       const expiredCtx = telegramContext({ text: "late prompt" });
       await bot.emitText(expiredCtx);
-      expect(expiredCtx.reply).toHaveBeenCalledWith("Spawn prompt expired. Run /spawn again.");
+      expect(expiredCtx.reply).toHaveBeenCalledWith("Spawn expired. Run /spawn again.");
     } finally {
       vi.useRealTimers();
     }
