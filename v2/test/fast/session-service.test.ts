@@ -15942,6 +15942,69 @@ describe("SessionService", () => {
       );
     });
 
+    it("does not republish a shared link when the last sibling completes after the liveness check", async () => {
+      loadConfigMock.mockReturnValue(daemonSidecarProjectConfig());
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", status: "completed" }));
+      const sibling = sessionRecord({ id: "api-2", deskId: "api-1", status: "running" });
+      sessions.set("api-2", sibling);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const publisher = service as unknown as {
+        publishSidecarLink(id: string, name: string, port: number, url: string): Promise<void>;
+      };
+
+      const publication = publisher.publishSidecarLink(
+        "api-1",
+        "daemon",
+        4100,
+        "https://preview.example.com/4100",
+      );
+      sessions.set("api-2", { ...sibling, status: "completed" });
+      await publication;
+
+      expect(sessions.get("api-1")?.slots?.links).toBeUndefined();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "session.sidecar.link.published",
+      );
+    });
+
+    it("does not republish a shared link when the last sibling completes after the liveness check", async () => {
+      loadConfigMock.mockReturnValue(daemonSidecarProjectConfig());
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", status: "completed" }));
+      const sibling = sessionRecord({ id: "api-2", deskId: "api-1" });
+      sessions.set("api-2", sibling);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      let reads = 0;
+      readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
+        reads += 1;
+        if (reads === 2) {
+          sessions.set("api-2", { ...sibling, status: "completed" });
+        }
+        const session = sessions.get(sessionId);
+        return session ? clone(session) : null;
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const publisher = service as unknown as {
+        publishSidecarLink(id: string, name: string, port: number, url: string): Promise<void>;
+      };
+
+      await publisher.publishSidecarLink(
+        "api-1",
+        "daemon",
+        4100,
+        "https://preview.example.com/4100",
+      );
+
+      expect(sessions.get("api-1")?.slots?.links).toBeUndefined();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "session.sidecar.link.published",
+      );
+    });
+
     it("stops a project sidecar requested from a desk sibling on the anchor's tmux and unlinks the anchor's slot", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
