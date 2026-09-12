@@ -142,6 +142,9 @@ const resolvePlaywrightSidecarCommandMock = vi.fn<() => string | undefined>();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const readFreeKbMock = vi.fn<(path: string, timeoutMs?: number) => Promise<number | undefined>>();
+const readDiskBudgetReportMock = vi.fn();
+const measureDiskBudgetMock = vi.fn();
+const realDuMock = vi.fn();
 // Default "none": most tests declare no sidecar ports at all, and this must
 // never silently default to "unknown" (which would mask a real assertion
 // that a probe failure keeps rather than reaps) or "established" (which
@@ -632,6 +635,18 @@ vi.mock("../../src/disk-space.js", () => ({
   DISK_PROBE_TIMEOUT_MS: 2_000,
 }));
 
+// The daemon never runs `du` (see cache-retention.ts's call-site comment) —
+// runDiskBudgetSweep only reads the CLI-written disk-budget.json, so only
+// that read is mocked here.
+vi.mock("../../src/disk-budget.js", () => ({
+  readDiskBudgetReport: readDiskBudgetReportMock,
+  // Stubbed (never real) so a call to either is provably visible in a test
+  // (S10): the sweep's own contract is "read the file, never measure
+  // anything", and a mock the test never sees called pins nothing.
+  measureDiskBudget: measureDiskBudgetMock,
+  realDu: realDuMock,
+}));
+
 // Only snapshotProcesses is mocked (a real `ps` fork, the thing the fast
 // tier must never do) — every other export (confirmReaps, reapSidecarPane,
 // signalSidecarPane, reapRecordedIdentity, sweepSidecars, ...) stays the
@@ -811,6 +826,14 @@ function baseConfig() {
       enabled: true,
       idleTtlMinutes: 120,
       maxAgeWarnMinutes: 360,
+    },
+    diskBudget: {
+      enabled: false,
+      intervalMinutes: 360,
+      warnAttributableGb: 60,
+      npmCacheMaxGb: 20,
+      buildCacheOlderThanDays: 14,
+      maxWorktreesPerSweep: 20,
     },
     admission: {
       enabled: true,
@@ -1463,6 +1486,11 @@ describe("SessionService", () => {
     // test explicitly opts in, so the huge pre-existing spawn-event-sequence
     // fixture stays unaffected.
     readFreeKbMock.mockReset().mockResolvedValue(undefined);
+    // Same "no test-visible signal unless a test opts in" default as
+    // readFreeKb above — absent measurement emits nothing.
+    readDiskBudgetReportMock.mockReset().mockResolvedValue(undefined);
+    measureDiskBudgetMock.mockReset();
+    realDuMock.mockReset();
     flushEventLogCollapseMock.mockReset();
     tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
@@ -23151,6 +23179,115 @@ describe("SessionService", () => {
     // sessionId (that would recreate the dir appendEventLog writes into).
     expect(completed?.[1].sessionId).toBeUndefined();
     service.dispose();
+  });
+
+  describe("disk budget sweep", () => {
+    it("the budget sweep runs no du and emits nothing on a stale or absent measurement", async () => {
+      createSessionStore();
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        diskBudget: { ...baseConfig().diskBudget, enabled: true, warnAttributableGb: 1 },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        runDiskBudgetSweep(): Promise<void>;
+        lastDiskBudgetSweepAt: number;
+        dispose(): void;
+      };
+      service.lastDiskBudgetSweepAt = 0;
+
+      // Absent measurement.
+      readDiskBudgetReportMock.mockResolvedValueOnce(undefined);
+      await service.runDiskBudgetSweep();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "host.disk.budget_exceeded",
+        ),
+      ).toBe(false);
+
+      // Stale measurement (older than 2 * intervalMinutes).
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: "2020-01-01T00:00:00.000Z",
+        roots: [],
+        totals: { attributableBytes: 999_999_999_999 },
+      });
+      await service.runDiskBudgetSweep();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "host.disk.budget_exceeded",
+        ),
+      ).toBe(false);
+      // S10: the title's claim ("runs no du") must be an assertion, not just
+      // a comment — measureDiskBudget/realDu are the only exports that would
+      // ever spawn `du`, and the sweep must never call either.
+      expect(measureDiskBudgetMock).not.toHaveBeenCalled();
+      expect(realDuMock).not.toHaveBeenCalled();
+      expect(readDiskBudgetReportMock).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("emits host.disk.budget_exceeded every sweep while over budget, and nothing below the ceiling", async () => {
+      createSessionStore();
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        diskBudget: { ...baseConfig().diskBudget, enabled: true, warnAttributableGb: 1 },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        runDiskBudgetSweep(): Promise<void>;
+        lastDiskBudgetSweepAt: number;
+        dispose(): void;
+      };
+
+      // Below the 1GB ceiling — no event.
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        roots: [],
+        totals: { attributableBytes: 500 * 1024 * 1024 },
+      });
+      await service.runDiskBudgetSweep();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "host.disk.budget_exceeded",
+        ),
+      ).toBe(false);
+
+      // Above the ceiling — exactly one warn event.
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        roots: [{ id: "npm-cacache", sizeBytes: 2 * 1024 * 1024 * 1024 }],
+        totals: { attributableBytes: 2 * 1024 * 1024 * 1024 },
+      });
+      await service.runDiskBudgetSweep();
+      const exceeded = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "host.disk.budget_exceeded",
+      );
+      expect(exceeded).toHaveLength(1);
+      expect(exceeded[0]?.[1].level).toBe("warn");
+
+      // No latch: a second sweep still over budget emits again.
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        roots: [{ id: "npm-cacache", sizeBytes: 2 * 1024 * 1024 * 1024 }],
+        totals: { attributableBytes: 2 * 1024 * 1024 * 1024 },
+      });
+      await service.runDiskBudgetSweep();
+      const exceededAfterSecondSweep = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "host.disk.budget_exceeded",
+      );
+      expect(exceededAfterSecondSweep).toHaveLength(2);
+      service.dispose();
+    });
   });
 
   it("does not collect a shared workspace while a stopped member is restoring", async () => {

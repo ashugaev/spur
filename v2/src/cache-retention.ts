@@ -31,7 +31,12 @@ const execFileAsync = promisify(execFile);
 // path stays `disk-space.ts`'s `readFreeKb` (a `df`, not a `du`) — see
 // session-service.ts's warnIfHostDiskLow. Only host-install.ts's
 // `reclaimable-caches` doctor check and cli.ts's `cache` command call these
-// functions.
+// functions. disk-budget.ts's daemon-facing sweep preserves this invariant
+// too: session-service.ts imports only disk-budget.ts, which imports only
+// build-cache-scan.ts (read-only fs walk, no `rm`/`execFile`) — never this
+// module, and never disk-gc.ts, which is where this module's `rm`/`execFile`
+// surface actually lives. The sweep itself never runs `du` either; it reads
+// a CLI-written `<dataDir>/disk-budget.json` instead.
 
 export type CacheRootId =
   | "npm-cacache"
@@ -62,6 +67,7 @@ export type ProtectedReason =
   | { kind: "package-manager-active"; pid: number }
   | { kind: "pinned-revision"; dirName: string }
   | { kind: "pin-unresolved" }
+  | { kind: "referrer-unresolved" }
   | { kind: "pin-source" }
   | { kind: "spur-owned" }
   | { kind: "class-never-pruned" }
@@ -119,6 +125,13 @@ export interface LivenessSnapshot {
   // one parsed `browsers.json` pin source (P4). An `npx-package` entry
   // whose hash is in this set is a pin source and must not be deleted.
   pinSourceNpxHashes: ReadonlySet<string>;
+  // P5: true when at least one `~/.cache/ms-playwright/.links/<hash>`
+  // referrer file was unreadable, empty, pointed at a path that no longer
+  // exists, or whose `browsers.json` did not parse. A stale/unreadable
+  // referrer is indistinguishable from an install this process simply
+  // cannot see, so every browser-revision is protected while this is set —
+  // conservative by construction, it can only add protection.
+  unresolvedReferrers: boolean;
 }
 
 export interface CachePlan {
@@ -204,7 +217,7 @@ export function ageDaysFor(mtimeMs: number, ctimeMs: number, nowMs: number): num
 
 const PACKAGE_MANAGER_BIN = /(^|\/)(npm|pnpm|npx|yarn)(\s|$)/;
 
-function isPackageManagerProcess(proc: ProcessSnapshotEntry): boolean {
+export function isPackageManagerProcess(proc: ProcessSnapshotEntry): boolean {
   return PACKAGE_MANAGER_BIN.test(proc.args);
 }
 
@@ -264,6 +277,13 @@ export function verdictFor(
     if (!liveness.instanceConfigOk || liveness.pinSourceCount === 0) {
       return { kind: "protected", reason: { kind: "pin-unresolved" } };
     }
+    // P5 fail-closed: an unresolvable `.links` referrer is indistinguishable
+    // from an install this process cannot see, so every revision is
+    // protected rather than only the ones whose dirName happens to appear
+    // in the sources that DID resolve.
+    if (liveness.unresolvedReferrers) {
+      return { kind: "protected", reason: { kind: "referrer-unresolved" } };
+    }
     if (liveness.pinnedDirNames.has(entry.entryClass.dirName)) {
       return {
         kind: "protected",
@@ -312,6 +332,10 @@ function cacheRoots(home: string, tmpPath = "/tmp"): CacheRoot[] {
 // Names inside `~/.cache` owned by their own dedicated CacheRootId — never
 // double-measured/double-classified as "generic".
 const XDG_CACHE_EXCLUDED_NAMES = new Set(["ms-playwright", "ms-playwright-mcp"]);
+
+function isNodeErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
 
 async function readBrowsersJson(browsersJsonPath: string): Promise<unknown | undefined> {
   try {
@@ -370,6 +394,7 @@ async function resolvePins(
   pinnedDirNames: Set<string>;
   pinSourceCount: number;
   pinSourceNpxHashes: Set<string>;
+  unresolvedReferrers: boolean;
 }> {
   const pinnedDirNames = new Set<string>();
   const pinSourceNpxHashes = new Set<string>();
@@ -439,7 +464,57 @@ async function resolvePins(
     // ~/.npm/_npx absent or unreadable — no npx-installed pins.
   }
 
-  return { pinnedDirNames, pinSourceCount, pinSourceNpxHashes };
+  // P5: `~/.cache/ms-playwright/.links/<sha1>` — one file per playwright-core
+  // install path that has ever registered against this browsers root. Each
+  // file holds exactly one absolute path to the referring install; resolve
+  // that install's OWN `browsers.json` (the referrer path is already the
+  // package directory) and union its pins in. Covers installs P1-P4 cannot
+  // see: outside every configured project, outside every worktree, and
+  // outside `~/.npm/_npx` (e.g. `/usr/lib/node_modules`, a python
+  // `driver/package`). A missing `.links` directory contributes nothing and
+  // is not itself unresolved — only an entry that exists and fails to
+  // resolve sets `unresolvedReferrers`.
+  let unresolvedReferrers = false;
+  const linksDir = join(home, ".cache", "ms-playwright", ".links");
+  let linkFiles: string[];
+  try {
+    linkFiles = await readdir(linksDir);
+  } catch (error) {
+    // ENOENT (no `.links` dir at all) is a legitimate absence and
+    // contributes nothing. Any OTHER error — EACCES, EIO, EMFILE, a
+    // too-many-open-files transient — is indistinguishable from "a
+    // referrer this process cannot currently see", and MUST fail closed
+    // the same way an individual unreadable referrer does (S7): silently
+    // treating it as "empty" would let every revision through unprotected
+    // precisely when the evidence is least trustworthy.
+    if (isNodeErrnoException(error) && error.code === "ENOENT") {
+      linkFiles = [];
+    } else {
+      linkFiles = [];
+      unresolvedReferrers = true;
+    }
+  }
+  for (const fileName of linkFiles) {
+    let referrerPath: string;
+    try {
+      const raw = await readFile(join(linksDir, fileName), "utf8");
+      referrerPath = raw.trim();
+      if (!referrerPath) {
+        throw new Error("empty referrer");
+      }
+    } catch {
+      unresolvedReferrers = true;
+      continue;
+    }
+    const parsed = await readBrowsersJson(join(referrerPath, "browsers.json"));
+    if (parsed === undefined) {
+      unresolvedReferrers = true;
+      continue;
+    }
+    addFrom(parsed);
+  }
+
+  return { pinnedDirNames, pinSourceCount, pinSourceNpxHashes, unresolvedReferrers };
 }
 
 async function readPnpmStorePins(rootPath: string): Promise<unknown | undefined> {
@@ -498,10 +573,8 @@ async function collectLiveness(
   const processListReadable = snapshot.status === "ok" && snapshot.processes.length > 0;
   const processes = snapshot.status === "ok" ? snapshot.processes : [];
   const processTreeReadable = await canReadProcessTree(process.pid);
-  const { pinnedDirNames, pinSourceCount, pinSourceNpxHashes } = await resolvePins(
-    home,
-    instanceConfig,
-  );
+  const { pinnedDirNames, pinSourceCount, pinSourceNpxHashes, unresolvedReferrers } =
+    await resolvePins(home, instanceConfig);
 
   const sessionCwds: LiveSessionCwd[] = [];
   if (instanceConfig.status === "ok") {
@@ -543,6 +616,7 @@ async function collectLiveness(
     pinSourceCount,
     instanceConfigOk: instanceConfig.status === "ok",
     pinSourceNpxHashes,
+    unresolvedReferrers,
   };
 }
 
@@ -724,6 +798,11 @@ export interface PlanCachePruneOptions {
   // await abandoned, or a wedged/slow `du` keeps the event loop (and `spur
   // doctor`'s exit) alive well past the budget.
   signal?: AbortSignal;
+  // Narrows `cacheRoots(...)` to these roots only; absent keeps today's
+  // behavior exactly (every root measured). Added for disk-gc.ts's T2 to
+  // delegate the `playwright-browsers` root alone rather than re-deriving
+  // the pin predicate.
+  rootIds?: readonly CacheRootId[];
 }
 
 export async function planCachePrune(options: PlanCachePruneOptions = {}): Promise<CachePlan> {
@@ -740,7 +819,10 @@ export async function planCachePrune(options: PlanCachePruneOptions = {}): Promi
   const candidates: CacheCandidate[] = [];
   let reclaimableKb = 0;
 
-  for (const root of cacheRoots(home, options.tmpPath)) {
+  const roots0 = cacheRoots(home, options.tmpPath).filter(
+    (root) => options.rootIds === undefined || options.rootIds.includes(root.id),
+  );
+  for (const root of roots0) {
     const { measurement, entries, ownership } = await measureRoot(root, nowMs, options.signal);
     roots.push(measurement);
     for (const entry of entries) {
