@@ -603,6 +603,7 @@ export async function startServer(
       config: service.config,
       bus,
       sessionService: service,
+      memoryHoldEngaged: () => service.memoryHoldEngaged(),
       logger: {
         warn: logger.warn ?? writeStderr,
         ...(logger.info ? { info: logger.info } : {}),

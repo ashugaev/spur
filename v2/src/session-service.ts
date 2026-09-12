@@ -493,6 +493,10 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
+// Consecutive 1s ticks above the restore floor plus margin required before
+// the hold clears. someAvg10 is itself a 10s decayed average, so ten
+// consecutive clear samples cover one full PSI window too.
+const MEMORY_HOLD_CLEAR_TICKS = 10;
 const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
@@ -675,6 +679,21 @@ type MemoryShedExhaustedEdge =
   | "swap:sidecar";
 type MemoryGuardConfig = AppConfig["admission"]["memoryGuard"];
 
+// The ungated pair produced by evaluateMemoryDenial. Neither `enforce` nor
+// `enforceFloors` nor `admission.enabled` has been applied — every caller
+// (assertAdmissible, updateMemoryHold) applies its own gates so a condition
+// never counts toward a denial or a hold unless its own flag says it can.
+type MemoryDenialCause = "legacy_available" | "legacy_swap" | "context_floor" | "pressure";
+
+interface MemoryDenialSample {
+  legacyDetail?: string | undefined;
+  legacyCause?: MemoryDenialCause | undefined;
+  floorDetail?: string | undefined;
+  floorCause?: MemoryDenialCause | undefined;
+  availableBytes: number;
+  someAvg10: number | null;
+}
+
 interface MemoryShedEpisode {
   ramContinuousSinceMs: number | null;
   cgroupHighLatched: boolean;
@@ -827,6 +846,12 @@ export class SessionRateLimitedError extends Error {
 // field, so one here would be written and never read.
 export class SessionAdmissionDeniedError extends Error {
   readonly statusCode = 429;
+  readonly reason: "memory_guard" | "cap";
+
+  constructor(message: string, reason: "memory_guard" | "cap") {
+    super(message);
+    this.reason = reason;
+  }
 }
 
 export class SessionNotReopenableError extends Error {
@@ -2552,6 +2577,17 @@ export class SessionService {
   private memoryShedTimer: NodeJS.Timeout | null = null;
   private memoryShedRunning = false;
   private memoryShedEpisode = createMemoryShedEpisode();
+  // Host-wide latch driven by the 1s memory-shed tick (updateMemoryHold): one
+  // "engaged"/"cleared" event pair per episode, read by the wake due-branches,
+  // the trigger flush, and the queued-message drain to hold in place instead
+  // of attempting, failing, and retrying per session. See the memory-guard
+  // wake-storm spec for the full design.
+  private memoryHold: {
+    engaged: boolean;
+    clearTicks: number;
+    engagedAtMs: number | null;
+    engagedCause: MemoryDenialCause | null;
+  } = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   // Local (in-worktree) project config resolved per session. The 2s dashboard
   // tick resolves a project for every session, so without this each tick
@@ -2787,8 +2823,28 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    // One host-memory read shared by both calls below: updateMemoryHold's
+    // wake-context check and runMemoryShed's opening pressure sample would
+    // otherwise each take their own /proc read microseconds apart for the
+    // same tick. Only this shared opening sample is reused — runMemoryShed's
+    // later re-reads (after it stops a sidecar or session) still take a
+    // fresh sample, since host memory has actually changed by then.
+    const host = readHostMemory();
+    // Its own try/catch, separate from runMemoryShed's below: without this
+    // isolation a throw inside updateMemoryHold would be mislabeled as
+    // daemon.memory.shed.failed.
     try {
-      await this.runMemoryShed();
+      this.updateMemoryHold(host);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("daemon.memory.hold.failed", {
+        level: "warn",
+        message: `Memory hold update failed: ${message}`,
+        details: { message },
+      });
+    }
+    try {
+      await this.runMemoryShed(host);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("daemon.memory.shed.failed", {
@@ -2797,6 +2853,140 @@ export class SessionService {
         details: { message },
       });
     }
+  }
+
+  // Host-wide latch: engages when the memory guard would deny a wake and
+  // clears only after MEMORY_HOLD_CLEAR_TICKS consecutive non-denying ticks
+  // — either a sample that clears both the restore floor and a one-session
+  // margin, or an unreadable sample (a null read fails open, so it must not
+  // be able to outlast the condition it mirrors). Runs on the unconditional
+  // memory-shed tick so admission.enabled: false is the only key that can
+  // disable it — memoryGuard.shedEnabled must NOT (runMemoryShed's own
+  // shedEnabled early-return must never reach here).
+  private updateMemoryHold(hostSample: HostMemory | null): void {
+    const admission = this.config.admission;
+    if (!admission.enabled) {
+      // Escape hatch: neither the cap nor the guard can deny, so the hold
+      // must not stall the fleet either. Force-clear an engaged hold (one
+      // cleared event) so flipping this key off mid-episode releases rather
+      // than freezes.
+      if (this.memoryHold.engaged) {
+        const engagedAtMs = this.memoryHold.engagedAtMs;
+        const engagedCause = this.memoryHold.engagedCause;
+        this.memoryHold = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
+        this.logEvent("daemon.memory.hold.cleared", {
+          level: "info",
+          message: "Memory hold released: admission is disabled",
+          details: {
+            reason: "admission_disabled",
+            availableBytes: null,
+            floorBytes: admission.memoryGuard.restoreFloorBytes,
+            marginBytes: null,
+            durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+            engagedCause,
+          },
+        });
+      } else {
+        this.memoryHold.clearTicks = 0;
+      }
+      return;
+    }
+
+    const guard = admission.memoryGuard;
+    const sample = this.evaluateMemoryDenial("wake", hostSample);
+    const denied =
+      sample !== null &&
+      ((sample.legacyDetail !== undefined && guard.enforce) ||
+        (sample.floorDetail !== undefined && guard.enforceFloors));
+
+    if (denied) {
+      this.memoryHold.clearTicks = 0;
+      if (!this.memoryHold.engaged) {
+        this.memoryHold.engaged = true;
+        this.memoryHold.engagedAtMs = Date.now();
+        this.memoryHold.engagedCause =
+          sample.legacyDetail !== undefined && guard.enforce
+            ? (sample.legacyCause ?? null)
+            : (sample.floorCause ?? null);
+        this.logEvent("daemon.memory.hold.engaged", {
+          level: "warn",
+          message: "Memory hold engaged: due wakes and queued deliveries are held in place",
+          details: {
+            availableBytes: sample.availableBytes,
+            floorBytes: guard.restoreFloorBytes,
+            someAvg10: sample.someAvg10,
+            cause: this.memoryHold.engagedCause,
+          },
+        });
+      }
+      return;
+    }
+
+    if (sample === null) {
+      // A null readHostMemory() read fails open in assertAdmissible (no
+      // reading denies nothing), so a persistently unreadable sample must
+      // not be able to strand an engaged hold forever. Feed it into the
+      // same MEMORY_HOLD_CLEAR_TICKS counter as a non-denying tick — one
+      // unreadable sample still can't clear the hold, but ten consecutive
+      // ones (readable-and-clear or unreadable, in any mix) do, via the one
+      // release path below.
+      if (this.memoryHold.engaged) {
+        this.memoryHold.clearTicks += 1;
+        if (this.memoryHold.clearTicks >= MEMORY_HOLD_CLEAR_TICKS) {
+          const engagedAtMs = this.memoryHold.engagedAtMs;
+          const engagedCause = this.memoryHold.engagedCause;
+          this.memoryHold = {
+            engaged: false,
+            clearTicks: 0,
+            engagedAtMs: null,
+            engagedCause: null,
+          };
+          this.logEvent("daemon.memory.hold.cleared", {
+            level: "info",
+            message: "Memory hold released: memory sample is unreadable",
+            details: {
+              availableBytes: null,
+              floorBytes: guard.restoreFloorBytes,
+              marginBytes: null,
+              durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+              engagedCause,
+              reason: "sample_unavailable",
+            },
+          });
+        }
+      }
+      return;
+    }
+
+    if (sample.availableBytes >= guard.restoreFloorBytes + admission.perSessionBytes) {
+      if (this.memoryHold.engaged) {
+        this.memoryHold.clearTicks += 1;
+      }
+      if (this.memoryHold.engaged && this.memoryHold.clearTicks >= MEMORY_HOLD_CLEAR_TICKS) {
+        const engagedAtMs = this.memoryHold.engagedAtMs;
+        const engagedCause = this.memoryHold.engagedCause;
+        this.memoryHold = { engaged: false, clearTicks: 0, engagedAtMs: null, engagedCause: null };
+        this.logEvent("daemon.memory.hold.cleared", {
+          level: "info",
+          message: "Memory hold cleared: available memory recovered",
+          details: {
+            availableBytes: sample.availableBytes,
+            floorBytes: guard.restoreFloorBytes,
+            marginBytes: admission.perSessionBytes,
+            durationMs: engagedAtMs !== null ? Date.now() - engagedAtMs : null,
+            engagedCause,
+            reason: "recovered",
+          },
+        });
+      }
+      return;
+    }
+
+    this.memoryHold.clearTicks = 0;
+  }
+
+  memoryHoldEngaged(): boolean {
+    return this.memoryHold.engaged;
   }
 
   private async runSidecarReaper(): Promise<void> {
@@ -2844,8 +3034,10 @@ export class SessionService {
     }
   }
 
-  private readMemoryPressure(nowMs: number): MemoryPressureState {
-    const host = readHostMemory();
+  // hostSample: reuse an already-taken readHostMemory() sample instead of
+  // taking a second one; omitted by every caller that needs a fresh read.
+  private readMemoryPressure(nowMs: number, hostSample?: HostMemory | null): MemoryPressureState {
+    const host = hostSample !== undefined ? hostSample : readHostMemory();
     const cgroup = readCgroupMemorySnapshot();
     const guard = this.config.admission.memoryGuard;
     const episode = this.memoryShedEpisode;
@@ -3125,7 +3317,11 @@ export class SessionService {
     return edges;
   }
 
-  private async runMemoryShed(): Promise<void> {
+  // hostSample: an opening host-memory sample the tick already took (see
+  // runMemoryShedTick), reused for the opening pressure read only. Every
+  // later re-read within this run stays a fresh readHostMemory() call, since
+  // shedding an action changes the live memory state.
+  private async runMemoryShed(hostSample?: HostMemory | null): Promise<void> {
     if (this.memoryShedRunning) return;
     const guard = this.config.admission.memoryGuard;
     if (!this.config.admission.enabled || !guard.shedEnabled) {
@@ -3140,7 +3336,7 @@ export class SessionService {
     let tier: MemoryShedTier = "mcp_sidecar";
     let candidateProvenExhausted = false;
     try {
-      pressure = this.readMemoryPressure(Date.now());
+      pressure = this.readMemoryPressure(Date.now(), hostSample);
       if (pressure.stage === "none") return;
       const candidates = await this.memoryShedCandidates();
       const liveTmux = await listTmuxSessionNames();
@@ -3679,7 +3875,7 @@ export class SessionService {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
-        if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
+        if (scheduledWake && !this.memoryHold.engaged && Date.parse(scheduledWake.dueAt) <= now) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
             // Claim the due occurrence BEFORE sending: clear scheduledWake and
             // persist it first. A slow or failing send must not leave the wake
@@ -3802,6 +3998,7 @@ export class SessionService {
         const intervalWake = session.intervalWake;
         if (
           intervalWake &&
+          !this.memoryHold.engaged &&
           Date.parse(intervalWake.nextDueAt) <= now &&
           (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
@@ -3919,7 +4116,7 @@ export class SessionService {
         // session of its wake this tick. On error treat rotated=false so the
         // afterHours nudge fallback below still runs.
         let rotated = false;
-        if (liveState === "rate_limited") {
+        if (!this.memoryHold.engaged && liveState === "rate_limited") {
           try {
             rotated = await this.tryAutoRotateClaudeAccount(session);
           } catch (error) {
@@ -3934,7 +4131,7 @@ export class SessionService {
         }
 
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (!rotated && afterHours > 0 && session.rateLimitedAt) {
+        if (!this.memoryHold.engaged && !rotated && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
             // Undefined liveState means classification has not populated stateHistory
@@ -4008,7 +4205,7 @@ export class SessionService {
         // tick) or a liveState that already moved on both skip the send —
         // clearing serverErrorAt is updateStateHistory's job alone, not this
         // loop's, so a non-"error" liveState leaves the marker untouched here.
-        if (session.serverErrorAt) {
+        if (!this.memoryHold.engaged && session.serverErrorAt) {
           const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
           if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
             try {
@@ -4054,6 +4251,7 @@ export class SessionService {
         const dailyWake = session.dailyWake;
         if (
           !dailyWake ||
+          this.memoryHold.engaged ||
           Date.parse(dailyWake.nextDueAt) > now ||
           !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
@@ -10625,7 +10823,11 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
-      if (error instanceof SessionRateLimitedError || error instanceof QueueDeliveryInFlightError) {
+      if (
+        error instanceof SessionRateLimitedError ||
+        error instanceof QueueDeliveryInFlightError ||
+        (error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard")
+      ) {
         throw error;
       }
       const failure = error instanceof Error ? error.message : String(error);
@@ -13863,6 +14065,15 @@ export class SessionService {
     if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
+    // While the memory hold is engaged, defer this attempt entirely: it
+    // would otherwise call ensureSessionReadyForSend, which can relaunch the
+    // session in place and write to its pane — real work this loop should
+    // not do under host memory pressure. Returning false is safe:
+    // runDeliveryLoop treats true/false identically, and false is what every
+    // other stays-queued path below returns.
+    if (this.memoryHold.engaged) {
+      return false;
+    }
     this.queueDeliveryInFlight.add(sessionId);
     try {
       const session = readSession(this.config.dataDir, sessionId);
@@ -14626,48 +14837,80 @@ export class SessionService {
   // of it. `admission.enabled: false` is a full escape hatch: neither the
   // cap nor the memory guard can deny, though the guard still logs a
   // report-only warning when crossed so the condition stays visible.
+  // The guard's own condition, extracted so the memory-hold latch (see
+  // updateMemoryHold) can read exactly what assertAdmissible would deny
+  // without a second, driftable copy of the thresholds. Applies NO gate:
+  // `enforce`, `enforceFloors`, and `admission.enabled` are each applied by
+  // the caller, never here.
+  // hostSample lets updateMemoryHold's tick reuse the single readHostMemory()
+  // it already took for this tick instead of taking a second one; every
+  // other caller omits it and gets its own live read.
+  private evaluateMemoryDenial(
+    context: "spawn" | "restore" | "wake",
+    hostSample?: HostMemory | null,
+  ): MemoryDenialSample | null {
+    const admission = this.config.admission;
+    const memory = hostSample !== undefined ? hostSample : readHostMemory();
+    if (!memory) return null;
+    const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
+    const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
+    const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
+    const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
+    let legacyDetail: string | undefined;
+    let legacyCause: MemoryDenialCause | undefined;
+    if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
+      legacyDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
+      legacyCause = "legacy_available";
+    } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
+      legacyDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
+      legacyCause = "legacy_swap";
+    }
+
+    // A wake reuses the restore floor: it relaunches an already-existing
+    // parked session in place, the same shape of memory pressure as a
+    // restore, not a brand-new spawn.
+    const contextFloor =
+      context === "restore" || context === "wake"
+        ? admission.memoryGuard.restoreFloorBytes
+        : admission.memoryGuard.admissionFloorBytes;
+    let floorDetail: string | undefined;
+    let floorCause: MemoryDenialCause | undefined;
+    let someAvg10: number | null = null;
+    if (memory.availableBytes < contextFloor) {
+      floorDetail = `available memory ${availableMiB}MB is below the ${(
+        contextFloor /
+        (1024 * 1024)
+      ).toFixed(0)}MB ${context} floor`;
+      floorCause = "context_floor";
+    } else {
+      const pressure = readCgroupPressure();
+      if (pressure !== null) {
+        someAvg10 = pressure.someAvg10;
+        if (pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse) {
+          floorDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
+          floorCause = "pressure";
+        }
+      }
+    }
+    return {
+      legacyDetail,
+      legacyCause,
+      floorDetail,
+      floorCause,
+      availableBytes: memory.availableBytes,
+      someAvg10,
+    };
+  }
+
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore" | "wake",
     opts?: { replacingSessionId?: string; admissionReservation?: symbol },
   ): void {
     const admission = this.config.admission;
-    const memory = readHostMemory();
-    let legacyGuardDetail: string | undefined;
-    let floorGuardDetail: string | undefined;
-    if (memory) {
-      const availableMiB = (memory.availableBytes / (1024 * 1024)).toFixed(0);
-      const floorMiB = (admission.memoryGuard.minAvailableBytes / (1024 * 1024)).toFixed(0);
-      const swapMiB = (memory.swapFreeBytes / (1024 * 1024)).toFixed(0);
-      const swapFloorMiB = (admission.memoryGuard.minFreeSwapBytes / (1024 * 1024)).toFixed(0);
-      if (memory.availableBytes < admission.memoryGuard.minAvailableBytes) {
-        legacyGuardDetail = `available memory ${availableMiB}MB is below the ${floorMiB}MB floor`;
-      } else if (memory.swapFreeBytes < admission.memoryGuard.minFreeSwapBytes) {
-        legacyGuardDetail = `free swap ${swapMiB}MB is below the ${swapFloorMiB}MB floor`;
-      }
-
-      // A wake reuses the restore floor: it relaunches an already-existing
-      // parked session in place, the same shape of memory pressure as a
-      // restore, not a brand-new spawn.
-      const contextFloor =
-        context === "restore" || context === "wake"
-          ? admission.memoryGuard.restoreFloorBytes
-          : admission.memoryGuard.admissionFloorBytes;
-      if (memory.availableBytes < contextFloor) {
-        floorGuardDetail = `available memory ${availableMiB}MB is below the ${(
-          contextFloor /
-          (1024 * 1024)
-        ).toFixed(0)}MB ${context} floor`;
-      } else {
-        const pressure = readCgroupPressure();
-        if (
-          pressure !== null &&
-          pressure.someAvg10 > admission.memoryGuard.pressureSomeAvg10Refuse
-        ) {
-          floorGuardDetail = `memory PSI some avg10 ${pressure.someAvg10.toFixed(2)} exceeds ${admission.memoryGuard.pressureSomeAvg10Refuse.toFixed(2)}`;
-        }
-      }
-    }
+    const sample = this.evaluateMemoryDenial(context);
+    const legacyGuardDetail = sample?.legacyDetail;
+    const floorGuardDetail = sample?.floorDetail;
     if (legacyGuardDetail) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
@@ -14684,6 +14927,7 @@ export class SessionService {
     if (denialDetail) {
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
+        "memory_guard",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -14707,6 +14951,7 @@ export class SessionService {
       const projectCandidates = live.records.filter((session) => session.project === projectId);
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
+        "cap",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
@@ -14719,6 +14964,7 @@ export class SessionService {
     if (totalLive >= admission.maxLiveSessions) {
       const denial = new SessionAdmissionDeniedError(
         `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
+        "cap",
       );
       this.logEvent("session.admission.denied", {
         level: "warn",
