@@ -31392,6 +31392,99 @@ describe("SessionService", () => {
       );
     });
 
+    it("hands off successfully when the startup attachment file is deleted between the artifact lookup and the read (TOCTOU ENOENT)", async () => {
+      mockClaudeJsonlState("waiting");
+      // readSessionArtifact reports the artifact exists (its own stat check
+      // passed), but the file is gone by the time readFileSync runs — never
+      // created here, so the real fs read throws ENOENT.
+      const goneArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "1773828300000-gone.png");
+      readSessionArtifactMock.mockReturnValue({
+        id: "1773828300000-gone.png",
+        path: goneArtifactPath,
+        name: "1773828300000-gone.png",
+        size: 12,
+        mimeType: "image/png",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1773828300000-gone.png"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(spawned.id).toBe("api-2");
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(launchPrompt).not.toContain("[Attached file:");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.startup_attachment_missing",
+          level: "warn",
+          sessionId: "api-1",
+          details: { missingIds: ["1773828300000-gone.png"] },
+        }),
+      );
+    });
+
+    it("propagates a non-ENOENT error reading a startup attachment instead of treating it as missing", async () => {
+      mockClaudeJsonlState("waiting");
+      // A directory at the artifact path makes the real readFileSync throw
+      // EISDIR, not ENOENT — this must NOT be swallowed into missingIds.
+      const dirArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "1773828300000-dir.png");
+      mkdirSync(dirArtifactPath, { recursive: true });
+      readSessionArtifactMock.mockReturnValue({
+        id: "1773828300000-dir.png",
+        path: dirArtifactPath,
+        name: "1773828300000-dir.png",
+        size: 12,
+        mimeType: "image/png",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          startupAttachmentIds: ["1773828300000-dir.png"],
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow();
+    });
+
     it("hands off with one resolvable and one missing startup attachment, carrying only the resolved one into the prompt and warning on only the missing id", async () => {
       mockClaudeJsonlState("waiting");
       const startupArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "1773828300000-resolved.png");
