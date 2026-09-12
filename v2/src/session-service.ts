@@ -6762,13 +6762,13 @@ export class SessionService {
     reservedPort: number,
     linkUrl: string,
   ): Promise<void> {
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
     const latest = readSession(this.config.dataDir, sessionId);
     if (!latest) return;
     if (isTerminalSessionStatus(latest.status)) {
       const sidecar = this.resolveProjectForSession(latest)?.sidecars[sidecarName];
       if (!sidecar || sidecar.mcp || !this.hasRunningWorkspaceMembers(latest)) return;
     }
-    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
     const resolved = resolveWorkspaceState(this.config.dataDir, latest);
     const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: sidecarName, url: linkUrl }],

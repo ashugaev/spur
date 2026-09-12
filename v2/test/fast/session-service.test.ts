@@ -15907,6 +15907,41 @@ describe("SessionService", () => {
       expect(sessions.get("api-2")?.sidecarPorts).toBeUndefined();
     });
 
+    it("does not republish a shared link when the last sibling completes during the liveness check", async () => {
+      loadConfigMock.mockReturnValue(daemonSidecarProjectConfig());
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", status: "completed" }));
+      const sibling = sessionRecord({ id: "api-2", deskId: "api-1" });
+      sessions.set("api-2", sibling);
+      let resolveAlive!: (alive: boolean) => void;
+      sidecarTmuxAliveMock.mockReturnValue(
+        new Promise<boolean>((resolve) => {
+          resolveAlive = resolve;
+        }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const publisher = service as unknown as {
+        publishSidecarLink(id: string, name: string, port: number, url: string): Promise<void>;
+      };
+
+      const publication = publisher.publishSidecarLink(
+        "api-1",
+        "daemon",
+        4100,
+        "https://preview.example.com/4100",
+      );
+      expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "daemon");
+      sessions.set("api-2", { ...sibling, status: "completed" });
+      resolveAlive(true);
+      await publication;
+
+      expect(sessions.get("api-1")?.slots?.links).toBeUndefined();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "session.sidecar.link.published",
+      );
+    });
+
     it("stops a project sidecar requested from a desk sibling on the anchor's tmux and unlinks the anchor's slot", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
