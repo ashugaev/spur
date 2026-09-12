@@ -46,11 +46,27 @@ Actions: `reclaim` removes worktree, archives; `archive` moves records only; `bl
 
 Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with their log shard; `mv` back into `sessions/<projectId>/` to un-archive (a collected `stopped` session can't restore — `gc` lists those ids first). `--no-sizes` skips freed-byte measurement; exits `1` on any group error. Defaults: `sessionGc.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
 
+## disk
+
+`spur disk [--json]` reports Spur-attributable disk usage, read-only, daemon-free. Rows: the four never-reclaimed Spur stores (`session-artifacts`, `worktrees`, `session-tools`, `opencode-store` under `~/.local/share/opencode`), `npm-cacache`, `npm-npx`, `playwright-browsers`, `playwright-mcp-profiles`, and an aggregated `worktree-build-caches` row (webpack/`.next` caches found by a bounded depth-3 walk under `worktreeDir`, skipping `node_modules`/`.git`). Each row carries `reclaimedByDiskGc` (this run's `disk-gc` reclaim set includes it) and `reclaimedBy` (`disk-gc`, `spur cache`, `opencode-gc`, `spur gc`, or `none`) so one table names which command owns each root's deletion. A `du` that times out or is aborted reports `status: "unmeasured"`, never `sizeBytes: 0`.
+
+Side effect: every run overwrites `<dataDir>/disk-budget.json` (`{ generatedAt, roots, totals }`). The daemon's warn sweep ([`diskBudget`](configuration.md#field-reference)) reads only this file — it never runs its own `du` — and emits nothing when the file is absent or older than `2 * diskBudget.intervalMinutes`.
+
+## disk-gc
+
+`spur disk-gc [--execute]` reclaims: stale `mcp-*` playwright profile dirs under `~/.cache/ms-playwright(-mcp)` (default target, protected by a live argv match or a live `SingletonLock`/`SingletonSocket` pid), and webpack/`.next` build caches inside a worktree where every session record sharing that `worktreePath` is `completed` or `killed` — a worktree with zero matching records is reported `orphaned_no_record` and never touched, and a `worktree: false` session's real checkout (outside `worktreeDir`) is refused (`path_outside_worktree_dir`, re-checked on the realpath immediately before delete). Dry run by default; `--execute` applies the plan.
+
+`--browser-revisions` additionally prunes unpinned playwright browser revisions, delegating to `spur cache`'s pin resolver unchanged (never a second deletion implementation) — off by default because the predicate is "referenced by any installed playwright's `browsers.json` pins", a strict superset of "referenced by a live session", not an exact live-session test.
+
+npm cap: when `~/.npm/_cacache` exceeds `diskBudget.npmCacheMaxGb`, `--execute` runs `npm cache verify` (collects orphaned/corrupt content only), re-measures, and — only if still over cap — reads `index-v5` to rank entries oldest-first by `time` and removes exactly enough with `npm cache clean <key>` (one entry per call, never `--force`) to clear the cap, then `npm cache verify` once more. Skipped entirely while any npm/pnpm/npx/yarn process runs. An unreadable/malformed `index-v5` aborts the whole npm target (`npm_index_unreadable`) without touching it. This command never runs `npm cache clean --force` and never deletes `_cacache` itself — that whole-root wipe stays `spur cache --prune --yes`'s job (see below).
+
+Flags: `--execute`, `--browser-revisions`, `--older-than <days>` (default `diskBudget.buildCacheOlderThanDays`), `--limit <n>` (default `diskBudget.maxWorktreesPerSweep`), `--json`. Requires a resolved instance config.
+
 ## cache
 
-`spur cache [--prune --yes]` reports host caches outside `~/.spur` — size, path, age (days), protection reason per entry, size-ranked. Dry-run by default; `--prune --yes` deletes `prunable` entries, no daemon needed. Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, rest of `~/.cache`, `/tmp`, never `~/.spur`.
+`spur cache [--prune --yes]` reports host caches outside `~/.spur` — size, path, age (days), protection reason per entry, size-ranked. Dry-run by default; `--prune --yes` deletes `prunable` entries, no daemon needed. Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, rest of `~/.cache`, `/tmp`, never `~/.spur`. The in-`~/.spur/worktrees` webpack/`.next` build-cache target is out of scope here — see `disk-gc` above.
 
-Prunable: `vendor-cache` (`~/.npm/_cacache`) — 7d, protected while npm/pnpm/npx/yarn runs. `npx-package` (`~/.npm/_npx/<hash>`) — 30d, protected by a `browsers.json` pin or live-process argv match. `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d, protected by any resolved `browsers.json` pin, fail-closed if none resolve. Report-only: `browser-profile` (`mcp-*` dirs, cookies), `browser-registry` (`~/.cache/ms-playwright/b`), `generic` (rest of `~/.cache`), `tmp-entry` (`/tmp`). Unreadable process tree degrades plan to report-only.
+Prunable: `vendor-cache` (`~/.npm/_cacache`) — 7d, protected while npm/pnpm/npx/yarn runs. `npx-package` (`~/.npm/_npx/<hash>`) — 30d, protected by a `browsers.json` pin or live-process argv match. `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d, protected by any resolved `browsers.json` pin (including a `~/.cache/ms-playwright/.links` referrer's own `browsers.json`), fail-closed if none resolve, and fail-closed for every revision if any `.links` referrer is itself unreadable or missing. This `.links` fail-closed behavior is strictly more conservative than before — it can only add protection, never remove it. Report-only: `browser-profile` (`mcp-*` dirs, cookies; reclaimed by `disk-gc`, not this command), `browser-registry` (`~/.cache/ms-playwright/b`), `generic` (rest of `~/.cache`), `tmp-entry` (`/tmp`). Unreadable process tree degrades plan to report-only.
 
 ## daemon
 

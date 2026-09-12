@@ -345,6 +345,12 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. On by default, unlike `sessionGc`: this reaper kills a restartable sidecar process, never a worktree or a record. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. Workspace idle time that reaps a non-MCP project sidecar. Per-sidecar override: `projects.<id>.sidecars.<name>.idleTtlMinutes`. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. Process age at which a kept sidecar logs `session.sidecar.age_warning`. Warn only — it authorizes no kill.
+- `diskBudget.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon warn on Spur-attributable disk usage crossing `warnAttributableGb`; `spur disk`/`spur disk-gc` themselves work regardless. See [Disk budget](#disk-budget).
+- `diskBudget.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps, riding the same 5-minute `sessionGc` timer tick (no second timer).
+- `diskBudget.warnAttributableGb`: optional, default `60`. Ceiling in GB of `spur disk`'s `totals.attributableBytes`; crossing it emits `host.disk.budget_exceeded` (warn) on the first crossing.
+- `diskBudget.npmCacheMaxGb`: optional, default `20`. `spur disk-gc --execute`'s per-key `npm cache clean` cap on `~/.npm/_cacache`. Never triggers a whole-root wipe.
+- `diskBudget.buildCacheOlderThanDays`: optional, default `14`. Minimum newest-file age of a worktree build-cache dir before `spur disk-gc` selects it. Also the CLI's `--older-than` default.
+- `diskBudget.maxWorktreesPerSweep`: optional positive integer, default `20`. Per-run worktree cap. Also the CLI's `--limit` default.
 - `tmux.socketName`: optional, default `spur-<server.port>`. Instance config only.
 - `eventLog.hotBytes`: optional, default `134217728` (128MB). Instance config only. See [Event log retention](#event-log-retention).
 - `eventLog.shardHotBytes`: optional, default `16777216` (16MB).
@@ -420,6 +426,14 @@ Each pass logs `session.sidecar.reaped` per kill with the matched rule and freed
 `deadPane` (omitted when false) marks a sidecar whose tmux session exists but whose pane exited (`remain-on-exit`, same `alive`/`dead` split as [ports](commands.md#sidecars)); the session detail page keeps its Terminal button reachable but shows the Start action.
 
 Cross-workspace port collision: a sidecar start refuses when this workspace's recorded reservation for this sidecar matches a live other workspace's recorded reservation for a non-MCP sidecar in the same project AND that port is free right now. The error names the holding workspace and sidecar; stop that sidecar or its session first — Spur reuses no pane and reaps nothing across a workspace boundary. Refuses nothing: a shared `ports` range alone, an occupied colliding port (the start scans for another free port), a same-workspace sidecar, another project, a holder with no live pane, an explicit `clearPort`.
+
+## Disk budget
+
+`diskBudget` gates a daemon warn sweep over Spur-attributable disk usage; `spur disk` (report) and `spur disk-gc` (reclaim, see [commands.md](commands.md#disk-gc)) are daemon-free and work regardless of `enabled`.
+
+Four stores are report-only, never reclaimed by `disk-gc`: `<dataDir>/session-artifacts`, `worktreeDir`, `<dataDir>/session-tools`, `~/.local/share/opencode`. Host caches (`~/.npm/_cacache`, `~/.npm/_npx`) are reported here but reclaimed only by `spur cache` (see [commands.md](commands.md#cache)) — `disk-gc` enforces only a per-key `npmCacheMaxGb` cap on `_cacache` via `npm cache clean <key>`, never a whole-root wipe. `disk-gc` owns reclaiming stale playwright MCP profile dirs and terminal-worktree build caches directly, and unpinned browser revisions only behind `--browser-revisions`.
+
+The daemon sweep never runs `du`: it reads `<dataDir>/disk-budget.json`, written only by a `spur disk` run, and emits nothing when that file is absent or older than `2 * diskBudget.intervalMinutes` — a stale or missing measurement is not evidence of a breach. `host.disk.budget_exceeded` (level `warn`) reaches `events.jsonl` through the same path as every other daemon event and is subject to the same warn/error collapse window (see [Event log retention](#event-log-retention), `eventLog.collapseWindowMs`) — "emitted once" means the first crossing appends one line, not that no repeat can ever appear.
 
 ## Stale mode
 
