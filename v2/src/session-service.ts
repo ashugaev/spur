@@ -176,7 +176,13 @@ import {
   NPM_GLOBALCONFIG_ENV_LOWER,
   npmPinConfigPath,
 } from "./npm-prefix.js";
-import { clearPortListener, hasEstablishedConnections, isHostPortFree } from "./port-probe.js";
+import {
+  clearPortListener,
+  findListenerPids,
+  hasEstablishedConnections,
+  isHostPortFree,
+} from "./port-probe.js";
+import { readProcessCwd } from "./process-tree.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   closeTelegramTopic,
@@ -6541,17 +6547,79 @@ export class SessionService {
       }
     }
 
-    const buildRangeCandidates = (
+    // Bounds the total holder-attribution work (findListenerPids +
+    // readProcessCwd) for one reservation attempt, not per port: 2x
+    // LISTENER_LOOKUP_TIMEOUT_MS (port-probe.ts) so a wedged lsof/ss on one
+    // port can never make attributing the rest of a wide range hang the
+    // whole start. Ports past the budget degrade to holder-unknown, never
+    // to "free".
+    const SIDECAR_CONFLICT_ATTRIBUTION_BUDGET_MS = 4_000;
+    const attributionDeadlineMs = Date.now() + SIDECAR_CONFLICT_ATTRIBUTION_BUDGET_MS;
+
+    // Emits a candidate ONLY for a port carrying a concrete block reason —
+    // already reserved (portOwnership), claimed by a sibling portId in this
+    // same attempt, or host-occupied. A free, unreserved, unclaimed port in
+    // the range is never offered: the caller's dropdown must only ever list
+    // what is actually blocking this start (measured bug: a free port named
+    // in the refusal message alongside the genuinely occupied ones).
+    const buildRangeCandidates = async (
       portId: string,
       portConfig: SidecarPortConfig,
-    ): SidecarPortConflictCandidate[] => {
+      claimedPorts: ReadonlySet<number>,
+    ): Promise<SidecarPortConflictCandidate[]> => {
       const candidates: SidecarPortConflictCandidate[] = [];
       for (let port = portConfig.start; port <= portConfig.end; port += 1) {
+        const ownership = portOwnership.get(port);
+        if (ownership) {
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: ownership.owner,
+            reservedBy:
+              ownership.sessionId !== undefined
+                ? `${ownership.sessionId}${ownership.sidecarName ? `/${ownership.sidecarName}` : ""}`
+                : ownership.owner,
+          });
+          continue;
+        }
+        if (claimedPorts.has(port)) {
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: "external",
+            clearable: false,
+          });
+          continue;
+        }
+        if (await isHostPortFree(port)) {
+          // Not a block: a prior sibling portId in this same range-scan
+          // pass already exhausted every free port before reaching here,
+          // so this can only happen for a port outside that scan (never
+          // observed in practice, kept as a defensive skip rather than a
+          // false "occupied" claim).
+          continue;
+        }
+        let holder: SidecarPortConflictCandidate["holder"];
+        if (Date.now() < attributionDeadlineMs) {
+          try {
+            const pids = await findListenerPids(port);
+            const pid = pids[0];
+            if (pid !== undefined) {
+              holder = { pid, cwd: await readProcessCwd(pid) };
+            }
+          } catch {
+            // Neither lsof nor ss ran: stays occupied-holder-unknown, never
+            // "free" and never a 500 replacing the 409.
+          }
+        }
         candidates.push({
           portId,
           env: portConfig.env,
           port,
-          owner: portOwnership.get(port)?.owner ?? "external",
+          owner: "external",
+          ...(holder ? { holder } : {}),
         });
       }
       return candidates;
@@ -6571,6 +6639,7 @@ export class SessionService {
     const plans: ReservationPlan[] = [];
     const claimed = new Set<number>();
     const conflictCandidates: SidecarPortConflictCandidate[] = [];
+    const failedPortIds: string[] = [];
     for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
       const env = portConfig.env;
       const existingPort = currentSidecarPorts[env];
@@ -6625,11 +6694,26 @@ export class SessionService {
         continue;
       }
 
-      // Whole range occupied: offer every occupied port for the user to clear.
-      conflictCandidates.push(...buildRangeCandidates(portId, portConfig));
+      // Whole range occupied: offer every blocked port for the user to clear.
+      // The reservation for this portId is unsatisfiable — throw is driven
+      // by this explicit flag, never by conflictCandidates.length, so a
+      // portId that fails after another portId already narrowed candidates
+      // can never fall through into the apply pass.
+      conflictCandidates.push(...(await buildRangeCandidates(portId, portConfig, claimed)));
+      failedPortIds.push(portId);
     }
 
-    if (conflictCandidates.length > 0) {
+    if (failedPortIds.length > 0) {
+      this.logEvent("session.sidecar.start_rejected", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Sidecar ${sidecarName} start refused: port conflict on ${failedPortIds.join(", ")}`,
+        details: {
+          reason: "port_conflict",
+          sidecarName,
+          candidates: conflictCandidates,
+        },
+      });
       throw new SidecarPortConflictError(sidecarName, conflictCandidates);
     }
 

@@ -3782,15 +3782,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }
                       value={conflictClearPort ?? ""}
                     >
-                      {sidecarPortConflict.candidates.map((candidate) => (
-                        <option
-                          key={`${candidate.portId}:${candidate.port}`}
-                          value={candidate.port}
-                        >
-                          {candidate.portId}:{candidate.port}
-                          {candidate.owner ? ` — ${candidate.owner}` : ""}
-                        </option>
-                      ))}
+                      {sidecarPortConflict.candidates.map((candidate) => {
+                        const label = candidate.reservedBy
+                          ? `reserved by ${candidate.reservedBy}`
+                          : candidate.holder
+                            ? `pid ${candidate.holder.pid}${candidate.holder.cwd ? ` (${candidate.holder.cwd})` : ""}`
+                            : candidate.owner && candidate.owner !== "external"
+                              ? candidate.owner
+                              : "holder unknown";
+                        return (
+                          <option
+                            key={`${candidate.portId}:${candidate.port}`}
+                            disabled={candidate.clearable === false}
+                            value={candidate.port}
+                          >
+                            {candidate.portId}:{candidate.port} — {label}
+                          </option>
+                        );
+                      })}
                     </select>
                   </label>
                   <div className="flex justify-end gap-2">
