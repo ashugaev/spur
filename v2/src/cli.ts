@@ -2703,7 +2703,7 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("disk")
     .description(
-      "Report Spur-attributable disk usage: report-only stores, host caches, and worktree build caches. Read-only; writes <dataDir>/disk-budget.json for the daemon's warn sweep.",
+      "Report Spur-attributable disk usage: report-only stores, host caches, and worktree build caches. Read-only; writes <dataDir>/disk-budget.json.",
     )
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command) => {
@@ -2731,7 +2731,7 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("disk-gc")
     .description(
-      "Reclaim stale playwright MCP profile dirs and worktree build caches in terminal worktrees, and cap ~/.npm/_cacache with npm-native per-key `npm cache clean`. Dry run unless --execute.",
+      "Reclaim stale browser MCP profile dirs and worktree build caches in terminal worktrees, and cap ~/.npm/_cacache with npm-native per-key `npm cache clean`. Dry run unless --execute.",
     )
     .option("--execute", "Apply the plan; without this flag nothing is removed")
     .option(
