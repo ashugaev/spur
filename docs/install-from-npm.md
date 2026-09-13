@@ -6,7 +6,12 @@ Run Spur on a fresh Linux server. This is the required path for coding-agent ins
 
 Package ships the web UI prebuilt — no on-box build.
 
-Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (Ubuntu's apt build is too old — use nodesource or nvm).
+Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ at `/usr/bin/node` — the units hardcode that path (see gotchas). Ubuntu's apt build is too old; nodesource lands there:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
+/usr/bin/node -v                    # required — a node reachable only on PATH is not enough
+```
 
 ## Requirements
 
@@ -18,10 +23,13 @@ Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ (
 ```bash
 npm config set prefix ~/.local      # required — see gotchas
 npm install -g @shugaev/spur@latest
+mkdir -p ~/.claude/skills ~/.codex/skills   # Spur links its skills here, never creates the dirs
 spur init                           # installs + starts the systemd user units, links host skills
 ```
 
-Two non-obvious points:
+Three non-obvious points:
+
+- Node must live at `/usr/bin/node`. Both units ship `ExecStart=/usr/bin/node ...`; nothing rewrites that path. A node under `nvm`, `fnm`, or `~/.local` crash-loops both units on `status=203/EXEC` with a correct npm prefix. Only the npm prefix moves to `~/.local` — the runtime stays system-wide. nvm host: `sudo ln -s "$(command -v node)" /usr/bin/node`.
 
 - Prefix must be `~/.local` — a system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path (`status=203/EXEC`). Put `~/.local/bin` on PATH, persisted for new logins. The `npm config set prefix ~/.local` above writes into `~/.npmrc`, needed once to land the very first `npm install -g @shugaev/spur` before Spur exists to pin anything. After the daemon's first boot (`spur init`/`update`/`reinit`, a reboot, or `systemctl restart`), the pin moves to Spur's own `~/.spur/npmrc` as npm's `--globalconfig` — never `~/.npmrc`, which `nvm` refuses to load once it carries a `prefix=`/`globalconfig=` line. `spur init`/`update`/`reinit` strip that line back out of `~/.npmrc` only on hosts with nvm installed — on a host without nvm the line stays, since it's what makes a bare `npm install -g` (outside any agent session) land in `~/.local` at all, and nothing there conflicts with it. A plain daemon boot leaves `~/.npmrc` alone either way. `spur doctor`'s `npmrc-nvm-conflict` check applies the same nvm gate and gives the one-liner to remove a leftover line (system-unit hosts, see below, can't run `spur reinit`).
 - `npm install` only unpacks — it starts nothing and won't survive reboot. `spur init` installs the units, starts them, and enables linger. `spur init` also links the packaged Spur agent skills into `~/.claude/skills` and `~/.codex/skills` when that `skills` directory already exists — never creating an absent one — replacing its own links (including a dangling one under any `.../skills/<name>` path) on every release, and leaving a real file, directory, or foreign symlink untouched. An absent dir is skipped with a warning naming the path and the fix (`mkdir -p <path> && spur reinit`). See [Doctor](commands.md#doctor)'s `skills-symlinks` check.
