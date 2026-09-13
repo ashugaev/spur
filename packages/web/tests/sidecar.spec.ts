@@ -204,6 +204,46 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(sidecarTermBtn).toHaveCount(0);
   });
 
+  test("#822: dead-pane sidecar keeps the terminal button and shows start", async ({ page }) => {
+    const session = makeSessionWithSidecar("dev", false, {
+      id: "sc-dead-pane-1",
+      runtimeAlive: true,
+      tmuxSession: "spur-sc-dead-pane-1",
+      sidecars: [{ name: "dev", alive: false, deadPane: true }],
+    });
+    let startRequested = false;
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/start`, (route) => {
+      startRequested = true;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeSessionWithSidecar("dev", true, { id: session.id })),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    // Dead-pane status dot renders the same not-alive (grey) style as any
+    // dead sidecar, not the alive fill — discriminates the row from an
+    // alive one, since `deadPane` never accompanies `alive: true`.
+    await expect(sidecarSection.getByTestId("sidecar-status-dev")).toHaveClass(
+      /color-text-tertiary/,
+    );
+    await expect(sidecarSection.getByTestId("sidecar-status-dev")).not.toHaveClass(
+      /color-chip-alive/,
+    );
+    await expect(sidecarSection.getByRole("button", { name: /terminal/i })).toBeVisible();
+    await expect(sidecarSection.getByRole("link", { name: /open/i })).toHaveCount(0);
+
+    const startButton = sidecarSection.getByRole("button", { name: "Start sidecar dev" });
+    await expect(startButton).toBeVisible();
+    await startButton.click();
+
+    await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
+    expect(startRequested).toBe(true);
+  });
+
   test("no sidecars section when sidecars array is empty", async ({ page }) => {
     const session = makeWorkingSession({ id: "sc-empty-1", sidecars: [] });
     await mockSessionDetail(page, session);

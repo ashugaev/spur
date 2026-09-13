@@ -1,4 +1,4 @@
-import { test, expect, devices, type Page } from "playwright/test";
+import { test, expect, devices, type Locator, type Page } from "playwright/test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -25,6 +25,36 @@ function boxesOverlap(first: ElementBox, second: ElementBox): boolean {
     first.y < second.y + second.height &&
     first.y + first.height > second.y
   );
+}
+
+// Reads each character's rendered x-center via Range.getBoundingClientRect() and asserts
+// the x-centers are non-decreasing left to right, i.e. the visual order matches the
+// original string order. DOM-text assertions (getByText) are unchanged by bidi reordering
+// and cannot catch a `dir="rtl"` name that visually reverses — this reads the actual paint
+// order instead.
+async function assertVisualCharOrder(locator: Locator, expectedText: string): Promise<void> {
+  const handle = await locator.elementHandle();
+  if (!handle) throw new Error("artifact name element not found");
+  const xCenters = await locator.page().evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    const textNode = walker.nextNode();
+    if (!textNode || !textNode.textContent) return [];
+    const range = document.createRange();
+    const centers: number[] = [];
+    for (let index = 0; index < textNode.textContent.length; index++) {
+      range.setStart(textNode, index);
+      range.setEnd(textNode, index + 1);
+      const rects = range.getClientRects();
+      const rect = rects[rects.length - 1];
+      centers.push(rect ? rect.x + rect.width / 2 : NaN);
+    }
+    return centers;
+  }, handle);
+
+  expect(xCenters.length).toBe(expectedText.length);
+  for (let index = 1; index < xCenters.length; index++) {
+    expect(xCenters[index]).toBeGreaterThanOrEqual(xCenters[index - 1] - 0.5);
+  }
 }
 
 async function expectArtifactControlsOutsideSurface(page: Page): Promise<void> {
@@ -2610,6 +2640,148 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
+  test("renders a nested artifact under its relative path and opens it through the same URL", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-nested",
+      artifacts: [
+        {
+          id: "design/design-spec.md",
+          name: "design/design-spec.md",
+          size: 512,
+          mimeType: "text/markdown; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.route(
+      "**/api/sessions/detail-s4b-nested/artifacts/design/design-spec.md",
+      (route) => {
+        route.fulfill({ status: 200, contentType: "text/markdown", body: "# spec" });
+      },
+    );
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    // The card renders the full relative path, not just the basename.
+    await expect(page.getByText("design/design-spec.md")).toBeVisible();
+    const downloadLink = page.getByRole("link", { name: "Download design/design-spec.md" });
+    await expect(downloadLink).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-nested/artifacts/design/design-spec.md",
+    );
+    await expect(downloadLink).toHaveAttribute("download", "design-spec.md");
+  });
+
+  test("artifact list view does not scroll the page horizontally on a narrow viewport", async ({
+    page,
+  }) => {
+    // Reproduces the reviewer's PR #789 measurement (scrollWidth 402 vs
+    // innerWidth 390 at 390px) with the current HEAD's Updated column always
+    // visible, which grows the row further. Name must shrink and any
+    // remaining overflow must stay inside the table, never the page.
+    const session = makeWorkingSession({
+      id: "detail-s4b-narrow-list",
+      artifacts: [
+        {
+          id: "report.html",
+          name: "a-fairly-long-generated-report-name-for-this-session.html",
+          size: 123_456,
+          mimeType: "text/html",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page
+      .getByRole("tablist", { name: "Artifact view" })
+      .getByRole("button", { name: "List" })
+      .click();
+    await expect(page.getByRole("columnheader", { name: /Updated/ })).toBeVisible();
+
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    const innerWidth = await page.evaluate(() => window.innerWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+
+  test("renders artifact names with a leading neutral character in original visual order", async ({
+    page,
+  }) => {
+    // A leading `.`, `_`, `(`, or digit run is a weak/neutral character under the Unicode
+    // Bidi Algorithm: under `dir="rtl"` it takes the paragraph's RTL base direction and
+    // reorders to the opposite end (".env.example" paints as "env.example."). The name
+    // must render in original character order regardless.
+    const names = [
+      ".env.example",
+      ".claude/settings.json",
+      "2026-04-02-report.md",
+      "01-intro.md",
+      "(draft) plan.md",
+      "_under.md",
+      "100%.txt",
+    ];
+    const session = makeWorkingSession({
+      id: "detail-s4b-bidi",
+      artifacts: names.map((name, index) => ({
+        id: name,
+        name,
+        size: 100 + index,
+        mimeType: "text/plain",
+        kind: "text" as const,
+        origin: "intentional" as const,
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: `2026-04-02T10:0${index}:00.000Z`,
+      })),
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByText("Artifacts")).toBeVisible();
+
+    for (const name of names) {
+      await assertVisualCharOrder(page.locator(`[title="${name}"]`).first(), name);
+    }
+  });
+
+  test("shows the truncation banner when artifactsTruncated is set", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-truncated",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+      artifactsTruncated: true,
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: "Artifacts" })).toBeVisible();
+    await expect(page.getByText(/nested artifacts were truncated/i)).toBeVisible();
+    // The banner never names a specific count: truncation can fire on the entry budget
+    // with zero nested rows emitted, so a stated count would be false in that case.
+    await expect(page.getByText(/\d+\s*files/i)).toHaveCount(0);
+  });
+
   test("image lightbox zoom buttons scale and reset the preview", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4b-zoom",
@@ -3165,6 +3337,178 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByText("agent-second.txt")).toBeVisible();
     await expect(page.getByText("agent-history-first.jsonl")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /system \(/i })).toHaveCount(0);
+  });
+
+  test("switches the artifacts panel between grid and list and persists the mode", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-mode",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "trace.log",
+          name: "trace.log",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T09:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByAltText("shot.png")).toBeVisible();
+    await expect(page.getByRole("table")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "List" }).click();
+    await expect(page.getByRole("table")).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Name" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Size" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Type" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Updated" })).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByRole("table")).toBeVisible();
+  });
+
+  test("sorts the artifact list by every column", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("spur:artifact-view-mode", "list");
+    });
+    const session = makeWorkingSession({
+      id: "detail-s4b-sort",
+      artifacts: [
+        {
+          id: "beta.txt",
+          name: "beta.txt",
+          size: 300,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T09:00:00.000Z",
+          updatedAt: "2026-04-02T09:00:00.000Z",
+        },
+        {
+          id: "alpha.txt",
+          name: "alpha.txt",
+          size: 100,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T11:00:00.000Z",
+          updatedAt: "2026-04-02T11:00:00.000Z",
+        },
+        {
+          id: "gamma.png",
+          name: "gamma.png",
+          size: 200,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByRole("table")).toBeVisible();
+
+    const rowName = (index: number) =>
+      page
+        .locator("tbody tr td")
+        .nth(index * 5)
+        .innerText();
+
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Name" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "beta.txt", "gamma.png"]);
+
+    await page.getByRole("button", { name: "Name" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["gamma.png", "beta.txt", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Size" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Size" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Type" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Type" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.getByRole("button", { name: "Updated" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+
+    await page.getByRole("button", { name: "Updated" }).click();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["beta.txt", "gamma.png", "alpha.txt"]);
+
+    await page.reload();
+    await expect(page.getByRole("table")).toBeVisible();
+    await expect
+      .poll(async () => [await rowName(0), await rowName(1), await rowName(2)])
+      .toEqual(["alpha.txt", "gamma.png", "beta.txt"]);
+  });
+
+  test("opens the same artifact viewer from a list row", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("spur:artifact-view-mode", "list");
+    });
+    const session = makeWorkingSession({
+      id: "detail-s4b-list-view",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.getByRole("table")).toBeVisible();
+
+    await page.getByRole("button", { name: "Preview shot.png" }).click();
+    await expect(page.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeVisible();
   });
 });
 

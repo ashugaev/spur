@@ -428,4 +428,217 @@ describe("ConversationView", () => {
 
     expect(screen.getByText(longText)).toBeInTheDocument();
   });
+
+  it("never renders a 'showing last' count hint", () => {
+    const entries: TranscriptEntry[] = [
+      { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        startIndex={200}
+        hasMore
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(/showing last/i)).not.toBeInTheDocument();
+  });
+
+  function stubScrollMetrics(
+    el: HTMLElement,
+    metrics: { scrollTop: number; scrollHeight: number; clientHeight: number },
+  ) {
+    Object.defineProperty(el, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: metrics.scrollTop,
+    });
+    Object.defineProperty(el, "scrollHeight", { configurable: true, value: metrics.scrollHeight });
+    Object.defineProperty(el, "clientHeight", { configurable: true, value: metrics.clientHeight });
+  }
+
+  it("calls onLoadOlder on scroll-to-top when hasMore is true", () => {
+    const onLoadOlder = vi.fn();
+    const entries: TranscriptEntry[] = [
+      { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        startIndex={100}
+        hasMore
+        isLoadingOlder={false}
+        onLoadOlder={onLoadOlder}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    stubScrollMetrics(scrollEl, { scrollTop: 0, scrollHeight: 1000, clientHeight: 300 });
+    fireEvent.scroll(scrollEl);
+
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call onLoadOlder on scroll-to-top when hasMore is false", () => {
+    const onLoadOlder = vi.fn();
+    const entries: TranscriptEntry[] = [
+      { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        startIndex={0}
+        hasMore={false}
+        onLoadOlder={onLoadOlder}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    stubScrollMetrics(scrollEl, { scrollTop: 0, scrollHeight: 1000, clientHeight: 300 });
+    fireEvent.scroll(scrollEl);
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it("does not call onLoadOlder on scroll-to-top when isLoadingOlder is already true", () => {
+    const onLoadOlder = vi.fn();
+    const entries: TranscriptEntry[] = [
+      { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        startIndex={100}
+        hasMore
+        isLoadingOlder
+        onLoadOlder={onLoadOlder}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    stubScrollMetrics(scrollEl, { scrollTop: 0, scrollHeight: 1000, clientHeight: 300 });
+    fireEvent.scroll(scrollEl);
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it("calls onResumeTail on scroll-to-bottom when hasOlderLoaded is true", () => {
+    const onResumeTail = vi.fn();
+    const entries: TranscriptEntry[] = [
+      { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        startIndex={100}
+        hasOlderLoaded
+        onResumeTail={onResumeTail}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    stubScrollMetrics(scrollEl, { scrollTop: 990, scrollHeight: 1000, clientHeight: 300 });
+    fireEvent.scroll(scrollEl);
+
+    expect(onResumeTail).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a loading row at the top while isLoadingOlder is true", () => {
+    const entries: TranscriptEntry[] = [
+      { kind: "message", role: "user", text: "hi", timestampMs: 1 },
+    ];
+    render(
+      <ConversationView
+        entries={entries}
+        messages={[]}
+        durationMs={0}
+        isLoadingOlder
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+  });
+
+  it("keeps a shared entry's row identity stable when an older page is prepended (startIndex 100 -> 0)", () => {
+    // Before a load-older: the retained tail alone, absolute index starts at 100.
+    const tailOnly: TranscriptEntry[] = [
+      { kind: "message", role: "user", text: "shared-entry", timestampMs: 1 },
+      { kind: "message", role: "assistant", text: "second-entry", timestampMs: 2 },
+    ];
+    const { rerender } = render(
+      <ConversationView
+        entries={tailOnly}
+        messages={[]}
+        durationMs={0}
+        startIndex={100}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+    // The stable row wrapper (MessageEntryRow's bubble div), not the inner
+    // markdown-rendered <p> — react-markdown recreates its own DOM subtree on
+    // every render regardless of key stability, so only the row wrapper's
+    // identity is a meaningful signal here.
+    const rowBefore = screen.getByText("shared-entry").closest("div.min-w-0");
+
+    // After a load-older: an older page is prepended, absolute index starts at 0.
+    // "shared-entry" is now at local index 100, but its absolute key
+    // (startIndex + index) is unchanged, so the node must not remount.
+    const withOlderPage: TranscriptEntry[] = [
+      ...Array.from(
+        { length: 100 },
+        (_, i): TranscriptEntry => ({
+          kind: "message",
+          role: "assistant",
+          text: `older-${i}`,
+          timestampMs: 0,
+        }),
+      ),
+      ...tailOnly,
+    ];
+    rerender(
+      <ConversationView
+        entries={withOlderPage}
+        messages={[]}
+        durationMs={0}
+        startIndex={0}
+        isWorking={false}
+        agent="claude"
+        onAnswer={vi.fn()}
+      />,
+    );
+    const rowAfter = screen.getByText("shared-entry").closest("div.min-w-0");
+
+    expect(rowAfter).not.toBeNull();
+    expect(rowAfter).toBe(rowBefore);
+  });
 });

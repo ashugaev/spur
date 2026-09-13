@@ -1,4 +1,4 @@
-import { test, expect, type Locator, type Page } from "playwright/test";
+import { devices, test, expect, type Locator, type Page } from "playwright/test";
 import { join } from "node:path";
 import { makeWorkingSession, mockSessions, type ProjectInfo } from "./fixtures.js";
 
@@ -275,6 +275,30 @@ async function emitTerminalOutput(page: Page, data: string) {
     };
     windowWithState.__scenarioTerminalState?.emitOutput(output);
   }, data);
+}
+
+async function dispatchTouchSwipe(
+  page: Page,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: start.x, y: start.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: end.x, y: end.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
 }
 
 async function captureTerminalLinksState(page: Page, name: string) {
@@ -716,6 +740,46 @@ test.describe("scenario migration E2E: terminal voice", () => {
 
     await expect(textbox).toHaveValue("Existing draft Appended terminal voice");
     await expect(modal.getByRole("img", { name: "terminal-image.png" })).toBeVisible();
+  });
+});
+
+test.describe("scenario migration E2E: terminal touch scroll", () => {
+  test("OpenCode terminal touch scroll sends position-aware SGR input", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    try {
+      const session = makeWorkingSession({
+        id: "scenario-terminal-touch-scroll",
+        agent: "opencode",
+        model: "openai/gpt-5",
+      });
+      const terminal = await openTerminal(page, session);
+      const touchTarget = terminal.locator(".xterm-screen");
+      const bounds = await touchTarget.boundingBox();
+      if (!bounds) throw new Error("Terminal touch target bounds unavailable");
+      const x = bounds.x + bounds.width / 2;
+      const y = bounds.y + bounds.height / 2;
+
+      await dispatchTouchSwipe(page, { x, y: y - 40 }, { x, y });
+      await dispatchTouchSwipe(page, { x, y }, { x, y: y - 40 });
+
+      await expect
+        .poll(async () => {
+          const events = (await terminalSentData(page))
+            .map((payload) =>
+              payload.startsWith("\x1b[<") ? /^(64|65);(\d+);(\d+)M$/.exec(payload.slice(3)) : null,
+            )
+            .filter((match): match is RegExpExecArray => match !== null);
+          return (
+            events.some((match) => match[1] === "64") &&
+            events.some((match) => match[1] === "65") &&
+            events.every((match) => Number(match[2]) > 1 && Number(match[3]) > 1)
+          );
+        })
+        .toBe(true);
+    } finally {
+      await context.close();
+    }
   });
 });
 

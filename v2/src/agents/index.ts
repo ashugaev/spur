@@ -45,6 +45,7 @@ import {
   readOpenCodeConversation,
   scanOpenCodeForNewUserMessage,
 } from "./opencode.js";
+import { agentExecutableCommand, agentProcessNames } from "./executable.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
@@ -152,6 +153,7 @@ interface AgentAdapter {
     worktreePath: string;
     sessionToolDir: string;
     mcpBindings?: SidecarMcpBinding[];
+    mcpExclude?: string[];
     restrictWrites?: boolean;
     cursorConfigDir?: string;
     claudeConfigDir?: string;
@@ -251,9 +253,40 @@ function openCodePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
-function defaultProcessMatchers(launchCommand: string, fallbackBinary: string): string[] {
-  const binary = basename(extractCommandBinary(launchCommand, fallbackBinary));
-  return binary ? [binary] : [];
+function derivedLaunchBinaryName(agent: AgentName, launchCommand: string): string {
+  return basename(extractCommandBinary(launchCommand, agentExecutableCommand(agent)));
+}
+
+function defaultProcessMatchers(agent: AgentName, launchCommand: string): string[] {
+  const derived = derivedLaunchBinaryName(agent, launchCommand);
+  return [...new Set([derived, ...agentProcessNames(agent)])].filter(
+    (matcher) => matcher.length > 0,
+  );
+}
+
+// RESIDUAL 1: a wrapper whose own filename IS the canonical name (a script named
+// `claude` on PATH that execs .../versions/2.1.251) leaves this gate CLOSED, so that
+// host stays false-DEAD in isProcessRunningInTmux. Accepted: SPUR_<AGENT>_BIN is not
+// used as a second gate condition because its common use is pointing at an off-PATH
+// binary whose basename IS canonical, and opening the fallback there trades zero gain
+// for a possible hang (see RESIDUAL 2).
+// RESIDUAL 2: when this gate is open, isProcessRunningInTmux's pane-child fallback
+// gates on the tty's foreground process group (tpgid), not "any direct child of the
+// pane shell" (#857 P1: that wider rule kept reading ALIVE off a persistent shell
+// helper — gitstatusd, a `sleep 300 &` job — left behind after the agent exited).
+// Two narrower residuals remain:
+//   - A SIGTSTP-suspended agent is not the tty's foreground job (job control hands
+//     the foreground back to the shell while it is stopped), so this now reads DEAD
+//     even though the agent is alive and resumable: keystrokes still buffer on the
+//     tty and the agent consumes them on resume. This matches main's existing
+//     behavior for a suspended agent — not a regression introduced by the fgPgid gate.
+//   - With job control disabled in the pane shell (`set +m`), a lingering child
+//     shares the shell's own process group, so `row.pgid === fgPgid` still matches
+//     it and it reads false-ALIVE, same as before.
+// Accepted because it is confined to hosts that are otherwise 100% destructively
+// false-DEAD today.
+export function agentLaunchUsesForeignBinary(agent: AgentName, launchCommand: string): boolean {
+  return !agentProcessNames(agent).includes(derivedLaunchBinaryName(agent, launchCommand));
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -292,13 +325,22 @@ function mergeMcpServers(
 // Merges the same MCP server sources Claude itself loads (user < project <
 // local, later wins), so --strict-mcp-config only drops servers Claude
 // wouldn't have loaded anyway rather than every host/project MCP server.
+//
+// settings.json is deliberately NOT a source: Claude 2.1.221 ignores an
+// "mcpServers" block there (verified against a scratch CLAUDE_CONFIG_DIR —
+// `claude mcp list` lists a probe planted in .claude.json and not the same
+// probe in settings.json). Reading it would make Spur START servers Claude
+// never loads, which is the opposite of what --strict-mcp-config is for here.
 async function readHostClaudeMcpServers(args: {
   worktreePath: string;
   claudeConfigDir?: string;
 }): Promise<Record<string, unknown>> {
   const merged: Record<string, unknown> = {};
-  const userConfigPath = join(args.claudeConfigDir ?? homedir(), ".claude.json");
-  const userConfig = await readJsonFile(userConfigPath);
+  // Independent files: read together, merge in precedence order below.
+  const [userConfig, projectConfig] = await Promise.all([
+    readJsonFile(join(args.claudeConfigDir ?? homedir(), ".claude.json")),
+    readJsonFile(join(args.worktreePath, ".mcp.json")),
+  ]);
   let localProject: unknown;
   if (isPlainObject(userConfig)) {
     mergeMcpServers(merged, userConfig.mcpServers);
@@ -307,8 +349,6 @@ async function readHostClaudeMcpServers(args: {
       localProject = projects[args.worktreePath];
     }
   }
-  const projectConfigPath = join(args.worktreePath, ".mcp.json");
-  const projectConfig = await readJsonFile(projectConfigPath);
   if (isPlainObject(projectConfig)) {
     mergeMcpServers(merged, projectConfig.mcpServers);
   }
@@ -332,6 +372,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       worktreePath,
       sessionToolDir,
       mcpBindings,
+      mcpExclude,
       restrictWrites,
       claudeConfigDir,
     }) => {
@@ -339,13 +380,22 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       if (restrictWrites) {
         result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
       }
-      if (mcpBindings?.length) {
+      // Either an MCP sidecar to inject or a host server to suppress makes the
+      // generated file authoritative (--strict-mcp-config). With neither, stay
+      // out of the way and let Claude resolve MCP servers itself.
+      if (mcpBindings?.length || mcpExclude?.length) {
         const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
-        const mcpServers = await readHostClaudeMcpServers({
+        const hostServers = await readHostClaudeMcpServers({
           worktreePath,
           ...(claudeConfigDir ? { claudeConfigDir } : {}),
         });
-        for (const binding of mcpBindings) {
+        // Exclude first: a project that suppresses the host "playwright" still
+        // gets Spur's managed playwright sidecar binding under the same name.
+        const excluded = new Set(mcpExclude ?? []);
+        const mcpServers = Object.fromEntries(
+          Object.entries(hostServers).filter(([name]) => !excluded.has(name)),
+        );
+        for (const binding of mcpBindings ?? []) {
           mcpServers[binding.server] = { type: "http", url: binding.url };
         }
         const mcpConfig = { mcpServers };
@@ -354,7 +404,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       }
       return result;
     },
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("claude", launchCommand),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
     sendsInterruptKey: true,
@@ -406,16 +456,18 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       sessionToolDir,
       worktreePath,
       mcpBindings,
+      mcpExclude,
       restrictWrites,
       modelsCacheHome,
     }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(mcpBindings?.length ? { mcpBindings } : {}),
+        ...(mcpExclude?.length ? { mcpExclude } : {}),
         ...(modelsCacheHome ? { modelsCacheHome } : {}),
       }),
     }),
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("codex", launchCommand),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
     sendsInterruptKey: true,
@@ -465,10 +517,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         },
       };
     },
-    processMatchers: (launchCommand) => {
-      const derived = defaultProcessMatchers(launchCommand, cursorCommand());
-      return [...new Set([...derived, "agent", "cursor-agent"])];
-    },
+    processMatchers: (launchCommand) => defaultProcessMatchers("cursor", launchCommand),
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
     sendsInterruptKey: false,
@@ -478,14 +527,19 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
     submitAck: async (ctx) => {
-      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath);
+      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
       if (!baseline) {
         return null;
       }
       return {
         async scan(text) {
-          const found = await scanCursorJsonlForMessage(baseline, text, ctx.worktreePath);
-          return { found, lastScannedFile: baseline.file };
+          const result = await scanCursorJsonlForMessage(
+            baseline,
+            text,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+          );
+          return { found: result.found, lastScannedFile: result.scannedFile };
         },
       };
     },
@@ -504,7 +558,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
-    processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, opencodeCommand()),
+    processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
     stateStrategy: "opencode",
     sendMode: "bracketed_paste",
     sendsInterruptKey: true,
@@ -612,6 +666,7 @@ export async function setupAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   mcpBindings?: SidecarMcpBinding[];
+  mcpExclude?: string[];
   restrictWrites?: boolean;
   cursorConfigDir?: string;
   claudeConfigDir?: string;

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  agentLaunchUsesForeignBinary,
   agentProcessMatchers,
   agentSessionConfig,
   agentStateStrategy,
@@ -7,6 +8,10 @@ import {
   extractCommandBinary,
   parseAgentName,
 } from "../../src/agents/index.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("extractCommandBinary", () => {
   it("extracts a simple command", () => {
@@ -79,6 +84,42 @@ describe("agent helpers", () => {
       "agent",
     ]);
     expect(agentProcessMatchers("cursor", "agent --force")).toEqual(["agent", "cursor-agent"]);
+  });
+
+  it("appends the canonical binary name so an exec'ing wrapper stays matchable", () => {
+    expect(
+      agentProcessMatchers(
+        "codex",
+        "CODEX_HOME='/home/u/.spur/session-tools/s1/codex-home' /home/u/.local/bin/codex-spur-wrapper.sh --enable hooks",
+      ),
+    ).toEqual(["codex-spur-wrapper.sh", "codex"]);
+    expect(agentProcessMatchers("claude", "/opt/bin/claude-wrap.sh --resume")).toEqual([
+      "claude-wrap.sh",
+      "claude",
+    ]);
+    expect(agentProcessMatchers("opencode", "/opt/bin/oc-wrap.sh")).toEqual([
+      "oc-wrap.sh",
+      "opencode",
+    ]);
+  });
+
+  it("dedupes a direct launch to a single matcher", () => {
+    expect(agentProcessMatchers("codex", "codex --model gpt-5.6")).toEqual(["codex"]);
+  });
+
+  it("gates the pane-child fallback on a foreign launch binary", () => {
+    expect(agentLaunchUsesForeignBinary("codex", "codex --model x")).toBe(false);
+    expect(
+      agentLaunchUsesForeignBinary("codex", "/home/u/.local/bin/codex-wrap.sh --model x"),
+    ).toBe(true);
+    expect(agentLaunchUsesForeignBinary("claude", "")).toBe(false);
+    expect(agentLaunchUsesForeignBinary("cursor", "agent --force")).toBe(false);
+    expect(agentLaunchUsesForeignBinary("cursor", "/opt/bin/cursor-agent --force")).toBe(false);
+  });
+
+  it("still appends the canonical name when the override IS the wrapper (I1 no-op guard)", () => {
+    vi.stubEnv("SPUR_CODEX_BIN", "/home/u/.local/bin/codex-spur-wrapper.sh");
+    expect(agentProcessMatchers("codex", "")).toEqual(["codex-spur-wrapper.sh", "codex"]);
   });
 
   it("scopes Cursor runtime state to the session data dir", () => {

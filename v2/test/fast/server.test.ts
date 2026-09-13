@@ -1,11 +1,12 @@
 import * as fs from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { logSpurEvent, readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
+import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
@@ -18,13 +19,13 @@ import {
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
-import type { SessionRecord, SessionView } from "../../src/types.js";
+import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
   writeConfigRegistryFile,
 } from "../../src/registry.js";
-import { findFreePort } from "../helpers/common.js";
+import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
   it("rejects a missing non-default config path without bootstrapping it on disk", async () => {
@@ -140,10 +141,18 @@ describe("startServer", () => {
       "utf8",
     );
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
+    // `findOrphanDaemonTrees` scans the whole host process table, unscoped
+    // by worktreeDir (spur#859 B4) — hitting the real `/sidecars/sweep`
+    // route on a host with even one leftover orphan daemon makes this
+    // empty-sandbox assertion host-state-dependent. Inject the same
+    // snapshot seam B4 added for the doctor check (collectHostInstallChecks)
+    // here too, via startServer's test-only override, instead of masking
+    // the symptom by stripping a volatile field from the comparison.
+    const server = await startServer(
+      configPath,
+      { info: () => undefined, warn: () => undefined },
+      { sidecarSnapshot: async () => ({ ok: true, byPid: new Map(), byPgid: new Map() }) },
+    );
 
     try {
       const defaultResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
@@ -158,6 +167,7 @@ describe("startServer", () => {
         reaped: unknown[];
       };
       expect(defaultResult.reaped).toEqual([]);
+      expect(defaultResult.leaked).toEqual([]);
 
       const reapResponse = await fetch(`http://127.0.0.1:${port}/sidecars/sweep`, {
         method: "POST",
@@ -170,9 +180,6 @@ describe("startServer", () => {
         leaked: unknown[];
         reaped: unknown[];
       };
-      // Nothing leaked in this empty sandbox, so both calls report the same
-      // shape either way — the important assertion is the default omits any
-      // reaping regardless of what `leaked` ends up containing.
       expect(reapResult.leaked).toEqual(defaultResult.leaked);
     } finally {
       await server.stop();
@@ -342,6 +349,7 @@ describe("startServer", () => {
       SessionService.prototype.spawn = async function mockSpawn() {
         throw new SessionAdmissionDeniedError(
           'Cannot spawn session for project "demo": at the global cap of 2 live sessions (2 live now). Stop one of: demo-1 (demo).',
+          "cap",
         );
       };
 
@@ -692,12 +700,10 @@ describe("startServer", () => {
           id: "demo-done",
           project: "demo",
           agent: "claude",
-          prompt: "ship it",
           branch: "demo-done",
           worktree: true,
           worktreePath: join(worktreeDir, "demo", "demo-done"),
           tmuxSession: "demo-done",
-          launchCommand: "",
           status: "completed",
           state: "stopped",
           runtimeAlive: false,
@@ -705,7 +711,6 @@ describe("startServer", () => {
           createdAt: "2026-04-15T00:00:00.000Z",
           updatedAt: "2026-04-15T00:00:00.000Z",
           lastActivityAt: "2026-04-15T00:00:00.000Z",
-          artifacts: [],
           services: [],
           sidecars: [],
         },
@@ -743,6 +748,107 @@ describe("startServer", () => {
     ]);
   });
 
+  it("GET /sessions/:id still carries the artifact manifest while GET /sessions does not", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-artifact",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-artifact",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-artifact"),
+      tmuxSession: "demo-artifact",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+    const artifactsDir = sessionArtifactsDir(dataDir, session.id);
+    await mkdir(artifactsDir, { recursive: true });
+    await writeFile(join(artifactsDir, "shot.png"), "fake-png", "utf8");
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const listResponse = await fetch(`http://127.0.0.1:${port}/sessions`);
+      const listed = (await listResponse.json()) as Array<Record<string, unknown>>;
+      const listedSession = listed.find((entry) => entry["id"] === "demo-artifact");
+      expect(listedSession).not.toHaveProperty("artifacts");
+      expect(listedSession).not.toHaveProperty("prompt");
+      expect(listedSession).not.toHaveProperty("launchCommand");
+
+      const detailResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-artifact`);
+      const detail = (await detailResponse.json()) as { artifacts: Array<{ name: string }> };
+      expect(detail.artifacts.map((artifact) => artifact.name)).toContain("shot.png");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("serves compact JSON with a content-length instead of a pretty-printed body", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/info`);
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      // The listing payloads run to megabytes; the 2-space indent was ~10% of
+      // every one of them, re-serialized on each poll.
+      expect(body).not.toMatch(/\n\s+"/);
+      expect(JSON.parse(body)).toMatchObject({ version: expect.any(String) });
+      expect(response.headers.get("content-length")).toBe(String(Buffer.byteLength(body)));
+    } finally {
+      await server.stop();
+    }
+  });
   it("forwards clearPort to sidecar start", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -875,6 +981,79 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  it("passes the sidecarStop outcome through the stop route's 200 body alongside id and sidecars", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalStopSidecar = SessionService.prototype.stopSidecar;
+    SessionService.prototype.stopSidecar = async function mockStopSidecar() {
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        artifacts: [],
+        services: [],
+        sidecars: [{ name: "dev", alive: false, ports: [], tmuxSession: "demo-1--dev" }],
+        sidecarStop: { outcome: "partial", survivors: [777] },
+      } satisfies SidecarStopView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/sidecars/dev/stop`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as SidecarStopView;
+      expect(body.id).toBe("demo-1");
+      expect(body.sidecars).toEqual([
+        { name: "dev", alive: false, ports: [], tmuxSession: "demo-1--dev" },
+      ]);
+      expect(body.sidecarStop).toEqual({ outcome: "partial", survivors: [777] });
+    } finally {
+      SessionService.prototype.stopSidecar = originalStopSidecar;
       await server.stop();
     }
   });
@@ -1131,33 +1310,35 @@ describe("startServer", () => {
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
     const worktreeDir = join(root, "worktrees");
-    const port = await findFreePort();
     await mkdir(repoDir, { recursive: true });
-    const configPath = join(root, "spur.yaml");
-    await writeFile(
-      configPath,
-      [
-        "server:",
-        "  host: 127.0.0.1",
-        `  port: ${port}`,
-        `dataDir: ${dataDir}`,
-        `worktreeDir: ${worktreeDir}`,
-        "projects:",
-        "  demo:",
-        `    path: ${repoDir}`,
-      ].join("\n"),
-      "utf8",
-    );
 
     const originalSend = SessionService.prototype.send;
     SessionService.prototype.send = async function mockSend(_sessionId, _body) {
       throw new SessionRateLimitedError("Session demo-1 is rate limited");
     };
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
 
     try {
       const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/send`, {
@@ -1857,6 +2038,250 @@ describe("startServer", () => {
       await expect(response.text()).resolves.toBe("artifact-bytes");
     } finally {
       SessionService.prototype.getArtifact = getArtifact;
+      await server.stop();
+    }
+  });
+
+  it("streams a nested artifact through GET /sessions/:id/artifacts/:path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-nested",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-nested",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-nested"),
+      tmuxSession: "demo-nested",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+    const artifactsDir = sessionArtifactsDir(dataDir, session.id);
+    await mkdir(join(artifactsDir, "design"), { recursive: true });
+    await writeFile(join(artifactsDir, "design", "design-spec.md"), "# Spec", "utf8");
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-nested/artifacts/design/design-spec.md`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-disposition")).toContain('filename="design-spec.md"');
+      await expect(response.text()).resolves.toBe("# Spec");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("answers 404 for an artifact id that escapes the artifacts root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-escape",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-escape",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-escape"),
+      tmuxSession: "demo-escape",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+    await mkdir(sessionArtifactsDir(dataDir, session.id), { recursive: true });
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      // A ".." segment bounded by a real "/" is dot-segment-normalized by the client's own
+      // URL parser before the request leaves — even when the dots themselves are percent-
+      // encoded (WHATWG URL normalization decodes a segment to check for "." and ".." before
+      // it decides whether to remove it). Encoding the SLASH instead keeps the whole tail one
+      // opaque segment through the client parser; the daemon route captures it whole and only
+      // decodes once it owns the string, so the traversal survives to parseArtifactRelativePath.
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-escape/artifacts/..%2F..%2Fetc%2Fpasswd`,
+      );
+      expect(response.status).toBe(404);
+      const body = await response.text();
+      expect(body).toContain("Artifact not found:");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("answers 404 for a symlink that resolves outside the artifacts root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-symlink-escape",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-symlink-escape",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-symlink-escape"),
+      tmuxSession: "demo-symlink-escape",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+    const artifactsDir = sessionArtifactsDir(dataDir, session.id);
+    await mkdir(artifactsDir, { recursive: true });
+    const outsideDir = join(root, "outside");
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(join(outsideDir, "secret.txt"), "top secret", "utf8");
+    await symlink(join(outsideDir, "secret.txt"), join(artifactsDir, "evil"), "file");
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-symlink-escape/artifacts/evil`,
+      );
+      expect(response.status).toBe(404);
+      const body = await response.text();
+      expect(body).toContain("Artifact not found:");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("answers 404, not 500, for an artifact id with an invalid percent-encoding", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-bad-encoding",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-bad-encoding",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-bad-encoding"),
+      tmuxSession: "demo-bad-encoding",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+    await mkdir(sessionArtifactsDir(dataDir, session.id), { recursive: true });
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      // "%E0%A4%A" is a truncated UTF-8 sequence: decodeURIComponent throws a URIError on
+      // it. That's an artifact id nothing can ever match, so it must answer 404 like any
+      // other unknown id — never the generic 500 an uncaught URIError falls through to.
+      const response = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-bad-encoding/artifacts/%E0%A4%A`,
+      );
+      expect(response.status).toBe(404);
+      const body = await response.text();
+      expect(body).toContain("Artifact not found:");
+    } finally {
       await server.stop();
     }
   });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentExecutableCommand,
+  agentProcessNames,
   missingAgentExecutableMessage,
   resolveAgentExecutable,
 } from "../../src/agents/executable.js";
@@ -64,6 +65,22 @@ describe("agent executable resolution", () => {
     expect(missingAgentExecutableMessage("opencode")).toBe(
       "opencode executable not found: /missing/opencode; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
     );
+  });
+
+  it("names each agent's canonical process names, independent of any SPUR_*_BIN override", () => {
+    expect(agentProcessNames("claude")).toEqual(["claude"]);
+    expect(agentProcessNames("codex")).toEqual(["codex"]);
+    expect(agentProcessNames("cursor")).toEqual(["agent", "cursor-agent"]);
+    expect(agentProcessNames("opencode")).toEqual(["opencode"]);
+
+    vi.stubEnv("SPUR_CLAUDE_BIN", "/opt/bin/claude-wrap.sh");
+    vi.stubEnv("SPUR_CODEX_BIN", "/opt/bin/codex-wrap.sh");
+    vi.stubEnv("SPUR_CURSOR_BIN", "/opt/bin/cursor-wrap.sh");
+    vi.stubEnv("SPUR_OPENCODE_BIN", "/opt/bin/oc-wrap.sh");
+    expect(agentProcessNames("claude")).toEqual(["claude"]);
+    expect(agentProcessNames("codex")).toEqual(["codex"]);
+    expect(agentProcessNames("cursor")).toEqual(["agent", "cursor-agent"]);
+    expect(agentProcessNames("opencode")).toEqual(["opencode"]);
   });
 
   it("gives doctor an actionable optional-agent warning", () => {

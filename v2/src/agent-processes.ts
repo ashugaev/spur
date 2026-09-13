@@ -75,9 +75,11 @@ interface CompiledAgentMatcher {
 }
 
 // A record-less process' args may match more than one agent's matchers —
-// cursor injects the bare literal "agent" (agents/index.ts:419-421), which a
-// claude/codex launchCommand's defaultProcessMatchers can also produce. An
-// ambiguous match degrades to null; never a guess (I7).
+// every agent's matcher set now carries its canonical name from
+// AGENT_EXECUTABLES (agents/executable.ts), and cursor's canonical name IS
+// the bare literal "agent", which a claude/codex launchCommand-derived
+// basename can also produce. An ambiguous match degrades to null; never a
+// guess (I7).
 function resolveAgentForArgs(
   args: string,
   compiled: readonly CompiledAgentMatcher[],

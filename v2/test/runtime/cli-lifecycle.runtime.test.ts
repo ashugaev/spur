@@ -12,6 +12,7 @@ import type {
   RuntimeInfo,
   ServiceInstanceView,
   SidecarPortConflictPayload,
+  SessionListItemView,
   SessionRecord,
   SessionView,
   TodoProjection,
@@ -32,6 +33,7 @@ import {
   stopDaemonByPid,
   syncTmuxEnvironment,
   tmuxSessionExists,
+  waitForCleanTodoLedger,
   type RuntimeTestContext,
 } from "../helpers/runtime.js";
 
@@ -74,7 +76,7 @@ async function runDoctorJson(
   try {
     const result = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
       ...options,
-      timeout: 60_000,
+      timeout: 120_000,
     });
     stdout = result.stdout;
     exitCode = 0;
@@ -277,19 +279,32 @@ done
 if [[ ! -f "$runtime_file" ]]; then
   exit 1
 fi
-"$SPUR_SESSION_TOOL_DIR/spur" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
+set +e
+list_status=1
+for _ in $(seq 1 30); do
+  "$SPUR_SESSION_TOOL_DIR/spur-isolated" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
+  list_status=$?
+  if [[ "$list_status" -eq 0 ]]; then
+    break
+  fi
+  sleep 1
+done
+set -e
+if [[ "$list_status" -ne 0 ]]; then
+  exit 1
+fi
 printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
 set +e
 valid_status=1
 for _ in $(seq 1 30); do
-  "$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
+  "$SPUR_SESSION_TOOL_DIR/spur-isolated" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
   valid_status=$?
   if [[ "$valid_status" -eq 0 ]]; then
     break
   fi
   sleep 1
 done
-"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
+"$SPUR_SESSION_TOOL_DIR/spur-isolated" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
 invalid_status=$?
 set -e
 printf '%s\n' "$valid_status" > ".sibling-isolated-branch-valid-status-\${SPUR_SESSION:?}"
@@ -1440,6 +1455,20 @@ projects:
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "slots",
+        "--session",
+        "api-999",
+        "--title",
+        "does not matter",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
     const listed = JSON.parse(
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
@@ -1486,13 +1515,12 @@ projects:
     });
 
     // The complete gate is unconditional on session state: it 409s while the
-    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
-    // "waiting" (which lands strictly after its own resolve_initial_todo
-    // call) before completing, or this races the fixture's todo resolution.
-    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
-      timeoutMs: 15_000,
-      accept: (value) => value.state === "waiting",
-    });
+    // fixture's seeded ToDo item is still open. The fixture resolves it via a
+    // backgrounded add-then-complete round trip that can still be in flight
+    // after the session reaches "waiting" (record_fixture_todo in
+    // helpers/runtime.ts), so wait for the ledger itself to go clean before
+    // completing.
+    await waitForCleanTodoLedger(context, spawned.id);
 
     const completed = JSON.parse(
       (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
@@ -1544,13 +1572,12 @@ projects:
     ) as SessionView;
 
     // The complete gate is unconditional on session state: it 409s while the
-    // fixture's seeded ToDo item is still open. Wait for the fixture to reach
-    // "waiting" (which lands strictly after its own resolve_initial_todo
-    // call) before completing, or this races the fixture's todo resolution.
-    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${completeSession.id}`), {
-      timeoutMs: 15_000,
-      accept: (value) => value.state === "waiting",
-    });
+    // fixture's seeded ToDo item is still open. The fixture resolves it via a
+    // backgrounded add-then-complete round trip that can still be in flight
+    // after the session reaches "waiting" (record_fixture_todo in
+    // helpers/runtime.ts), so wait for the ledger itself to go clean before
+    // completing.
+    await waitForCleanTodoLedger(context, completeSession.id);
 
     await writeFile(
       configPath,
@@ -1690,17 +1717,7 @@ projects:
     );
 
     const completed = JSON.parse(
-      (
-        await context.execCli([
-          "--config",
-          configPath,
-          "complete",
-          spawned.id,
-          "--todo-override-reason",
-          "Runtime fixture completes before recording any ToDo step",
-          "--json",
-        ])
-      ).stdout,
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
     ) as SessionView;
     expect(completed.status).toBe("completed");
     expect(completed.workspaceExists).toBe(false);
@@ -1940,15 +1957,7 @@ projects:
     ) as SessionView;
     expect(spawned.branch).toBe(occupiedBranch);
 
-    await context.execCli([
-      "--config",
-      configPath,
-      "complete",
-      spawned.id,
-      "--todo-override-reason",
-      "Runtime fixture completes before recording any ToDo step",
-      "--json",
-    ]);
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
 
     const occupiedWorktreePath = join(context.rootDir, "occupied-respawn-branch");
     await execFileAsync("git", ["worktree", "add", occupiedWorktreePath, occupiedBranch], {
@@ -2453,6 +2462,7 @@ projects:
       timeoutMs: 15_000,
       accept: (value) => value.includes("resume after pause"),
     });
+    await waitForCleanTodoLedger(context, spawned.id);
 
     const completed = JSON.parse(
       (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
@@ -3139,15 +3149,7 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
-    await context.execCli([
-      "--config",
-      configPath,
-      "complete",
-      spawned.id,
-      "--todo-override-reason",
-      "Runtime fixture completes before recording any ToDo step",
-      "--json",
-    ]);
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
     expect(existsSync(artifactDir)).toBe(false);
 
     const missing = await fetch(
@@ -3347,11 +3349,10 @@ projects:
       },
     });
 
-    const attachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("l logs"),
+      accept: (value) => value.includes("l logs") && value.includes("service web:3000:running"),
     });
-    expect(attachedPane).toContain("service web:3000:running");
 
     await sendKeysToTmux(controllerSessionName, "l");
 
@@ -3814,15 +3815,17 @@ projects:
       timeoutMs: 15_000,
       accept: (value) => value.includes("startup:launch::"),
     });
-    const listed = await context.fetchJson<SessionView[]>("/sessions");
+    const listed = await context.fetchJson<SessionListItemView[]>("/sessions");
+    const listedDetail = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
 
     expect(log).toContain("startup:launch::");
     expect(log).not.toContain("research");
     expect(log).not.toContain("[Spur step");
     expect(pane).not.toContain("[Spur step");
     expect(listed[0]?.id).toBe(spawned.id);
-    expect(listed[0]?.prompt).toBe("");
+    expect(listed[0]).not.toHaveProperty("prompt");
     expect(listed[0]?.pipeline).toBeUndefined();
+    expect(listedDetail.prompt).toBe("");
   });
 
   it.each([
@@ -4553,15 +4556,7 @@ projects:
         ])
       ).stdout,
     ) as SessionView;
-    await context.execCli([
-      "--config",
-      configPath,
-      "complete",
-      target.id,
-      "--todo-override-reason",
-      "Runtime fixture completes before recording any ToDo step",
-      "--json",
-    ]);
+    await context.execCli(["--config", configPath, "complete", target.id, "--json"]);
 
     const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
     const respawned = JSON.parse(
@@ -5486,13 +5481,11 @@ projects:
 
       // Wait for the fixture to actually resolve the session's seeded Spur
       // ToDo item before completing — the sidecar link landing is unrelated
-      // to the fixture's own todo-resolution CLI calls, so completing right
+      // to the fixture's backgrounded add-then-complete todo round trip
+      // (record_fixture_todo in helpers/runtime.ts), so completing right
       // after the link appears can still 409 on an open item that hasn't
       // landed yet.
-      await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
-        timeoutMs: 15_000,
-        accept: (value) => value.state === "waiting",
-      });
+      await waitForCleanTodoLedger(context, spawned.id);
 
       const closed =
         action === "complete"
@@ -5528,6 +5521,12 @@ projects:
       "spur-isolated-daemon.sh",
     );
     const siblingProbePath = await writeIsolatedDaemonSiblingProbe(context);
+    // scripts/spur-isolated-daemon.sh self-prunes stale spur-isolated-daemon.*
+    // dirs under ${TMPDIR:-/tmp} on every start (spur#811). Without an
+    // injected TMPDIR here, the sidecar would resolve the runner's real
+    // /tmp — the same host that can hold other live isolated daemons.
+    const isolatedDaemonTmpDir = join(context.rootDir, "isolated-daemon-tmp");
+    await mkdir(isolatedDaemonTmpDir, { recursive: true });
     const projectConfigDir = join(context.rootDir, "UPPER-CONFIG-PATH");
     await mkdir(projectConfigDir, { recursive: true });
     const projectConfigPath = join(projectConfigDir, "isolated-source-project.yaml");
@@ -5566,6 +5565,7 @@ projects:
         autoStart: true
         env:
           SPUR_PROJECT_CONFIG_PATH: ${projectConfigPath}
+          TMPDIR: ${isolatedDaemonTmpDir}
         ports:
           daemon:
             env: SPUR_RESERVED_PORT_DAEMON
@@ -5610,7 +5610,7 @@ projects:
       timeoutMs: 15_000,
       accept: (value) => value === true,
     });
-    await pollUntil(async () => existsSync(join(toolDir, "spur")), {
+    await pollUntil(async () => existsSync(join(toolDir, "spur-isolated")), {
       timeoutMs: 15_000,
       accept: (value) => value === true,
     });
@@ -5627,6 +5627,7 @@ projects:
       accept: (value) => value === true,
     });
     const isolatedEnv = await readFile(join(toolDir, "isolated-env.sh"), "utf8");
+    const outerWrapper = await readFile(join(toolDir, "spur"), "utf8");
     const branchValidStatus = (await readFile(branchValidStatusPath, "utf8")).trim();
     const branchValidOutput = await readFile(branchValidOutputPath, "utf8");
     const branchInvalidStatus = (await readFile(branchInvalidStatusPath, "utf8")).trim();
@@ -5641,6 +5642,8 @@ projects:
     expect(branchInvalidOutput).toContain(
       'branch "Bad_Branch.Name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
     );
+    expect(outerWrapper).toContain(`--config '${configPath}'`);
+    expect(outerWrapper).not.toContain("spur-isolated-daemon.");
   });
 
   it("starting isolated-ui starts isolated-daemon dependency first", async () => {

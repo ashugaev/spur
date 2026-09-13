@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./config.js";
+import { SPUR_SIDECAR_NAME_ENV } from "./sidecar-runtime.js";
 import {
   type ConnectProjectConfigRequest,
   type DisconnectProjectConfigRequest,
@@ -12,6 +13,7 @@ import {
   type RuntimeInfo,
   type GithubPrCheckUnavailablePayload,
   type OpenPrActionRequiredPayload,
+  type SessionNotRestorablePayload,
   type SidecarPortConflictPayload,
 } from "./types.js";
 
@@ -104,6 +106,17 @@ function isGithubPrCheckUnavailablePayload(
   return record.code === "github_pr_check_unavailable" && typeof record.sessionId === "string";
 }
 
+function isSessionNotRestorablePayload(payload: unknown): payload is SessionNotRestorablePayload {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Partial<SessionNotRestorablePayload>;
+  return (
+    record.code === "session_not_restorable" &&
+    typeof record.sessionId === "string" &&
+    typeof record.reason === "string" &&
+    Array.isArray(record.availableActions)
+  );
+}
+
 function openPrActionCommand(path: string, sessionId: string): string | null {
   const action = path.match(/^\/sessions\/[^/]+\/(complete|kill)$/)?.[1];
   if (!action) return null;
@@ -133,6 +146,14 @@ function formatDaemonError(status: number, payload: unknown, path: string): stri
       ? "GitHub rate limit"
       : "commonly gh missing, unauthenticated, or unreachable";
     return `GitHub PR check unavailable for ${payload.sessionId}: ${cause}. ${retry}`;
+  }
+  if (isSessionNotRestorablePayload(payload)) {
+    const hints = payload.availableActions.map((action) =>
+      action === "force_kill"
+        ? `\`spur kill ${payload.sessionId} --force\` to discard it`
+        : `\`spur respawn ${payload.sessionId}\` to start a fresh session`,
+    );
+    return `${payload.reason}. Try ${hints.join(" or ")}.`;
   }
   if (typeof payload === "object" && payload !== null && "error" in payload) {
     return String(payload.error);
@@ -268,16 +289,30 @@ async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<vo
   }
 }
 
-function spawnDaemon(cliEntrypoint: string, configPath: string): void {
+function spawnDaemon(
+  cliEntrypoint: string,
+  configPath: string,
+  reason: "autostart" | "restart",
+): void {
   // SPUR_DISABLE_AUTOSTART blocks CLI auto-spawn so the daemon is only ever
   // started by an external manager (e.g. systemd on the prod VM). Without
   // this guard, a CLI invocation during a restart window can fork a daemon
   // outside the service cgroup, win the :4310 bind race, and put
-  // spur-daemon.service into an EADDRINUSE crash loop.
+  // spur-daemon.service into an EADDRINUSE crash loop. This guard applies to
+  // both reasons, unconditionally.
   if (process.env.SPUR_DISABLE_AUTOSTART === "1") {
     throw new Error(
       "Spur daemon is unreachable and SPUR_DISABLE_AUTOSTART=1; this managed instance must come back through the repo deploy or service restart flow.",
     );
+  }
+  if (reason === "autostart") {
+    const sessionId = process.env.SPUR_SESSION?.trim() ?? "";
+    const sidecarName = process.env[SPUR_SIDECAR_NAME_ENV]?.trim() ?? "";
+    if (sessionId !== "" || sidecarName !== "") {
+      throw new Error(
+        `Spur daemon at ${configPath} is unreachable and this is a Spur session context (SPUR_SESSION=${sessionId || sidecarName}); a session pane must not fork a daemon. Start it from a host shell: \`systemctl --user restart spur-daemon\` (npm install) or \`spur daemon start\`.`,
+      );
+    }
   }
   const child = spawn(
     process.execPath,
@@ -347,7 +382,7 @@ export async function restartDaemonIfRunning(
   // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
   let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS);
   if (!runtime) {
-    spawnDaemon(cliEntrypoint, resolvedConfigPath);
+    spawnDaemon(cliEntrypoint, resolvedConfigPath, "restart");
     runtime = await waitForReadyDaemon(baseUrl);
   }
   if (!runtime) {
@@ -373,7 +408,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     probe = await probeDaemon(baseUrl);
   }
   if (probe.state === "unreachable") {
-    spawnDaemon(cliEntrypoint, resolvedConfigPath);
+    spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
   }
 
   for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
@@ -386,7 +421,7 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
       await stopIncompatibleDaemon(baseUrl, probe.pid);
       probe = await probeDaemon(baseUrl);
       if (probe.state === "unreachable") {
-        spawnDaemon(cliEntrypoint, resolvedConfigPath);
+        spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
       }
     }
   }

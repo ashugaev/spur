@@ -35,7 +35,10 @@ import type { SpurSessionState } from "@/lib/types";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import {
   areTerminalLinksEqual,
+  composeTerminalLinkDisplay,
   extractTerminalLinks,
+  mergeTerminalLinkDiscoveries,
+  TERMINAL_LINK_DISCOVERY_LIMIT,
   type TerminalLink,
 } from "@/lib/terminal-links";
 
@@ -195,12 +198,11 @@ export function buildDirectTerminalWsUrl(location: TerminalLocation, sessionId: 
 
 /**
  * Build an SGR mouse scroll sequence.
- * Button 64 = scroll up, 65 = scroll down.  Position (1,1) is fine — tmux
- * only cares about the button for WheelUpPane / WheelDownPane.
+ * Button 64 = scroll up, 65 = scroll down.
  */
-function sgrScroll(up: boolean): string {
+function sgrScroll(up: boolean, column: number, row: number): string {
   const button = up ? 64 : 65;
-  return `\x1b[<${button};1;1M`;
+  return `\x1b[<${button};${column};${row}M`;
 }
 
 interface InputAckMessage {
@@ -248,6 +250,7 @@ export function DirectTerminal({
   const [arrowsOpen, setArrowsOpen] = useState(false);
   const [terminalLinks, setTerminalLinks] = useState<TerminalLink[]>([]);
   const terminalLinksRef = useRef<TerminalLink[]>([]);
+  const discoveredTerminalLinksRef = useRef<TerminalLink[]>([]);
   const [terminalLinksOpen, setTerminalLinksOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -556,6 +559,7 @@ export function DirectTerminal({
 
   useEffect(() => {
     terminalLinksRef.current = [];
+    discoveredTerminalLinksRef.current = [];
     setTerminalLinks([]);
     setTerminalLinksOpen(false);
 
@@ -622,7 +626,7 @@ export function DirectTerminal({
         terminal.focus();
         fit.fit();
 
-        const scanTerminalLinks = () => {
+        const scanTerminalLinks = (mode: "merge" | "keep" | "reset") => {
           if (!mounted || !terminal) return;
           const activeBuffer = terminal.buffer.active;
           const startIndex = Math.max(0, activeBuffer.length - 100);
@@ -638,17 +642,30 @@ export function DirectTerminal({
                 : undefined,
             );
           }
-          const nextLinks = extractTerminalLinks(rows, terminal.cols);
+          const scanned = extractTerminalLinks(rows, terminal.cols);
+
+          if (mode === "reset") {
+            discoveredTerminalLinksRef.current = [];
+          }
+          if (mode !== "keep") {
+            discoveredTerminalLinksRef.current = mergeTerminalLinkDiscoveries(
+              discoveredTerminalLinksRef.current,
+              scanned,
+              TERMINAL_LINK_DISCOVERY_LIMIT,
+            );
+          }
+
+          const nextLinks = composeTerminalLinkDisplay(scanned, discoveredTerminalLinksRef.current);
           if (areTerminalLinksEqual(terminalLinksRef.current, nextLinks)) return;
           terminalLinksRef.current = nextLinks;
           setTerminalLinks(nextLinks);
           if (nextLinks.length === 0) setTerminalLinksOpen(false);
         };
 
-        scanTerminalLinks();
-        parsedWriteDisposable = terminal.onWriteParsed(scanTerminalLinks);
-        terminalResizeDisposable = terminal.onResize(scanTerminalLinks);
-        bufferChangeDisposable = terminal.buffer.onBufferChange(scanTerminalLinks);
+        scanTerminalLinks("merge");
+        parsedWriteDisposable = terminal.onWriteParsed(() => scanTerminalLinks("merge"));
+        terminalResizeDisposable = terminal.onResize(() => scanTerminalLinks("keep"));
+        bufferChangeDisposable = terminal.buffer.onBufferChange(() => scanTerminalLinks("reset"));
 
         // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
         // using native drag semantics, so finger movement matches terminal content movement.
@@ -667,16 +684,46 @@ export function DirectTerminal({
         const onTouchMove = (e: Event) => {
           const te = e as TouchEvent;
           if (te.touches.length !== 1) return;
-          const dy = touchStartY - te.touches[0].clientY;
+          const touch = te.touches[0];
+          const dy = touchStartY - touch.clientY;
           touchAccum += dy;
-          touchStartY = te.touches[0].clientY;
+          touchStartY = touch.clientY;
 
           const lines = Math.trunc(touchAccum / TOUCH_SCROLL_THRESHOLD);
           if (lines === 0) return;
+
+          const rect = touchTarget.getBoundingClientRect();
+          const cols = terminal?.cols;
+          const rows = terminal?.rows;
+          if (
+            !Number.isFinite(rect.width) ||
+            rect.width <= 0 ||
+            !Number.isFinite(rect.height) ||
+            rect.height <= 0 ||
+            typeof cols !== "number" ||
+            !Number.isFinite(cols) ||
+            cols <= 0 ||
+            typeof rows !== "number" ||
+            !Number.isFinite(rows) ||
+            rows <= 0 ||
+            !Number.isFinite(touch.clientX) ||
+            !Number.isFinite(touch.clientY)
+          ) {
+            return;
+          }
+
+          const column = Math.min(
+            cols,
+            Math.max(1, Math.ceil(((touch.clientX - rect.left) * cols) / rect.width)),
+          );
+          const row = Math.min(
+            rows,
+            Math.max(1, Math.ceil(((touch.clientY - rect.top) * rows) / rect.height)),
+          );
           touchAccum -= lines * TOUCH_SCROLL_THRESHOLD;
 
           const up = lines < 0;
-          const seq = sgrScroll(up);
+          const seq = sgrScroll(up, column, row);
           const count = Math.abs(lines);
           for (let i = 0; i < count; i++) {
             sendTerminalInput(seq);

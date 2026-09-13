@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { createProgram } from "../../src/cli.js";
+import { describe, expect, it, vi } from "vitest";
+import { Command } from "commander";
+import { argvWithoutStrayHelpFlags, createProgram, run } from "../../src/cli.js";
 
 function buildProgram() {
   return createProgram("/tmp/dist/cli.js");
@@ -25,6 +26,7 @@ describe("spur help", () => {
     expect(help).toContain("todo");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
+    expect(help).toContain("restore [options] <sessionId>");
     expect(help).toContain("reopen [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("memory <set|get|list|rm>");
@@ -302,5 +304,146 @@ describe("spur help", () => {
     expect(help).toContain("--scope <scope>");
     expect(help).toContain("--file <path>");
     expect(help).toContain("--session <id>");
+  });
+});
+
+describe("argvWithoutStrayHelpFlags", () => {
+  it("strips -h/--help from an unknown top-level command word", () => {
+    const program = createProgram("/tmp/dist/cli.js");
+
+    expect(argvWithoutStrayHelpFlags(program, ["node", "spur", "bogus", "--help"])).toEqual([
+      "node",
+      "spur",
+      "bogus",
+    ]);
+    expect(
+      argvWithoutStrayHelpFlags(program, ["node", "spur", "--config=/p", "bogus", "-h"]),
+    ).toEqual(["node", "spur", "--config=/p", "bogus"]);
+    // Space form: --config's required-arg value ("/p") must be consumed as
+    // its own token, not mistaken for the command word.
+    expect(
+      argvWithoutStrayHelpFlags(program, ["node", "spur", "--config", "/p", "bogus", "-h"]),
+    ).toEqual(["node", "spur", "--config", "/p", "bogus"]);
+    expect(argvWithoutStrayHelpFlags(program, ["node", "spur", "bogus", "-h", "--force"])).toEqual([
+      "node",
+      "spur",
+      "bogus",
+      "--force",
+    ]);
+    // "start" is a subcommand of daemon/sidecar, not top-level, so this
+    // deliberately flips from root-help/exit-0 to unknown-command/exit-1.
+    expect(argvWithoutStrayHelpFlags(program, ["node", "spur", "start", "--help"])).toEqual([
+      "node",
+      "spur",
+      "start",
+    ]);
+  });
+
+  it("leaves argv unchanged for known commands and non-help invocations", () => {
+    const program = createProgram("/tmp/dist/cli.js");
+    const unchanged: string[][] = [
+      ["node", "spur", "reopn", "x"],
+      ["node", "spur", "--help"],
+      ["node", "spur", "-h"],
+      ["node", "spur"],
+      ["node", "spur", "--config", "/p", "--help"],
+      ["node", "spur", "reopen", "--help"],
+      ["node", "spur", "ls"],
+      ["node", "spur", "restore", "x"],
+      ["node", "spur", "daemon", "start", "--help"],
+      ["node", "spur", "slots", "--help"],
+      // A help flag placed BEFORE the command word is a root-help request
+      // (commander's own precedence), not a stray flag to strip.
+      ["node", "spur", "--help", "bogus"],
+      ["node", "spur", "-h", "bogus"],
+    ];
+
+    for (const argv of unchanged) {
+      expect(argvWithoutStrayHelpFlags(program, argv)).toEqual(argv);
+    }
+  });
+
+  it("derives the value-taking skip set from program.options instead of hardcoding --config", () => {
+    // Discriminating fixture: --foo's value "bar" collides with a registered
+    // command name. The old hardcoded-"--config" scan would treat "--foo" as
+    // an unrecognized bare token, stop at "bar", see a known command, and
+    // return argv UNCHANGED. The derived scan consumes "bar" as --foo's
+    // value, lands on "bogus" as the command word, and strips the trailing
+    // --help.
+    const fixture = new Command();
+    fixture.option("--foo <v>", "value-taking option");
+    fixture.command("bar");
+
+    expect(
+      argvWithoutStrayHelpFlags(fixture, ["node", "spur", "--foo", "bar", "bogus", "--help"]),
+    ).toEqual(["node", "spur", "--foo", "bar", "bogus"]);
+  });
+});
+
+describe("run", () => {
+  it("exits 1 with commander's unknown-command error for `spur bogus --help`", async () => {
+    // process.exit is mocked so it can't actually terminate the test
+    // process, which means a stray earlier `_outputHelpIfRequested` exit(0)
+    // would NOT stop execution here the way it does for a real CLI
+    // invocation — commander would fall through to unknownCommand() and
+    // call exit(1) right after anyway, making a bare `toHaveBeenCalledWith`
+    // pass whether or not the strip actually ran. Assert the exact call
+    // list instead: exactly one exit(1), no exit(0) help-then-fallthrough.
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdoutChunks.push(String(chunk));
+        return true;
+      });
+    const stderrChunks: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stderrChunks.push(String(chunk));
+        return true;
+      });
+
+    try {
+      await run(["node", "/tmp/dist/cli.js", "bogus", "--help"]);
+      // Assert before mockRestore(): restoring a spy also clears its call
+      // history, so an assertion after the finally block would always see
+      // zero calls regardless of what actually happened.
+      expect(exitSpy.mock.calls).toEqual([[1]]);
+      expect(stderrChunks.join("")).toContain("error: unknown command 'bogus'");
+      expect(stdoutChunks.join("")).not.toContain("𖤓 Spur");
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+  });
+
+  it("prints root help and exits 0 for `spur --help bogus` (help flag before the command word)", async () => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const stdoutChunks: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdoutChunks.push(String(chunk));
+        return true;
+      });
+    // process.exit is mocked, so execution continues past the first exit(0)
+    // into commander's own unknown-option handling for the now-unstripped
+    // "--help" positioned after "bogus" from commander's point of view — this
+    // also writes to stderr. No test may assert a clean or exact stderr here;
+    // only that root help reached stdout and the FIRST exit call is 0.
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      await run(["node", "/tmp/dist/cli.js", "--help", "bogus"]);
+      expect(exitSpy.mock.calls[0]).toEqual([0]);
+      expect(stdoutChunks.join("")).toContain("𖤓 Spur");
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
   });
 });

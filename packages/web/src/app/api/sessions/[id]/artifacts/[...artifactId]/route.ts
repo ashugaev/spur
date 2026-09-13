@@ -3,15 +3,14 @@ import { ARTIFACT_HTML_CSP, isHtmlMimeType } from "@/lib/artifact-html";
 import { spurRequest } from "@/lib/spur-daemon";
 
 interface RouteContext {
-  params: Promise<{ id: string; artifactId: string }>;
+  params: Promise<{ id: string; artifactId: string[] }>;
 }
 
 export async function GET(_: Request, context: RouteContext) {
   const { id, artifactId } = await context.params;
   try {
-    const res = await spurRequest(
-      `/sessions/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}`,
-    );
+    const artifactPath = artifactId.map((segment) => encodeURIComponent(segment)).join("/");
+    const res = await spurRequest(`/sessions/${encodeURIComponent(id)}/artifacts/${artifactPath}`);
     if (!res.ok) {
       return new NextResponse(await res.text(), { status: res.status });
     }

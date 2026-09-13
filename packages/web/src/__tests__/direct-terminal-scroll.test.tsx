@@ -56,6 +56,7 @@ const mockTerminal = {
     element.replaceChildren();
     const screen = document.createElement("div");
     screen.className = "xterm-screen";
+    screen.getBoundingClientRect = vi.fn(() => new DOMRect(100, 50, 800, 480));
     element.appendChild(screen);
   }),
   focus: vi.fn(),
@@ -127,11 +128,15 @@ class MockMediaRecorder {
 }
 
 vi.mock("xterm", () => ({
-  Terminal: vi.fn(() => mockTerminal),
+  Terminal: vi.fn(function Terminal() {
+    return mockTerminal;
+  }),
 }));
 
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: vi.fn(() => mockFit),
+  FitAddon: vi.fn(function FitAddon() {
+    return mockFit;
+  }),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -142,7 +147,7 @@ vi.mock("next/navigation", () => ({
 const wsSend = vi.fn();
 const wsInstances: Array<Record<string, unknown>> = [];
 
-const MockWebSocket = vi.fn(() => {
+const MockWebSocket = vi.fn(function MockWebSocket() {
   const ws: Record<string, unknown> = {
     readyState: 0,
     binaryType: "arraybuffer",
@@ -217,6 +222,14 @@ function sentInputPayloads(): string[] {
     .map((payload) => payload.data);
 }
 
+function sentRawPayloads(): string[] {
+  return wsSend.mock.calls
+    .map(([payload]) => payload)
+    .filter(
+      (payload): payload is string => typeof payload === "string" && !payload.startsWith("{"),
+    );
+}
+
 beforeEach(() => {
   onBinaryCallback = null;
   parsedWriteCallback = null;
@@ -237,6 +250,8 @@ beforeEach(() => {
   mockTerminal.onResize.mockClear();
   mockTerminal.buffer.onBufferChange.mockClear();
   mockTerminal.open.mockClear();
+  mockTerminal.cols = 80;
+  mockTerminal.rows = 24;
   vi.spyOn(global, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input.url;
     if (url === "/api/runtime/voice") {
@@ -318,6 +333,20 @@ async function mountTerminal({
   return result;
 }
 
+function dispatchTouch(
+  target: Element,
+  type: "touchstart" | "touchmove",
+  touches: Array<{ clientX: number; clientY: number }>,
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "touches", {
+    configurable: true,
+    value: touches,
+  });
+  target.dispatchEvent(event);
+  return event;
+}
+
 describe("buildDirectTerminalWsUrl", () => {
   it("uses ws on plain HTTP and preserves the host port", async () => {
     const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
@@ -389,10 +418,20 @@ describe("DirectTerminal scroll integration", () => {
     normalBuffer.rows = [{ text: "https://resized.example https://newest.example" }];
     act(() => terminalResizeCallback?.());
     fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    // Resize is a keep-mode rescan: it shows what is on screen right away,
+    // even before these two urls are folded into discovered.
+    expect(screen.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+      "https://newest.example",
+      "https://resized.example",
+      "https://parsed.example",
+    ]);
+
+    act(() => parsedWriteCallback?.());
     const links = screen.getAllByRole("link");
     expect(links.map((link) => link.getAttribute("href"))).toEqual([
       "https://newest.example",
       "https://resized.example",
+      "https://parsed.example",
     ]);
 
     alternateBuffer.rows = [{ text: "https://alternate.example" }];
@@ -433,7 +472,7 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
   });
 
-  it("closes and removes the disclosure when a scan becomes empty", async () => {
+  it("keeps discovered links when a scan becomes empty", async () => {
     normalBuffer.rows = [{ text: "https://example.com" }];
     await mountTerminal();
     fireEvent.click(await screen.findByRole("button", { name: "Open terminal links" }));
@@ -441,8 +480,9 @@ describe("DirectTerminal scroll integration", () => {
 
     normalBuffer.rows = [];
     act(() => parsedWriteCallback?.());
-    expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Terminal links" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open terminal links" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Terminal links" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /example\.com/i })).toBeInTheDocument();
   });
 
   it("rejoins a URL split across hard-wrapped (isWrapped: false) rows into one link", async () => {
@@ -513,6 +553,58 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByRole("link")).toHaveAttribute("href", full);
   });
 
+  it("keeps a link discovered before its row left the buffer", async () => {
+    normalBuffer.rows = [{ text: "https://a.example" }];
+    await mountTerminal();
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "1",
+    );
+
+    normalBuffer.rows = [{ text: "https://b.example" }];
+    act(() => parsedWriteCallback?.());
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    expect(screen.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
+      "https://b.example",
+      "https://a.example",
+    ]);
+  });
+
+  it("evicts the oldest off-screen discovery when the cap is exceeded", async () => {
+    normalBuffer.rows = Array.from({ length: 100 }, (_, index) => ({
+      text: `https://cap-${index}.example`,
+    }));
+    await mountTerminal();
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "100",
+    );
+
+    normalBuffer.rows = [{ text: "https://cap-new.example" }];
+    act(() => parsedWriteCallback?.());
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toHaveTextContent(
+      "100",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal links" }));
+    const hrefs = screen.getAllByRole("link").map((link) => link.getAttribute("href"));
+    expect(hrefs).toHaveLength(100);
+    expect(hrefs).toContain("https://cap-new.example");
+    expect(hrefs).not.toContain("https://cap-0.example");
+  });
+
+  it("clears discovered links when the session identity changes", async () => {
+    normalBuffer.rows = [{ text: "https://session-a.example" }];
+    const result = await mountTerminal({ sessionId: "session-a" });
+    expect(await screen.findByRole("button", { name: "Open terminal links" })).toBeInTheDocument();
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    normalBuffer.rows = [];
+    await act(async () => {
+      result.rerender(<DirectTerminal sessionId="session-b" />);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Open terminal links" })).not.toBeInTheDocument();
+    });
+  });
+
   it("resets discovery ownership when the session identity changes", async () => {
     normalBuffer.rows = [{ text: "https://session-a.example" }];
     const result = await mountTerminal({ sessionId: "session-a" });
@@ -579,27 +671,105 @@ describe("DirectTerminal scroll integration", () => {
     expect(wsSend).toHaveBeenCalledWith(sgrMouseUp);
   });
 
-  it("maps touch swipe direction to native terminal scroll direction", async () => {
+  it("maps touch position and swipe direction to terminal cells", async () => {
     const { container } = await mountTerminal({ sessionId: "test-touch" });
 
     const touchTarget = container.querySelector(".xterm-screen");
     expect(touchTarget).not.toBeNull();
 
-    const touchStart = new Event("touchstart", { bubbles: true, cancelable: true });
-    Object.defineProperty(touchStart, "touches", {
-      configurable: true,
-      value: [{ clientY: 200 }],
-    });
-    touchTarget!.dispatchEvent(touchStart);
+    dispatchTouch(touchTarget!, "touchstart", [{ clientX: 500, clientY: 250 }]);
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: 500, clientY: 210 }]);
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: 700, clientY: 250 }]);
 
-    const touchMove = new Event("touchmove", { bubbles: true, cancelable: true });
-    Object.defineProperty(touchMove, "touches", {
-      configurable: true,
-      value: [{ clientY: 160 }],
-    });
-    touchTarget!.dispatchEvent(touchMove);
+    expect(sentRawPayloads()).toEqual([
+      "\x1b[<65;40;8M",
+      "\x1b[<65;40;8M",
+      "\x1b[<64;60;10M",
+      "\x1b[<64;60;10M",
+    ]);
+  });
 
-    expect(wsSend).toHaveBeenCalledWith("\x1b[<65;1;1M");
+  it("accumulates sub-threshold touch movement and emits one event per 20 pixels", async () => {
+    const { container } = await mountTerminal({ sessionId: "test-touch-accumulation" });
+    const touchTarget = container.querySelector(".xterm-screen");
+    expect(touchTarget).not.toBeNull();
+
+    dispatchTouch(touchTarget!, "touchstart", [{ clientX: 300, clientY: 200 }]);
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: 300, clientY: 190 }]);
+    expect(sentRawPayloads()).toEqual([]);
+
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: 300, clientY: 175 }]);
+    expect(sentRawPayloads()).toEqual(["\x1b[<65;20;7M"]);
+  });
+
+  it("ignores multi-touch movement", async () => {
+    const { container } = await mountTerminal({ sessionId: "test-touch-multiple" });
+    const touchTarget = container.querySelector(".xterm-screen");
+    expect(touchTarget).not.toBeNull();
+
+    dispatchTouch(touchTarget!, "touchstart", [
+      { clientX: 300, clientY: 200 },
+      { clientX: 400, clientY: 200 },
+    ]);
+    dispatchTouch(touchTarget!, "touchmove", [
+      { clientX: 300, clientY: 100 },
+      { clientX: 400, clientY: 100 },
+    ]);
+
+    expect(sentRawPayloads()).toEqual([]);
+  });
+
+  it("clamps touch positions outside the screen to valid terminal cells", async () => {
+    const { container } = await mountTerminal({ sessionId: "test-touch-clamp" });
+    const touchTarget = container.querySelector(".xterm-screen");
+    expect(touchTarget).not.toBeNull();
+
+    dispatchTouch(touchTarget!, "touchstart", [{ clientX: -100, clientY: 200 }]);
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: -100, clientY: 100 }]);
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: 1_000, clientY: 700 }]);
+
+    expect(sentRawPayloads()).toEqual([
+      ...Array.from({ length: 5 }, () => "\x1b[<65;1;3M"),
+      ...Array.from({ length: 30 }, () => "\x1b[<64;80;24M"),
+    ]);
+  });
+
+  it.each([
+    ["zero width", new DOMRect(100, 50, 0, 480), 80, 24],
+    ["zero height", new DOMRect(100, 50, 800, 0), 80, 24],
+    ["infinite width", { left: 100, top: 50, width: Infinity, height: 480 } as DOMRect, 80, 24],
+    ["NaN height", { left: 100, top: 50, width: 800, height: Number.NaN } as DOMRect, 80, 24],
+    ["zero columns", new DOMRect(100, 50, 800, 480), 0, 24],
+    ["infinite rows", new DOMRect(100, 50, 800, 480), 80, Infinity],
+  ])("retains touch movement while %s is invalid", async (_name, rect, cols, rows) => {
+    const { container } = await mountTerminal({ sessionId: "test-touch-invalid" });
+    const touchTarget = container.querySelector(".xterm-screen");
+    expect(touchTarget).not.toBeNull();
+    touchTarget!.getBoundingClientRect = vi.fn(() => rect as DOMRect);
+    mockTerminal.cols = cols;
+    mockTerminal.rows = rows;
+
+    dispatchTouch(touchTarget!, "touchstart", [{ clientX: 500, clientY: 250 }]);
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: 500, clientY: 210 }]);
+    expect(sentRawPayloads()).toEqual([]);
+
+    touchTarget!.getBoundingClientRect = vi.fn(() => new DOMRect(100, 50, 800, 480));
+    mockTerminal.cols = 80;
+    mockTerminal.rows = 24;
+    dispatchTouch(touchTarget!, "touchmove", [{ clientX: 500, clientY: 200 }]);
+    expect(sentRawPayloads()).toEqual(["\x1b[<65;40;8M", "\x1b[<65;40;8M"]);
+  });
+
+  it("removes touch listeners on unmount", async () => {
+    const result = await mountTerminal({ sessionId: "test-touch-cleanup" });
+    const touchTarget = result.container.querySelector(".xterm-screen");
+    expect(touchTarget).not.toBeNull();
+    const removeEventListener = vi.spyOn(touchTarget!, "removeEventListener");
+
+    result.unmount();
+
+    expect(removeEventListener).toHaveBeenCalledWith("touchstart", expect.any(Function));
+    expect(removeEventListener).toHaveBeenCalledWith("touchmove", expect.any(Function));
   });
 
   it("opens agent hotkeys menu and sends a selected shortcut", async () => {

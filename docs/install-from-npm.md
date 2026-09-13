@@ -6,7 +6,7 @@ Run Spur on a fresh Linux server. This is the required path for coding-agent ins
 
 Package ships the web UI prebuilt — no on-box build.
 
-Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Needs Node 20+ at `/usr/bin/node` — the units hardcode that path (see gotchas). Ubuntu's apt build is too old; nodesource lands there:
+Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Node version: range in [`package.json`](../package.json) `engines.node`. Node must sit at `/usr/bin/node` — the units hardcode that path (see gotchas). Ubuntu's apt build is too old; nodesource lands there:
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs

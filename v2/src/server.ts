@@ -1,10 +1,12 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { basename } from "node:path";
 import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
   deploySwitchStatePath,
@@ -30,8 +32,8 @@ import {
   type UserActionOrigin,
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
-import { startConfiguredSources } from "./event-sources/index.js";
-import { initializeGhPath, setGhEventSink } from "./gh.js";
+import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
+import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
@@ -140,6 +142,17 @@ export async function resolveTodoMutationActor(args: {
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
+// ToDo state gates the agent, never the person driving Spur: a CLI or UI
+// request that no session made on its own behalf carries a human actor, and
+// the service skips the empty/unfinished ledger block for it.
+function humanTodoOptions(
+  origin: UserActionOrigin,
+  callerHeader: string | string[] | undefined,
+): { todoActor: TodoActor } | undefined {
+  if (callerHeader || (origin !== "cli" && origin !== "ui")) return undefined;
+  return { todoActor: { kind: "human", origin } };
+}
+
 export type StartedServer = SessionService & {
   stop(): Promise<void>;
 };
@@ -213,8 +226,14 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
-  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-  response.end(JSON.stringify(payload, null, 2) + "\n");
+  // Compact, not pretty-printed: the listing payloads run to megabytes and the
+  // 2-space indent was ~10% of every one of them, re-serialized on each poll.
+  const body = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(body.byteLength),
+  });
+  response.end(body);
 }
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
@@ -309,20 +328,10 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
-  const todoOverrideReason = raw["todoOverrideReason"];
-  if (
-    todoOverrideReason !== undefined &&
-    (typeof todoOverrideReason !== "string" || !todoOverrideReason.trim())
-  ) {
-    throw new Error("todoOverrideReason must be nonblank");
-  }
   return {
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
-    ...(typeof todoOverrideReason === "string"
-      ? { todoOverrideReason: todoOverrideReason.trim() }
-      : {}),
   };
 }
 
@@ -434,6 +443,17 @@ export function armShutdownBackstop(
   return () => clearTimeout(timer);
 }
 
+// The backstop's `onForceExit` calls `process.exit(0)` directly and never reaches the
+// normal shutdown path's own `flushGhPollCycles()` call in its `finally` — so this
+// is its own flush point. `logBeforeExit` runs the caller's own log write between the
+// flush and the exit; `flushGhPollCycles()` deletes each run as it flushes, so this can
+// never double-emit against a normal-path flush that also ran.
+export function forceShutdownExit(logBeforeExit: () => void): void {
+  flushGhPollCycles();
+  logBeforeExit();
+  process.exit(0);
+}
+
 export interface ReloadApplyHooks {
   // Swap the registry to the reloaded config, then bring automation up against it.
   applyNext: () => void;
@@ -541,6 +561,11 @@ function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRe
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
+  // Test-only (spur#859 B4): overrides the sidecar sweep's process-table
+  // read so a fixture can control it instead of scanning the real host —
+  // never set by a real caller (cli.ts's `daemon start` passes only the
+  // first two args). Kept off the wire: nothing over HTTP can reach this.
+  testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
   if (ghPathState.status === "unavailable") {
@@ -549,7 +574,10 @@ export async function startServer(
     );
   }
   assertConfigMayUseProdSlot(configPath);
-  const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
+  const service = new SessionService(configPath, undefined, {
+    deferBackgroundLoops: true,
+    ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
+  });
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
@@ -575,6 +603,7 @@ export async function startServer(
       config: service.config,
       bus,
       sessionService: service,
+      memoryHoldEngaged: () => service.memoryHoldEngaged(),
       logger: {
         warn: logger.warn ?? writeStderr,
         ...(logger.info ? { info: logger.info } : {}),
@@ -606,6 +635,7 @@ export async function startServer(
             ...(session.slots?.title ? { title: session.slots.title } : {}),
           };
         },
+        listProjects: async () => spawnableProjects(service.listProjects()),
       });
       const nextBacklogs = startConfiguredBacklogs({
         config: service.config,
@@ -1341,7 +1371,14 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
-        sendJson(response, 200, await service.getConversation(conversationSessionId));
+        const fromValue = url.searchParams.get("from");
+        const from =
+          fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        sendJson(
+          response,
+          200,
+          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+        );
         return;
       }
 
@@ -1385,12 +1422,25 @@ export async function startServer(
         return;
       }
 
-      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
+      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
-        const artifact = service.getArtifact(
-          decodeURIComponent(artifactMatch[1]),
-          decodeURIComponent(artifactMatch[2]),
-        );
+        // An invalid percent-encoding in any segment (decodeURIComponent throws URIError)
+        // is not a malformed request — it just can never match a real artifact id. Treat
+        // it as a not-found id, same as any other id the store doesn't recognize, rather
+        // than letting it fall through to the generic 500 handler.
+        let sessionId: string;
+        let artifactId: string;
+        try {
+          sessionId = decodeURIComponent(artifactMatch[1]);
+          artifactId = artifactMatch[2]
+            .split("/")
+            .map((segment) => decodeURIComponent(segment))
+            .join("/");
+        } catch {
+          sendError(response, 404, `Artifact not found: ${artifactMatch[1]}/${artifactMatch[2]}`);
+          return;
+        }
+        const artifact = service.getArtifact(sessionId, artifactId);
         // An SVG opened as a top-level document runs its own scripts on Spur's origin,
         // and browsers ignore a CSP sandbox on image documents, so hand it over as a
         // download instead. <img> previews ignore content-disposition and still render.
@@ -1398,7 +1448,7 @@ export async function startServer(
         response.writeHead(200, {
           "content-type": artifact.mimeType,
           "content-length": String(artifact.size),
-          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(artifact.name)}"`,
+          "content-disposition": `${renderInline ? "inline" : "attachment"}; filename="${encodeURIComponent(basename(artifact.name))}"`,
           "cache-control": "no-store",
           // Artifact HTML is agent-authored: render it in an opaque origin so it can
           // never read Spur's storage or call the API with the operator's session.
@@ -1563,12 +1613,7 @@ export async function startServer(
           );
           return;
         }
-        const todoOptions =
-          body.todoOverrideReason &&
-          !request.headers["x-spur-caller-session"] &&
-          (origin === "cli" || origin === "ui")
-            ? { todoActor: { kind: "human" as const, origin } }
-            : undefined;
+        const todoOptions = humanTodoOptions(origin, request.headers["x-spur-caller-session"]);
         sendJson(
           response,
           200,
@@ -1609,7 +1654,15 @@ export async function startServer(
       const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
       if (method === "POST" && handoffSessionId) {
         const body = await readJsonBody<HandoffSessionRequest>(request);
-        sendJson(response, 200, await service.handoff(handoffSessionId, body));
+        sendJson(
+          response,
+          200,
+          await service.handoff(
+            handoffSessionId,
+            body,
+            humanTodoOptions(origin, request.headers["x-spur-caller-session"]),
+          ),
+        );
         return;
       }
 
@@ -1996,16 +2049,17 @@ export async function startServer(
       // Armed before the first await so a step that wedges inside its own bound still
       // ends the process well under the service manager's stop timeout.
       const disarmBackstop = exitProcess
-        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) => {
-            logEvent("daemon.shutdown.forced_exit", {
-              level: "error",
-              message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
-                activeResources,
-              )}`,
-              details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
-            });
-            process.exit(0);
-          })
+        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) =>
+            forceShutdownExit(() =>
+              logEvent("daemon.shutdown.forced_exit", {
+                level: "error",
+                message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
+                  activeResources,
+                )}`,
+                details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
+              }),
+            ),
+          )
         : null;
       try {
         // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
@@ -2051,6 +2105,20 @@ export async function startServer(
         // awaitBounded and stopTriggersBounded log and continue, because a best-effort
         // teardown must not abandon the steps behind it. Only a synchronous throw
         // (dispose(), the sync stops) escapes, and only programmatic stop() sees it.
+        //
+        // Flushed here, last, rather than before dispose(): dispose() only clears the
+        // owned intervals, it does not cancel or await an already in-flight
+        // runGhPollCycle (e.g. the attention monitor's fire-and-forget call). That
+        // call's own `finally` in gh.ts writes into pollCycleRuns whenever it settles,
+        // which can happen during any of the awaits above (sources.stop,
+        // settleBackgroundSpawns, server.close) or be skipped over entirely by an
+        // uncaught synchronous throw from backlogs?.stop() / runtimeLogs?.stop() —
+        // both unbounded, unlike the awaitBounded steps around them. A flush placed
+        // before dispose() or mid-try misses that write; finally is the one place
+        // guaranteed to run after every one of those paths. ghEventSinkDataDir is a
+        // module-level value set once at startup and never cleared during teardown, so
+        // the sink this flush writes through is still live here.
+        flushGhPollCycles();
         disarmBackstop?.();
         if (exitProcess) {
           process.exit(0);

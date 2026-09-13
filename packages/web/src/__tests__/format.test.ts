@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  formatBytes,
   formatRelativeTime,
   getSessionSubtitle,
   getSessionTitle,
@@ -95,6 +96,21 @@ describe("formatRelativeTime", () => {
 
   it("returns 'unknown' on unparseable input", () => {
     expect(formatRelativeTime("not-a-date")).toBe("unknown");
+  });
+});
+
+describe("formatBytes", () => {
+  it("renders sub-KB values in bytes", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(1023)).toBe("1023 B");
+  });
+
+  it("renders KB values with one decimal", () => {
+    expect(formatBytes(1024)).toBe("1.0 KB");
+  });
+
+  it("renders MB values with one decimal", () => {
+    expect(formatBytes(1024 * 1024)).toBe("1.0 MB");
   });
 });
 

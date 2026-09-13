@@ -93,10 +93,18 @@ import {
   readConfigRegistryFile,
 } from "./registry.js";
 import { listSessions } from "./metadata.js";
+import {
+  createArtifactRetentionDeps,
+  executeArtifactRetention,
+  listAnchorArtifacts,
+  planArtifactRetention,
+  type ArtifactRetentionReport,
+} from "./artifact-retention.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
+  isRespawnableStatus,
   isSessionState,
   type AppConfig,
   type OpenPrAction,
@@ -117,7 +125,9 @@ import {
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
   type ServiceInstanceView,
+  type SessionListItemView,
   type SessionView,
+  type SidecarStopView,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
@@ -142,6 +152,9 @@ import {
 } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
+// Debounces the detail-pane refetch behind arrow-key repeats: holding an
+// arrow key issues one GET /sessions/:id, not one per keypress.
+const DETAIL_FETCH_DEBOUNCE_MS = 150;
 const LIST_FIXED_ROWS = 9;
 const LIST_MIN_SESSION_ROWS = 4;
 const LIST_MAX_DETAIL_ROWS = 6;
@@ -184,7 +197,7 @@ function captureTmuxTarget(sessionName: string, lines = 200): string {
   ).trimEnd();
 }
 
-function sessionLogAgentPane(session: SessionView): string {
+function sessionLogAgentPane(session: SessionListItemView): string {
   return session.runtimeAlive ? dimText(RUNTIME_LOGS_UNAVAILABLE) : dimText("(agent is not live)");
 }
 
@@ -535,7 +548,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function findSelectedIndex(
-  sessions: SessionView[],
+  sessions: SessionListItemView[],
   selectedSessionId: string | null,
 ): number | null {
   if (!selectedSessionId) return null;
@@ -544,7 +557,7 @@ function findSelectedIndex(
 }
 
 function moveSelection(
-  sessions: SessionView[],
+  sessions: SessionListItemView[],
   selectedSessionId: string | null,
   delta: number,
 ): string | null {
@@ -558,11 +571,14 @@ function moveSelection(
   return next ? next.id : null;
 }
 
-async function loadRawSessions(cliEntrypoint: string, configPath?: string): Promise<SessionView[]> {
-  return getJson<SessionView[]>(cliEntrypoint, "/sessions", configPath);
+async function loadRawSessions(
+  cliEntrypoint: string,
+  configPath?: string,
+): Promise<SessionListItemView[]> {
+  return getJson<SessionListItemView[]>(cliEntrypoint, "/sessions", configPath);
 }
 
-function visibleSessionsForHumanList(sessions: SessionView[]): SessionView[] {
+function visibleSessionsForHumanList(sessions: SessionListItemView[]): SessionListItemView[] {
   return sessions.filter(
     (session) => session.status !== "completed" && session.status !== "killed",
   );
@@ -631,7 +647,7 @@ async function loadUserActions(
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
-): Promise<{ info: RuntimeInfo; sessions: SessionView[] }> {
+): Promise<{ info: RuntimeInfo; sessions: SessionListItemView[] }> {
   const [info, sessions] = await Promise.all([
     getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath),
     loadRawSessions(cliEntrypoint, configPath),
@@ -639,14 +655,17 @@ async function loadHumanListData(
   return { info, sessions: sortSessionsForList(visibleSessionsForHumanList(sessions)) };
 }
 
-function replaceListedSession(sessions: SessionView[], updated: SessionView): SessionView[] {
+function replaceListedSession(
+  sessions: SessionListItemView[],
+  updated: SessionView,
+): SessionListItemView[] {
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
 function postSessionAction(
   cliEntrypoint: string,
   sessionId: string,
-  action: "pause" | "complete" | "kill" | "reopen",
+  action: "pause" | "complete" | "kill" | "reopen" | "restore",
   configPath?: string,
   body: object = {},
 ): Promise<SessionView> {
@@ -664,7 +683,6 @@ type CompleteCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
-  todoOverrideReason?: string;
 };
 
 function renderTodoProjection(projection: TodoProjection): string {
@@ -700,8 +718,10 @@ function appendOptionValue(value: string, previous?: string[]): string[] {
 
 function renderLiveSessionList(args: {
   info: RuntimeInfo;
-  sessions: SessionView[];
+  sessions: SessionListItemView[];
   selectedSessionId: string | null;
+  selectedDetail: SessionView | null;
+  detailLoading: boolean;
   statusMessage?: string;
 }): string {
   const rows = process.stdout.rows > 0 ? process.stdout.rows : 24;
@@ -726,6 +746,8 @@ function renderLiveSessionList(args: {
     info: args.info,
     sessions: visibleSessions,
     selectedSessionId: args.selectedSessionId,
+    selectedDetail: args.selectedDetail,
+    detailLoading: args.detailLoading,
     totalSessions: args.sessions.length,
     windowStart,
     maxDetailLines,
@@ -746,7 +768,7 @@ function renderAttachedPaneView(args: { title: string; content: string }): strin
 }
 
 interface SessionLogViewState {
-  session: SessionView;
+  session: SessionListItemView;
   agentPane: string;
   eventLines: string[];
   localLines: string[];
@@ -826,7 +848,10 @@ function readDisplaySessionEventLines(dataDir: string, sessionId: string): strin
     .map(formatEventLine);
 }
 
-function buildStateChangeLine(previous: SessionView, next: SessionView): string | null {
+function buildStateChangeLine(
+  previous: SessionListItemView,
+  next: SessionListItemView,
+): string | null {
   const changes: string[] = [];
   if (previous.status !== next.status) {
     changes.push(`status ${previous.status} -> ${next.status}`);
@@ -1158,8 +1183,16 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
       outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
     // Tree total, not the root pid's own rss — the root alone understated
     // the measured 863333/863351 leak by 17x.
+    const attribution =
+      tree.kind === "orphan-daemon"
+        ? tree.liveness === "serving"
+          ? `daemon ${tree.configPath} — serving on ${tree.port} — stop it with 'spur --config ${tree.configPath} daemon stop'`
+          : tree.liveness === "unknown"
+            ? `daemon ${tree.configPath} — liveness unknown — verify manually before killing`
+            : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
+        : (tree.sidecarName ?? "unattributed");
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,
     );
   });
   return lines.join("\n");
@@ -1168,6 +1201,42 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
 // Test-only: exercises the sweep summary's status/survivors formatting
 // without spinning up a live CLI command or the daemon route it calls.
 export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
+
+// `sidecar stop`'s success line, per real outcome — never claims a reap that
+// did not happen (`sidecarStop.outcome`, session-service.ts's stopSidecar).
+function renderSidecarStopMessage(name: string, session: SidecarStopView): string {
+  const { sidecarStop } = session;
+  if (sidecarStop.outcome === "nothing-to-stop") {
+    return `Sidecar ${name} on ${session.id} was not running; nothing to stop.`;
+  }
+  if (sidecarStop.outcome === "partial") {
+    // ND-2: unverifiedPorts has two distinct causes (a probe that could not
+    // run, or a port excluded as ambiguous against a non-terminal sibling —
+    // see docs/daemon-api.md's sidecar-stop route entry) — this message
+    // names neither, rather than misattributing an ambiguous-ownership
+    // exclusion to a missing OS tool.
+    const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
+    if (sidecarStop.survivors.length === 0 && unverifiedPorts.length > 0) {
+      return `Stopped sidecar ${name} for ${session.id}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Report them: spur sidecar sweep`;
+    }
+    return `Stopped sidecar ${name} for ${session.id}, but ${sidecarStop.survivors.length} process(es) survived: ${sidecarStop.survivors.join(",")}. Report them: spur sidecar sweep`;
+  }
+  return `Stopped sidecar ${name} for ${session.id}.`;
+}
+
+// Test-only: exercises the stop message's per-outcome branching without a
+// live CLI command or the daemon route it calls.
+export const _renderSidecarStopMessageForTests = renderSidecarStopMessage;
+
+// `sidecar stop`'s process exit code, per real outcome — only a `partial`
+// reap (survivors left behind) is operator-actionable failure.
+function sidecarStopExitCode(session: SidecarStopView): number | undefined {
+  return session.sidecarStop.outcome === "partial" ? 1 : undefined;
+}
+
+// Test-only: exercises the stop exit-code mapping without a live CLI
+// command or the daemon route it calls.
+export const _sidecarStopExitCodeForTests = sidecarStopExitCode;
 
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
@@ -1226,6 +1295,37 @@ export function renderSessionGcResult(report: GcReport): string {
   }
   if (report.dryRun) {
     lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+export function renderArtifactRetentionResult(report: ArtifactRetentionReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.files} artifact(s) across ${report.scanned.anchors} anchor(s); planned ${report.anchors.length} (limit ${report.limit}, older than ${report.olderThanDays}d, max ${formatBytes(report.maxBytesPerSession)}, max ${report.maxFilesPerSession} file(s) per anchor).`,
+    ),
+    "",
+  ];
+  if (report.anchors.length === 0) {
+    lines.push(dimText("Nothing to prune."));
+    return lines.join("\n");
+  }
+  for (const anchor of report.anchors) {
+    const detail = anchor.error
+      ? `error: ${anchor.error}`
+      : anchor.blockReasons.length > 0
+        ? anchor.blockReasons.join(",")
+        : `${anchor.totalFiles} file(s), ${formatBytes(anchor.totalBytes)} on disk`;
+    lines.push(
+      `  ${accent(anchor.anchorId.padEnd(20))}  ${`${anchor.evictFiles} file(s)`.padEnd(14)}  ${formatBytes(anchor.evictBytes).padEnd(9)}  ${detail}`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.evictFiles} artifact(s) selected, ${formatBytes(report.totals.freedBytes)} ${report.dryRun ? "would be freed" : "freed"}, ${report.totals.errors} error(s).`,
+  );
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing deleted. Re-run with --execute to apply."));
   }
   return lines.join("\n");
 }
@@ -1504,6 +1604,64 @@ function formatHelp(command: Command, helper: Help): string {
   return sections.join("\n\n");
 }
 
+// Refetches the selector's selected-session detail off GET /sessions/:id —
+// the one route left doing the per-session artifact filesystem walk.
+// Extracted so its single-flight and staleness guards are unit-testable
+// without a TTY: `load()` is called both on selection change (debounced)
+// and on every 2s refresh tick, since the pane renders fields that move
+// under a stable id (`updated`, `queued`, service status), so the tick
+// refetch can't simply be dropped. `inFlight` is a strict single-flight
+// guard — a tick landing while a selection-change fetch is still
+// outstanding (or vice versa) is dropped rather than issued, so two GETs
+// for the same walk can never stack. `bumpToken()` invalidates any
+// in-flight fetch for an abandoned selection so its resolve is dropped,
+// never rendered, and never clears `detailLoading` out from under a newer
+// fetch still in flight.
+export function createSelectedDetailLoader(deps: {
+  fetchDetail: (id: string) => Promise<SessionView>;
+  getSelectedSessionId: () => string | null;
+  setSelectedDetail: (detail: SessionView | null) => void;
+  setDetailLoading: (loading: boolean) => void;
+  setStatusMessage: (message: string) => void;
+  render: () => void;
+}): { load: () => Promise<void>; bumpToken: () => void } {
+  let token = 0;
+  let inFlight = false;
+  const bumpToken = (): void => {
+    token += 1;
+  };
+  const load = async (): Promise<void> => {
+    const selectedSessionId = deps.getSelectedSessionId();
+    if (selectedSessionId === null) {
+      deps.setSelectedDetail(null);
+      deps.setDetailLoading(false);
+      return;
+    }
+    if (inFlight) return;
+    token += 1;
+    const myToken = token;
+    const id = selectedSessionId;
+    inFlight = true;
+    try {
+      const detail = await deps.fetchDetail(id);
+      if (myToken !== token || id !== deps.getSelectedSessionId()) return;
+      deps.setSelectedDetail(detail);
+      deps.setDetailLoading(false);
+      deps.render();
+    } catch (error) {
+      if (myToken !== token || id !== deps.getSelectedSessionId()) return;
+      deps.setDetailLoading(false);
+      deps.setSelectedDetail(null);
+      const message = error instanceof Error ? error.message : String(error);
+      deps.setStatusMessage(brandLine(message));
+      deps.render();
+    } finally {
+      inFlight = false;
+    }
+  };
+  return { load, bumpToken };
+}
+
 async function runInteractiveSessionList(
   cliEntrypoint: string,
   configPath?: string,
@@ -1533,6 +1691,13 @@ async function runInteractiveSessionList(
   let attachedPaneContent = "";
   let terminalActive = false;
   let refreshTimer: NodeJS.Timeout | undefined;
+  // The selector's detail pane is fetched from GET /sessions/:id, never
+  // sliced off the projected list row — the list no longer carries `prompt`
+  // or `launchCommand`. See createSelectedDetailLoader for the staleness
+  // and single-flight guards on that fetch.
+  let selectedDetail: SessionView | null = null;
+  let detailLoading = false;
+  let detailDebounceTimer: NodeJS.Timeout | undefined;
 
   const render = (): void => {
     if (closed) return;
@@ -1553,9 +1718,61 @@ async function runInteractiveSessionList(
       info,
       sessions,
       selectedSessionId,
+      selectedDetail,
+      detailLoading,
       ...(statusMessage ? { statusMessage } : {}),
     };
     process.stdout.write(`\u001b[2J\u001b[H${renderLiveSessionList(listArgs)}\n`);
+  };
+
+  const detailLoader = createSelectedDetailLoader({
+    fetchDetail: (id) => getJson<SessionView>(cliEntrypoint, `/sessions/${id}`, configPath),
+    getSelectedSessionId: () => selectedSessionId,
+    setSelectedDetail: (detail) => {
+      selectedDetail = detail;
+    },
+    setDetailLoading: (loading) => {
+      detailLoading = loading;
+    },
+    setStatusMessage: (message) => {
+      statusMessage = message;
+    },
+    render,
+  });
+  const loadSelectedDetail = detailLoader.load;
+
+  // The single path every selection change routes through — arrow keys, a
+  // mutation response (restore/pause/respawn already return a full
+  // SessionView, so no refetch is needed there), a vanished selection, and
+  // a terminal action clearing the selection. Without this, the pane would
+  // show the previous row's detail under a new id until the next tick, or
+  // stay populated after a kill/complete cleared the selection.
+  const setSelectedSession = (id: string | null, detail?: SessionView): void => {
+    // Bumped first: an in-flight tick-issued fetch for the OLD selection
+    // (same id, same pre-bump token) must read as stale once this call
+    // supplies a fresh detail or re-arms its own fetch — otherwise a
+    // pre-mutation response landing after `detail` is assigned here would
+    // overwrite it.
+    detailLoader.bumpToken();
+    selectedSessionId = id;
+    if (detailDebounceTimer) {
+      clearTimeout(detailDebounceTimer);
+      detailDebounceTimer = undefined;
+    }
+    if (detail) {
+      selectedDetail = detail;
+      detailLoading = false;
+      return;
+    }
+    selectedDetail = null;
+    if (id === null) {
+      detailLoading = false;
+      return;
+    }
+    detailLoading = true;
+    detailDebounceTimer = setTimeout(() => {
+      void loadSelectedDetail();
+    }, DETAIL_FETCH_DEBOUNCE_MS);
   };
 
   const enableTerminal = (): void => {
@@ -1607,9 +1824,11 @@ async function runInteractiveSessionList(
       sessions = nextSessions;
       if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
         const vanishedId = selectedSessionId;
-        selectedSessionId = null;
+        setSelectedSession(null);
         clearPendingConfirmations();
         statusMessage = brandLine(`${vanishedId} disappeared. Use ↑↓ to reselect before acting.`);
+      } else {
+        await loadSelectedDetail();
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1620,10 +1839,10 @@ async function runInteractiveSessionList(
     }
   };
 
-  const getSelectedSession = (): SessionView | null =>
+  const getSelectedSession = (): SessionListItemView | null =>
     sessions.find((session) => session.id === selectedSessionId) ?? null;
 
-  const getSelectedSessionOrWarn = (): SessionView | null => {
+  const getSelectedSessionOrWarn = (): SessionListItemView | null => {
     const session = getSelectedSession();
     if (session) return session;
     statusMessage = brandLine(RESELECT_MESSAGE);
@@ -1686,7 +1905,7 @@ async function runInteractiveSessionList(
         configPath,
       );
       sessions = replaceListedSession(sessions, restored);
-      selectedSessionId = restored.id;
+      setSelectedSession(restored.id, restored);
       clearPendingConfirmations();
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
@@ -1813,7 +2032,7 @@ async function runInteractiveSessionList(
     try {
       const paused = await postSessionAction(cliEntrypoint, session.id, "pause", configPath);
       sessions = replaceListedSession(sessions, paused);
-      selectedSessionId = paused.id;
+      setSelectedSession(paused.id, paused);
       clearPendingConfirmations();
       statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
@@ -1837,7 +2056,7 @@ async function runInteractiveSessionList(
     try {
       const completed = await postSessionAction(cliEntrypoint, session.id, "complete", configPath);
       sessions = sessions.filter((entry) => entry.id !== completed.id);
-      selectedSessionId = null;
+      setSelectedSession(null);
       clearPendingConfirmations();
       statusMessage = brandLine(`Completed ${completed.id}.`);
     } catch (error) {
@@ -1870,7 +2089,7 @@ async function runInteractiveSessionList(
         force ? { force: true } : {},
       );
       sessions = sessions.filter((entry) => entry.id !== killed.id);
-      selectedSessionId = null;
+      setSelectedSession(null);
       clearPendingConfirmations();
       statusMessage = brandLine(`Killed ${killed.id}.`);
     } catch (error) {
@@ -1894,11 +2113,7 @@ async function runInteractiveSessionList(
   const respawnSelectedSession = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
-    if (
-      session.status !== "completed" &&
-      session.status !== "killed" &&
-      session.status !== "errored"
-    ) {
+    if (!isRespawnableStatus(session.status)) {
       statusMessage = brandLine(`Session ${session.id} is not in a terminal state.`);
       render();
       return;
@@ -1920,7 +2135,7 @@ async function runInteractiveSessionList(
         configPath,
       );
       sessions = sortSessionsForList([...sessions, respawned]);
-      selectedSessionId = respawned.id;
+      setSelectedSession(respawned.id, respawned);
       clearPendingConfirmations();
       statusMessage = brandLine(`Respawned as ${respawned.id}.`);
       return;
@@ -1981,13 +2196,13 @@ async function runInteractiveSessionList(
       }
       if (key.name === "up") {
         clearPendingConfirmations();
-        selectedSessionId = moveSelection(sessions, selectedSessionId, -1);
+        setSelectedSession(moveSelection(sessions, selectedSessionId, -1));
         render();
         return;
       }
       if (key.name === "down") {
         clearPendingConfirmations();
-        selectedSessionId = moveSelection(sessions, selectedSessionId, 1);
+        setSelectedSession(moveSelection(sessions, selectedSessionId, 1));
         render();
         return;
       }
@@ -2036,12 +2251,16 @@ async function runInteractiveSessionList(
       if (refreshTimer) {
         clearInterval(refreshTimer);
       }
+      if (detailDebounceTimer) {
+        clearTimeout(detailDebounceTimer);
+      }
       process.stdin.off("keypress", onKeypress);
       process.stdout.off("resize", onResize);
       disableTerminal();
     };
 
     enableTerminal();
+    setSelectedSession(selectedSessionId);
     render();
     refreshTimer = setInterval(() => {
       void refresh();
@@ -2425,6 +2644,70 @@ export function createProgram(cliEntrypoint: string): Command {
           return executeSessionGc(plan, createGcDeps(config), { dryRun, sizes });
         },
         render: renderSessionGcResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("artifacts-gc")
+    .description(
+      "Prune oversized agent-history artifacts per session workspace (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is deleted")
+    .option("--older-than <days>", "Age prune cutoff; applies only to completed/killed/stopped")
+    .option("--max-bytes <bytes>", "Agent-history bytes kept per workspace")
+    .option("--max-files <number>", "Agent-history files kept per workspace")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum workspaces to act on in one run")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const retention = config.artifactRetention;
+      const olderThanDays =
+        options.olderThan === undefined
+          ? retention.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const maxBytesPerSession =
+        options.maxBytes === undefined
+          ? retention.maxBytesPerSession
+          : parsePositiveIntegerOption(String(options.maxBytes), "--max-bytes");
+      const maxFilesPerSession =
+        options.maxFiles === undefined
+          ? retention.maxFilesPerSession
+          : parsePositiveIntegerOption(String(options.maxFiles), "--max-files");
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning artifact retention" : "running artifact retention",
+        action: () => {
+          const plan = planArtifactRetention({
+            sessions: listSessions(config.dataDir),
+            now: new Date(),
+            olderThanDays,
+            maxBytesPerSession,
+            maxFilesPerSession,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            listArtifacts: listAnchorArtifacts(config.dataDir),
+          });
+          return Promise.resolve(
+            executeArtifactRetention(plan, createArtifactRetentionDeps(config), { dryRun }),
+          );
+        },
+        render: renderArtifactRetentionResult,
         exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
       });
     });
@@ -2874,22 +3157,15 @@ export function createProgram(cliEntrypoint: string): Command {
       parsePrActionOption,
     )
     .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
-    .option("--todo-override-reason <reason>", "Record a manual override for unfinished ToDo items")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body: { prAction?: OpenPrAction; skipPrCheck?: true; todoOverrideReason?: string } = {};
+      const body: { prAction?: OpenPrAction; skipPrCheck?: true } = {};
       if (options.prAction) {
         body.prAction = options.prAction;
       }
       if (options.skipPrCheck) {
         body.skipPrCheck = true;
-      }
-      if (options.todoOverrideReason) {
-        if (process.env["SPUR_SESSION"] === sessionId) {
-          throw new Error("A session cannot override its own unfinished ToDo items");
-        }
-        body.todoOverrideReason = options.todoOverrideReason;
       }
       await outputResult({
         json: Boolean(options.json),
@@ -3056,6 +3332,30 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("restore")
+    .description("Resume the existing conversation of a stopped or errored session.")
+    .argument("<sessionId>", "Session id")
+    .option(
+      "--force",
+      "Restore even if a live agent process for this session id already exists outside its pane",
+    )
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options: { force?: boolean; json?: boolean }, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body: { force?: true } = {};
+      if (options.force) {
+        body.force = true;
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "restoring session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "restore", configPath, body),
+        success: (session) => `Restored ${session.id}.`,
+        render: renderSessionCard,
+      });
     });
 
   program
@@ -3682,13 +3982,14 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "stopping sidecar",
         action: () =>
-          postJson<SessionView>(
+          postJson<SidecarStopView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
             {},
             configPath,
           ),
-        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
+        success: (session) => renderSidecarStopMessage(options.name as string, session),
+        exitCode: sidecarStopExitCode,
         render: renderSessionCard,
       });
     });
@@ -4025,12 +4326,70 @@ export function createProgram(cliEntrypoint: string): Command {
   return program;
 }
 
+/**
+ * Commander checks for -h/--help before it checks for an unknown command, so
+ * `spur bogus --help` prints root help and exits 0 instead of reporting the
+ * unknown command. Strip stray help flags placed AFTER an unrecognized
+ * command word so commander's own unknownCommand() handler runs instead,
+ * exiting 1 with its did-you-mean suggestion. A help flag placed BEFORE the
+ * command word (`spur --help bogus`, `spur -h bogus`) is a root-help request
+ * and is left untouched, matching commander's own precedence. Known commands
+ * and help requests for them are left untouched too.
+ */
+export function argvWithoutStrayHelpFlags(program: Command, argv: string[]): string[] {
+  const knownCommands = new Set(
+    program.commands.flatMap((command) => [command.name(), ...command.aliases()]),
+  );
+  // Required-arg top-level options consume their next argv entry so its
+  // value is never mistaken for the command word — derived from
+  // program.options rather than hardcoding "--config" so a future top-level
+  // option is covered automatically. Matched by exact token only: the equals
+  // form (`--config=/p`) carries its own value and must not consume the
+  // following entry. No top-level optional-arg option exists today (an
+  // optional-arg option's own value can start with "-", so consuming it
+  // unconditionally would be wrong) — add that distinction here if one is
+  // ever registered, not before.
+  const requiredArgFlags = new Set(
+    program.options
+      .filter((option) => option.required)
+      .flatMap((option) => [option.short, option.long].filter((flag): flag is string => !!flag)),
+  );
+  let commandWord: string | undefined;
+  let commandIndex = -1;
+  for (let index = 2; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token !== undefined && requiredArgFlags.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (token?.startsWith("-")) {
+      continue;
+    }
+    commandWord = token;
+    commandIndex = index;
+    break;
+  }
+  if (commandWord === undefined || knownCommands.has(commandWord)) {
+    return argv;
+  }
+  const strayHelpIndices = new Set(
+    argv
+      .map((token, index) => ({ token, index }))
+      .filter(({ token, index }) => index > commandIndex && (token === "-h" || token === "--help"))
+      .map(({ index }) => index),
+  );
+  if (strayHelpIndices.size === 0) {
+    return argv;
+  }
+  return argv.filter((_token, index) => !strayHelpIndices.has(index));
+}
+
 export async function run(argv = process.argv): Promise<void> {
   const cliEntrypoint = argv[1] ?? "";
   const program = createProgram(cliEntrypoint);
 
   try {
-    await program.parseAsync(argv);
+    await program.parseAsync(argvWithoutStrayHelpFlags(program, argv));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.error(message, { output: process.stderr, symbol: brandMark(), withGuide: false });

@@ -1,6 +1,14 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { readResponsePayload } from "@/lib/json-payload";
 import { isRuntimeInfoResponse, useVersionSwitch } from "@/lib/version-switch-context";
 
@@ -41,11 +49,22 @@ export interface BackendConnectionState {
   phase: BackendConnectionPhase;
   // Probe count while disconnected, for display only.
   attempts: number;
+  // Last non-empty version a healthy heartbeat reported. Null before the
+  // first one; sticky across a disconnect, never blanked by a phase reset.
+  version: string | null;
 }
 
-const CONNECTED_STATE: BackendConnectionState = { phase: "connected", attempts: 0 };
+// The liveness half of BackendConnectionState: what the phase-reset objects
+// below assign. `version` is deliberately excluded — see the useState split
+// in the provider for why it can't live in this same reset object.
+type LivenessState = Pick<BackendConnectionState, "phase" | "attempts">;
 
-const BackendConnectionContext = createContext<BackendConnectionState>(CONNECTED_STATE);
+const CONNECTED_STATE: LivenessState = { phase: "connected", attempts: 0 };
+
+const BackendConnectionContext = createContext<BackendConnectionState>({
+  ...CONNECTED_STATE,
+  version: null,
+});
 
 export function useBackendConnection(): BackendConnectionState {
   return useContext(BackendConnectionContext);
@@ -73,12 +92,17 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
   // gate stays dormant while one is in flight so the two never compete.
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const dormant = versionSwitchPhase !== "idle";
-  const [state, setState] = useState<BackendConnectionState>(CONNECTED_STATE);
+  const [state, setState] = useState<LivenessState>(CONNECTED_STATE);
   // Reactive (not a plain ref) so a failure immediately reschedules the
   // interval onto the fast cadence below — see intervalMs. Always updated
   // via the functional setter form so overlapping/stale reads can't drop a
   // real failure and indefinitely defer reaching FAILURE_THRESHOLD.
   const [consecutiveFailures, setConsecutiveFailures] = useState(0);
+  // Separate primitive, not a field on `state`: `state` is reset by identity
+  // at CONNECTED_STATE (dormant entry, and recovery) and a folded `version`
+  // field would be blanked by both. A primitive survives every phase reset
+  // and bails via Object.is when a heartbeat reports the same version.
+  const [reportedVersion, setReportedVersion] = useState<string | null>(null);
   // Fires the very first probe of an activation immediately instead of
   // waiting a full heartbeat — otherwise opening the UI against an
   // already-dead daemon shows a broken dashboard for HEARTBEAT_INTERVAL_MS
@@ -130,6 +154,16 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
           const version = await probeBackend();
           if (cancelled) return;
 
+          // An out-of-band upgrade moves the daemon version with no other
+          // signal to a page that never reloads. Truthy, not `!== null`:
+          // isRuntimeInfoResponse admits `""`, and publishing it would blank
+          // the label. Primitive state, so an unchanged version bails out
+          // of the re-render. Published above the phase branch so both the
+          // steady-state path below and the recovery path just past it see
+          // the new value; the `=== null` / `!== null` liveness checks stay
+          // untouched — an empty version still proves the daemon answered.
+          if (version) setReportedVersion(version);
+
           if (state.phase === "disconnected") {
             if (version === null) {
               setState((current) => ({ phase: "disconnected", attempts: current.attempts + 1 }));
@@ -166,7 +200,18 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
     };
   }, [dormant, state.phase, consecutiveFailures]);
 
+  // One composition point for the identity guarantee: VersionSwitchProvider
+  // passes an unmemoized value (version-switch-context.tsx), so any of its
+  // renders re-renders this provider too. Without this memo, an unrelated
+  // cascade would mint a new context value here and re-render every
+  // consumer (Dashboard included) even though `state` and `reportedVersion`
+  // are both unchanged.
+  const value = useMemo<BackendConnectionState>(
+    () => ({ ...state, version: reportedVersion }),
+    [state, reportedVersion],
+  );
+
   return (
-    <BackendConnectionContext.Provider value={state}>{children}</BackendConnectionContext.Provider>
+    <BackendConnectionContext.Provider value={value}>{children}</BackendConnectionContext.Provider>
   );
 }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
@@ -57,8 +57,8 @@ import {
   scanCodexRolloutForMessage,
 } from "../../src/agents/codex.js";
 
-const mockCreateReadStream = createReadStream as ReturnType<typeof vi.fn>;
-const mockCreateInterface = createInterface as ReturnType<typeof vi.fn>;
+const mockCreateReadStream = createReadStream as unknown as Mock;
+const mockCreateInterface = createInterface as unknown as Mock;
 
 function requireValue<T>(value: T | null | undefined, message: string): T {
   if (value === null || value === undefined) {
@@ -67,17 +67,19 @@ function requireValue<T>(value: T | null | undefined, message: string): T {
   return value;
 }
 
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
-const mockCp = cp as ReturnType<typeof vi.fn>;
-const mockReaddir = readdir as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
-const mockLstat = lstat as ReturnType<typeof vi.fn>;
-const mockRm = rm as ReturnType<typeof vi.fn>;
-const mockSymlink = symlink as ReturnType<typeof vi.fn>;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+const mockExistsSync = existsSync as unknown as Mock<typeof existsSync>;
+const mockMkdir = mkdir as unknown as Mock<typeof mkdir>;
+const mockReadFile = readFile as unknown as Mock<typeof readFile>;
+const mockWriteFile = writeFile as unknown as Mock<typeof writeFile>;
+const mockCp = cp as unknown as Mock<typeof cp>;
+const mockReaddir = readdir as unknown as Mock;
+const mockStat = stat as unknown as Mock;
+const mockLstat = lstat as unknown as Mock;
+const mockRm = rm as unknown as Mock<typeof rm>;
+const mockSymlink = symlink as unknown as Mock<typeof symlink>;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
+  typeof resolveWorktreePathCandidates
+>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -843,6 +845,42 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     const content = writeCall?.[1] as string;
     expect(content).toContain('[mcp_servers.playwright]\ncommand = "npx"');
     expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
+  });
+
+  it("strips an inherited table for an excluded server and preserves unrelated servers", async () => {
+    setUserConfig(
+      '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
+    );
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpExclude: ["playwright"],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).not.toContain("[mcp_servers.playwright]");
+    expect(content).not.toContain('args = ["@playwright/mcp"]');
+    expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
+  });
+
+  it("keeps the sidecar binding when the same server name is also excluded", async () => {
+    setUserConfig('[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], {
+      mcpBindings: [{ server: "playwright", url: "http://localhost:8742/mcp" }],
+      mcpExclude: ["playwright"],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
+    expect(count).toBe(1);
+    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://localhost:8742/mcp"');
+    expect(content).not.toContain('args = ["@playwright/mcp"]');
   });
 });
 

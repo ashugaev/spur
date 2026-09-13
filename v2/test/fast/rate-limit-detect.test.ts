@@ -12,6 +12,8 @@ import {
   detectCodexMcpPermissionDialog,
   detectCodexRateLimit,
   detectCursorRateLimit,
+  parseRateLimitResetAtMs,
+  rateLimitExpired,
   scanTmuxRateLimit,
 } from "../../src/rate-limit-detect.js";
 import { parseJsonlRecord } from "../../src/claude-jsonl-state.js";
@@ -345,6 +347,72 @@ describe("detectClaudeUsageLimitMenu", () => {
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
   });
 
+  // Claude Code's newer three-option layout: the admin option moved to "3."
+  // and a "wait here" option took slot 2. Same menu, same confirm footer.
+  const THREE_OPTION_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Stop and wait for limit to reset",
+    "  2. Wait here, then continue automatically at Sep 2, 8am",
+    "  3. Ask your admin for more usage",
+    "",
+    "Enter to confirm \u00b7 Esc to cancel",
+  ].join("\n");
+
+  it("flags the three-option menu whose admin option is numbered 3", () => {
+    expect(detectClaudeUsageLimitMenu(THREE_OPTION_MENU_TEXT)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the three-option menu when the cursor sits on the wait-here option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "\u276f 2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("returns null for a three-option menu with no confirm footer", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when the three-option menu has scrolled out of the live tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    expect(detectClaudeUsageLimitMenu(`${THREE_OPTION_MENU_TEXT}\n${subsequentOutput}`)).toBeNull();
+  });
+
+  it("returns null when the wait-here option is present but the admin option is not", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
   it("returns null for unrelated normal Claude Code output", () => {
     const paneText = ["Working on the task...", "Editing src/index.ts"].join("\n");
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
@@ -363,6 +431,27 @@ describe("detectClaudeUsageLimitMenu", () => {
   it("returns null for session-service.test.ts's raw contents (self-match regression guard)", () => {
     const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("ignores a usage-limit menu that has scrolled out of the live tail", () => {
+    const subsequentOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: doing unrelated follow-up work`,
+    ).join("\n");
+    const paneText = `${MENU_TEXT}\n${subsequentOutput}`;
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("still matches a menu at the pane tail", () => {
+    const precedingOutput = Array.from(
+      { length: 25 },
+      (_, i) => `line ${i}: earlier unrelated output`,
+    ).join("\n");
+    const paneText = `${precedingOutput}\n${MENU_TEXT}`;
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
   });
 });
 
@@ -388,6 +477,32 @@ describe("claudeUsageMenuOptionOneSelected", () => {
       "> 2. Ask your admin for more usage",
       "",
       "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns true when the \u276f cursor glyph marks option 1 on the three-option menu", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
+  });
+
+  it("returns false when the \u276f cursor glyph sits on another option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "\u276f 2. Wait here, then continue automatically at Sep 2, 8am",
+      "  3. Ask your admin for more usage",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
     ].join("\n");
     expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
   });
@@ -523,6 +638,57 @@ describe("scanTmuxRateLimit", () => {
     expect(scanTmuxRateLimit(readPane("cursor-false-match.scrollback.txt"))).toBeNull();
   });
 
+  it("flags a claude usage-limit banner behind a \u26a0 status glyph", () => {
+    const pane = [
+      "  editing src/index.ts",
+      "\u26a0 Usage limit reached \u00b7 continuing automatically at Sep 2, 8am \u00b7 esc to cancel",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("flags the same banner when the glyph carries an emoji variation selector", () => {
+    const pane = "\u26a0\ufe0f Usage limit reached \u00b7 continuing automatically at Sep 2, 8am";
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("flags an indented glyph banner", () => {
+    expect(scanTmuxRateLimit("   \u26a0  Out of credits")).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
+  });
+
+  it("still ignores a marker quoted right after a status glyph", () => {
+    expect(scanTmuxRateLimit('\u26a0 the pane renders "usage limit reached" here')).toBeNull();
+  });
+
+  it("ignores a mid-line marker on claude's own \u23fa output line", () => {
+    // Claude prefixes its own assistant/tool-call lines with these glyphs, so
+    // stripping one must not also buy the marker a marker-anywhere allowance.
+    expect(scanTmuxRateLimit("\u23fa Updated the usage limit reached marker handling")).toBeNull();
+  });
+
+  it("ignores a mid-line marker on a \u2717 test-runner line", () => {
+    expect(scanTmuxRateLimit("\u2717 flags the real codex out of credits pane")).toBeNull();
+  });
+
+  it("keeps the marker-anywhere allowance for codex's \u25a0 banner only", () => {
+    expect(scanTmuxRateLimit("\u25a0 Your workspace is out of credits. Ask your owner.")).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
+  });
+
+  it("still ignores a marker on a > gutter line", () => {
+    expect(scanTmuxRateLimit("> Usage limit reached")).toBeNull();
+  });
+
   it("returns null when no banner is rendered", () => {
     expect(scanTmuxRateLimit("Working on the task...")).toBeNull();
   });
@@ -559,5 +725,156 @@ describe("readCodexRolloutState rate limits", () => {
     });
     const dir = await makeSessionsDir(line);
     expect((await readCodexRolloutState(dir)).rateLimit).toBeNull();
+  });
+});
+
+describe("parseRateLimitResetAtMs", () => {
+  it("parses the field-reported sample anchored same-day", () => {
+    const anchorMs = Date.parse("2026-07-01T11:07:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 11:20am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-01T11:20:00.000Z"));
+  });
+
+  it("parses the captured fixture sample anchored same-day", () => {
+    const anchorMs = Date.parse("2026-07-12T18:18:45.588Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 7pm (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-12T19:00:00.000Z"));
+  });
+
+  it("rolls over to the next day when the anchor's clock time is already past the reset hour", () => {
+    const anchorMs = Date.parse("2026-07-01T23:50:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 12:10am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-02T00:10:00.000Z"));
+  });
+
+  it("clamps to the end of the truncated banner minute instead of rolling a full day", () => {
+    const anchorMs = Date.parse("2026-07-01T11:20:30.000Z");
+    const resetAtMs = parseRateLimitResetAtMs(
+      "You've hit your session limit · resets 11:20am (UTC)",
+      anchorMs,
+    );
+    expect(resetAtMs).toBe(Date.parse("2026-07-01T11:21:00.000Z"));
+    expect(resetAtMs).toBeGreaterThan(anchorMs);
+  });
+
+  it("rolls a full day once the anchor is past the truncation window", () => {
+    const anchorMs = Date.parse("2026-07-01T11:21:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 11:20am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-02T11:20:00.000Z"));
+  });
+
+  it("maps 12pm to noon, and 12am to midnight clamped to the end of its truncated minute", () => {
+    const anchorMs = Date.parse("2026-07-01T00:00:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 12pm (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-01T12:00:00.000Z"));
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 12am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-07-01T00:01:00.000Z"));
+  });
+
+  it("returns undefined for an hour of 0", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 0am (UTC)", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for minutes above 59", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 11:99am (UTC)", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined with no resets phrase", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · You've hit your usage limit.", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined with no UTC parenthetical", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 3pm", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for a non-UTC parenthetical", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your session limit · resets 3pm (PDT)", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for a weekly-limit banner carrying a resets clause", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets 7pm (UTC)", 0),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for an opus-limit banner carrying a resets clause", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your opus limit · resets 7pm (UTC)", 0),
+    ).toBeUndefined();
+  });
+});
+
+describe("rateLimitExpired", () => {
+  it("is true once now reaches the parsed reset instant", () => {
+    expect(
+      rateLimitExpired({ limited: true, reason: "claude rate_limit", resetAtMs: 100 }, 100),
+    ).toBe(true);
+    expect(
+      rateLimitExpired({ limited: true, reason: "claude rate_limit", resetAtMs: 100 }, 101),
+    ).toBe(true);
+  });
+
+  it("is false before the parsed reset instant", () => {
+    expect(
+      rateLimitExpired({ limited: true, reason: "claude rate_limit", resetAtMs: 100 }, 99),
+    ).toBe(false);
+  });
+
+  it("is false when the detection carries no resetAtMs", () => {
+    expect(rateLimitExpired({ limited: true, reason: "claude rate_limit" }, Date.now())).toBe(
+      false,
+    );
+  });
+});
+
+describe("detectClaudeRateLimit stays time-free", () => {
+  it("returns limited:true for a rate-limited record at any now, and carries resetAtMs through", () => {
+    const anchorMs = Date.parse("2026-07-12T18:18:45.588Z");
+    const record = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        isApiErrorMessage: true,
+        apiErrorStatus: 429,
+        error: "rate_limit",
+        timestamp: "2026-07-12T18:18:45.588Z",
+        message: {
+          model: "<synthetic>",
+          role: "assistant",
+          stop_reason: "stop_sequence",
+          content: [{ type: "text", text: "You've hit your session limit · resets 7pm (UTC)" }],
+        },
+      }),
+      anchorMs,
+    );
+    expect(record).toBeDefined();
+    if (!record) {
+      return;
+    }
+    const detection = detectClaudeRateLimit([record]);
+    expect(detection).toEqual({
+      limited: true,
+      reason: "claude rate_limit",
+      resetAtMs: Date.parse("2026-07-12T19:00:00.000Z"),
+    });
+    // The detector itself takes no `now` argument — passing different "now"
+    // values (simulated by re-invoking with the same records) always
+    // reproduces the same detection.
+    expect(detectClaudeRateLimit([record])).toEqual(detection);
   });
 });

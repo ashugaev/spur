@@ -148,8 +148,8 @@ this on:
   about. Start with a coarse schedule (hourly, not every-minute) and watch the
   first few runs' diffs before tightening it.
 - `spawn.autoComplete` does not apply here: `config.ts` only permits it for
-  `github:work_item.new`, `sentry:issue.new`, or `github-ci:run.completed`
-  events, not `cron:tick` — setting it on a cron-triggered spawn trigger fails
+  `github:work_item.new`, `sentry:issue.new`, `github-ci:run.completed`, or
+  `jira:work_item.new` events, not `cron:tick` — setting it on a cron-triggered spawn trigger fails
   config load. It also isn't a "which sessions are already live" concept, it's
   one-work-item-per-PR dedup (README's `pr-review-queue-spawn` example is the
   only place it's actually used; a desk-group PR-review trigger uses

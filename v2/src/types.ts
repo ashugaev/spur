@@ -167,11 +167,13 @@ export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
+export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   GITHUB_CI_RUN_COMPLETED_EVENT,
+  JIRA_WORK_ITEM_NEW_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -180,6 +182,10 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export interface JiraWorkItemEventData extends WorkItemEventData {
+  key: string;
 }
 
 export type BacklogProviderId = "jira";
@@ -248,6 +254,10 @@ export interface GitHubAdaptivePollConfig {
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   adaptivePoll?: GitHubAdaptivePollConfig;
+  // Caps how many sessions one review poll batches into a single GraphQL call.
+  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+  maxReviewBatchTargets?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -263,11 +273,15 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
-export interface JiraSourceConfig {
+export interface JiraSourceConfig extends BaseSourceConfig {
   type: "jira";
   baseUrl: string;
   email: string;
   token: string;
+  query?: string;
+  intervalMs: number;
+  emitExisting: boolean;
+  maxResults: number;
 }
 
 export interface BacklogConfig {
@@ -562,6 +576,16 @@ export interface SessionModeConfig {
   default?: boolean;
 }
 
+/**
+ * Host/global MCP servers suppressed for this project's sessions. Spur's launch
+ * plan is authoritative: an excluded server is dropped from the generated agent
+ * MCP config, so a project pays no RAM for a globally-configured server it does
+ * not use.
+ */
+export interface ProjectMcpConfig {
+  exclude: string[];
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -580,6 +604,7 @@ export interface ProjectConfig {
   workspaceAccess?: WorkspaceAccessConfig;
   modes?: Record<string, SessionModeConfig>;
   sidecars: Record<string, SidecarConfig>;
+  mcp?: ProjectMcpConfig;
   sources: Record<string, SourceConfig>;
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
@@ -726,6 +751,16 @@ export interface AppConfig {
     intervalMinutes: number;
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
+  };
+  // Prunes agent-history artifacts only. Disjoint from sessionGc, which owns
+  // worktrees and session records.
+  artifactRetention: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxAnchorsPerSweep: number;
+    maxBytesPerSession: number;
+    maxFilesPerSession: number;
   };
   sidecarGc: {
     enabled: boolean;
@@ -905,6 +940,15 @@ export function isTerminalSessionStatus(
   return status === "completed" || status === "killed";
 }
 
+// respawn()'s own gate. One definition consumed by the hint builders in
+// session-service.ts and cli.ts so a hint can never name respawn for a
+// status respawn's own throw would reject.
+export function isRespawnableStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" | "errored" {
+  return status === "completed" || status === "killed" || status === "errored";
+}
+
 export interface ServiceInstanceRecord {
   sessionId: string;
   project: string;
@@ -950,6 +994,9 @@ export interface SessionSidecarView {
   ageSeconds?: number;
   /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
   ageWarn?: boolean;
+  /** True when the sidecar's tmux session exists but its pane has exited
+   * (remain-on-exit); omitted otherwise. */
+  deadPane?: boolean;
 }
 
 export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
@@ -960,6 +1007,8 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   hasUnseenAttention?: boolean;
   lastActivityAt: string;
   artifacts: SessionArtifact[];
+  /** True only when a nested-artifact budget cut the walk short; omitted otherwise. */
+  artifactsTruncated?: boolean;
   services: ServiceInstanceView[];
   sidecars: SessionSidecarView[];
   workspaceAccess?: SessionWorkspaceAccess;
@@ -969,7 +1018,24 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   queuedMessages?: SessionQueuedMessagesView;
 }
 
-export interface DashboardSessionView extends SessionRecord {
+/**
+ * Fields enrichDashboard strips: the runtime detail the dashboard listing never
+ * renders. `launchCommand`, `stateSubscriptions`, `allowedTriggers`,
+ * `agentSessionId` and `branchSource` are read only from the single-session
+ * views, and together they were ~14% of the listing payload.
+ */
+export type DashboardOmittedField =
+  | "queuedMessages"
+  | "pipeline"
+  | "sidecarNames"
+  | "sidecarPorts"
+  | "launchCommand"
+  | "stateSubscriptions"
+  | "allowedTriggers"
+  | "agentSessionId"
+  | "branchSource";
+
+export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -981,7 +1047,31 @@ export interface DashboardSessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
 }
 
-export type SessionListView = SessionView | DashboardSessionView;
+export type SidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
+export type SidecarStopView = SessionView & { sidecarStop: SidecarStopReport };
+
+// Dropped from the list projection because they are the byte-heavy or
+// filesystem-walk-backed fields: `artifacts`/`artifactsTruncated` require a
+// per-session recursive readdir+stat walk, `stateHistory` and the prompt
+// bodies dominate the pretty-printed payload at production scale. Full
+// detail for all six stays on GET /sessions/:id (SessionView via `get`).
+// Not exported — no consumer outside this file needs the field-name union
+// itself, only the resulting `SessionListItemView` shape.
+type SessionListOmittedField =
+  | "artifacts"
+  | "artifactsTruncated"
+  | "stateHistory"
+  | "launchCommand"
+  | "prompt"
+  | "originalTaskPrompt";
+
+export type SessionListItemView = Omit<SessionView, SessionListOmittedField>;
+
+export type SessionListView = SessionListItemView | DashboardSessionView;
 
 export interface SessionWorkspaceAccessItem {
   label: string;
@@ -1111,7 +1201,6 @@ export interface CompleteSessionRequest {
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
   skipRuntimeTeardown?: boolean;
-  todoOverrideReason?: string;
 }
 
 export type TodoActor =
@@ -1406,4 +1495,10 @@ export interface ConversationResponse {
   entries: TranscriptEntry[];
   durationMs: number;
   state: SessionState;
+  /** Absolute index of `entries[0]` within the full transcript. */
+  startIndex: number;
+  /** Total number of entries in the full transcript. */
+  totalEntries: number;
+  /** True when there are older entries before `startIndex` (startIndex > 0). */
+  hasMore?: boolean;
 }
