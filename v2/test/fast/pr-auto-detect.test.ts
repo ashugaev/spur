@@ -124,6 +124,14 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: vi.fn(() => Promise.resolve(null)),
+  // Delegates to the same mocks readRuntimeSnapshot's other reads already
+  // drive, so this file's existing tmuxSessionExistsMock overrides keep
+  // working unchanged; `unresponsive` is never exercised by this file's tests.
+  getTmuxSessionPresence: vi.fn(async (name: string, options?: { fresh?: boolean }) => ({
+    present: await tmuxSessionExistsMock(name, options),
+    unresponsive: false,
+  })),
+  getTmuxPanePresence: vi.fn(async () => ({ dead: false, unresponsive: false })),
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
