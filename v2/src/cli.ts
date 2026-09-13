@@ -94,6 +94,12 @@ import {
 } from "./registry.js";
 import { listSessions } from "./metadata.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
+import {
+  collectOpenCodeGcPlan,
+  createOpenCodeGcDeps,
+  executeOpenCodeGc,
+  type OpenCodeGcReport,
+} from "./opencode-gc.js";
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
@@ -1285,6 +1291,95 @@ export function renderSessionGcResult(report: GcReport): string {
         `${restoreLoss.length} stopped session(s) lose \`spur restore\` once collected: ${restoreLoss.join(" ")}`,
       ),
     );
+  }
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+export function renderOpenCodeGcResult(report: OpenCodeGcReport): string {
+  if (report.reason) {
+    return dimText(`No plan: ${report.reason}. Nothing was read or removed.`);
+  }
+  // An operator has to be able to tell a genuinely empty plan from a blind
+  // one, so the scope of the listing is stated, not implied: how many
+  // directories were listed, how many failed, and that the listing is
+  // project-scoped rather than store-wide.
+  const enumeration = report.enumeration;
+  const lines = [
+    dimText(
+      `Store ${report.storeRoot}; enumerated ${enumeration.listedCount} session(s) from ${enumeration.directories.length} candidate director${enumeration.directories.length === 1 ? "y" : "ies"} (limit ${enumeration.limit}, older than ${report.olderThanDays}d, statuses ${report.statuses.join(",")}).`,
+    ),
+    dimText(
+      "  `opencode session list` is project-scoped by its cwd, so this is what those directories project to, not the whole store.",
+    ),
+  ];
+  if (enumeration.directories.length === 0) {
+    lines.push(
+      dimText("  No candidate directory: no terminal opencode record carries an agentSessionId."),
+    );
+  }
+  if (enumeration.directoriesFailed > 0) {
+    lines.push(
+      dimText(
+        `  ${enumeration.directoriesFailed} director${enumeration.directoriesFailed === 1 ? "y" : "ies"} failed to list; their sessions are invisible to this plan.`,
+      ),
+    );
+  }
+  for (const directory of enumeration.directories) {
+    lines.push(dimText(`  listed  ${directory}`));
+  }
+  lines.push("");
+  for (const entry of report.sessions) {
+    const detail = entry.error
+      ? `error: ${entry.error}`
+      : entry.blockReason
+        ? entry.blockReason
+        : entry.canonicalDirectory;
+    const verb = entry.blockReason ? "blocked" : entry.deleted ? "deleted" : "select ";
+    lines.push(
+      `  ${accent(verb)}  ${entry.id.padEnd(31)}  ${`${Math.floor(entry.ageDays)}d`.padEnd(5)}  ${detail}`,
+    );
+    lines.push(dimText(`           ${entry.recordIds.join(" ")}`));
+  }
+  for (const leaf of report.snapshotLeaves) {
+    lines.push(
+      `  ${accent(leaf.removed ? "removed" : "snapshot")}  ${formatBytes(leaf.sizeBytes).padEnd(9)}  ${leaf.path}`,
+    );
+  }
+  if (report.log) {
+    // A dry run has no archive to `du`, so its retained term is an
+    // apparent-size projection up to one filesystem block off the executing
+    // path's exact du − du. Say so, or the two read identically.
+    const projected = report.log.projected ? " [projected, not measured]" : "";
+    lines.push(
+      `  ${accent(report.log.truncated ? "truncated" : "log      ")}  ${formatBytes(report.log.freedBytes).padEnd(9)}  ${report.log.path} (retaining ${formatBytes(report.log.retainedBytes)} as ${report.log.archivePath})${projected}`,
+    );
+  }
+  if (report.sessions.length === 0 && report.snapshotLeaves.length === 0 && !report.log) {
+    lines.push(dimText("Nothing to collect."));
+  }
+  lines.push("");
+  // Two differently-sourced numbers, never summed: file bytes are a du, the
+  // db file delta is a stat across the VACUUM. There is no third, estimated
+  // number — sizing the selected rows up front would open the store.
+  lines.push(`Freed (files): ${formatBytes(report.totals.freedBytes)} — a floor, not the store's`);
+  lines.push(dimText("  total reclaimable size: the listing is project-scoped, not store-wide."));
+  lines.push(`DB file bytes returned by VACUUM: ${formatBytes(report.totals.dbFileBytesFreed)}`);
+  if (report.dryRun) {
+    lines.push(
+      dimText("  A dry run reports file bytes only; DB bytes are known after the VACUUM runs."),
+    );
+  }
+  lines.push(
+    `Totals: ${report.totals.sessionsSelected} session(s) selected, ${report.totals.sessionsDeleted} deleted, ${report.totals.sessionsBlocked} blocked by a status change during the run, ${report.totals.snapshotLeavesRemoved} snapshot leaf/leaves removed, ${report.totals.errors} error(s).`,
+  );
+  if (report.vacuum.blockReasons.length > 0) {
+    lines.push(dimText(`VACUUM skipped: ${report.vacuum.blockReasons.join(",")}.`));
+  }
+  if (report.vacuum.error) {
+    lines.push(dimText(`VACUUM failed: ${report.vacuum.error}.`));
   }
   if (report.dryRun) {
     lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
@@ -2606,6 +2701,60 @@ export function createProgram(cliEntrypoint: string): Command {
           return executeSessionGc(plan, createGcDeps(config), { dryRun, sizes });
         },
         render: renderSessionGcResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("opencode-gc")
+    .description(
+      "Reclaim opencode's own store: rows of terminal sessions, dead-worktree snapshot leaves, the unrotated log (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is deleted or truncated")
+    .option("--older-than <days>", "Minimum age in days of a store session's last update")
+    .option("--statuses <list>", "Statuses to collect, comma-separated: completed,killed,stopped")
+    .option("--limit <number>", "Maximum store sessions to delete in one run")
+    .option("--no-sizes", "Skip `du` size measurement (no freed-byte reporting)")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const olderThanDays =
+        options.olderThan === undefined
+          ? config.opencodeGc.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const statuses =
+        options.statuses === undefined
+          ? config.opencodeGc.statuses
+          : parseSessionGcStatusesOption(String(options.statuses));
+      const limit =
+        options.limit === undefined
+          ? config.opencodeGc.maxSessionsPerSweep
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      const sizes = options.sizes !== false;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning opencode gc" : "running opencode gc",
+        action: async () => {
+          const deps = createOpenCodeGcDeps(config);
+          const plan = await collectOpenCodeGcPlan(deps, {
+            now: new Date(),
+            olderThanDays,
+            statuses,
+            limit,
+            logMaxBytes: config.opencodeGc.logMaxBytes,
+            logTailBytes: config.opencodeGc.logTailBytes,
+          });
+          // The single VACUUM is CLI-only: 93 s measured on a 3.1 GB store,
+          // against a 300 s daemon tick.
+          return executeOpenCodeGc(plan, deps, { dryRun, sizes, vacuum: true });
+        },
+        render: renderOpenCodeGcResult,
         exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
       });
     });

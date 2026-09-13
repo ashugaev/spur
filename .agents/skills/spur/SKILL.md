@@ -25,6 +25,7 @@ SAFETY
   A daemon on the default port is someone's production instance. Never `daemon start|stop`, kill, or direct-HTTP a daemon you did not start; never repoint `--config` at `~/.spur/config.yaml`.
   Run non-default-instance CLI calls from a neutral cwd — `spawn`/`list` auto-connect the nearest `spur.yaml` upward from cwd and spawn real sessions.
   Never run `gc --execute` against a data dir you do not own; a bare `gc` is the dry run.
+  Never run `opencode-gc --execute` on a host running opencode agents you do not own; it deletes store rows and truncates the vendor log for every project the candidate directories reach. A bare `opencode-gc` is the dry run.
   Never run `cache --prune --yes` on a host running agents you do not own; a bare `cache` or `cache --prune` is a dry run.
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, or Jira runs arbitrary commands as the daemon user.

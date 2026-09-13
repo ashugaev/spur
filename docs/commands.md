@@ -46,6 +46,24 @@ Actions: `reclaim` removes worktree, archives; `archive` moves records only; `bl
 
 Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with their log shard; `mv` back into `sessions/<projectId>/` to un-archive (a collected `stopped` session can't restore — `gc` lists those ids first). `--no-sizes` skips freed-byte measurement; exits `1` on any group error. Defaults: `sessionGc.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
 
+## opencode-gc
+
+`spur opencode-gc [--execute]` reclaims opencode's own store — root resolved from `opencode db path`, never hardcoded. Dry run unless `--execute`, daemon-free. Three units: store rows of an opencode session, `snapshot/<projectId>/<worktreeHash>` leaves, `log/opencode.log`.
+
+Selects a store session only when a Spur record's `agentSessionId` equals its id and every such record is `completed`/`killed`. Directory co-location protects, never selects, and both sides are realpath-canonicalized. Skip reasons: `protected_live_record`, `no_record_match`, `directory_unresolvable`, `too_recent`, `over_limit`. Plan-wide refusals: `store_unresolved`, `enumeration_failed`, `enumeration_truncated`. Rows go through `opencode session delete` — `event` has no FK to `session`, so only the vendor path removes the event rows.
+
+Each record is re-read from disk immediately before its own delete; a status that left the collected set blocks that entry as `changed_during_run`. Covers a respawn landing mid-run — `completed` is respawnable and an opencode resume is `--session <agentSessionId>`, so a deleted session would come back empty.
+
+Snapshot leaf selected when its git config records a `[core] worktree` that no longer exists; a leaf with an existing worktree or no `worktree` line is never selected. Log above [`opencodeGc.logMaxBytes`](configuration.md#field-reference) is copy-truncated: tail to `opencode.log.1` (overwritten), then `ftruncate` to 0. Truncate, never rename — every live opencode process holds the file `O_APPEND` and resumes at offset 0. Writes landing between the copy and the truncate are lost.
+
+`opencode session list` is scoped by its cwd's project and takes no directory flag, so the plan enumerates once per distinct candidate directory — the canonicalized `worktreePath` of every collected opencode record carrying an `agentSessionId` — and merges. The report names each directory listed and how many failed. Sessions outside those projects are never listed, so every total is a floor, and an empty plan is distinguishable from a blind one. One listing costs 2-4 s.
+
+Two byte numbers, never summed: freed files (`du -s --block-size=1` of snapshot leaves plus the log delta) and DB file bytes returned by `VACUUM` (a stat delta, `--execute` only). A dry run reports file bytes only and never estimates DB bytes — sizing the selected rows up front means opening the store, and even `sqlite3 "file:<db>?mode=ro"` rewrites the `-shm`. A dry run's log term is marked `[projected, not measured]`: with no archive written yet it cannot be a `du`, so it is up to one filesystem block off.
+
+One `VACUUM` at the end of an `--execute` run, CLI only (93 s measured on a 3.1 GB store). Skipped, with the reason printed, on `dry_run`, `no_sessions_deleted`, `db_path_unresolved`, `free_space_unknown`, `insufficient_free_space` (needs 2x the DB size free), or `live_opencode_record`.
+
+Flags: `--older-than <days>`, `--statuses <completed,killed,stopped>`, `--limit <n>` override `opencodeGc.olderThanDays`, `.statuses`, `.maxSessionsPerSweep`; `--no-sizes` skips `du` (no freed-byte reporting); `--json` prints raw JSON. Exits `1` on any error. Defaults: `opencodeGc.*` ([configuration.md](configuration.md#field-reference)).
+
 ## cache
 
 `spur cache [--prune --yes]` reports host caches outside `~/.spur` — size, path, age (days), protection reason per entry, size-ranked. Dry-run by default; `--prune --yes` deletes `prunable` entries, no daemon needed. Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, rest of `~/.cache`, `/tmp`, never `~/.spur`.
