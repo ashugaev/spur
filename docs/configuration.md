@@ -235,6 +235,15 @@ Chats and forum topics bind to sessions with `/watch`. Without an id, Spur repli
 
 Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` always send a farewell and drop the binding — the forum topic closes too, unless the session was spawned with `selfDestruct` enabled. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
 
+`/spawn` picks an agent, then a project, before creating a session. Bare `/spawn` asks the agent first; `/spawn <agent>` and `/spawn <agent> <task>` go straight to the project step. The picked project overrides the source's own project.
+
+- Picker lists configured non-shepherd projects; a registry-discovered project is never a spawn target.
+- One configured project auto-picks — no keyboard. `/spawn <agent>` replies naming the project; `/spawn <agent> <task>` spawns immediately instead, replying `Spawning...`/`Spawned and bound...` with no project name.
+- A pending `/spawn` expires 10 minutes after its last step with no reply.
+- A stale project keyboard, from an overwritten or expired `/spawn`, answers `Spawn expired. Run /spawn again.` and spawns nothing.
+
+`autoSpawn` below skips the picker, always uses `autoSpawn.project`.
+
 ## Event log retention
 
 Two append-only logs under `dataDir`: `events.jsonl` (daemon/session events) and `user-actions.jsonl` (mutating API calls). Each also shards per session under `<dataDir>/sessions/<id>/`. `hotBytes` caps the root file before it rotates into a `.N.gz` archive, `shardHotBytes` caps each shard. Rotation is lossless and archives read through the same path as the live file. `retainArchives` bounds archives per file — the next rotation past that count deletes the oldest, so history past the window is pruned.
