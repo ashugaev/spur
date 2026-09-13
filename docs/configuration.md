@@ -235,6 +235,15 @@ Chats and forum topics bind to sessions with `/watch`. Without an id, Spur repli
 
 Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` always send a farewell and drop the binding — the forum topic closes too, unless the session was spawned with `selfDestruct` enabled. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
 
+`/spawn` picks an agent, then a project, before creating a session. Bare `/spawn` asks the agent first; `/spawn <agent>` and `/spawn <agent> <task>` go straight to the project step. The picked project overrides the source's own project.
+
+- Picker lists configured non-shepherd projects; a registry-discovered project is never a spawn target.
+- One configured project auto-picks — no keyboard. `/spawn <agent>` replies naming the project; `/spawn <agent> <task>` spawns immediately instead, replying `Spawning...`/`Spawned and bound...` with no project name.
+- A pending `/spawn` expires 10 minutes after its last step with no reply.
+- A stale project keyboard, from an overwritten or expired `/spawn`, answers `Spawn expired. Run /spawn again.` and spawns nothing.
+
+`autoSpawn` below skips the picker, always uses `autoSpawn.project`.
+
 ## Event log retention
 
 Two append-only logs under `dataDir`: `events.jsonl` (daemon/session events) and `user-actions.jsonl` (mutating API calls). Each also shards per session under `<dataDir>/sessions/<id>/`. `hotBytes` caps the root file before it rotates into a `.N.gz` archive, `shardHotBytes` caps each shard. Rotation is lossless and archives read through the same path as the live file. `retainArchives` bounds archives per file — the next rotation past that count deletes the oldest, so history past the window is pruned.
@@ -342,6 +351,12 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
+- `artifactRetention.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur artifacts-gc`](commands.md#artifacts-gc) policy on the same 5-minute timer as `sessionGc`; `spur artifacts-gc` itself works regardless.
+- `artifactRetention.olderThanDays`: optional, default `30`. Age cutoff, applied only to a workspace whose every session is `completed`, `killed`, or `stopped`. Also the `spur artifacts-gc --older-than` default.
+- `artifactRetention.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed.
+- `artifactRetention.maxAnchorsPerSweep`: optional positive integer, default `20`. Per-sweep workspace cap (the CLI's own default cap is `100`).
+- `artifactRetention.maxBytesPerSession`: optional positive integer, default `2147483648` (2GiB). `agent-history-*.jsonl` bytes kept per workspace; the oldest are evicted until the workspace fits. Applies at any session status.
+- `artifactRetention.maxFilesPerSession`: optional positive integer, default `500`. `agent-history-*.jsonl` file count kept per workspace, oldest evicted first. Applies at any session status.
 - `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. On by default, unlike `sessionGc`: this reaper kills a restartable sidecar process, never a worktree or a record. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. Workspace idle time that reaps a non-MCP project sidecar. Per-sidecar override: `projects.<id>.sidecars.<name>.idleTtlMinutes`. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. Process age at which a kept sidecar logs `session.sidecar.age_warning`. Warn only — it authorizes no kill.
@@ -359,13 +374,13 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `userActionLog.hotBytes`: optional, default `134217728` (128MB). Instance config only.
 - `userActionLog.shardHotBytes`: optional, default `16777216` (16MB).
 - `userActionLog.retainArchives`: optional, default `5`.
-- `admission.enabled`: optional boolean, default `true`. `false` disables cap refusal, floor refusal, and critical shedding; legacy `minAvailableBytes` / `minFreeSwapBytes` warnings may still log. Instance config only — project config ignores `admission` before semantic parsing.
+- `admission.enabled`: optional boolean, default `true`. `false` disables cap refusal, floor refusal, critical shedding, and the memory hold; legacy `minAvailableBytes` / `minFreeSwapBytes` warnings may still log. Instance config only — project config ignores `admission` before semantic parsing.
 - `admission.maxLiveSessions`: optional positive integer, default `100`. Global cap on concurrently live (`running`/`spawning`, plus a session mid-restore) sessions. Agent state does not affect the count: a `waiting` or `needs_input` session remains `running` and keeps its slot. An explicit value wins over memory-sizing fields.
 - `admission.perSessionBytes`: optional positive number, default `1610612736` (1.5 GiB). Estimated worst-case memory cost of one live session. Setting this field without `maxLiveSessions` opts into the memory-derived cap.
 - `admission.reserveFraction`: optional number in `(0, 1]`, default `0.7`. Fraction of total host memory reserved for sessions. Setting this field without `maxLiveSessions` opts into the memory-derived cap.
 - `admission.memoryGuard.enforce`: optional boolean, default `false`. Controls only legacy `minAvailableBytes` / `minFreeSwapBytes`: `false` logs `session.admission.memory_guard` and admits; `true` refuses the spawn or restore.
 - `admission.memoryGuard.enforceFloors`: optional boolean, default `true`. Refuses spawn below `admissionFloorBytes`, restore below `restoreFloorBytes`, or either operation above the PSI threshold.
-- `admission.memoryGuard.shedEnabled`: optional boolean, default `true`. Enables the 1-second critical-memory sampler and staged shedding.
+- `admission.memoryGuard.shedEnabled`: optional boolean, default `true`. Enables staged critical-memory shedding. Does not gate the memory hold, which samples on the same 1-second tick regardless.
 - `admission.memoryGuard.minAvailableBytes`: optional non-negative number, default `1073741824` (1 GiB). Guard threshold on `/proc/meminfo`'s `MemAvailable`; `0` effectively disables the available-memory half of the guard.
 - `admission.memoryGuard.minFreeSwapBytes`: optional non-negative number, default `0`. Guard threshold on `/proc/meminfo`'s `SwapFree`; `0` effectively disables the swap half of the guard.
 - `admission.memoryGuard.admissionFloorBytes`: optional non-negative number. Default `max(1073741824, floor(MemTotal / 8))`.
@@ -390,6 +405,22 @@ The 1-second sampler reads host `MemAvailable` plus daemon-cgroup `memory.curren
 Below the critical floor each tick stops at most one safe sidecar. Session shedding starts after 12s of continuous low host RAM; host RAM at half the critical floor (capped at 2 GiB) or finite cgroup-max headroom at that threshold skips the grace period — one sidecar, re-sample, then at most one session pause. `memory.high` alone authorizes sidecar shedding only. Order: sessions `rate_limited` before `waiting`, oldest `updatedAt` first; sidecars all built-in MCP before project. Untouched: `working`, `needs_input`, restore-warmup, unclassifiable sessions, protected shared sidecars. Paused sessions stay restorable.
 
 Pressure closes at the admission floor (RAM), below the cgroup-high threshold by the smaller of 10% or the emergency threshold, or above twice the emergency headroom (finite max). Swap-only shedding starts disarmed, arms after swap recovers 10 percentage points below `shedSwapUsedFraction`, and spends one sidecar attempt per recovery. Healthy and recovery ticks log nothing. Events: `daemon.memory.shed`, `daemon.memory.shed.failed`, `session.admission.denied`, `session.admission.memory_guard`, startup warning `daemon.memory.unbounded`.
+
+While the guard would deny a wake, a host-wide memory hold engages on the same 1-second tick: due scheduled/interval/daily wakes, queued-message delivery, and pending trigger sends stay in place instead of being attempted. While held, a trigger batch for a `stopped` session is deferred, not dropped. The hold clears after ten consecutive non-denying ticks — sampling at or above the restore floor plus `perSessionBytes`, an unreadable `/proc/meminfo` sample, or a mix of the two — since an unreadable sample also fails open in the admission check the hold mirrors; `admission.enabled: false` force-releases an engaged one.
+
+Hold events: `daemon.memory.hold.engaged` (warn) with `availableBytes`, `floorBytes`, `someAvg10`, `cause` (`legacy_available`, `legacy_swap`, `context_floor`, `pressure`); `daemon.memory.hold.cleared` (info) with `reason` (`recovered`, `admission_disabled`, or `sample_unavailable`), `availableBytes`, `floorBytes`, `marginBytes`, `durationMs`, `engagedCause` — `admission_disabled` and `sample_unavailable` report `availableBytes` and `marginBytes` as `null`; `daemon.memory.hold.failed` (warn) with `message`. A held trigger delivery logs `trigger.send.suppressed_memory_guard` (info) with `interrupt`, `attempt` in place of `trigger.send.failed`.
+
+## Artifact retention
+
+`artifactRetention` prunes `agent-history-*.jsonl` session artifacts. Never touches worktrees or session records — that is [`spur gc`](commands.md#gc).
+
+Unit is the artifacts directory of a [desk group](#desk-groups) workspace, shared by every member.
+
+Only an artifact that is agent-written (`origin: automatic`), named `agent-history-*`, and not user-added is evictable. A user upload, a startup attachment, and any other artifact in the same directory always survive. A directory listing that hits its walk cap blocks the whole workspace for that run.
+
+Eviction is oldest-first, per workspace, in this order: age (only when every member is `completed`, `killed`, or `stopped`), then `maxBytesPerSession`, then `maxFilesPerSession`.
+
+An `agent-history-*.jsonl` artifact after a session's first capture holds only the transcript lines appended since the previous state transition, not the whole transcript. The UI still links each file as a history snapshot. Oldest-first eviction removes the base full copy, so surviving files do not reconstruct a full transcript.
 
 ## Sidecar reaping
 
@@ -439,7 +470,7 @@ The daemon sweep never runs `du`: it reads `<dataDir>/disk-budget.json`, written
 
 `staleAfterMinutes` (instance, default `720`, 12 hours) parks a `running` session idle in state `waiting` that long: pane killed, live sidecars torn down, record written `status: "stopped"`, `stopReason: "stale_timeout"`, `staleSidecars` (names tmux-alive at park time), derived state `stale`. `0` — instance or `projects.<id>.staleAfterMinutes` — disables parking for that scope. Never parked: `working`, `needs_input`, `rate_limited`, queued or in-flight work, Shepherd sessions, and a session with no transcript activity signal at all. The idle clock is the agent's transcript activity, or the parsed reset instant of a claude rate limit that just expired when that is later — still not a routine record write (`agentSessionId` capture, PR field update, slot unlink, `serverError`/`rateLimitedAt` clear), not a tmux attach, so an open web terminal never holds a session unparked.
 
-Waking passes the same [admission gate](#admission-control) as spawn and restore. Refused: a trigger delivery or queued-message drain retries through its own path; a scheduled/interval/daily wake re-arms the same occurrence for the next tick; a manual send or Resume is rejected like an over-cap spawn.
+Waking passes the same [admission gate](#admission-control) as spawn and restore. Refused: a trigger delivery or queued-message drain retries through its own path; a scheduled/interval/daily wake re-arms the same occurrence for the next tick; a manual send or Resume is rejected like an over-cap spawn. A memory-guard crossing instead engages the host-wide [memory hold](#admission-control): automatic paths (scheduled/interval/daily wakes, queued-message delivery, trigger sends) are held in place; manual send and Resume still call `assertAdmissible` and return a 429 while memory is below the floor.
 
 Any system message wakes a parked session silently — GitHub/review event, trigger send, scheduled/interval/daily wake, manual send: pane relaunched, `staleSidecars` replayed, message delivered once the agent process is live, no restore prompt when the native transcript resumes. On a fresh-launch fallback (no native resume, or it failed) the original task prompt is resent first, wrapped as restore does — every fresh-launch fallback, parked or not. The resend waits on the agent's submit ack for claude and cursor, skips it for codex (as `spur restore` does). Ack never confirmed but pane alive: the resend proceeds and logs `session.recover.context_unconfirmed`. Manual Resume (`spur restore`, web Resume) wakes with no message. After a wake the record carries neither `stopReason` nor `staleSidecars`.
 
@@ -481,7 +512,18 @@ Message delivery events: `session.message.sent`, `session.message.delivery_recov
 
 Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff doubles from 2 minutes to a 30-minute cap), `session.todo.nudge_disabled` (give-up; `details.kind` is `ledger_corrupt` or `target_gone`). `session.todo.nudge_disabled` is emitted at most once per session per liveness episode.
 
+Session lifecycle events: `session.complete.completed`, `session.complete.failed`, `session.pause.completed`, `session.pause.failed`, `session.self_destruct.completed`, `session.self_destruct.failed`, `session.desk_complete.completed`, `session.desk_complete.failed`, `session.handoff.completed`, `session.handoff.failed`.
+
+- A ToDo-gate refusal logs the `.failed` event at `warn` with `details.kind` `todo_ledger_empty` or `todo_open_work`.
+- `session.handoff.failed` after the successor spawned stays `error` with no `details.kind`, ToDo cause or not.
+- Every other failure cause logs `.failed` at `error` with no `details.kind`.
+- Cut note: events written before 2026-09-11 log `self_destruct`, `desk_complete`, and `handoff` under `session.complete.*`; a query over historical `events.jsonl` must union both names.
+
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
+
+Attention monitor events: `session.attention_monitor.failed` (a whole sweep threw). `session.attention_monitor.session_failed` (one session threw and was skipped for that sweep, its previous attention and run state carried forward; carries `sessionId`, `projectId`). `session.attention_monitor.slow` (a sweep's wall time reached the 5s poll interval; carries `durationMs`, `intervalMs`, `suppressedTicks` — ticks dropped while that sweep ran). `session.runtime.probe_unresponsive` (reconcile of a running session skipped, its tmux probe hit the 5s timeout; session record left untouched).
+
+Handoff/respawn events: `session.handoff.startup_attachment_missing`, `session.respawn.startup_attachment_missing` (warn when a record-listed startup attachment has no file on disk; handoff/respawn proceed with resolvable attachments only; `details.missingIds`).
 
 ## Daemon restarts
 

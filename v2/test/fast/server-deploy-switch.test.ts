@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import type * as ChildProcess from "node:child_process";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
 import { findFreePort } from "../helpers/common.js";
@@ -112,7 +112,7 @@ function registryResponse(versions: ReadonlyArray<string>): Response {
 }
 
 describe("POST /deploy/switch", () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
+  let fetchSpy: Mock<typeof fetch>;
   let originalFetch: typeof fetch;
 
   beforeEach(() => {

@@ -18,7 +18,13 @@ export type DiskBudgetRootId =
   | "playwright-mcp-profiles"
   | "worktree-build-caches";
 
-export type DiskBudgetOwner = "disk-gc" | "spur cache" | "opencode-gc" | "spur gc" | "none";
+export type DiskBudgetOwner =
+  | "disk-gc"
+  | "spur cache"
+  | "opencode-gc"
+  | "spur gc"
+  | "artifacts-gc"
+  | "none";
 
 export interface DiskBudgetRoot {
   id: DiskBudgetRootId;
@@ -60,7 +66,7 @@ const ROOT_ORDER: readonly {
   reclaimedByDiskGc: boolean;
   reclaimedBy: DiskBudgetOwner;
 }[] = [
-  { id: "session-artifacts", reclaimedByDiskGc: false, reclaimedBy: "none" },
+  { id: "session-artifacts", reclaimedByDiskGc: false, reclaimedBy: "artifacts-gc" },
   { id: "worktrees", reclaimedByDiskGc: false, reclaimedBy: "spur gc" },
   { id: "session-tools", reclaimedByDiskGc: false, reclaimedBy: "none" },
   { id: "opencode-store", reclaimedByDiskGc: false, reclaimedBy: "none" },

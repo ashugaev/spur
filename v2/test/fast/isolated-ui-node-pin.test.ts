@@ -288,7 +288,7 @@ describe("spur-isolated-ui node pin", () => {
     ).resolves.toEqual(["install node=v24.15.0", "dev node=v24.15.0"]);
   });
 
-  it("engines-invalid system node (below the ^20.19.0 floor) activates the pin via nvm", async () => {
+  it("engines-invalid system node (below the ^22.13.0 floor) activates the pin via nvm", async () => {
     const worktree = createFakeWorktree();
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeStubNvm(worktree.nvmDir);
@@ -311,13 +311,11 @@ describe("spur-isolated-ui node pin", () => {
     });
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\^20\.19\.0/);
+    expect(rejection.stderr).toMatch(/\^22\.13\.0/);
     // Full range, not a prefix of it: NODE_ENGINES_RANGE here is exactly
     // what node_satisfies_engines's `node -e` wrote to stdout and the shell
-    // captured via command substitution — pins that the whole 28-byte
-    // engines.node string (including the trailing `>=24` clause) arrived
-    // intact, not truncated mid-write.
-    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0 \|\| >=24/);
+    // captured via command substitution — pins that the whole engines.node string (including the trailing `>=24` clause) arrived intact, not truncated mid-write.
+    expect(rejection.stderr).toMatch(/\^22\.13\.0 \|\| >=24/);
     expect(rejection.stderr).toMatch(/v21\.7\.3/);
     expect(rejection.stderr).toMatch(/\.nvmrc/);
     expect(rejection.stderr).toMatch(/nvm install 24/);
@@ -342,7 +340,7 @@ describe("spur-isolated-ui node pin", () => {
     });
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0 \|\| >=24/);
+    expect(rejection.stderr).toMatch(/\^22\.13\.0 \|\| >=24/);
     expect(rejection.stderr).toMatch(/v21\.0\.0-rc\.0/);
     expect(rejection.stderr).toMatch(/nvm install 24/);
     expect(rejection.stderr).not.toMatch(/unparseable output/);
@@ -411,14 +409,14 @@ describe("spur-isolated-ui node pin", () => {
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeFileSync(
       join(worktree.repoDir, "package.json"),
-      JSON.stringify({ engines: { node: "^20.19.0 || ^22.13.0" } }),
+      JSON.stringify({ engines: { node: "^22.13.0" } }),
       "utf8",
     );
 
     const rejection = await runIsolatedUiExpectFailure(worktree, { SPUR_TEST_SYS_NODE: "v25.2.0" });
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\^20\.19\.0 \|\| \^22\.13\.0/);
+    expect(rejection.stderr).toMatch(/\^22\.13\.0/);
     expect(rejection.stderr).toMatch(/v25\.2\.0/);
     expect(existsSync(worktree.logPath)).toBe(false);
   });
@@ -428,7 +426,7 @@ describe("spur-isolated-ui node pin", () => {
     writeFileSync(join(worktree.repoDir, ".nvmrc"), "24\n", "utf8");
     writeFileSync(
       join(worktree.repoDir, "package.json"),
-      JSON.stringify({ engines: { node: "^20.19.0 || ^22.13.0" } }),
+      JSON.stringify({ engines: { node: "^22.13.0" } }),
       "utf8",
     );
 
@@ -445,7 +443,7 @@ describe("spur-isolated-ui node pin", () => {
     const rejection = await runIsolatedUiExpectFailure(worktree);
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/\^20\.19\.0/);
+    expect(rejection.stderr).toMatch(/\^22\.13\.0/);
     expect(rejection.stderr).toMatch(/v21\.7\.3/);
     expect(rejection.stderr).toMatch(/\.nvmrc/);
     // PR #824 review LOW 1: no nvm ever ran here, so the remedy must never
@@ -555,7 +553,7 @@ exec "$SPUR_TEST_REAL_NODE" "$@"
 
     expect(rejection).toMatchObject({ code: 1 });
     expect(rejection.stderr).toMatch(/node not found on PATH/);
-    expect(rejection.stderr).not.toMatch(/\^20\.19\.0/);
+    expect(rejection.stderr).not.toMatch(/\^22\.13\.0/);
   });
 
   it("pins a bare major that satisfies the root engines range", () => {

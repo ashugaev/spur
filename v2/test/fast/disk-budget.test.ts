@@ -88,6 +88,9 @@ describe("measureDiskBudget", () => {
     const profiles = report.roots.find((r) => r.id === "playwright-mcp-profiles");
     expect(profiles?.reclaimedBy).toBe("disk-gc");
     expect(profiles?.reclaimedByDiskGc).toBe(true);
+    const artifacts = report.roots.find((r) => r.id === "session-artifacts");
+    expect(artifacts?.reclaimedBy).toBe("artifacts-gc");
+    expect(artifacts?.reclaimedByDiskGc).toBe(false);
   });
 
   it("worktree-build-caches aggregates bytes across the injected worktree list", async () => {

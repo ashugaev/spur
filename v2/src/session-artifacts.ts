@@ -217,6 +217,57 @@ export function deleteSessionArtifactsDir(dataDir: string, sessionId: string): v
 }
 
 /**
+ * Deletes exactly one artifact by id and drops its `.spur-artifacts.json` entry. The
+ * explicit counterpart to `deleteSessionArtifactsExcept`: it can only ever remove the id it
+ * was handed, so a short or lossy listing upstream can never widen it into deleting a file
+ * nobody selected. Returns false when the id is unsafe, resolves outside the artifacts root,
+ * or is not a regular file. Removes no directory: only the named file.
+ */
+export function deleteSessionArtifactById(
+  dataDir: string,
+  sessionId: string,
+  artifactId: string,
+): boolean {
+  const normalizedId = parseArtifactRelativePath(artifactId);
+  if (normalizedId === null) {
+    return false;
+  }
+  const dir = sessionArtifactsDir(dataDir, sessionId);
+  const path = join(dir, normalizedId);
+  let resolvedRoot: string;
+  let resolvedPath: string;
+  try {
+    resolvedRoot = realpathSync(dir);
+    // realpath, not lstat: an id whose own last segment is a symlink pointing outside the
+    // root must never be followed into a delete. Containment is checked on the resolution.
+    resolvedPath = realpathSync(path);
+  } catch {
+    return false;
+  }
+  if (!resolvedPath.startsWith(`${resolvedRoot}${sep}`)) {
+    return false;
+  }
+  try {
+    if (!statSync(resolvedPath).isFile()) {
+      return false;
+    }
+    rmSync(resolvedPath, { force: true });
+  } catch {
+    return false;
+  }
+  const metadata = readArtifactMetadata(dir);
+  if (metadata[normalizedId]) {
+    writeArtifactMetadata(
+      dir,
+      Object.fromEntries(
+        Object.entries(metadata).filter(([artifactId]) => artifactId !== normalizedId),
+      ),
+    );
+  }
+  return true;
+}
+
+/**
  * Deletes every artifact not in `keepArtifactIds`, then prunes emptied directories.
  * Walks with `withFileTypes` (lstat semantics): it never descends into a symlinked
  * directory (a followed link would `rmSync` outside the artifacts root); a symlink entry

@@ -124,6 +124,14 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: vi.fn(() => Promise.resolve(null)),
+  // Delegates to the same mocks readRuntimeSnapshot's other reads already
+  // drive, so this file's existing tmuxSessionExistsMock overrides keep
+  // working unchanged; `unresponsive` is never exercised by this file's tests.
+  getTmuxSessionPresence: vi.fn(async (name: string, options?: { fresh?: boolean }) => ({
+    present: await tmuxSessionExistsMock(name, options),
+    unresponsive: false,
+  })),
+  getTmuxPanePresence: vi.fn(async () => ({ dead: false, unresponsive: false })),
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
@@ -181,18 +189,20 @@ vi.mock("../../src/registry.js", () => ({
   isInsideWorktreeDir: vi.fn(() => false),
   removeConfigRegistryPath: vi.fn(() => []),
   // Keep existing per-test buildMergedConfigMock setups driving the merged config.
-  ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
-    invalidateRemovedPaths: vi.fn(),
-    canonicalizePath: vi.fn((path: string) => path),
-    scan: () => {
+  ConfigRegistryScanner: class {
+    invalidateRemovedPaths = vi.fn();
+    canonicalizePath(path: string) {
+      return path;
+    }
+    scan() {
       const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
       return {
         config: merged.config,
         configPaths: merged.configPaths,
         newDiagnostics: [],
       };
-    },
-  })),
+    }
+  },
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -238,6 +248,14 @@ function baseConfig(): AppConfig {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    artifactRetention: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxAnchorsPerSweep: 20,
+      maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+      maxFilesPerSession: 500,
     },
     sidecarGc: {
       enabled: true,

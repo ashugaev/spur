@@ -48,7 +48,7 @@ Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with t
 
 ## disk
 
-`spur disk [--json]` reports Spur-attributable disk usage, read-only, daemon-free. Rows: the four never-reclaimed Spur stores (`session-artifacts`, `worktrees`, `session-tools`, `opencode-store` under `~/.local/share/opencode`), `npm-cacache`, `npm-npx`, `playwright-browsers`, `playwright-mcp-profiles`, and an aggregated `worktree-build-caches` row (webpack/`.next` caches found by a bounded depth-3 walk under `worktreeDir`, skipping `node_modules`/`.git`). Each row carries `reclaimedByDiskGc` (this run's `disk-gc` reclaim set includes it) and `reclaimedBy` (`disk-gc`, `spur cache`, `opencode-gc`, `spur gc`, or `none`) so one table names which command owns each root's deletion. A `du` that times out or is aborted reports `status: "unmeasured"`, never `sizeBytes: 0`.
+`spur disk [--json]` reports Spur-attributable disk usage, read-only, daemon-free. Rows: `session-artifacts`, `worktrees`, `session-tools`, `opencode-store` (under `~/.local/share/opencode`), `npm-cacache`, `npm-npx`, `playwright-browsers`, `playwright-mcp-profiles`, and an aggregated `worktree-build-caches` row (webpack/`.next` caches found by a bounded depth-3 walk under `worktreeDir`, skipping `node_modules`/`.git`). Each row carries `reclaimedByDiskGc` (this run's `disk-gc` reclaim set includes it) and `reclaimedBy` (`disk-gc`, `spur cache`, `opencode-gc`, `spur gc`, `artifacts-gc`, or `none`) so one table names which command owns each root's deletion — `artifacts-gc` owns `session-artifacts` ([`spur artifacts-gc`](#artifacts-gc)), `spur gc` owns `worktrees`, `session-tools` and `opencode-store` are `none`. A `du` that times out or is aborted reports `status: "unmeasured"`, never `sizeBytes: 0`.
 
 Side effect: every run overwrites `<dataDir>/disk-budget.json` (`{ generatedAt, roots, totals }`). The daemon's warn sweep ([`diskBudget`](configuration.md#field-reference)) reads only this file — it never runs its own `du` — and emits nothing when the file is absent or older than `2 * diskBudget.intervalMinutes`. Nothing runs `spur disk` on a schedule; for the warn sweep to have data, cron it yourself, e.g. `0 * * * * spur disk` for hourly.
 
@@ -63,6 +63,15 @@ npm cap: `disk-gc` measures `~/.npm/_cacache` itself with its own `du` call, ind
 Build-cache selection: every eligible worktree (already past the terminal-status and `worktreeDir`-containment gates above) is measured, then ranked by reclaimable bytes descending — `--limit` keeps the N LARGEST eligible worktrees, never the first N in path order. Ranking only reorders what already passed both safety gates; it never widens eligibility.
 
 Flags: `--execute`, `--browser-revisions`, `--older-than <days>` (default `diskBudget.buildCacheOlderThanDays`), `--limit <n>` (default `diskBudget.maxWorktreesPerSweep`, the N largest eligible worktrees by reclaimable bytes), `--json`. Requires a resolved instance config.
+
+## artifacts-gc
+
+`spur artifacts-gc [--execute]` prunes `agent-history-*.jsonl` session artifacts. Dry run unless `--execute`, daemon-free. Unit: the artifacts dir of a workspace (desk members share one). Prints per-workspace files and bytes plus the total it would free.
+
+Selection, eviction order, and what always survives: [Artifact retention](configuration.md#artifact-retention). A blocked workspace prints `listing_truncated`; exits `1` on any deletion error.
+
+Flags: `--older-than <days>`, `--max-bytes <bytes>`, `--max-files <n>`, `--project <id>`, `--limit <n>`, `--json`. Defaults: `artifactRetention.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
+
 
 ## cache
 
