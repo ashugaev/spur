@@ -2916,7 +2916,6 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
-
   program
     .command("disk-gc")
     .description(
@@ -3041,7 +3040,6 @@ export function createProgram(cliEntrypoint: string): Command {
         });
       },
     );
-
 
   program
     .command("spawn")

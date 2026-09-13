@@ -72,7 +72,6 @@ Selection, eviction order, and what always survives: [Artifact retention](config
 
 Flags: `--older-than <days>`, `--max-bytes <bytes>`, `--max-files <n>`, `--project <id>`, `--limit <n>`, `--json`. Defaults: `artifactRetention.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
 
-
 ## cache
 
 `spur cache [--prune --yes]` reports host caches outside `~/.spur` — size, path, age (days), protection reason per entry, size-ranked. Dry-run by default; `--prune --yes` deletes `prunable` entries, no daemon needed. Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, rest of `~/.cache`, `/tmp`, never `~/.spur`. The in-`~/.spur/worktrees` webpack/`.next` build-cache target is out of scope here — see `disk-gc` above.
