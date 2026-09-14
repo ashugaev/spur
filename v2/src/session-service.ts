@@ -117,6 +117,7 @@ import {
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
+import { redactAutoPingHandles } from "./auto-ping.js";
 import {
   type HistoryCaptureStamp,
   AGENT_HISTORY_ARTIFACT_PREFIX,
@@ -11795,7 +11796,11 @@ export class SessionService {
         this.historyCaptureStamps.get(stampKey),
         (payload) => {
           const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, anchorId);
-          writeFileSync(join(artifactDir, artifactId), payload);
+          writeFileSync(
+            join(artifactDir, artifactId),
+            redactAutoPingHandles(payload.toString("utf8")),
+            "utf8",
+          );
         },
       );
       // Nothing new in the source: no file, no metadata entry, no artifact id.

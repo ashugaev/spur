@@ -15978,6 +15978,49 @@ describe("SessionService", () => {
     expect(writtenBytes).toBe(statSync(sourceHistoryPath).size);
   });
 
+  it("redacts auto-ping handles from full and delta artifacts without changing the source", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-controls-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    const handle = `ap1_${"a".repeat(43)}`;
+    const line = (index: number, token: string) =>
+      `${JSON.stringify({ type: "assistant", i: index, message: `réponse ${token}` })}\n`;
+    writeFileSync(sourceHistoryPath, line(0, handle), "utf8");
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const reader = { filePath: sourceHistoryPath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    for (let index = 1; index <= 3; index += 1) {
+      appendFileSync(sourceHistoryPath, line(index, handle), "utf8");
+      vi.advanceTimersByTime(5_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: index % 2 === 1 ? "needs_input" : "waiting",
+        reader,
+      });
+      await service.get("api-1");
+    }
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    expect(artifactIds).toHaveLength(3);
+    const copies = artifactIds.map((id) =>
+      readFileSync(join(artifactDirForSession("api-1"), String(id)), "utf8"),
+    );
+    expect(copies).toEqual([
+      line(0, "[auto-ping-handle]") + line(1, "[auto-ping-handle]"),
+      line(2, "[auto-ping-handle]"),
+      line(3, "[auto-ping-handle]"),
+    ]);
+    expect(copies.join("").includes(handle)).toBe(false);
+    expect(readFileSync(sourceHistoryPath, "utf8")).toBe(
+      [0, 1, 2, 3].map((index) => line(index, handle)).join(""),
+    );
+    service.dispose();
+  });
+
   it("re-emits a partial trailing line whole once it ends on a newline", async () => {
     const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-partial-source.jsonl");
     mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
