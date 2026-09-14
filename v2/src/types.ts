@@ -2,6 +2,7 @@ import type { HostMemory } from "./host-memory.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
+export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -927,6 +928,8 @@ export interface SessionRecord {
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
   serverErrorAt?: string;
+  serverErrorReactivationAttempts?: number;
+  todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */

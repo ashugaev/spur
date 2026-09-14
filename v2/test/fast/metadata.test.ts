@@ -439,6 +439,41 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-2")?.closeoutOwner).toBe(true);
   });
 
+  it.each([undefined, -1, 0, 3, 4, 1.5, "3"])(
+    "validates automatic reminder counters: %s",
+    async (attempts) => {
+      const dataDir = await newDataDir();
+      writeSession(dataDir, {
+        ...legacyBase,
+        id: "api-2",
+        tmuxSession: "api-2",
+        serverErrorReactivationAttempts: attempts,
+        todoNudge: { fingerprint: "a".repeat(64), attempts },
+      } as SessionRecord);
+      const restored = readSession(dataDir, "api-2");
+      const valid =
+        typeof attempts === "number" &&
+        Number.isInteger(attempts) &&
+        attempts >= 0 &&
+        attempts <= 3;
+      expect(restored?.serverErrorReactivationAttempts).toBe(valid ? attempts : undefined);
+      expect(restored?.todoNudge).toEqual(
+        valid ? { fingerprint: "a".repeat(64), attempts } : undefined,
+      );
+    },
+  );
+
+  it("drops a malformed ToDo reminder fingerprint", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      todoNudge: { fingerprint: "invalid", attempts: 3 },
+    });
+    expect(readSession(dataDir, "api-2")?.todoNudge).toBeUndefined();
+  });
+
   it.each([
     { name: "exclusive writable worktree", overrides: {}, expected: true },
     { name: "restricted worktree", overrides: { restrictWrites: true }, expected: false },

@@ -120,6 +120,8 @@ Each session's ToDo ledger starts empty — no code path seeds an item; the agen
 
 `$SPUR_TODO_COMMAND`: session-bound `spur-todo` wrapper, same actions, no `--session`, can't target another ledger. Routes/error codes: [daemon-api.md](daemon-api.md#session-routes).
 
+Automatic ToDo reminders stop after 3 attempts for unchanged open work, human blockers, or an empty ledger. A changed actionable item or a clean ledger resets the limit; restart, restore, and failed delivery do not. Successful reminders stay at least 60 seconds apart.
+
 ## send, queue
 
 `spur send <sessionId> <message>`. While an agent is busy, `send` queues per session, flushes on return to prompt, ahead of the next auto-step. Prints `Delivered message to <id>.` when the response carries no real queued messages, `Queued message for <id> (<N> pending).` otherwise; N counts real queued messages, never a pipeline's own auto-steps. A `stopped`/`paused` session with an existing workspace: `send` tries native resume first, then a fresh launch.
