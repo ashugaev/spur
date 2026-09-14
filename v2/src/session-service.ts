@@ -7467,7 +7467,6 @@ export class SessionService {
           this.recordSidecarStartConflict(
             args.session.id,
             args.sidecarName,
-
             error.payload.candidates,
           );
         }
@@ -7640,6 +7639,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       repoPath: args.project.path,
       symlinks: args.project.symlinks,
+      closeoutOwner: reservedSession.closeoutOwner === true,
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
@@ -14707,6 +14707,13 @@ export class SessionService {
     return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
+  private clearCloseoutOwner(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (session?.closeoutOwner !== true) return;
+    writeSession(this.config.dataDir, { ...session, closeoutOwner: false, updatedAt: nowIso() });
+    this.stateCache.delete(sessionId);
+  }
+
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -14777,6 +14784,7 @@ export class SessionService {
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
+    this.clearCloseoutOwner(session.id);
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
@@ -14927,6 +14935,7 @@ export class SessionService {
           ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
         },
       );
+      this.clearCloseoutOwner(session.id);
 
       const spawnedRecord = readSession(this.config.dataDir, spawned.id);
       if (spawnedRecord) {

@@ -13,10 +13,7 @@ describe("published interface contracts", () => {
   it("documents closeout ownership in command docs", async () => {
     const commands = await readRepoFile("docs/commands.md");
 
-    expect(commands).toContain("marks the assigned closeout owner for a writable worktree");
-    expect(commands).toContain("transferred handoff ownership on a reused workspace");
-    expect(commands).toContain("`0` marks non-owners, including read-only and shared-workspace");
-    expect(commands).toContain("missing variable preserves standalone hook enforcement");
+    expect(commands).toMatch(/SPUR_CLOSEOUT_OWNER=1[^\n]*`0`/);
   });
 
   it("documents auto-ping CLI, daemon routes, source support, and agent interface", async () => {

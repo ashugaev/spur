@@ -11,7 +11,7 @@ marker_lock_held=0
 temporary=""
 if [ -n "${SPUR_SESSION:-}" ] && [ -n "${SPUR_SESSION_TOOL_DIR:-}" ]; then
   marker="$SPUR_SESSION_TOOL_DIR/auto-push-stop-state"
-  marker_lock="${marker}.lock"
+  marker_lock="${marker}.flock"
 fi
 
 cleanup_marker_transition() {
@@ -19,23 +19,20 @@ cleanup_marker_transition() {
     rm -f "$temporary" 2>/dev/null || true
   fi
   if [ "$marker_lock_held" = "1" ]; then
-    rmdir "$marker_lock" 2>/dev/null || true
+    exec 9>&-
   fi
 }
 
 acquire_marker_lock() {
   [ -d "$SPUR_SESSION_TOOL_DIR" ] || return 1
-  attempts=0
-  while ! mkdir "$marker_lock" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    [ "$attempts" -lt 200 ] || return 1
-    sleep 0.01 || return 1
-  done
+  umask 077
+  { exec 9>"$marker_lock"; } 2>/dev/null || return 1
+  flock -w 2 9 2>/dev/null || return 1
   marker_lock_held=1
 }
 
 release_marker_lock() {
-  rmdir "$marker_lock" 2>/dev/null || return 1
+  exec 9>&-
   marker_lock_held=0
 }
 
