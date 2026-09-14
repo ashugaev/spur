@@ -4429,6 +4429,7 @@ describe("SessionService", () => {
           SPUR_SIDECAR_DEPTH: "1",
           SPUR_SIDECAR_NAME: "dev",
           SPUR_RESERVED_PORT_DEV: "3000",
+          SPUR_CLOSEOUT_OWNER: "1",
         }),
       }),
     );
@@ -32196,6 +32197,28 @@ describe("SessionService", () => {
   });
 
   describe("respawn", () => {
+    it.each([false, true])(
+      "demotes a respawn source only after successful spawn (failure: %s)",
+      async (fail) => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          sessionRecord({ id: "api-1", status: "completed", worktree: true, closeoutOwner: true }),
+        );
+        if (fail) reserveNextSessionIdMock.mockRejectedValueOnce(new Error("spawn failed"));
+        else reserveNextSessionIdMock.mockResolvedValue("api-2");
+        const service = await createDisposedSessionService();
+        if (fail) {
+          await expect(service.respawn("api-1")).rejects.toThrow("spawn failed");
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+        } else {
+          expect((await service.respawn("api-1")).closeoutOwner).toBe(true);
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        }
+      },
+    );
+
     it("respawns a completed session by calling spawn with original params", async () => {
       mockClaudeJsonlState("waiting");
       readSessionMock.mockReturnValue({
@@ -32393,29 +32416,32 @@ describe("SessionService", () => {
 
     it("kills an errored respawn source after spawning the replacement", async () => {
       mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          status: "errored",
+          error: "boom",
+          closeoutOwner: true,
+        }),
+      );
       hasUncommittedChangesMock.mockResolvedValue(false);
       hasUnpushedCommitsMock.mockResolvedValue(false);
-      readSessionMock.mockReturnValue({
-        id: "api-1",
-        project: "api",
-        agent: "claude",
-        prompt: "fix the bug",
-        branch: "api-1",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "errored",
-        error: "boom",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:05:00.000Z",
-      });
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      createWorktreeMock.mockResolvedValue("/tmp/spur-worktrees/api/api-2");
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await service.respawn("api-1");
+      const result = await service.respawn("api-1");
 
+      expect(result.id).toBe("api-2");
+      expect(result.closeoutOwner).toBe(true);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     });
@@ -32928,6 +32954,7 @@ describe("SessionService", () => {
       expect(result.agent).toBe("cursor");
       expect(result.id).toBe("api-2");
       expect(result.closeoutOwner).toBe(true);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
       const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
       expect(typeof launchPrompt).toBe("string");
       expect(launchPrompt).toContain("Task handoff from session api-1 (codex).");
@@ -33882,6 +33909,7 @@ describe("SessionService", () => {
           worktree: true,
           worktreePath: "/tmp/spur-worktrees/api/api-1",
           launchCommand: "codex",
+          closeoutOwner: true,
         }),
       );
       workspaceExistsMock.mockReturnValue(true);
@@ -33892,6 +33920,7 @@ describe("SessionService", () => {
 
       await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow("spawn failed");
       expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     });
 

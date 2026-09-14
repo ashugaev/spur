@@ -1,4 +1,6 @@
-import { chmod, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -215,6 +217,42 @@ describe("auto-push Stop hook", () => {
       );
 
       expect(results.filter((result) => result.stdout.length > 0)).toHaveLength(1);
+    }
+  });
+
+  it("recovers after a killed lock holder and ignores an orphaned legacy lock directory", async () => {
+    const repoDir = await makeDirtyRepo();
+    const toolDir = await makeTempDir("spur-auto-push-tools-");
+    const { binDir, calledPath } = await makeGhStub();
+    await mkdir(join(toolDir, "auto-push-stop-state.lock"));
+    const holder = spawn(
+      "bash",
+      [
+        "-c",
+        'exec 9>"$1"; flock 9; printf ready; read -r line',
+        "bash",
+        join(toolDir, "auto-push-stop-state.flock"),
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const closed = once(holder, "close");
+    try {
+      await once(holder.stdout, "data");
+      holder.kill("SIGKILL");
+      await closed;
+      const env = {
+        CLAUDE_PROJECT_DIR: repoDir,
+        GH_CALLED_PATH: calledPath,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        SPUR_SESSION: "api-1",
+        SPUR_SESSION_TOOL_DIR: toolDir,
+      };
+      const first = await runAutoPushHook(["codex"], env);
+      expect(JSON.parse(first.stdout)).toMatchObject({ decision: "block" });
+      expect(await runAutoPushHook(["codex"], env)).toEqual({ stderr: "", stdout: "" });
+    } finally {
+      holder.kill("SIGKILL");
+      await closed;
     }
   });
 
