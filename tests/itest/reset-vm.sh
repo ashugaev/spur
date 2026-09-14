@@ -43,6 +43,10 @@ rm -f "$HOME/.local/bin/claude" "$HOME/.local/bin/codex"
 
 log "removing node and tailscale"
 sudo apt-get remove -y nodejs >/dev/null 2>&1
+# A tested agent that installs node under nvm hits `status=203/EXEC` (the units
+# exec /usr/bin/node) and symlinks it in by hand. Removing ~/.nvm below leaves
+# that root-owned symlink dangling, so the next run starts dirty.
+[ -L /usr/bin/node ] && sudo rm -f /usr/bin/node
 sudo rm -f /etc/apt/sources.list.d/nodesource.list
 sudo rm -f /etc/apt/sources.list.d/nodesource.sources
 sudo rm -f /usr/share/keyrings/nodesource.gpg
@@ -98,6 +102,7 @@ rm -rf "$HOME/.claude/skills" "$HOME/.codex"
 log "state after reset"
 printf '  %-14s %s\n' "node-apt"      "$(dpkg -s nodejs >/dev/null 2>&1 && echo present || echo absent)"
 printf '  %-14s %s\n' "node-nvm"      "$([ -e "$HOME/.nvm" ] && echo present || echo absent)"
+printf '  %-14s %s\n' "node-link"     "$([ -e /usr/bin/node ] && echo present || { [ -L /usr/bin/node ] && echo dangling || echo absent; })"
 printf '  %-14s %s\n' "spur"          "$([ -e "$HOME/.local/lib/node_modules/@shugaev" ] && echo present || echo absent)"
 printf '  %-14s %s\n' "~/.spur"       "$([ -e "$HOME/.spur" ] && echo present || echo absent)"
 printf '  %-14s %s\n' "claude"        "$([ -e "$HOME/.local/bin/claude" ] && echo present || echo absent)"
