@@ -7813,7 +7813,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("stays silent when the service is disposed instead of the record drifting (shutdown, not a stall)", async () => {
+    it("stays silent when a genuine drift lands the same tick as dispose() (shutdown wins)", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       sessions.set("api-1", parkedQueuedSession());
@@ -7824,6 +7824,19 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
       expect(run).toBeDefined();
+
+      // Same unmarked-stop shape as the positive drift test -- every record
+      // clause (still awaiting a prompt, status off "running", no
+      // stopReason, not terminal) is satisfied here too. Only the
+      // isDeliveryStopped() flag, set by dispose() below, keeps this one
+      // quiet -- binds the shutdown-first ordering, not the record shape.
+      const parked = sessions.get("api-1");
+      if (!parked) throw new Error("expected api-1 to exist");
+      sessions.set("api-1", {
+        ...parked,
+        status: "stopped",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+      });
       service.dispose();
 
       const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
