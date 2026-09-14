@@ -500,6 +500,8 @@ Message delivery events: `session.message.sent`, `session.message.delivery_recov
 
 Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff doubles from 2 minutes to a 30-minute cap), `session.todo.nudge_disabled` (give-up; `details.kind` is `ledger_corrupt` or `target_gone`). `session.todo.nudge_disabled` is emitted at most once per session per liveness episode.
 
+Successful ToDo nudges occur once per unchanged ledger revision. Ledger changes permit another nudge after 60 seconds. Session relaunch/restore and daemon restart reset suppression.
+
 Session lifecycle events: `session.complete.completed`, `session.complete.failed`, `session.pause.completed`, `session.pause.failed`, `session.self_destruct.completed`, `session.self_destruct.failed`, `session.desk_complete.completed`, `session.desk_complete.failed`, `session.handoff.completed`, `session.handoff.failed`.
 
 - A ToDo-gate refusal logs the `.failed` event at `warn` with `details.kind` `todo_ledger_empty` or `todo_open_work`.
