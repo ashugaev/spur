@@ -27,6 +27,7 @@ import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
+import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as claudeModule from "../../src/agents/claude.js";
@@ -399,7 +400,8 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../../src/claude-jsonl-state.js", () => ({
+vi.mock("../../src/claude-jsonl-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof claudeJsonlStateModule>()),
   CONVERSATION_PAGE_ENTRIES: 100,
   readClaudeJsonlState: readClaudeJsonlStateMock,
   readClaudeConversationTail: readClaudeConversationTailMock,
@@ -1173,6 +1175,7 @@ type SessionServiceInternals = {
     message: string,
     options?: { interrupt?: boolean; freshLaunch?: boolean },
   ): Promise<AgentSendOutcome>;
+  writeAgentMessage: SessionServiceInternals["sendAgentMessage"];
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
   classifySessionRecord(
     session: SessionRecord,
@@ -1825,6 +1828,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "1",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -1863,6 +1867,7 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
     expect(result.id).toBe("api-1");
+    expect(result.closeoutOwner).toBe(true);
     expect(result.state).toBe("waiting");
     expect(result.runtimeAlive).toBe(true);
     expect(result.workspaceExists).toBe(true);
@@ -2081,7 +2086,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
 
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(1);
@@ -2094,6 +2099,98 @@ describe("SessionService", () => {
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(2);
       service.dispose();
+    });
+
+    it.each([false, true])(
+      "caps unchanged ToDo across 100 concurrent observations and reconstruction (send fails: %s)",
+      async (fails) => {
+        const sessions = createSessionStore();
+        const session = runningSession();
+        sessions.set(session.id, session);
+        await useRealTodoLedger();
+        let service = await createDisposedSessionService();
+        const send = vi.fn().mockImplementation(async () => {
+          if (fails) throw new Error("ambiguous submit failure");
+          return SUBMITTED;
+        });
+        vi.spyOn(sessionServiceInternals(service), "writeAgentMessage").mockImplementation(send);
+        for (let index = 0; index < 100; index++) {
+          if (index === 50) {
+            service = await createDisposedSessionService();
+            vi.spyOn(sessionServiceInternals(service), "writeAgentMessage").mockImplementation(
+              send,
+            );
+          }
+          vi.setSystemTime(Date.now() + 3_600_000);
+          const internals = sessionServiceInternals(service);
+          await Promise.all([internals.maybeNudgeTodo(session), internals.maybeNudgeTodo(session)]);
+        }
+        expect(send).toHaveBeenCalledTimes(3);
+        expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(3);
+        await service.mutateTodo(
+          session.id,
+          { action: "add", text: "New actionable task", reason: "New work" },
+          { kind: "agent", agent: "claude", sessionId: session.id },
+        );
+        vi.setSystemTime(Date.now() + 3_600_000);
+        await sessionServiceInternals(service).maybeNudgeTodo(session);
+        expect(send).toHaveBeenCalledTimes(4);
+        expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(1);
+      },
+    );
+
+    it("preserves the ToDo budget when delivery captured its session before a competing nudge", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      mockClaudeJsonlState("waiting");
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = service as unknown as SessionServiceInternals & {
+        ensureSessionReadyForSend(record: SessionRecord): Promise<SessionRecord>;
+      };
+      const ensureReady = internals.ensureSessionReadyForSend.bind(service);
+      const readySpy = vi.spyOn(internals, "ensureSessionReadyForSend");
+      sendMessageToTmuxMock.mockClear();
+      for (let round = 0; round < 5; round++) {
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let signalReady: (() => void) | undefined;
+        const reached = new Promise<void>((resolve) => {
+          signalReady = resolve;
+        });
+        readySpy.mockImplementationOnce(async (record) => {
+          const ready = await ensureReady(record);
+          signalReady?.();
+          await gate;
+          return ready;
+        });
+        const delivery = service.deliver(session.id, `Manual update ${round}`);
+        await reached;
+        const prior = sessions.get(session.id)?.todoNudge;
+        const nudge = internals.maybeNudgeTodo(session);
+        try {
+          await vi.advanceTimersByTimeAsync(0);
+          expect(sessions.get(session.id)?.todoNudge).toEqual(prior);
+        } finally {
+          release?.();
+          await Promise.all([delivery, nudge]);
+        }
+        expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(Math.min(round + 1, 3));
+        vi.setSystemTime(Date.now() + 60_001);
+      }
+      expect(
+        sendMessageToTmuxMock.mock.calls.filter(([, message]) =>
+          message.includes("Spur ToDo is empty"),
+        ),
+      ).toHaveLength(3);
+      expect(
+        sendMessageToTmuxMock.mock.calls.filter(([, message]) =>
+          message.startsWith("Manual update"),
+        ),
+      ).toHaveLength(5);
     });
 
     it("backs off after a failed nudge and throttles successful delivery", async () => {
@@ -2113,7 +2210,7 @@ describe("SessionService", () => {
       if (!itemId) throw new Error("Expected added ToDo item");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValueOnce(new Error("pane unavailable"))
         .mockResolvedValue(SUBMITTED);
 
@@ -2184,7 +2281,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
 
       for (let i = 0; i < 20; i++) {
         await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -2224,7 +2321,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
       const t0 = Date.now();
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -2262,7 +2359,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       const disabledEvents = logSpurEventMock.mock.calls
@@ -2283,7 +2380,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
@@ -2311,26 +2408,15 @@ describe("SessionService", () => {
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(3);
 
-      // Advance past 8 failures with jumps well beyond any possible delay
-      // (the 1_800_000 cap), so each jump always clears the gate and drives
-      // exactly one more failure. 3 failures recorded above; 5 more here
-      // reaches 8.
+      // Pacing expiry cannot replenish consumed attempts.
       let now = t0 + 360_000;
       for (let i = 0; i < 5; i++) {
         now += 2_000_000;
         vi.setSystemTime(now);
         await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       }
-      expect(send).toHaveBeenCalledTimes(8);
-
-      // The 8th failure's delay must be exactly the 1_800_000 cap.
-      vi.setSystemTime(now + 1_800_000 - 1);
-      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-      expect(send).toHaveBeenCalledTimes(8);
-
-      vi.setSystemTime(now + 1_800_000);
-      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-      expect(send).toHaveBeenCalledTimes(9);
+      expect(send).toHaveBeenCalledTimes(3);
+      expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(3);
       service.dispose();
     });
 
@@ -2347,7 +2433,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
@@ -2398,7 +2484,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValueOnce(new Error("pane unavailable"))
         .mockResolvedValueOnce(SUBMITTED)
         .mockRejectedValue(new Error("pane unavailable"));
@@ -2427,7 +2513,8 @@ describe("SessionService", () => {
 
       vi.setSystemTime(secondFailureAt + 120_000);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-      expect(send).toHaveBeenCalledTimes(4);
+      expect(send).toHaveBeenCalledTimes(3);
+      expect(internals.todoNudgeBackoff.get(session.id)?.failures).toBe(1);
       service.dispose();
     });
 
@@ -2441,7 +2528,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValue(
           new Error(
             "Command failed: tmux -L spur send-keys -t =api-1: Enter\ncan't find session: api-1",
@@ -2473,7 +2560,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValue(new Error("agent replied: can't find session notes"));
       const t0 = Date.now();
 
@@ -2506,7 +2593,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
@@ -2541,7 +2628,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
@@ -2572,7 +2659,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
       const send = vi
-        .spyOn(internals, "sendAgentMessage")
+        .spyOn(internals, "writeAgentMessage")
         .mockRejectedValueOnce(
           new Error(
             "Command failed: tmux -L spur send-keys -t =api-1: Enter\ncan't find session: api-1",
@@ -2607,7 +2694,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(internals.todoNudgeDisabled.get(session.id)?.kind).toBe("ledger_corrupt");
@@ -2934,6 +3021,7 @@ describe("SessionService", () => {
     });
 
     expect(result.id).toBe("api-2");
+    expect(result.closeoutOwner).toBe(false);
     expect(sessions.get("api-2")?.workspaceId).toBe("api-1");
     // deskId is legacy-read-only now: a freshly spawned session must not get one.
     expect(sessions.get("api-2")?.deskId).toBeUndefined();
@@ -2942,6 +3030,7 @@ describe("SessionService", () => {
         sessionName: "api-2",
         env: expect.objectContaining({
           SPUR_SESSION: "api-2",
+          SPUR_CLOSEOUT_OWNER: "0",
           SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         }),
       }),
@@ -4425,6 +4514,7 @@ describe("SessionService", () => {
           SPUR_SIDECAR_DEPTH: "1",
           SPUR_SIDECAR_NAME: "dev",
           SPUR_RESERVED_PORT_DEV: "3000",
+          SPUR_CLOSEOUT_OWNER: "1",
         }),
       }),
     );
@@ -5095,6 +5185,7 @@ describe("SessionService", () => {
       "Restricted writes mode: do not modify, create, or delete files in the workspace.",
     );
     expect(result.restrictWrites).toBe(true);
+    expect(result.closeoutOwner).toBe(false);
     expect(result.pipeline).toMatchObject({
       steps: ["review"],
       nextStepIndex: 1,
@@ -5617,6 +5708,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -20790,6 +20882,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -25514,6 +25607,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -25823,6 +25917,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -26794,6 +26889,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "codex",
+        SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
@@ -32186,6 +32282,28 @@ describe("SessionService", () => {
   });
 
   describe("respawn", () => {
+    it.each([false, true])(
+      "demotes a respawn source only after successful spawn (failure: %s)",
+      async (fail) => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          sessionRecord({ id: "api-1", status: "completed", worktree: true, closeoutOwner: true }),
+        );
+        if (fail) reserveNextSessionIdMock.mockRejectedValueOnce(new Error("spawn failed"));
+        else reserveNextSessionIdMock.mockResolvedValue("api-2");
+        const service = await createDisposedSessionService();
+        if (fail) {
+          await expect(service.respawn("api-1")).rejects.toThrow("spawn failed");
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
+        } else {
+          expect((await service.respawn("api-1")).closeoutOwner).toBe(true);
+          expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
+        }
+      },
+    );
+
     it("respawns a completed session by calling spawn with original params", async () => {
       mockClaudeJsonlState("waiting");
       readSessionMock.mockReturnValue({
@@ -32199,6 +32317,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         launchCommand: "claude --dangerously-skip-permissions",
         status: "completed",
+        closeoutOwner: true,
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:05:00.000Z",
       });
@@ -32210,6 +32329,7 @@ describe("SessionService", () => {
 
       expect(result.id).toBe("api-1");
       expect(result.status).toBe("running");
+      expect(result.closeoutOwner).toBe(true);
       expect(createWorktreeMock).toHaveBeenCalled();
       expect(createTmuxSessionMock).toHaveBeenCalled();
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
@@ -32238,6 +32358,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         launchCommand: "claude --dangerously-skip-permissions",
         status: "completed",
+        closeoutOwner: false,
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:05:00.000Z",
         pipeline: {
@@ -32290,6 +32411,7 @@ describe("SessionService", () => {
 
       expect(result.status).toBe("running");
       expect(result.worktree).toBe(false);
+      expect(result.closeoutOwner).toBe(false);
       expect(createWorktreeMock).not.toHaveBeenCalled();
     });
 
@@ -32379,29 +32501,32 @@ describe("SessionService", () => {
 
     it("kills an errored respawn source after spawning the replacement", async () => {
       mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          branch: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          status: "errored",
+          error: "boom",
+          closeoutOwner: true,
+        }),
+      );
       hasUncommittedChangesMock.mockResolvedValue(false);
       hasUnpushedCommitsMock.mockResolvedValue(false);
-      readSessionMock.mockReturnValue({
-        id: "api-1",
-        project: "api",
-        agent: "claude",
-        prompt: "fix the bug",
-        branch: "api-1",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "errored",
-        error: "boom",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:05:00.000Z",
-      });
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      createWorktreeMock.mockResolvedValue("/tmp/spur-worktrees/api/api-2");
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await service.respawn("api-1");
+      const result = await service.respawn("api-1");
 
+      expect(result.id).toBe("api-2");
+      expect(result.closeoutOwner).toBe(true);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     });
@@ -32892,6 +33017,7 @@ describe("SessionService", () => {
           worktree: true,
           worktreePath: "/tmp/spur-worktrees/api/api-1",
           launchCommand: "codex",
+          closeoutOwner: true,
           slots: {
             title: "Handoff task",
             links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
@@ -32912,6 +33038,8 @@ describe("SessionService", () => {
 
       expect(result.agent).toBe("cursor");
       expect(result.id).toBe("api-2");
+      expect(result.closeoutOwner).toBe(true);
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(false);
       const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
       expect(typeof launchPrompt).toBe("string");
       expect(launchPrompt).toContain("Task handoff from session api-1 (codex).");
@@ -32922,6 +33050,37 @@ describe("SessionService", () => {
       );
       expect(withSessionSlotInstructionsMock).toHaveBeenCalled();
       expect(launchPrompt).toContain("slot-instructions\n");
+    });
+
+    it.each([
+      { name: "non-owner", closeoutOwner: false, restrictWrites: false },
+      { name: "restricted owner", closeoutOwner: true, restrictWrites: true },
+    ])("keeps a $name handoff successor from owning closeout", async (source) => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          closeoutOwner: source.closeoutOwner,
+          ...(source.restrictWrites ? { restrictWrites: true } : {}),
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(result.closeoutOwner).toBe(false);
+      expect(createTmuxSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ SPUR_CLOSEOUT_OWNER: "0" }),
+        }),
+      );
     });
 
     it("forwards selfDestruct config from the source session across a handoff", async () => {
@@ -33835,6 +33994,7 @@ describe("SessionService", () => {
           worktree: true,
           worktreePath: "/tmp/spur-worktrees/api/api-1",
           launchCommand: "codex",
+          closeoutOwner: true,
         }),
       );
       workspaceExistsMock.mockReturnValue(true);
@@ -33845,6 +34005,7 @@ describe("SessionService", () => {
 
       await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow("spawn failed");
       expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")?.closeoutOwner).toBe(true);
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     });
 
@@ -38667,6 +38828,115 @@ describe("SessionService", () => {
       ).length;
     }
 
+    function mockServerRecovery(ownTimestampMs = Date.now() + 1) {
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        serverError: false,
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: Date.now(),
+          tailRecords: [
+            {
+              type: "assistant",
+              role: "assistant",
+              model: "test-model",
+              timestampMs: Date.now(),
+              ownTimestampMs,
+            },
+          ],
+        },
+      });
+    }
+
+    it("caps server-error reactivation across 100 intervals and reconstruction", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ serverErrorAt: "2026-03-18T09:00:00Z" }));
+      mockServerError();
+      let service = await createDisposedSessionService();
+      await service.get("api-1");
+      sendMessageToTmuxMock.mockClear();
+      for (let index = 0; index < 100; index++) {
+        if (index === 50) {
+          service = await createDisposedSessionService();
+          await service.get("api-1");
+        }
+        vi.setSystemTime(Date.now() + 1_800_001);
+        const internals = service as unknown as { processScheduledWakes(): Promise<void> };
+        await Promise.all([internals.processScheduledWakes(), internals.processScheduledWakes()]);
+      }
+      expect(
+        sendMessageToTmuxMock.mock.calls.filter(
+          ([, message]) => message === SERVER_ERROR_REACTIVATION_PROMPT,
+        ),
+      ).toHaveLength(3);
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBe(3);
+    });
+
+    it("preserves an exhausted server-error episode through warmup and unknown evidence, then resets on newer assistant output", async () => {
+      const sessions = createSessionStore();
+      const marker = "2026-03-18T09:00:00Z";
+      sessions.set(
+        "api-1",
+        runningSession({
+          serverErrorAt: marker,
+          serverErrorReactivationAttempts: 3,
+          agentSessionId: "native-1",
+        }),
+      );
+      mockServerError();
+      const service = await createDisposedSessionService();
+      const internals = service as unknown as { restoreWarmupUntil: Map<string, number> };
+      internals.restoreWarmupUntil.set("api-1", Date.now() + 30_000);
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBe(3);
+      internals.restoreWarmupUntil.clear();
+      readClaudeJsonlStateMock.mockResolvedValue(null);
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBe(3);
+      for (const record of [
+        { type: "user", role: "user", timestampMs: Date.now() },
+        { type: "assistant", role: "assistant", model: "test-model", timestampMs: Date.now() },
+        {
+          type: "assistant",
+          role: "assistant",
+          model: "test-model",
+          timestampMs: Date.now(),
+          ownTimestampMs: Date.parse(marker),
+        },
+      ]) {
+        readClaudeJsonlStateMock.mockResolvedValue({
+          state: "waiting",
+          serverError: false,
+          reader: {
+            filePath: "test.jsonl",
+            lastOffset: 0,
+            lastMtimeMs: Date.now(),
+            tailRecords: [record],
+          },
+        });
+        await service.get("api-1");
+        expect(sessions.get("api-1")?.serverErrorAt).toBe(marker);
+        expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBe(3);
+      }
+      mockServerError();
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBe(3);
+      mockServerRecovery();
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBeUndefined();
+      mockServerError();
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.serverErrorAt).toBeDefined();
+      vi.setSystemTime(Date.now() + 1_800_001);
+      await (
+        service as unknown as { processScheduledWakes(): Promise<void> }
+      ).processScheduledWakes();
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBe(1);
+    });
+
     it("classifies error and persists serverErrorAt for a server-error transcript", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
@@ -38683,9 +38953,12 @@ describe("SessionService", () => {
 
     it("clears serverErrorAt once the transcript recovers", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ serverErrorAt: "2026-03-18T09:00:00.000Z" }));
+      sessions.set(
+        "api-1",
+        runningSession({ serverErrorAt: "2026-03-18T09:00:00.000Z", agentSessionId: "native-1" }),
+      );
       mockClaudeSessionStatus("waiting", "idle");
-      mockClaudeJsonlState("waiting");
+      mockServerRecovery();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -38694,6 +38967,34 @@ describe("SessionService", () => {
       expect(view.state).not.toBe("error");
       expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
       service.dispose();
+    });
+
+    it("does not clear a newer server-error claim using stale recovery evidence", async () => {
+      const sessions = createSessionStore();
+      const stale = runningSession({
+        serverErrorAt: "2026-03-18T09:00:00Z",
+        serverErrorReactivationAttempts: 2,
+      });
+      sessions.set("api-1", {
+        ...stale,
+        serverErrorAt: "2026-03-18T10:00:00Z",
+        serverErrorReactivationAttempts: 3,
+      });
+      mockServerError();
+      const service = await createDisposedSessionService();
+      const internals = service as unknown as {
+        updateStateHistory(
+          session: SessionRecord,
+          state: "waiting",
+          source: "jsonl",
+          path: null,
+          error: boolean,
+          evidence: "recovered",
+        ): Promise<unknown>;
+      };
+      await internals.updateStateHistory(stale, "waiting", "jsonl", null, false, "recovered");
+      expect(sessions.get("api-1")?.serverErrorAt).toBe("2026-03-18T10:00:00Z");
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBe(3);
     });
 
     it("types the reactivation prompt once serverErrorAt is at least 30 minutes old and re-arms it", async () => {
@@ -38767,7 +39068,7 @@ describe("SessionService", () => {
 
     it("clears serverErrorAt while stabilizeState still damps the displayed state to error", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
+      sessions.set("api-1", runningSession({ agentSessionId: "native-1" }));
       mockServerError();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -38783,7 +39084,7 @@ describe("SessionService", () => {
       // clear on this tick — that only happens because updateStateHistory sets
       // and clears serverErrorAt outside its state-transition branch.
       mockClaudeSessionStatus("waiting", "idle");
-      mockClaudeJsonlState("waiting");
+      mockServerRecovery();
 
       const secondView = await service.get("api-1");
 
@@ -41474,7 +41775,11 @@ describe("SessionService", () => {
         createTmuxSessionMock.mockImplementation(async () => {
           memberPaneAlive = true;
         });
-        const service = await createDisposedSessionService();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        service.dispose();
         const internals = staleInternals(service);
 
         const stop = service.stopSidecar("api-1", "proxy");

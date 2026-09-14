@@ -6,7 +6,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -112,6 +112,7 @@ import {
   CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
   readClaudeJsonlState,
+  hasClaudeRecoveryAfter,
   type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
@@ -456,6 +457,7 @@ import {
   type TranscriptEntry,
   type UpdateSessionSlotsRequest,
   type TodoActor,
+  AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
 } from "./types.js";
@@ -990,6 +992,7 @@ interface SessionStateResult {
   historySourcePath?: string | null;
   workspacePresent: boolean;
   serverError: boolean;
+  serverErrorEvidence?: "error" | "recovered";
   // When the agent last wrote to its own structured artifact (claude transcript
   // JSONL / codex rollout + hook state / cursor transcript JSONL). Null only
   // when the agent has no such artifact yet. Every value here is a byproduct of
@@ -1319,6 +1322,18 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
 
 function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): boolean {
   return session.restrictWrites === true;
+}
+
+function resolveCloseoutOwner(args: {
+  restrictWrites: boolean;
+  worktree: boolean;
+  reusesWorkspace: boolean;
+  transferredOwner?: boolean;
+}): boolean {
+  if (args.restrictWrites) return false;
+  if (args.transferredOwner !== undefined) return args.transferredOwner;
+  if (args.reusesWorkspace) return false;
+  return args.worktree;
 }
 
 async function setupSessionAgentHooks(args: {
@@ -1774,12 +1789,14 @@ function buildSessionEnv(args: {
   dataDir: string;
   repoPath: string;
   symlinks: string[];
+  closeoutOwner?: boolean;
   extraEnv?: Record<string, string>;
 }): Record<string, string> {
   const env: Record<string, string> = {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
+    SPUR_CLOSEOUT_OWNER: args.closeoutOwner === true ? "1" : "0",
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
@@ -4302,43 +4319,58 @@ export class SessionService {
         if (!this.memoryHold.engaged && session.serverErrorAt) {
           const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
           if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
-            try {
-              await this.send(session.id, {
-                message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
-                queue: false,
-              });
-              this.logEvent("session.server_error.reactivated", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent server-error reactivation to ${session.id}`,
-                details: {
-                  serverErrorAt: session.serverErrorAt,
-                },
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.server_error.reactivation_failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send server-error reactivation to ${session.id}: ${message}`,
-                details: {
-                  serverErrorAt: session.serverErrorAt,
-                },
-              });
-            }
-            // Re-arm under CAS: only if the marker is still what this tick read
-            // (a concurrent clear/re-arm wins otherwise), so the next attempt is
-            // a fresh 30 minutes out.
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (current.serverErrorAt === session.serverErrorAt) {
+            await this.withWorkspaceLifecycleLocks(session.id, async () => {
+              const current = readSession(this.config.dataDir, session.id);
+              if (
+                !current?.serverErrorAt ||
+                current.status !== "running" ||
+                this.memoryHold.engaged ||
+                now - Date.parse(current.serverErrorAt) < CLAUDE_SERVER_ERROR_REACTIVATION_MS ||
+                (current.serverErrorReactivationAttempts ?? 0) >= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+              )
+                return;
+              const attempts = (current.serverErrorReactivationAttempts ?? 0) + 1;
               writeSession(this.config.dataDir, {
                 ...current,
                 serverErrorAt: new Date(now).toISOString(),
+                serverErrorReactivationAttempts: attempts,
                 updatedAt: nowIso(),
               });
-            }
+              if (attempts === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
+                this.logEvent("session.server_error.reactivation_exhausted", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Server-error reminder budget exhausted for ${session.id}`,
+                });
+              }
+              try {
+                await this.sendLocked(session.id, {
+                  message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+                  queue: false,
+                });
+                this.logEvent("session.server_error.reactivated", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent server-error reactivation to ${session.id}`,
+                  details: {
+                    serverErrorAt: session.serverErrorAt,
+                  },
+                });
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.server_error.reactivation_failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send server-error reactivation to ${session.id}: ${message}`,
+                  details: {
+                    serverErrorAt: session.serverErrorAt,
+                  },
+                });
+              }
+            });
           }
         }
 
@@ -6437,6 +6469,10 @@ export class SessionService {
   }
 
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
+    return this.withWorkspaceLifecycleLocks(session.id, () => this.maybeNudgeTodoLocked(session));
+  }
+
+  private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
@@ -6449,39 +6485,102 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
-      const projection = ensureTodoLedger(this.config.dataDir, session);
-      const open = projection.items.filter((item) => item.status === "open");
-      const humanHeld = projection.items.filter(
-        (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
-      );
-      let message: string | null = null;
-      if (open.length > 0) {
-        message = `Spur ToDo still has open work:\n${open
-          .map((item) => `- ${item.id}: ${item.text}`)
-          .join(
-            "\n",
-          )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
-      } else if (humanHeld.length > 0) {
-        message = `Spur ToDo needs human input:\n${humanHeld
-          .map((item) => {
-            const blocker = item.latestTransition?.blocker;
-            return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
-          })
-          .join("\n")}\nRequest the required input before continuing.`;
-      } else if (projection.counts.total === 0) {
-        message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
-      }
-      if (!message) {
-        // A clean observation with nothing to send: #836's "cleared on a
-        // clean observation". Not moved above the ensureTodoLedger read —
-        // that read succeeds on every send-failure cycle, so clearing there
-        // would zero `failures` forever and flatten the backoff to the base.
+      await this.withPaneWriteLock(session.tmuxSession, async () => {
+        const current = readSession(this.config.dataDir, session.id);
+        if (
+          !current ||
+          current.status !== "running" ||
+          hasQueuedMessages(current) ||
+          current.queuedMessages?.awaitingPrompt ||
+          current.pipeline?.status === "running"
+        )
+          return;
+        if (
+          this.todoNudgeDisabled.has(session.id) ||
+          (this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now() ||
+          Date.now() - (this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0) < 60_000
+        )
+          return;
+        session = current;
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const ledgerSession = readSession(this.config.dataDir, session.id);
+        if (!ledgerSession) return;
+        session = ledgerSession;
+        const open = projection.items
+          .filter((item) => item.status === "open")
+          .sort((a, b) => a.id.localeCompare(b.id));
+        const humanHeld = projection.items
+          .filter(
+            (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
+          )
+          .sort((a, b) => a.id.localeCompare(b.id));
+        let message: string | null = null;
+        if (open.length > 0) {
+          message = `Spur ToDo still has open work:\n${open
+            .map((item) => `- ${item.id}: ${item.text}`)
+            .join(
+              "\n",
+            )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
+        } else if (humanHeld.length > 0) {
+          message = `Spur ToDo needs human input:\n${humanHeld
+            .map((item) => {
+              const blocker = item.latestTransition?.blocker;
+              return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
+            })
+            .join("\n")}\nRequest the required input before continuing.`;
+        } else if (projection.counts.total === 0) {
+          message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
+        }
+        if (!message) {
+          // A clean observation with nothing to send: #836's "cleared on a
+          // clean observation". Not moved above the ensureTodoLedger read —
+          // that read succeeds on every send-failure cycle, so clearing there
+          // would zero `failures` forever and flatten the backoff to the base.
+          this.todoNudgeBackoff.delete(session.id);
+          if (session.todoNudge) {
+            const { todoNudge: _todoNudge, ...base } = session;
+            writeSession(this.config.dataDir, base);
+          }
+          return;
+        }
+        const fingerprint = createHash("sha256")
+          .update(
+            JSON.stringify(
+              open.length
+                ? ["open", open.map((item) => [item.id, item.text])]
+                : humanHeld.length
+                  ? [
+                      "human",
+                      humanHeld.map((item) => [
+                        item.id,
+                        item.latestTransition?.blocker?.kind === "human"
+                          ? item.latestTransition.blocker.requiredAction
+                          : item.text,
+                      ]),
+                    ]
+                  : ["empty"],
+            ),
+          )
+          .digest("hex");
+        const attempts =
+          session.todoNudge?.fingerprint === fingerprint ? session.todoNudge.attempts : 0;
+        if (attempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return;
+        writeSession(this.config.dataDir, {
+          ...session,
+          todoNudge: { fingerprint, attempts: attempts + 1 },
+        });
+        if (attempts + 1 === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
+          this.logEvent("session.todo.nudge_exhausted", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Spur ToDo reminder budget exhausted for ${session.id}`,
+          });
+        }
+        await this.writeAgentMessage(session, message, { interrupt: false });
+        this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
         this.todoNudgeBackoff.delete(session.id);
-        return;
-      }
-      await this.sendAgentMessage(session, message, { interrupt: false });
-      this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
-      this.todoNudgeBackoff.delete(session.id);
+      });
     } catch (error) {
       if (
         (error instanceof TodoLedgerCorruptError && !error.transient) ||
@@ -7624,6 +7723,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       repoPath: args.project.path,
       symlinks: args.project.symlinks,
+      closeoutOwner: reservedSession.closeoutOwner === true,
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
@@ -9287,6 +9387,7 @@ export class SessionService {
       replacingSessionId?: string;
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
+      closeoutOwnerTransfer?: boolean;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -9441,6 +9542,14 @@ export class SessionService {
       const tmuxSession = sessionId;
       createdAt = nowIso();
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+        ...(options?.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
+      });
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -9466,6 +9575,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -9674,6 +9784,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
@@ -10272,6 +10383,11 @@ export class SessionService {
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+      });
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -10281,6 +10397,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
@@ -10667,6 +10784,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -13503,6 +13621,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
+      closeoutOwner: session.closeoutOwner === true,
       ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
     });
 
@@ -13954,6 +14073,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: this.getProject(current.project).path,
         symlinks: this.getProject(current.project).symlinks,
+        closeoutOwner: current.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
@@ -14605,6 +14725,13 @@ export class SessionService {
     return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
+  private clearCloseoutOwner(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (session?.closeoutOwner !== true) return;
+    writeSession(this.config.dataDir, { ...session, closeoutOwner: false, updatedAt: nowIso() });
+    this.stateCache.delete(sessionId);
+  }
+
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -14671,9 +14798,11 @@ export class SessionService {
       }),
       {
         modeResolution: "carried",
+        closeoutOwnerTransfer: session.closeoutOwner === true,
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
+    this.clearCloseoutOwner(session.id);
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
@@ -14820,9 +14949,11 @@ export class SessionService {
           replacingSessionId: session.id,
           admissionReservation,
           modeResolution: "carried",
+          closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
           ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
         },
       );
+      this.clearCloseoutOwner(session.id);
 
       const spawnedRecord = readSession(this.config.dataDir, spawned.id);
       if (spawnedRecord) {
@@ -16077,16 +16208,13 @@ export class SessionService {
     stateSource: StateSource,
     historySourcePath: string | null,
     serverError: boolean,
+    serverErrorEvidence?: "error" | "recovered",
   ): Promise<SessionStateTransition[]> {
-    // The state can stay "error" across many ticks while the marker must
-    // still be armed/cleared, so this runs outside the transition branch
-    // below. Gated on the in-hand session record (no extra readSession) so
-    // the steady state (serverError already agrees with session.serverErrorAt)
-    // costs nothing.
+    // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
       this.writeServerErrorMarker(session.id, nowIso());
-    } else if (!serverError && session.serverErrorAt) {
-      this.writeServerErrorMarker(session.id, null);
+    } else if (serverErrorEvidence === "recovered" && session.serverErrorAt) {
+      this.writeServerErrorMarker(session.id, null, session.serverErrorAt);
     }
 
     const history = this.stateHistory.get(session.id) ?? [];
@@ -16137,7 +16265,11 @@ export class SessionService {
 
   // Sole writer/clearer of serverErrorAt outside the wake-loop CAS re-arm.
   // Re-reads before writing since this runs off the in-hand session record.
-  private writeServerErrorMarker(sessionId: string, serverErrorAt: string | null): void {
+  private writeServerErrorMarker(
+    sessionId: string,
+    serverErrorAt: string | null,
+    observedMarker?: string,
+  ): void {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) return;
     if (serverErrorAt) {
@@ -16148,8 +16280,12 @@ export class SessionService {
       if (current.serverErrorAt) return;
       writeSession(this.config.dataDir, { ...current, serverErrorAt, updatedAt: nowIso() });
     } else {
-      if (!current.serverErrorAt) return;
-      const { serverErrorAt: _serverErrorAt, ...base } = current;
+      if (!current.serverErrorAt || current.serverErrorAt !== observedMarker) return;
+      const {
+        serverErrorAt: _serverErrorAt,
+        serverErrorReactivationAttempts: _attempts,
+        ...base
+      } = current;
       writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
     }
   }
@@ -16497,6 +16633,7 @@ export class SessionService {
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
+    let serverErrorEvidence: "error" | "recovered" | undefined;
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
@@ -16519,6 +16656,14 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
+          if (jsonlResult.serverError) serverErrorEvidence = "error";
+          else if (
+            session.agentSessionId &&
+            session.serverErrorAt &&
+            hasClaudeRecoveryAfter(jsonlResult.reader.tailRecords, session.serverErrorAt)
+          ) {
+            serverErrorEvidence = "recovered";
+          }
           serverErrorJsonlPath = jsonlResult.reader.filePath;
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
@@ -16850,11 +16995,9 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
-      // Only true when the hasServerErrorRecord arm above actually applied. A
-      // live rate_limit record wins state outright, so this reports false and
-      // updateStateHistory's clear branch drops any stale serverErrorAt
-      // instead of arming it.
+      // Keep queue/state classification separate from positive recovery evidence.
       serverError: state === "error" && hasServerErrorRecord,
+      ...(serverErrorEvidence ? { serverErrorEvidence } : {}),
       workspacePresent: workspace.exists,
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
@@ -16890,6 +17033,7 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
+      classified.serverErrorEvidence,
     );
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
@@ -17035,6 +17179,7 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
+      classified.serverErrorEvidence,
     );
 
     const services: ServiceInstanceView[] = [];
