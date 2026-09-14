@@ -12,6 +12,7 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
+  AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type ReviewProviderId,
@@ -815,6 +816,20 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
+    ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
+    Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&
+    normalizedSession.serverErrorReactivationAttempts >= 0 &&
+    normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
+      : {}),
+    ...(normalizedSession.todoNudge &&
+    typeof normalizedSession.todoNudge.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(normalizedSession.todoNudge.fingerprint) &&
+    Number.isInteger(normalizedSession.todoNudge.attempts) &&
+    normalizedSession.todoNudge.attempts >= 0 &&
+    normalizedSession.todoNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { todoNudge: normalizedSession.todoNudge }
+      : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
