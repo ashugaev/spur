@@ -179,6 +179,100 @@ describe("OpenCode adapter", () => {
     });
   });
 
+  it("classifies an aborted turn as waiting, not error, so it does not wedge", () => {
+    // Verbatim from opencode-ai 1.18.30 opencode.db (real aborted turn), minus
+    // `path` (absolute local paths).
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              parentID: "msg_0278c2c95001O27KIcRuIDMm95",
+              role: "assistant",
+              mode: "build",
+              agent: "build",
+              cost: 0,
+              tokens: {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache: { read: 0, write: 0 },
+              },
+              modelID: "gemini-3.7-flash",
+              providerID: "google",
+              time: { created: 1787369893115, completed: 1787369901319 },
+              error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "waiting", reason: "assistant aborted" });
+
+    // Rate limit takes priority over the abort classification.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              error: {
+                name: "MessageAbortedError",
+                data: { statusCode: 429, message: "Too Many Requests" },
+              },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "rate_limited", reason: "assistant rate limit" });
+
+    // A non-allowlisted error with time.completed set still classifies as
+    // error — proves the fix did not widen into "any completed turn waits".
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "APIError", data: { statusCode: 404, isRetryable: false } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+
+    // Near-miss on name: substring/case matches must NOT be treated as
+    // aborted. The allowlist is exact-match only.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "MessageAbortedErrorLike", data: { message: "Aborted" } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+
+    // Near-miss on case: lower-cased name must NOT be treated as aborted.
+    expect(
+      parseOpenCodeState({
+        messages: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              error: { name: "messageabortederror", data: { message: "Aborted" } },
+            },
+          },
+        ],
+      }),
+    ).toEqual({ state: "error", reason: "assistant error" });
+  });
+
   it("classifies real export shapes without inventing live-service state", () => {
     expect(
       parseOpenCodeState({
@@ -235,17 +329,24 @@ describe("OpenCode adapter", () => {
       vi.unstubAllEnvs();
     });
 
-    // Writes one line per invocation, so the test counts spawns rather than
-    // trusting the cache's own bookkeeping.
-    async function stubCountingOpenCode(): Promise<{ dir: string; countPath: string }> {
+    // Writes one line per invocation, carrying the exported session id, so the
+    // test counts spawns per session rather than trusting the cache's own
+    // bookkeeping.
+    async function stubCountingOpenCode(options?: {
+      exitCode?: number;
+    }): Promise<{ dir: string; countPath: string }> {
       const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
       const countPath = join(dir, "calls.log");
       await writeFile(
         join(dir, "opencode"),
         [
           "#!/usr/bin/env node",
-          `require("node:fs").appendFileSync(${JSON.stringify(countPath)}, "x");`,
-          'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+          `require("node:fs").appendFileSync(${JSON.stringify(countPath)}, process.argv[process.argv.length - 1] + "\\n");`,
+          ...(options?.exitCode
+            ? [`process.exit(${options.exitCode});`]
+            : [
+                'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+              ]),
         ].join("\n"),
         "utf8",
       );
@@ -254,12 +355,20 @@ describe("OpenCode adapter", () => {
       return { dir, countPath };
     }
 
-    async function spawnCount(countPath: string): Promise<number> {
+    async function spawnLines(countPath: string): Promise<string[]> {
       try {
-        return (await readFile(countPath, "utf8")).length;
+        return (await readFile(countPath, "utf8")).split("\n").filter((line) => line.length > 0);
       } catch {
-        return 0;
+        return [];
       }
+    }
+
+    async function spawnCount(countPath: string): Promise<number> {
+      return (await spawnLines(countPath)).length;
+    }
+
+    async function spawnCountFor(countPath: string, sessionId: string): Promise<number> {
+      return (await spawnLines(countPath)).filter((line) => line === sessionId).length;
     }
 
     it("shares one export across concurrent reads of the same session", async () => {
@@ -311,6 +420,143 @@ describe("OpenCode adapter", () => {
       try {
         await readOpenCodeState("ses_a");
         await readOpenCodeState("ses_b");
+
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps a silent session cached while another session exports repeatedly", async () => {
+      // The cross-session case: a post-export sweep bounded by the TTL deletes
+      // every other session's entry on every completion, so one painting pane
+      // would drag the whole silent fleet back into exporting. Two sessions are
+      // the minimum that can observe that.
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        const anchor = Date.now();
+        const silent = anchor - 60_000;
+
+        await readOpenCodeState("ses_active", anchor);
+        await readOpenCodeState("ses_silent", silent);
+        expect(await spawnCountFor(countPath, "ses_active")).toBe(1);
+        expect(await spawnCountFor(countPath, "ses_silent")).toBe(1);
+
+        for (let step = 1; step <= 10; step += 1) {
+          const at = anchor + step * 6_000;
+          vi.setSystemTime(at);
+          await readOpenCodeState("ses_active", at);
+          await readOpenCodeState("ses_silent", silent);
+        }
+
+        expect(await spawnCountFor(countPath, "ses_active")).toBe(11);
+        expect(await spawnCountFor(countPath, "ses_silent")).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 20_000);
+
+    it("serves the cache past the TTL while the pane has printed nothing", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        const silent = Date.now() - 60_000;
+        await readOpenCodeState("ses_a", silent);
+        expect(await spawnCount(countPath)).toBe(1);
+
+        vi.setSystemTime(Date.now() + 30_000);
+        await readOpenCodeState("ses_a", silent);
+
+        expect(await spawnCount(countPath)).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("re-exports once the pane prints again", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        const silent = Date.now() - 60_000;
+        await readOpenCodeState("ses_a", silent);
+        const cachedAt = Date.now();
+
+        vi.setSystemTime(cachedAt + 6_000);
+        await readOpenCodeState("ses_a", cachedAt + 5_000);
+
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("re-exports at the max-age ceiling with a silent pane", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        const silent = Date.now() - 60_000;
+        await readOpenCodeState("ses_a", silent);
+        const cachedAt = Date.now();
+
+        vi.setSystemTime(cachedAt + 601_000);
+        await readOpenCodeState("ses_a", silent);
+
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not suppress when the activity token is null", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        await readOpenCodeState("ses_a", null);
+        const cachedAt = Date.now();
+
+        vi.setSystemTime(cachedAt + 6_000);
+        await readOpenCodeState("ses_a", null);
+
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not suppress when the pane printed within the settle margin", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        // window_activity has one-second resolution, so a paint 0.4s after this
+        // export starts still reports this same token. The gate must not trust
+        // itself here.
+        const justPrinted = Date.now() - 1_000;
+        await readOpenCodeState("ses_a", justPrinted);
+        const cachedAt = Date.now();
+
+        vi.setSystemTime(cachedAt + 6_000);
+        await readOpenCodeState("ses_a", justPrinted);
+
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("never pins a failed export on a silent pane", async () => {
+      // A failed export caches null and the classifier reads null as "working".
+      // Pinning that to the ceiling would hold a wrong live state, not a stale
+      // one, so a cached null always retries on the TTL.
+      const { dir, countPath } = await stubCountingOpenCode({ exitCode: 1 });
+      try {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        const silent = Date.now() - 60_000;
+        expect(await readOpenCodeState("ses_a", silent)).toBeNull();
+        const cachedAt = Date.now();
+
+        vi.setSystemTime(cachedAt + 6_000);
+        await readOpenCodeState("ses_a", silent);
 
         expect(await spawnCount(countPath)).toBe(2);
       } finally {

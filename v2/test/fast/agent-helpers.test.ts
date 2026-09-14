@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  agentLaunchUsesForeignBinary,
   agentProcessMatchers,
   agentSessionConfig,
   agentStateStrategy,
@@ -104,6 +105,16 @@ describe("agent helpers", () => {
 
   it("dedupes a direct launch to a single matcher", () => {
     expect(agentProcessMatchers("codex", "codex --model gpt-5.6")).toEqual(["codex"]);
+  });
+
+  it("gates the pane-child fallback on a foreign launch binary", () => {
+    expect(agentLaunchUsesForeignBinary("codex", "codex --model x")).toBe(false);
+    expect(
+      agentLaunchUsesForeignBinary("codex", "/home/u/.local/bin/codex-wrap.sh --model x"),
+    ).toBe(true);
+    expect(agentLaunchUsesForeignBinary("claude", "")).toBe(false);
+    expect(agentLaunchUsesForeignBinary("cursor", "agent --force")).toBe(false);
+    expect(agentLaunchUsesForeignBinary("cursor", "/opt/bin/cursor-agent --force")).toBe(false);
   });
 
   it("still appends the canonical name when the override IS the wrapper (I1 no-op guard)", () => {

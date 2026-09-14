@@ -93,6 +93,13 @@ import {
   readConfigRegistryFile,
 } from "./registry.js";
 import { listSessions } from "./metadata.js";
+import {
+  createArtifactRetentionDeps,
+  executeArtifactRetention,
+  listAnchorArtifacts,
+  planArtifactRetention,
+  type ArtifactRetentionReport,
+} from "./artifact-retention.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
 import { startServer } from "./server.js";
 import {
@@ -120,6 +127,7 @@ import {
   type ServiceInstanceView,
   type SessionListItemView,
   type SessionView,
+  type SidecarStopView,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
@@ -1175,8 +1183,16 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
       outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
     // Tree total, not the root pid's own rss — the root alone understated
     // the measured 863333/863351 leak by 17x.
+    const attribution =
+      tree.kind === "orphan-daemon"
+        ? tree.liveness === "serving"
+          ? `daemon ${tree.configPath} — serving on ${tree.port} — stop it with 'spur --config ${tree.configPath} daemon stop'`
+          : tree.liveness === "unknown"
+            ? `daemon ${tree.configPath} — liveness unknown — verify manually before killing`
+            : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
+        : (tree.sidecarName ?? "unattributed");
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,
     );
   });
   return lines.join("\n");
@@ -1185,6 +1201,42 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
 // Test-only: exercises the sweep summary's status/survivors formatting
 // without spinning up a live CLI command or the daemon route it calls.
 export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
+
+// `sidecar stop`'s success line, per real outcome — never claims a reap that
+// did not happen (`sidecarStop.outcome`, session-service.ts's stopSidecar).
+function renderSidecarStopMessage(name: string, session: SidecarStopView): string {
+  const { sidecarStop } = session;
+  if (sidecarStop.outcome === "nothing-to-stop") {
+    return `Sidecar ${name} on ${session.id} was not running; nothing to stop.`;
+  }
+  if (sidecarStop.outcome === "partial") {
+    // ND-2: unverifiedPorts has two distinct causes (a probe that could not
+    // run, or a port excluded as ambiguous against a non-terminal sibling —
+    // see docs/daemon-api.md's sidecar-stop route entry) — this message
+    // names neither, rather than misattributing an ambiguous-ownership
+    // exclusion to a missing OS tool.
+    const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
+    if (sidecarStop.survivors.length === 0 && unverifiedPorts.length > 0) {
+      return `Stopped sidecar ${name} for ${session.id}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Report them: spur sidecar sweep`;
+    }
+    return `Stopped sidecar ${name} for ${session.id}, but ${sidecarStop.survivors.length} process(es) survived: ${sidecarStop.survivors.join(",")}. Report them: spur sidecar sweep`;
+  }
+  return `Stopped sidecar ${name} for ${session.id}.`;
+}
+
+// Test-only: exercises the stop message's per-outcome branching without a
+// live CLI command or the daemon route it calls.
+export const _renderSidecarStopMessageForTests = renderSidecarStopMessage;
+
+// `sidecar stop`'s process exit code, per real outcome — only a `partial`
+// reap (survivors left behind) is operator-actionable failure.
+function sidecarStopExitCode(session: SidecarStopView): number | undefined {
+  return session.sidecarStop.outcome === "partial" ? 1 : undefined;
+}
+
+// Test-only: exercises the stop exit-code mapping without a live CLI
+// command or the daemon route it calls.
+export const _sidecarStopExitCodeForTests = sidecarStopExitCode;
 
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
@@ -1243,6 +1295,37 @@ export function renderSessionGcResult(report: GcReport): string {
   }
   if (report.dryRun) {
     lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+export function renderArtifactRetentionResult(report: ArtifactRetentionReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.files} artifact(s) across ${report.scanned.anchors} anchor(s); planned ${report.anchors.length} (limit ${report.limit}, older than ${report.olderThanDays}d, max ${formatBytes(report.maxBytesPerSession)}, max ${report.maxFilesPerSession} file(s) per anchor).`,
+    ),
+    "",
+  ];
+  if (report.anchors.length === 0) {
+    lines.push(dimText("Nothing to prune."));
+    return lines.join("\n");
+  }
+  for (const anchor of report.anchors) {
+    const detail = anchor.error
+      ? `error: ${anchor.error}`
+      : anchor.blockReasons.length > 0
+        ? anchor.blockReasons.join(",")
+        : `${anchor.totalFiles} file(s), ${formatBytes(anchor.totalBytes)} on disk`;
+    lines.push(
+      `  ${accent(anchor.anchorId.padEnd(20))}  ${`${anchor.evictFiles} file(s)`.padEnd(14)}  ${formatBytes(anchor.evictBytes).padEnd(9)}  ${detail}`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.evictFiles} artifact(s) selected, ${formatBytes(report.totals.freedBytes)} ${report.dryRun ? "would be freed" : "freed"}, ${report.totals.errors} error(s).`,
+  );
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing deleted. Re-run with --execute to apply."));
   }
   return lines.join("\n");
 }
@@ -2566,6 +2649,70 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("artifacts-gc")
+    .description(
+      "Prune oversized agent-history artifacts per session workspace (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is deleted")
+    .option("--older-than <days>", "Age prune cutoff; applies only to completed/killed/stopped")
+    .option("--max-bytes <bytes>", "Agent-history bytes kept per workspace")
+    .option("--max-files <number>", "Agent-history files kept per workspace")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum workspaces to act on in one run")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const retention = config.artifactRetention;
+      const olderThanDays =
+        options.olderThan === undefined
+          ? retention.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const maxBytesPerSession =
+        options.maxBytes === undefined
+          ? retention.maxBytesPerSession
+          : parsePositiveIntegerOption(String(options.maxBytes), "--max-bytes");
+      const maxFilesPerSession =
+        options.maxFiles === undefined
+          ? retention.maxFilesPerSession
+          : parsePositiveIntegerOption(String(options.maxFiles), "--max-files");
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning artifact retention" : "running artifact retention",
+        action: () => {
+          const plan = planArtifactRetention({
+            sessions: listSessions(config.dataDir),
+            now: new Date(),
+            olderThanDays,
+            maxBytesPerSession,
+            maxFilesPerSession,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            listArtifacts: listAnchorArtifacts(config.dataDir),
+          });
+          return Promise.resolve(
+            executeArtifactRetention(plan, createArtifactRetentionDeps(config), { dryRun }),
+          );
+        },
+        render: renderArtifactRetentionResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
+      });
+    });
+
+  program
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
@@ -3835,13 +3982,14 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "stopping sidecar",
         action: () =>
-          postJson<SessionView>(
+          postJson<SidecarStopView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
             {},
             configPath,
           ),
-        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
+        success: (session) => renderSidecarStopMessage(options.name as string, session),
+        exitCode: sidecarStopExitCode,
         render: renderSessionCard,
       });
     });

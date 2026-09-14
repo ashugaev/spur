@@ -36,6 +36,11 @@ export interface SourceSpawnSessionRequest {
   selfDestruct?: SelfDestructConfig;
 }
 
+export interface SourceProjectListItem {
+  id: string;
+  name: string;
+}
+
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   sourceId: string;
   projectId: string;
@@ -47,6 +52,14 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   signal: AbortSignal;
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  /**
+   * Every configured, non-shepherd project this daemon knows about — the
+   * spawnable-project list for a source's own project picker. Filtered at
+   * the daemon boundary (see `spawnableProjects` in `event-sources/index.ts`)
+   * so no source module needs to know about `ProjectListEntry.kind` or
+   * `configured`.
+   */
+  listProjects?(): Promise<SourceProjectListItem[]>;
   /**
    * Resolves this instance's own web UI base URL, lazily — called at the
    * moment a source actually needs it (voice transcription today), not at

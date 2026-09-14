@@ -6,6 +6,7 @@ import { EventBus } from "../../src/event-bus.js";
 
 const logSpurEventMock = vi.fn();
 const cronStartMock = vi.fn();
+const jiraStartMock = vi.fn();
 
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
@@ -18,6 +19,13 @@ vi.mock("../../src/event-sources/cron.js", () => ({
   },
 }));
 
+vi.mock("../../src/event-sources/jira.js", () => ({
+  jiraSourceModule: {
+    type: "jira",
+    start: jiraStartMock,
+  },
+}));
+
 async function loadStartConfiguredSources() {
   return import("../../src/event-sources/index.js");
 }
@@ -26,7 +34,7 @@ const MISSING_PATH = "/definitely/not/a/real/path/spur-vanished-project";
 
 interface TestConfigProject {
   path: string;
-  sources: Record<string, { type: string }>;
+  sources: Record<string, { type: string; query?: string }>;
 }
 
 function buildConfig(
@@ -44,6 +52,8 @@ describe("startConfiguredSources", () => {
     logSpurEventMock.mockReset();
     cronStartMock.mockReset();
     cronStartMock.mockResolvedValue({ stop: vi.fn() });
+    jiraStartMock.mockReset();
+    jiraStartMock.mockResolvedValue({ stop: vi.fn() });
   });
 
   afterEach(() => {
@@ -111,6 +121,46 @@ describe("startConfiguredSources", () => {
     await expect(controller.stop()).resolves.toBeUndefined();
   });
 
+  it("skips a jira source with no query (connection-only)", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { jira: { type: "jira" } },
+      },
+    });
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    expect(jiraStartMock).not.toHaveBeenCalled();
+
+    await controller.stop();
+  });
+
+  it("starts a jira source with a query as a poller", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { jira: { type: "jira", query: "project = WEBDEV" } },
+      },
+    });
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    expect(jiraStartMock).toHaveBeenCalledTimes(1);
+
+    await controller.stop();
+  });
+
   it("skips only the vanished project in a mixed config", async () => {
     const { startConfiguredSources } = await loadStartConfiguredSources();
     const config = buildConfig(tmpDir, {
@@ -138,5 +188,74 @@ describe("startConfiguredSources", () => {
     expect((missingEvents[0]?.[1] as { projectId: string }).projectId).toBe("gone");
 
     await controller.stop();
+  });
+
+  it("forwards listProjects into a source module's start deps", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { nightly: { type: "cron" } },
+      },
+    });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      listProjects,
+    });
+
+    expect(cronStartMock).toHaveBeenCalledTimes(1);
+    const startDeps = cronStartMock.mock.calls[0]?.[0] as { listProjects?: unknown };
+    expect(startDeps.listProjects).toBe(listProjects);
+
+    await controller.stop();
+  });
+
+  it("omits listProjects from a source module's start deps when not supplied", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: { nightly: { type: "cron" } },
+      },
+    });
+
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    const startDeps = cronStartMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect("listProjects" in startDeps).toBe(false);
+
+    await controller.stop();
+  });
+});
+
+describe("spawnableProjects", () => {
+  it("drops shepherd and unconfigured entries and preserves input order", async () => {
+    const { spawnableProjects } = await loadStartConfiguredSources();
+    const entries = [
+      { id: "api", name: "API", configured: true, prefix: "api", path: "/api" },
+      {
+        id: "spur-shepherd",
+        name: "Shepherd",
+        configured: true,
+        prefix: "shp",
+        path: "/shepherd",
+        kind: "shepherd" as const,
+      },
+      { id: "unconf", name: "Unconf", configured: false, prefix: "unc", path: "/unconf" },
+      { id: "web", name: "Web", configured: true, prefix: "web", path: "/web" },
+    ];
+
+    expect(spawnableProjects(entries)).toEqual([
+      { id: "api", name: "API" },
+      { id: "web", name: "Web" },
+    ]);
   });
 });

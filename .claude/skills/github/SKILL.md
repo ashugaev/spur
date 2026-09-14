@@ -19,6 +19,16 @@ CLOSE-OUT GATE, mandatory after any code change
 
 PR TITLE: <type>: <description>. Types incl. style, no version bump. AO_ISSUE_ID set, prefix: <ISSUE-ID>: <type>: <description>.
 
+PR BODY: plain language, what got fixed and why. Two to four lines, no headings.
+
+  Banned: file paths, symbol names, code, diff stats, test checklist, reasoning, design talk.
+  Reader wants the effect, not the diff. Detail belongs in the diff and the commits.
+  Closes line only when a real issue number exists.
+
+  Bad:   Dropped the Default sentinel in resolveAgentLaunchModel, added 3 vitest cases.
+  Good:  Spawn dropdown now shows the model that actually launches. Before it could
+         show one model and start another.
+
 CREATE OPEN PR
 
   git push -u origin HEAD
@@ -26,16 +36,8 @@ CREATE OPEN PR
   gh pr create \
     --title "<type>: <description>" \
     --body "$(cat <<'EOF'
-## Summary
-<what changed and why — 2-3 sentences>
-
-## Changes
-- <bullet list>
-
-## Testing
-- [ ] Lint passes
-- [ ] TypeScript compiles
-- [ ] Manual verification
+<what changed, one or two sentences>
+<why it was needed, one sentence>
 
 Closes #<issue-number>
 EOF

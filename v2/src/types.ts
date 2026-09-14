@@ -2,6 +2,7 @@ import type { HostMemory } from "./host-memory.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
+export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -167,11 +168,13 @@ export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
+export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   GITHUB_CI_RUN_COMPLETED_EVENT,
+  JIRA_WORK_ITEM_NEW_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -180,6 +183,10 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export interface JiraWorkItemEventData extends WorkItemEventData {
+  key: string;
 }
 
 export type BacklogProviderId = "jira";
@@ -248,6 +255,10 @@ export interface GitHubAdaptivePollConfig {
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   adaptivePoll?: GitHubAdaptivePollConfig;
+  // Caps how many sessions one review poll batches into a single GraphQL call.
+  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+  maxReviewBatchTargets?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -263,11 +274,15 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
-export interface JiraSourceConfig {
+export interface JiraSourceConfig extends BaseSourceConfig {
   type: "jira";
   baseUrl: string;
   email: string;
   token: string;
+  query?: string;
+  intervalMs: number;
+  emitExisting: boolean;
+  maxResults: number;
 }
 
 export interface BacklogConfig {
@@ -738,6 +753,16 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  // Prunes agent-history artifacts only. Disjoint from sessionGc, which owns
+  // worktrees and session records.
+  artifactRetention: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxAnchorsPerSweep: number;
+    maxBytesPerSession: number;
+    maxFilesPerSession: number;
+  };
   sidecarGc: {
     enabled: boolean;
     idleTtlMinutes: number;
@@ -863,6 +888,7 @@ export interface SessionRecord {
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  closeoutOwner?: boolean;
   claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
@@ -902,6 +928,8 @@ export interface SessionRecord {
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
   serverErrorAt?: string;
+  serverErrorReactivationAttempts?: number;
+  todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
@@ -1022,6 +1050,13 @@ export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmitt
   runningSidecarNames?: string[];
   deskGroupMembers?: SessionDeskMember[];
 }
+
+export type SidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
+export type SidecarStopView = SessionView & { sidecarStop: SidecarStopReport };
 
 // Dropped from the list projection because they are the byte-heavy or
 // filesystem-walk-backed fields: `artifacts`/`artifactsTruncated` require a
@@ -1155,6 +1190,12 @@ export interface SidecarPortConflictCandidate {
   env: string;
   port: number;
   owner?: string;
+  /** Session/sidecar name that recorded a reservation for this port, when known. */
+  reservedBy?: string;
+  /** Attributed foreign listener, when the port is host-occupied by an untracked process. */
+  holder?: { pid: number; cwd: string | null };
+  /** False for a port already claimed by a sibling portId in this same attempt: clearing it would break that other reservation. */
+  clearable?: boolean;
 }
 
 export interface SidecarPortConflictPayload {

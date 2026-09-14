@@ -18,6 +18,8 @@ Run from source without a global install: `node v2/dist/cli.js <cmd>` after `pnp
 
 For a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`, use `scripts/spur-isolated-daemon.sh`. `isolated-daemon` and `isolated-ui` project sidecars start an isolated Spur daemon and the web UI against it; new isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks, and `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs. Session tool wrappers, including `spur-isolated`, are documented in [commands.md](docs/commands.md#session-tools-and-environment).
 
+First start of either sidecar in a fresh worktree pays a full cold `pnpm install --frozen-lockfile`: it replaces the worktree's symlinked `node_modules` trees with a real install.
+
 ## PR Checks
 
 Before opening or updating a PR:

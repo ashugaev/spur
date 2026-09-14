@@ -32,6 +32,7 @@ export interface ParsedRecord {
   /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
   model?: string;
   timestampMs: number;
+  ownTimestampMs?: number;
 }
 
 export interface ClaudeJsonlReaderState {
@@ -103,6 +104,23 @@ export function hasTrailingClaudeServerError(records: readonly ParsedRecord[]): 
       continue;
     }
     return record.serverError === true;
+  }
+  return false;
+}
+
+export function hasClaudeRecoveryAfter(records: readonly ParsedRecord[], errorAt: string): boolean {
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index];
+    if (!record || CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) continue;
+    return (
+      record.role === "assistant" &&
+      (record.model !== undefined || record.hasToolUse === true) &&
+      !record.serverError &&
+      !record.rateLimited &&
+      !record.interrupted &&
+      record.ownTimestampMs !== undefined &&
+      record.ownTimestampMs > Date.parse(errorAt)
+    );
   }
   return false;
 }
@@ -322,13 +340,17 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
   const message = unwrapMessage(parsed);
   const ownTimestampMs = extractRecordTimestampMs(parsed, message);
   const recordTimestampMs = ownTimestampMs ?? timestampMs;
+  const timestamps = {
+    timestampMs: recordTimestampMs,
+    ...(ownTimestampMs !== undefined ? { ownTimestampMs } : {}),
+  };
 
   if (type === "progress") {
-    return { type: "progress", timestampMs: recordTimestampMs };
+    return { type: "progress", ...timestamps };
   }
 
   if (CLAUDE_BOOKKEEPING_RECORD_TYPES.has(type)) {
-    return { type, timestampMs: recordTimestampMs };
+    return { type, ...timestamps };
   }
 
   const role = extractRole(parsed, message);
@@ -360,7 +382,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       ...(typeof message["model"] === "string" && message["model"] !== SYNTHETIC_MODEL
         ? { model: message["model"] }
         : {}),
-      timestampMs: recordTimestampMs,
+      ...timestamps,
     };
   }
 
@@ -370,12 +392,12 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       type: "user",
       role: hasBlockType(blocks, "tool_result") ? "tool_result" : "user",
       ...(hasInterruptMarker(message, blocks) ? { interrupted: true } : {}),
-      timestampMs: recordTimestampMs,
+      ...timestamps,
     };
   }
 
   if (type) {
-    return { type, timestampMs: recordTimestampMs };
+    return { type, ...timestamps };
   }
 
   return null;
