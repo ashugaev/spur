@@ -39,6 +39,58 @@ afterEach(() => {
 });
 
 describe("AutoPingService", () => {
+  it("retains an empty leased route through startup GC and its later subscription through restart", async () => {
+    const dir = createDir();
+    const descriptor = route({
+      actionKind: "spawn",
+      destination: { kind: "trigger" },
+      sourceType: "cron",
+      eventName: "cron:tick",
+    });
+    const fingerprint = autoPingRouteFingerprint(descriptor);
+    const service = new AutoPingService(dir);
+    let restored: AutoPingService | undefined;
+    try {
+      const lease = service.registerRoute(fingerprint, descriptor);
+      service.setConfiguredRouteAuthorities([descriptor]);
+      expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).toContain(fingerprint);
+      const grant = service.createGrant({
+        scope: "subscription",
+        routeFingerprint: fingerprint,
+        destination: descriptor.destination,
+        target: { kind: "subscription" },
+      });
+      service.bindGrant(grant.handleHash, "owner");
+      const suppression = await service.unsubscribe("owner", "subscription", grant.handle);
+      service.releaseRoute(lease);
+      expect(service.list("owner")).toEqual([suppression.record]);
+      service.dispose();
+      restored = new AutoPingService(dir);
+      restored.setConfiguredRouteAuthorities([descriptor]);
+      expect(restored.list("owner")).toEqual([suppression.record]);
+      restored.setConfiguredRouteAuthorities([]);
+      expect(restored.list("owner")).toEqual([]);
+      expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).not.toContain(fingerprint);
+    } finally {
+      service.dispose();
+      restored?.dispose();
+    }
+  });
+
+  it("collects an unused route descriptor after its last lease is released", () => {
+    const dir = createDir();
+    const descriptor = route();
+    const fingerprint = autoPingRouteFingerprint(descriptor);
+    const service = new AutoPingService(dir);
+    try {
+      const lease = service.registerRoute(fingerprint, descriptor);
+      service.setConfiguredRouteAuthorities([descriptor]);
+      service.releaseRoute(lease);
+      expect(readFileSync(join(dir, "auto-ping.json"), "utf8")).not.toContain(fingerprint);
+    } finally {
+      service.dispose();
+    }
+  });
   it("reloads pending grants invalidated by resume before actor binding", async () => {
     const dir = createDir();
     const service = new AutoPingService(dir);

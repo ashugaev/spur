@@ -685,6 +685,8 @@ export class AutoPingService {
       liveRoute(entry.routeFingerprint),
     );
     const liveFingerprints = new Set([
+      ...this.configuredRoutes,
+      ...[...this.leases.values()].map((lease) => lease.routeFingerprint),
       ...this.state.grants.map((grant) => grant.routeFingerprint),
       ...this.state.suppressions.map((suppression) => suppression.routeFingerprint),
       ...this.state.mergeConflicts.map((entry) => entry.routeFingerprint),
