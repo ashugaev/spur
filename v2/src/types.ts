@@ -646,7 +646,19 @@ export interface PersistedPendingBatch {
   triggerId: string;
   sourceId: string;
   batch: PersistedSendBatch;
+  retryAccounting?: SendBatchRetryEntry[];
 }
+
+export interface SendBatchRetryEntry {
+  itemKey: string;
+  fingerprint: string;
+  deliveryAttempts: number;
+  ciAttempts: number;
+  nextAttemptAt: number;
+}
+
+export const DELIVERY_MAX_ATTEMPTS = 8;
+export const CI_FAILED_MAX_ATTEMPTS = 3;
 
 export interface SessionModeConfig {
   skill: string;

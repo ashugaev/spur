@@ -39,6 +39,27 @@ afterEach(() => {
 });
 
 describe("AutoPingService", () => {
+  it("reloads pending grants invalidated by resume before actor binding", async () => {
+    const dir = createDir();
+    const service = new AutoPingService(dir);
+    const descriptor = route();
+    const routeFingerprint = autoPingRouteFingerprint(descriptor);
+    service.registerRoute(routeFingerprint, descriptor);
+    const input = {
+      scope: "subscription" as const,
+      routeFingerprint,
+      destination: descriptor.destination,
+      target: { kind: "subscription" as const },
+    };
+    const bound = service.createGrant({ ...input, actorSessionId: "owner" });
+    service.createGrant(input);
+    const suppression = await service.unsubscribe("owner", "subscription", bound.handle);
+    await service.resume("owner", suppression.record.suppressionId);
+    service.dispose();
+    const restored = new AutoPingService(dir);
+    expect(restored.list("owner")).toEqual([]);
+    restored.dispose();
+  });
   it("caps unchanged conflict claims across reload and resets only on proven change", () => {
     const dir = createDir();
     const descriptor = route();

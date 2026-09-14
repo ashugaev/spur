@@ -220,10 +220,7 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
             this.sessionId,
           );
 
-    for (const key of [...this.signals.keys()]) {
-      if (snapshot?.signals.has(key)) continue;
-      this.signals.delete(key);
-    }
+    this.filterItems((item) => snapshot?.signals.has(item.key) ?? false);
   }
 
   isEmpty(): boolean {
@@ -457,7 +454,14 @@ class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
 
   merge(incoming: SendBatch): void {
     const next = incoming as TelegramSendBatch;
-    this.messages.push(...next.messages);
+    for (const message of next.messages) {
+      const index = this.messages.findIndex(
+        (existing) =>
+          existing.chatId === message.chatId && existing.messageId === message.messageId,
+      );
+      if (index < 0) this.messages.push(message);
+      else this.messages[index] = message;
+    }
     this.autoPing = mergeAutoPingState(this.autoPing, next.autoPing);
   }
 
@@ -481,7 +485,7 @@ class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
 
   protected autoPingItems(): Array<{ key: string; threadTarget?: AutoPingThreadTarget }> {
     return this.messages.map((message) => ({
-      key: String(message.messageId),
+      key: JSON.stringify([message.chatId, message.messageId]),
       ...(message.messageThreadId !== undefined
         ? {
             threadTarget: {
@@ -495,13 +499,15 @@ class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
   }
 
   protected removeAutoPingItem(key: string): void {
-    const index = this.messages.findIndex((message) => String(message.messageId) === key);
+    const index = this.messages.findIndex(
+      (message) => JSON.stringify([message.chatId, message.messageId]) === key,
+    );
     if (index >= 0) this.messages.splice(index, 1);
   }
 
   retryItems(): SendBatchItem[] {
     return this.messages.map((message) => ({
-      key: String(message.messageId),
+      key: JSON.stringify([message.chatId, message.messageId]),
       itemKey: JSON.stringify([message.chatId, message.messageId]),
       fingerprint: semanticFingerprint([
         message.text,

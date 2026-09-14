@@ -13,6 +13,8 @@ import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
+  DELIVERY_MAX_ATTEMPTS,
+  CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type ReviewProviderId,
@@ -195,6 +197,30 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
+  const accounting = value["retryAccounting"];
+  if (
+    accounting !== undefined &&
+    (!Array.isArray(accounting) ||
+      !accounting.every(
+        (entry: unknown) =>
+          isRecord(entry) &&
+          typeof entry["itemKey"] === "string" &&
+          typeof entry["fingerprint"] === "string" &&
+          /^[a-f0-9]{64}$/.test(entry["fingerprint"]) &&
+          typeof entry["deliveryAttempts"] === "number" &&
+          Number.isInteger(entry["deliveryAttempts"]) &&
+          entry["deliveryAttempts"] >= 0 &&
+          entry["deliveryAttempts"] <= DELIVERY_MAX_ATTEMPTS &&
+          typeof entry["ciAttempts"] === "number" &&
+          Number.isInteger(entry["ciAttempts"]) &&
+          entry["ciAttempts"] >= 0 &&
+          entry["ciAttempts"] <= CI_FAILED_MAX_ATTEMPTS &&
+          typeof entry["nextAttemptAt"] === "number" &&
+          Number.isFinite(entry["nextAttemptAt"]) &&
+          entry["nextAttemptAt"] >= 0,
+      ))
+  )
+    return false;
   return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 

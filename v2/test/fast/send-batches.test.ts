@@ -498,6 +498,37 @@ describe("automatic ping controls", () => {
 });
 
 describe("restoreSendBatch", () => {
+  it("preserves semantic identity across control and title changes while separating edited items", () => {
+    const parse = createSendBatchParser("github", "proj", "src-1");
+    const batch = requireBatch(parse(githubEventData()), "review batch");
+    const [before] = batch.retryItems();
+    batch.merge(requireBatch(parse(githubEventData({ prTitle: "renamed" })), "renamed batch"));
+    expect(batch.retryItems()).toEqual([before]);
+    batch.merge(
+      requireBatch(
+        parse(
+          githubEventData({ signals: [{ key: "comment:1", kind: "comment", text: "Changed" }] }),
+        ),
+        "edited batch",
+      ),
+    );
+    expect(batch.retryItems()[0]?.itemKey).toBe(before?.itemKey);
+    expect(batch.retryItems()[0]?.fingerprint).not.toBe(before?.fingerprint);
+    expect(restoreSendBatch(batch.serialize())?.retryItems()).toEqual(batch.retryItems());
+  });
+
+  it("deduplicates a Telegram item while retaining same-text messages and separate chats", () => {
+    const parse = createSendBatchParser("telegram", "proj", "src-1");
+    const batch = requireBatch(parse(telegramEventData()), "Telegram batch");
+    batch.merge(requireBatch(parse(telegramEventData()), "duplicate"));
+    batch.merge(requireBatch(parse(telegramEventData({ messageId: 100 })), "new message"));
+    batch.merge(requireBatch(parse(telegramEventData({ chatId: -200 })), "other chat"));
+    expect(batch.retryItems()).toHaveLength(3);
+    const retained = batch.retryItems()[2]?.itemKey;
+    batch.filterItems((item) => item.itemKey === retained);
+    expect(batch.retryItems()).toHaveLength(1);
+    expect(batch.format()).toContain("chat -200");
+  });
   it("round-trips a multi-signal review batch through serialize()", () => {
     const parse = createSendBatchParser("github", "proj", "src-1");
     const batch = requireBatch(

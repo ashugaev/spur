@@ -14,6 +14,7 @@ const EVENT_GRACE_MS = 24 * 60 * 60 * 1_000;
 const CREDENTIAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const GC_INTERVAL_MS = 60 * 60 * 1_000;
 const HANDLE_PATTERN = /^ap1_[A-Za-z0-9_-]{43}$/;
+const MERGE_CONFLICT_MAX_ATTEMPTS = 3;
 
 type GrantState = "pending" | "bound" | "consumed" | "revoked";
 
@@ -211,9 +212,12 @@ function parseState(raw: unknown): AutoPingState {
       typeof value.canonicalKey !== "string" ||
       !isDate(value.createdAt) ||
       (value.invalidatedAt !== undefined && !isDate(value.invalidatedAt)) ||
-      ((value.state === "bound" || value.state === "consumed") &&
+      ((value.state === "bound" ||
+        (value.state === "consumed" && value.invalidatedAt === undefined)) &&
         typeof value.actorSessionId !== "string") ||
+      (value.actorSessionId !== undefined && typeof value.actorSessionId !== "string") ||
       (value.state === "consumed" && typeof value.suppressionId !== "string") ||
+      (value.state !== "consumed" && value.suppressionId !== undefined) ||
       ((value.state === "pending" || value.state === "revoked") &&
         value.actorSessionId !== undefined) ||
       !["pending", "bound", "consumed", "revoked"].includes(String(value.state))
@@ -264,7 +268,7 @@ function parseState(raw: unknown): AutoPingState {
         typeof value.fingerprint !== "string" ||
         !Number.isInteger(value.attempts) ||
         Number(value.attempts) < 0 ||
-        Number(value.attempts) > 3 ||
+        Number(value.attempts) > MERGE_CONFLICT_MAX_ATTEMPTS ||
         (value.lastAppliedClearId !== undefined && typeof value.lastAppliedClearId !== "string")
       )
         throw new Error("Invalid auto-ping conflict state");
@@ -603,7 +607,7 @@ export class AutoPingService {
       budget.fingerprint = fingerprint;
     }
     if (clearId !== undefined) budget.lastAppliedClearId = clearId;
-    if (budget.attempts >= 3) return false;
+    if (budget.attempts >= MERGE_CONFLICT_MAX_ATTEMPTS) return false;
     budget.attempts += 1;
     this.persist();
     return true;

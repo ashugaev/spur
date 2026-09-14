@@ -517,7 +517,7 @@ function githubEvent(signalKey = "comment:1") {
       signals: [
         {
           key: signalKey,
-          kind: "comment",
+          kind: "comment" as const,
           text: "A new comment arrived.",
         },
       ],
@@ -565,7 +565,7 @@ function ciFailedEvent() {
       signals: [
         {
           key: "ci_failed",
-          kind: "ci_failed",
+          kind: "ci_failed" as const,
           text: "CI is failing: test suite.",
         },
       ],
@@ -601,7 +601,7 @@ function ciSnapshot(): ReviewSnapshot {
   return storedSnapshot([
     {
       key: "ci_failed",
-      kind: "ci_failed",
+      kind: "ci_failed" as const,
       text: "CI is failing: test suite.",
     },
   ]);
@@ -933,15 +933,13 @@ describe("startConfiguredTriggers", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "spur-conflict-cap-"));
     const autoPing = new AutoPingService(dataDir);
     const bus = new EventBus();
-    const get = vi
-      .fn()
-      .mockResolvedValue({
-        id: "api-1",
-        state: "stale",
-        status: "stopped",
-        workspaceExists: true,
-        stopReason: "stale_timeout",
-      });
+    const get = vi.fn().mockResolvedValue({
+      id: "api-1",
+      state: "stale",
+      status: "stopped",
+      workspaceExists: true,
+      stopReason: "stale_timeout",
+    });
     const deliver = vi.fn().mockResolvedValue(undefined);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const deps = {
@@ -974,6 +972,158 @@ describe("startConfiguredTriggers", () => {
       expect(deliver.mock.calls.at(-1)?.[1]).toContain("Action 99");
     } finally {
       await controller.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    "retains exhausted item tombstones across fresh UUIDs and reloads (CI=%s)",
+    async (ci) => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-item-budget-"));
+      const autoPing = new AutoPingService(dataDir);
+      const bus = new EventBus();
+      const get = vi.fn().mockResolvedValue({
+        id: "api-1",
+        state: ci ? "working" : "stale",
+        status: ci ? "running" : "stopped",
+        stopReason: "stale_timeout",
+        workspaceExists: true,
+      });
+      const deliver = ci
+        ? vi.fn().mockResolvedValue(undefined)
+        : vi.fn().mockRejectedValue(new Error("uncertain submit"));
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const event = ci ? ciFailedEvent() : githubEvent();
+      const deps = {
+        config: { ...config({ event: event.name, interrupt: ci }), dataDir } as never,
+        bus,
+        autoPing,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      };
+      let controller = startConfiguredTriggers(deps);
+      const limit = ci ? 3 : 8;
+      const delay = (attempt: number): number => (ci ? 600_000 : 10_000 * 2 ** (attempt - 1));
+      try {
+        readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(event.data.signals));
+        bus.emit(event);
+        await vi.advanceTimersByTimeAsync(1);
+        for (let attempt = 1; attempt < limit - 1; attempt += 1)
+          await vi.advanceTimersByTimeAsync(delay(attempt) + 5_000);
+        expect(deliver).toHaveBeenCalledTimes(limit - 1);
+        const first = event.data.signals[0];
+        if (!first) throw new Error("missing fixture signal");
+        const sibling = { ...first, key: "sibling", text: "Independent sibling" };
+        readGitHubSourceSnapshotMock.mockReturnValue(
+          storedSnapshot([...event.data.signals, sibling]),
+        );
+        bus.emit({
+          ...event,
+          occurrenceId: "new-sibling",
+          data: { ...event.data, signals: [sibling] },
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        await vi.advanceTimersByTimeAsync(delay(limit - 1));
+        for (let index = 0; index < 100; index += 1) {
+          await controller.stop();
+          controller = startConfiguredTriggers(deps);
+          bus.emit({ ...event, occurrenceId: `new-envelope-${index}` });
+          await vi.advanceTimersByTimeAsync(1);
+        }
+        expect(
+          deliver.mock.calls.filter((call) => String(call[1]).includes(first.text)),
+        ).toHaveLength(limit);
+        const record = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+        expect(
+          record.retryAccounting?.find((entry) => entry.itemKey.includes(first.key)),
+        ).toMatchObject({ deliveryAttempts: limit, ciAttempts: ci ? limit : 0 });
+        const changed = { ...first, text: "Changed actionable item" };
+        readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot([changed, sibling]));
+        bus.emit({
+          ...event,
+          occurrenceId: "changed-envelope",
+          data: { ...event.data, signals: [changed] },
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(deliver.mock.calls.at(-1)?.[1]).toContain("Changed actionable item");
+        expect(deliver.mock.calls.at(-1)?.[1]).not.toContain(first.text);
+      } finally {
+        await controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("re-reads a sibling merged while the old controller waits for session state and reserves before submission", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-item-race-"));
+    const autoPing = new AutoPingService(dataDir);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const working = { id: "api-1", status: "running", state: "working", workspaceExists: true };
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce(working)
+      .mockImplementation(async () => {
+        markStarted();
+        await held;
+        return { ...working, state: "waiting", lastActivityAt: staleActivity() };
+      });
+    const deliver = vi.fn().mockImplementation(async () => {
+      const record = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(
+        record.retryAccounting?.find((entry) => entry.itemKey.includes("comment:2")),
+      ).toMatchObject({ deliveryAttempts: 1 });
+    });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const deps = {
+      config: { ...config(), dataDir } as never,
+      bus,
+      autoPing,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    };
+    const old = startConfiguredTriggers(deps);
+    let replacement: ReturnType<typeof startConfiguredTriggers> | undefined;
+    try {
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      const ticking = vi.advanceTimersByTimeAsync(35_000);
+      await started;
+      const replacementBus = new EventBus();
+      replacement = startConfiguredTriggers({
+        ...deps,
+        bus: replacementBus,
+        sessionService: { get: vi.fn().mockResolvedValue(working), deliver } as never,
+      });
+      replacementBus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [{ key: "comment:2", kind: "comment", text: "Concurrent live sibling" }],
+        },
+      });
+      await vi.waitFor(() => expect(recordPendingSendBatchMock).toHaveBeenCalledTimes(2));
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot("comment:2"));
+      release();
+      await ticking;
+      await advanceSendWindow();
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(deliver.mock.calls[0]?.[1]).toContain("Concurrent live sibling");
+      expect(deliver.mock.calls[0]?.[1]).not.toContain("A new comment arrived.");
+    } finally {
+      release();
+      await old.stop();
+      await replacement?.stop();
       autoPing.dispose();
       rmSync(dataDir, { recursive: true, force: true });
     }
@@ -1157,9 +1307,11 @@ describe("startConfiguredTriggers", () => {
       await advancing;
       await vi.advanceTimersByTimeAsync(15_000);
 
-      expect(deliverMock).toHaveBeenCalledTimes(2);
-      expect(deliverMock.mock.calls[1]?.[1]).toContain("A new comment arrived.");
+      expect(deliverMock).toHaveBeenCalledTimes(3);
+      expect(deliverMock.mock.calls[1]?.[1]).not.toContain("A new comment arrived.");
       expect(deliverMock.mock.calls[1]?.[1]).toContain("Replacement live event.");
+      expect(deliverMock.mock.calls[2]?.[1]).toContain("A new comment arrived.");
+      expect(deliverMock.mock.calls[2]?.[1]).not.toContain("Replacement live event.");
       expect(
         deliverMock.mock.calls.filter((call) =>
           String(call[1]).includes("Replacement live event."),
