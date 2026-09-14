@@ -275,6 +275,26 @@ const sessionIndexCache = new Map<string, CachedSessionIndex>();
 
 const EMPTY_INDEX: Readonly<Record<string, string>> = Object.freeze({});
 
+interface CachedDirListing extends FileFingerprint {
+  names: readonly string[];
+}
+
+// Keyed on the absolute subdirectory path under dataDir/sessions. On a live
+// fleet that namespace holds a handful of project dirs next to one log-shard
+// dir per session (todo.ts, event-log.ts), and every listSessions() readdir'd
+// all of them — 1832 of 1841 finding no *.json at all. Caches the *.json FILE
+// NAMES only: content still goes through readSessionFileCached's own per-file
+// fingerprint, so an in-place record rewrite stays visible and unchanged
+// records keep their object identity.
+const sessionDirListingCache = new Map<string, CachedDirListing>();
+
+// A listing is stored only once the directory mtime is older than this.
+// Measured at STORE time (between readdir and the fingerprint it is keyed on),
+// not at HIT time — so a mutation landing after readdir but inside the same
+// timestamp tick as the pre-readdir stat never gets cached. Insurance for a
+// filesystem whose directory timestamps are coarse or lazily flushed.
+const DIR_LISTING_MIN_AGE_MS = 1_000;
+
 function statFingerprint(path: string): FileFingerprint | null {
   try {
     return statSync(path);
@@ -830,20 +850,70 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
+// Same path-boundary rule as pruneStaleSessionFileCacheEntries, over the
+// directory entries of this listing rather than its files.
+function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedDir of sessionDirListingCache.keys()) {
+    if (cachedDir.startsWith(rootPrefix) && !visitedDirs.has(cachedDir)) {
+      sessionDirListingCache.delete(cachedDir);
+    }
+  }
+}
+
+// The *.json entries of one subdirectory of dataDir/sessions, served from
+// cache while the directory's own fingerprint is unchanged. Stored only when
+// the pre-readdir mtime is older than DIR_LISTING_MIN_AGE_MS. Soundness rests
+// on the directory's mtime
+// ADVANCING on every entry mutation — create, rename-over, rename-out and
+// unlink all do, and writeJsonFile's tmp+rename mutates it twice. ino is a
+// cheap extra discriminator only: this ext4 reuses a directory inode across
+// rm -r + mkdir of the same name, so the fresh mtime is what catches that.
+function listSessionDirJsonNames(dir: string): readonly string[] {
+  const fingerprint = statFingerprint(dir);
+  if (!fingerprint) {
+    // Directory vanished between the root readdir and this stat. Drop the
+    // entry and fall through so the caller sees today's exact readdir error.
+    sessionDirListingCache.delete(dir);
+    return readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  }
+
+  const cached = sessionDirListingCache.get(dir);
+  if (cached && sameFingerprint(cached, fingerprint)) {
+    return cached.names;
+  }
+
+  const names = readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  // Keyed on the PRE-readdir fingerprint: a mutation landing between the stat
+  // and the readdir stores a listing under the older mtime, so the next call's
+  // stat misses and re-reads once. Fails safe, never stale.
+  if (Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS) {
+    sessionDirListingCache.set(dir, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      names,
+    });
+  }
+  return names;
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
     pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    pruneStaleSessionDirListingEntries(rootDir, new Set());
     return [];
   }
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
+  const visitedDirs = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(projectDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    visitedDirs.add(projectDir);
+    for (const fileName of listSessionDirJsonNames(projectDir)) {
       const filePath = join(projectDir, fileName);
       visited.add(filePath);
       const session = tryReadSessionFile(filePath);
@@ -854,6 +924,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
+  pruneStaleSessionDirListingEntries(rootDir, visitedDirs);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
