@@ -899,6 +899,22 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         if (deleted) clearBatch(queueKey, batch, { deletePersisted: false });
         return { status: "suppressed" };
       }
+      const conflictClaims: string[] = [];
+      batch.batch.filterItems((item) => {
+        if (!item.mergeConflict) return true;
+        const claimed = autoPing.claimMergeConflict(
+          batch.routeFingerprint,
+          item.mergeConflict.prNumber,
+          item.fingerprint,
+          item.mergeConflict.clearId,
+        );
+        if (claimed) conflictClaims.push(item.itemKey);
+        return claimed;
+      });
+      if (batch.batch.isEmpty()) {
+        clearBatch(queueKey, batch);
+        return { status: "suppressed" };
+      }
       try {
         await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), {
           interrupt,
@@ -946,6 +962,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return { status: "delivered" };
       } catch (error) {
         if (error instanceof SessionRateLimitedError) {
+          if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
           logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_rate_limited", {
             level: "info",
             sessionId: batch.batch.sessionId,
@@ -970,6 +987,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           return { status: "suppressed" };
         }
         if (error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard") {
+          if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
           logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_memory_guard", {
             level: "info",
             sessionId: batch.batch.sessionId,

@@ -43,6 +43,15 @@ interface AutoPingState {
   routes: PersistedRoute[];
   grants: PersistedGrant[];
   suppressions: PersistedSuppression[];
+  mergeConflicts: PersistedMergeConflict[];
+}
+
+interface PersistedMergeConflict {
+  routeFingerprint: string;
+  prNumber: number;
+  fingerprint: string;
+  attempts: number;
+  lastAppliedClearId?: string;
 }
 
 interface PersistedRoute {
@@ -244,7 +253,25 @@ function parseState(raw: unknown): AutoPingState {
         return value as unknown as PersistedRoute;
       })
     : [];
-  return { version: STATE_VERSION, routes, grants, suppressions };
+  if (raw.mergeConflicts !== undefined && !Array.isArray(raw.mergeConflicts))
+    throw new Error("Invalid auto-ping conflict state");
+  const mergeConflicts: PersistedMergeConflict[] = (raw.mergeConflicts ?? []).map(
+    (value: unknown) => {
+      if (
+        !isRecord(value) ||
+        typeof value.routeFingerprint !== "string" ||
+        !Number.isInteger(value.prNumber) ||
+        typeof value.fingerprint !== "string" ||
+        !Number.isInteger(value.attempts) ||
+        Number(value.attempts) < 0 ||
+        Number(value.attempts) > 3 ||
+        (value.lastAppliedClearId !== undefined && typeof value.lastAppliedClearId !== "string")
+      )
+        throw new Error("Invalid auto-ping conflict state");
+      return value as unknown as PersistedMergeConflict;
+    },
+  );
+  return { version: STATE_VERSION, routes, grants, suppressions, mergeConflicts };
 }
 
 function view(record: PersistedSuppression): AutoPingSuppressionView {
@@ -277,7 +304,7 @@ export class AutoPingService {
     this.clearIntervalFn = options.clearInterval ?? globalThis.clearInterval;
     this.state = existsSync(this.path)
       ? parseState(JSON.parse(readFileSync(this.path, "utf8")) as unknown)
-      : { version: STATE_VERSION, routes: [], grants: [], suppressions: [] };
+      : { version: STATE_VERSION, routes: [], grants: [], suppressions: [], mergeConflicts: [] };
     const setIntervalFn = options.setInterval ?? globalThis.setInterval;
     this.timer = setIntervalFn(() => this.gc(), GC_INTERVAL_MS);
   }
@@ -553,6 +580,44 @@ export class AutoPingService {
     });
   }
 
+  claimMergeConflict(
+    routeFingerprint: string,
+    prNumber: number,
+    fingerprint: string,
+    clearId?: string,
+  ): boolean {
+    let budget = this.state.mergeConflicts.find(
+      (entry) => entry.routeFingerprint === routeFingerprint,
+    );
+    if (!budget) {
+      budget = { routeFingerprint, prNumber, fingerprint, attempts: 0 };
+      this.state.mergeConflicts.push(budget);
+    }
+    if (
+      budget.prNumber !== prNumber ||
+      budget.fingerprint !== fingerprint ||
+      (clearId !== undefined && budget.lastAppliedClearId !== clearId)
+    ) {
+      budget.attempts = 0;
+      budget.prNumber = prNumber;
+      budget.fingerprint = fingerprint;
+    }
+    if (clearId !== undefined) budget.lastAppliedClearId = clearId;
+    if (budget.attempts >= 3) return false;
+    budget.attempts += 1;
+    this.persist();
+    return true;
+  }
+
+  refundMergeConflict(routeFingerprint: string): void {
+    const budget = this.state.mergeConflicts.find(
+      (entry) => entry.routeFingerprint === routeFingerprint,
+    );
+    if (!budget || budget.attempts === 0) return;
+    budget.attempts -= 1;
+    this.persist();
+  }
+
   addOccurrenceReference(routeFingerprint: string, occurrenceId: string): void {
     const key = `${routeFingerprint}:${occurrenceId}`;
     this.occurrenceReferences.set(key, (this.occurrenceReferences.get(key) ?? 0) + 1);
@@ -612,9 +677,13 @@ export class AutoPingService {
       if (!suppression.unreferencedAt) return true;
       return now - Date.parse(suppression.unreferencedAt) < EVENT_GRACE_MS;
     });
+    this.state.mergeConflicts = this.state.mergeConflicts.filter((entry) =>
+      liveRoute(entry.routeFingerprint),
+    );
     const liveFingerprints = new Set([
       ...this.state.grants.map((grant) => grant.routeFingerprint),
       ...this.state.suppressions.map((suppression) => suppression.routeFingerprint),
+      ...this.state.mergeConflicts.map((entry) => entry.routeFingerprint),
     ]);
     this.state.routes = this.state.routes.filter((route) =>
       liveFingerprints.has(route.routeFingerprint),

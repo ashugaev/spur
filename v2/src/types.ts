@@ -535,6 +535,7 @@ export interface AutoPingResumeResponse {
 export interface ReviewSnapshot {
   prNumber: number | null;
   signals: Map<string, ReviewSignal>;
+  mergeConflictClearId?: string;
 }
 
 // The baseline to diff the next poll's signals against: the stored snapshot's
@@ -556,6 +557,7 @@ export interface ReviewEventData {
   prNumber: number;
   prTitle: string;
   signals: ReviewSignal[];
+  mergeConflictClearId?: string;
 }
 
 export interface ReviewRequestSummary {
@@ -612,6 +614,7 @@ export type PersistedSendBatch = (
       prNumber: number;
       prTitle: string;
       signals: ReviewSignal[];
+      mergeConflictClearId?: string;
     }
   | {
       kind: "service";

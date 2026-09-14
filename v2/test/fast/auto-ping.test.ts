@@ -39,6 +39,26 @@ afterEach(() => {
 });
 
 describe("AutoPingService", () => {
+  it("caps unchanged conflict claims across reload and resets only on proven change", () => {
+    const dir = createDir();
+    const descriptor = route();
+    const fingerprint = autoPingRouteFingerprint(descriptor);
+    let service = new AutoPingService(dir);
+    service.registerRoute(fingerprint, descriptor);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      expect(service.claimMergeConflict(fingerprint, 42, "same")).toBe(attempt < 3);
+      service.dispose();
+      service = new AutoPingService(dir);
+      service.setConfiguredRouteAuthorities([descriptor]);
+    }
+    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(true);
+    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(true);
+    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(true);
+    expect(service.claimMergeConflict(fingerprint, 42, "same", "confirmed-clear")).toBe(false);
+    expect(service.claimMergeConflict(fingerprint, 42, "changed")).toBe(true);
+    expect(service.claimMergeConflict(fingerprint, 43, "same")).toBe(true);
+    service.dispose();
+  });
   it.each([
     { routes: {} },
     { grants: [{ scope: "event", target: { kind: "subscription" } }] },

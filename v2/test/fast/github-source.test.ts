@@ -915,6 +915,41 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("unions restore replay with new comments and persists confirmed conflict clearance", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(true);
+    const emit = vi.fn();
+    mockLifecyclePoll(
+      prView({ mergeable: "CONFLICTING" }),
+      JSON.stringify([
+        { id: 999, state: "COMMENTED", body: "New actionable review", user: { login: "reviewer" } },
+      ]),
+    );
+    let handle = await startLifecycle(emit);
+    expect(emit.mock.calls.filter(([name]) => name === "github:merge_conflict")).toHaveLength(1);
+    expect(emit.mock.calls.filter(([name]) => name === "github:comment")).toHaveLength(1);
+    const conflict = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    expect(conflict.mergeConflictClearId).toBeUndefined();
+    handle.stop();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", conflict]]));
+    mockLifecyclePoll(prView());
+    handle = await startLifecycle(emit);
+    const cleared = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    expect(cleared.mergeConflictClearId).toEqual(expect.any(String));
+    handle.stop();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", cleared]]));
+    mockLifecyclePoll(prView({ mergeable: "CONFLICTING" }));
+    handle = await startLifecycle(emit);
+    expect(
+      (writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot).mergeConflictClearId,
+    ).toBe(cleared.mergeConflictClearId);
+    expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({
+      mergeConflictClearId: cleared.mergeConflictClearId,
+    });
+    handle.stop();
+  });
+
   function prView(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
       number: 42,

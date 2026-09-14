@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readGitHubSourceSnapshot, readReviewSourceSnapshot } from "./metadata.js";
 import { reviewProvider } from "./review-providers/index.js";
 import type {
@@ -28,6 +29,20 @@ export interface SendBatch {
     suppressed: (occurrenceId: string, threadTarget?: AutoPingThreadTarget) => boolean,
   ): void;
   serialize(): PersistedSendBatch;
+  retryItems(): SendBatchItem[];
+  filterItems(keep: (item: SendBatchItem) => boolean): void;
+}
+
+export interface SendBatchItem {
+  key: string;
+  itemKey: string;
+  fingerprint: string;
+  ciReminder: boolean;
+  mergeConflict?: { prNumber: number; clearId?: string };
+}
+
+function semanticFingerprint(values: readonly unknown[]): string {
+  return createHash("sha256").update(JSON.stringify(values)).digest("hex");
 }
 
 export interface AutoPingBatchAttachment {
@@ -56,6 +71,18 @@ abstract class AutoPingAwareBatch {
 
   protected abstract autoPingItems(): Array<{ key: string; threadTarget?: AutoPingThreadTarget }>;
   protected abstract removeAutoPingItem(key: string): void;
+  abstract retryItems(): SendBatchItem[];
+
+  filterItems(keep: (item: SendBatchItem) => boolean): void {
+    for (const item of this.retryItems()) {
+      if (keep(item)) continue;
+      this.removeAutoPingItem(item.key);
+      if (this.autoPing)
+        this.autoPing.items = Object.fromEntries(
+          Object.entries(this.autoPing.items).filter(([key]) => key !== item.key),
+        );
+    }
+  }
 
   attachAutoPing(input: AutoPingBatchAttachment): void {
     const items: PersistedAutoPingBatchState["items"] = {};
@@ -134,6 +161,7 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
   readonly sessionId: string;
   private prNumber: number;
   private prTitle: string;
+  private mergeConflictClearId: string | undefined;
   private readonly signals: Map<string, ReviewSignal>;
 
   private constructor(
@@ -147,6 +175,7 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     this.sessionId = data.sessionId;
     this.prNumber = data.prNumber;
     this.prTitle = data.prTitle;
+    this.mergeConflictClearId = data.mergeConflictClearId;
     this.signals = new Map<string, ReviewSignal>();
     for (const signal of data.signals) {
       const discussion =
@@ -169,8 +198,10 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
 
   merge(incoming: SendBatch): void {
     const next = incoming as ReviewSendBatch;
+    if (this.prNumber !== next.prNumber) this.signals.clear();
     this.prNumber = next.prNumber;
     this.prTitle = next.prTitle;
+    this.mergeConflictClearId = next.mergeConflictClearId;
     for (const signal of next.signals.values()) {
       this.signals.set(signal.key, signal);
     }
@@ -210,6 +241,9 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       prNumber: this.prNumber,
       prTitle: this.prTitle,
       signals: [...this.signals.values()],
+      ...(this.mergeConflictClearId !== undefined
+        ? { mergeConflictClearId: this.mergeConflictClearId }
+        : {}),
       ...(this.autoPing ? { autoPing: this.autoPing } : {}),
     };
   }
@@ -218,6 +252,25 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     return [...this.signals.values()].map((signal) => ({
       key: signal.key,
       ...(signal.providerThreadTarget ? { threadTarget: signal.providerThreadTarget } : {}),
+    }));
+  }
+
+  retryItems(): SendBatchItem[] {
+    return [...this.signals.values()].map((signal) => ({
+      key: signal.key,
+      itemKey: JSON.stringify([this.providerId, this.prNumber, signal.key]),
+      fingerprint: semanticFingerprint([signal.kind, signal.text]),
+      ciReminder: signal.kind === "ci_failed",
+      ...(signal.kind === "merge_conflict"
+        ? {
+            mergeConflict: {
+              prNumber: this.prNumber,
+              ...(this.mergeConflictClearId !== undefined
+                ? { clearId: this.mergeConflictClearId }
+                : {}),
+            },
+          }
+        : {}),
     }));
   }
 
@@ -345,6 +398,15 @@ class ServiceSendBatch extends AutoPingAwareBatch implements SendBatch {
     return [...this.ruleIds].map((key) => ({ key }));
   }
 
+  retryItems(): SendBatchItem[] {
+    return [...this.ruleIds].map((key) => ({
+      key,
+      itemKey: JSON.stringify([this.serviceId, key]),
+      fingerprint: semanticFingerprint([this.serviceId, key]),
+      ciReminder: false,
+    }));
+  }
+
   protected removeAutoPingItem(key: string): void {
     this.ruleIds.delete(key);
   }
@@ -435,6 +497,20 @@ class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
   protected removeAutoPingItem(key: string): void {
     const index = this.messages.findIndex((message) => String(message.messageId) === key);
     if (index >= 0) this.messages.splice(index, 1);
+  }
+
+  retryItems(): SendBatchItem[] {
+    return this.messages.map((message) => ({
+      key: String(message.messageId),
+      itemKey: JSON.stringify([message.chatId, message.messageId]),
+      fingerprint: semanticFingerprint([
+        message.text,
+        message.messageThreadId ?? null,
+        message.userId,
+        message.username ?? null,
+      ]),
+      ciReminder: false,
+    }));
   }
 
   format(): string {
@@ -571,6 +647,9 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
         prNumber: record["prNumber"],
         prTitle: record["prTitle"],
         signals: record["signals"],
+        ...(typeof record["mergeConflictClearId"] === "string"
+          ? { mergeConflictClearId: record["mergeConflictClearId"] }
+          : {}),
       },
     );
     batch?.restoreAutoPing(parsePersistedAutoPingState(record["autoPing"]));

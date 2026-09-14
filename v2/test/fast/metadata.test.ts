@@ -12,6 +12,8 @@ import {
   readCommentSeenRegistry,
   readPendingSendBatches,
   readPendingSendBatch,
+  readReviewSourceSnapshot,
+  writeReviewSourceSnapshot,
   readTelegramBindings,
   readTelegramLastUpdateId,
   readTelegramReplyTarget,
@@ -44,6 +46,25 @@ async function newDataDir(): Promise<string> {
 }
 
 describe("work-item registry", () => {
+  it("round-trips confirmed conflict clear IDs and rejects malformed IDs", async () => {
+    const dataDir = await newDataDir();
+    const snapshot = {
+      prNumber: 42,
+      signals: new Map(),
+      mergeConflictClearId: "12345678-1234-1234-1234-123456789012",
+    };
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", snapshot);
+    expect(readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toEqual(
+      snapshot,
+    );
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", {
+      ...snapshot,
+      mergeConflictClearId: "bad",
+    });
+    expect(() => readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toThrow(
+      "Invalid merge-conflict clear identifier",
+    );
+  });
   it("round-trips recorded ids", async () => {
     const dataDir = await newDataDir();
     recordWorkItem(dataDir, "api", "pr-watch", "acme/api#1");

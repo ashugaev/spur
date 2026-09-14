@@ -641,8 +641,16 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
     | ReviewSignal[]
     | undefined;
   const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
+  const mergeConflictClearId = envelope?.mergeConflictClearId;
+  if (
+    mergeConflictClearId !== undefined &&
+    (typeof mergeConflictClearId !== "string" || !/^[0-9a-f-]{36}$/.test(mergeConflictClearId))
+  ) {
+    throw new Error("Invalid merge-conflict clear identifier");
+  }
   return {
     prNumber,
+    ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
     signals: new Map(
       (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
     ),
@@ -1080,6 +1088,9 @@ export function writeReviewSourceSnapshot(
   writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
     prNumber: snapshot.prNumber,
     signals: [...snapshot.signals.values()],
+    ...(snapshot.mergeConflictClearId !== undefined
+      ? { mergeConflictClearId: snapshot.mergeConflictClearId }
+      : {}),
   });
 }
 
