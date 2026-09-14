@@ -1187,6 +1187,7 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  lastSuccessfulTodoNudges: Map<string, { atMs: number; revision: string }>;
   confirmAgentExited(
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean>;
@@ -2254,11 +2255,19 @@ describe("SessionService", () => {
     );
 
     it("records the revision read before delivery when the ledger changes during a send", async () => {
+      const sessions = createSessionStore();
       const session = runningSession();
-      const todo = await import("../../src/todo.js");
-      const projection = openLedgerProjection();
-      vi.mocked(todo.ensureTodoLedger).mockReturnValue(projection);
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
       const service = await createDisposedSessionService();
+      const actor = { kind: "agent", agent: "claude", sessionId: session.id } as const;
+      const revisionBeforeSend = (
+        await service.mutateTodo(
+          session.id,
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          actor,
+        )
+      ).revision;
       const internals = sessionServiceInternals(service);
       let resolveSend!: (outcome: AgentSendOutcome) => void;
       const send = vi
@@ -2266,16 +2275,24 @@ describe("SessionService", () => {
         .mockImplementationOnce(() => new Promise((resolve) => (resolveSend = resolve)))
         .mockResolvedValue(SUBMITTED);
       const pending = internals.maybeNudgeTodo(session);
-      projection.revision = "changed-during-send";
+      await service.mutateTodo(
+        session.id,
+        { action: "add", text: "Follow up", reason: "Ledger changed mid-send" },
+        actor,
+      );
       resolveSend(SUBMITTED);
       await pending;
+      expect(internals.lastSuccessfulTodoNudges.get(session.id)?.revision).toBe(revisionBeforeSend);
+      expect(send.mock.calls[0]?.[1]).not.toContain("Follow up");
 
       vi.setSystemTime(Date.now() + 60_000);
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1]?.[1]).toContain("Follow up");
       vi.setSystemTime(Date.now() + 60_000);
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(2);
+      service.dispose();
     });
 
     it("stops nudging after an invalid-transition ledger error", async () => {
@@ -2671,6 +2688,57 @@ describe("SessionService", () => {
       loadConfigMock.mockReset().mockReturnValue(baseConfig());
     });
 
+    it.each([
+      ["restore", "empty"],
+      ["restore", "open"],
+      ["send", "empty"],
+      ["send", "open"],
+    ] as const)(
+      "re-arms successful nudges through %s recovery for an unchanged %s ledger",
+      async (entry, kind) => {
+        const sessions = createSessionStore();
+        const session = runningSession();
+        sessions.set(session.id, session);
+        const todo = await import("../../src/todo.js");
+        const projection = openLedgerProjection();
+        if (kind === "empty") {
+          projection.revision = "";
+          projection.items = [];
+          projection.counts = { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 };
+        }
+        vi.mocked(todo.ensureTodoLedger).mockReturnValue(projection);
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+        await internals.maybeNudgeTodo(session);
+        expect(send).toHaveBeenCalledTimes(1);
+        await internals.maybeNudgeTodo(session);
+        expect(send).toHaveBeenCalledTimes(1);
+
+        if (entry === "restore") {
+          mockClaudeJsonlState("waiting");
+          mockExitedThenRestoredProcess();
+          await service.restore(session.id);
+        } else {
+          tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+          terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [999] });
+          await expect(service.send(session.id, { message: "resume work" })).rejects.toThrow(/999/);
+        }
+        expect(internals.lastSuccessfulTodoNudges.has(session.id)).toBe(false);
+        send.mockClear();
+        await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0]?.[1]).toContain(
+          kind === "empty" ? "Spur ToDo is empty" : "Spur ToDo still has open work",
+        );
+        for (const elapsed of [60_000, 24 * 60 * 60_000]) {
+          vi.setSystemTime(Date.now() + elapsed);
+          await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+          expect(send).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+
     it("re-arms nudges for a relaunched session whose tmux target was gone", async () => {
       const sessions = createSessionStore();
       const session = runningSession();
@@ -2736,10 +2804,10 @@ describe("SessionService", () => {
     it("clears a target_gone gate (not a ledger_corrupt gate) at relaunchSessionInPlace's send-path recovery, not only at restore()", async () => {
       // Case (vii)'s other call site: send() heals a dead-process session via
       // ensureSessionReadyForSend -> relaunchSessionInPlace, whose first
-      // statement is clearTargetGoneNudgeGate. Drive it via send() with a
+      // statement is resetTodoNudgesForRespawn. Drive it via send() with a
       // dead pane process, following the "refuses to launch a replacement"
       // fixture's tmux/terminate mocks. The relaunch is made to fail fast
-      // (a surviving process) — clearTargetGoneNudgeGate runs before that
+      // (a surviving process) — resetTodoNudgesForRespawn runs before that
       // failure, so the assertion only needs the throw, not a full relaunch.
       readSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
         runningSession({ id: sessionId }),
@@ -2754,10 +2822,15 @@ describe("SessionService", () => {
         kind: "target_gone",
         reason: "can't find session: api-1",
       });
+      internals.lastSuccessfulTodoNudges.set("api-1", {
+        atMs: Date.now(),
+        revision: "seed",
+      });
 
       await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(/999/);
 
       expect(internals.todoNudgeDisabled.has("api-1")).toBe(false);
+      expect(internals.lastSuccessfulTodoNudges.has("api-1")).toBe(false);
       service.dispose();
     });
 

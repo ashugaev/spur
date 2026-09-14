@@ -6426,11 +6426,10 @@ export class SessionService {
     return backoffBaseMs(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs);
   }
 
-  // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
-  // target_gone observation: the tmux target that was missing now exists
-  // again under the same name. ledger_corrupt is untouched — a respawn does
-  // not change the ledger bytes.
-  private clearTargetGoneNudgeGate(sessionId: string): void {
+  // Same-id recovery permits a fresh nudge and invalidates target_gone.
+  // Preserve ledger_corrupt and transient retry backoff across recovery.
+  private resetTodoNudgesForRespawn(sessionId: string): void {
+    this.lastSuccessfulTodoNudges.delete(sessionId);
     if (this.todoNudgeDisabled.get(sessionId)?.kind === "target_gone") {
       this.todoNudgeDisabled.delete(sessionId);
     }
@@ -13415,7 +13414,7 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
-    this.clearTargetGoneNudgeGate(session.id);
+    this.resetTodoNudgesForRespawn(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
     // before this relaunch must never carry over.
     for (const name of Object.keys(project.sidecars)) {
@@ -13734,7 +13733,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    this.clearTargetGoneNudgeGate(sessionId);
+    this.resetTodoNudgesForRespawn(sessionId);
     // A restore can replay every sidecar afresh (directly, or via
     // relaunchSessionInPlace on the fresh-launch fallback); a cached
     // refusal from before this restore must never carry over.
