@@ -498,6 +498,22 @@ describe("automatic ping controls", () => {
 });
 
 describe("restoreSendBatch", () => {
+  it("reserves retained conflict replay budgets for GitHub without capping later GitLab episodes", () => {
+    const data = githubEventData({
+      signals: [{ key: "merge_conflict", kind: "merge_conflict", text: "Conflicts" }],
+    });
+    const github = requireBatch(
+      createSendBatchParser("github", "proj", "src")(data),
+      "GitHub batch",
+    );
+    const gitlab = requireBatch(
+      createSendBatchParser("gitlab", "proj", "src")(data),
+      "GitLab batch",
+    );
+    expect(github.retryItems()[0]?.mergeConflict).toEqual({ prNumber: 42 });
+    expect(gitlab.retryItems()[0]?.mergeConflict).toBeUndefined();
+    expect(restoreSendBatch(gitlab.serialize())?.retryItems()[0]?.mergeConflict).toBeUndefined();
+  });
   it("preserves semantic identity across control and title changes while separating edited items", () => {
     const parse = createSendBatchParser("github", "proj", "src-1");
     const batch = requireBatch(parse(githubEventData()), "review batch");

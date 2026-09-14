@@ -1129,6 +1129,47 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("delivers later GitLab conflict episodes after three successful notifications", async () => {
+    const settings = gitlabConfig();
+    settings.projects.api.triggers.send.event = "gitlab:merge_conflict";
+    const get = vi
+      .fn()
+      .mockResolvedValue({
+        id: "api-1",
+        state: "stale",
+        status: "stopped",
+        stopReason: "stale_timeout",
+        workspaceExists: true,
+      });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: settings as never,
+      bus,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      const signals: ReviewSignal[] = [
+        { key: "merge_conflict", kind: "merge_conflict", text: "Merge request conflicts" },
+      ];
+      readReviewSourceSnapshotMock.mockReturnValue(storedSnapshot(signals));
+      for (let index = 0; index < 5; index += 1) {
+        bus.emit({
+          ...gitlabEvent(),
+          name: "gitlab:merge_conflict",
+          occurrenceId: `episode-${index}`,
+          data: { ...gitlabEvent().data, signals },
+        });
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(deliver).toHaveBeenCalledTimes(5);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("suppresses a retried occurrence after its recipient redeems the event grant", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-auto-ping-"));
     const getMock = vi.fn().mockResolvedValue({

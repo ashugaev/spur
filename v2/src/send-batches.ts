@@ -258,7 +258,7 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       itemKey: JSON.stringify([this.providerId, this.prNumber, signal.key]),
       fingerprint: semanticFingerprint([signal.kind, signal.text]),
       ciReminder: signal.kind === "ci_failed",
-      ...(signal.kind === "merge_conflict"
+      ...(this.providerId === "github" && signal.kind === "merge_conflict"
         ? {
             mergeConflict: {
               prNumber: this.prNumber,
