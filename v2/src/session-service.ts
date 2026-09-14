@@ -10175,7 +10175,9 @@ export class SessionService {
         nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to resolve next daily wake time for ${session.id}: ${message}`);
+        throw new Error(`Failed to resolve next daily wake time for ${session.id}: ${message}`, {
+          cause: error,
+        });
       }
       writeSession(this.config.dataDir, {
         ...current,
