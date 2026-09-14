@@ -148,7 +148,7 @@ function isDestination(value: unknown): value is AutoPingDestination {
   );
 }
 
-function isTarget(value: unknown): value is AutoPingTarget {
+export function isAutoPingTarget(value: unknown): value is AutoPingTarget {
   if (!isRecord(value) || typeof value.kind !== "string") return false;
   if (value.kind === "occurrence") return typeof value.occurrenceId === "string";
   if (value.kind === "subscription") return true;
@@ -207,7 +207,7 @@ function parseState(raw: unknown): AutoPingState {
       !["event", "thread", "subscription"].includes(String(value.scope)) ||
       typeof value.routeFingerprint !== "string" ||
       !isDestination(value.destination) ||
-      !isTarget(value.target) ||
+      !isAutoPingTarget(value.target) ||
       !matchesScope(value.scope, value.target) ||
       typeof value.canonicalKey !== "string" ||
       !isDate(value.createdAt) ||
@@ -233,7 +233,7 @@ function parseState(raw: unknown): AutoPingState {
       !["event", "thread", "subscription"].includes(String(value.scope)) ||
       typeof value.routeFingerprint !== "string" ||
       !isDestination(value.destination) ||
-      !isTarget(value.target) ||
+      !isAutoPingTarget(value.target) ||
       !matchesScope(value.scope, value.target) ||
       typeof value.canonicalKey !== "string" ||
       typeof value.actorSessionId !== "string" ||

@@ -498,6 +498,47 @@ describe("automatic ping controls", () => {
 });
 
 describe("restoreSendBatch", () => {
+  it("rejects present policy state that omits targets for a restored payload", () => {
+    const batch = requireBatch(
+      createSendBatchParser("github", "proj", "src")(githubEventData()),
+      "review batch",
+    );
+    expect(
+      restoreSendBatch({
+        ...batch.serialize(),
+        autoPing: {
+          routeFingerprint: "route",
+          destination: { kind: "session", sessionId: "api-1" },
+          subscriptionHandle: "subscription",
+          items: {},
+        },
+      }),
+    ).toBeNull();
+    expect(restoreSendBatch(batch.serialize())).not.toBeNull();
+  });
+  it.each([
+    null,
+    {},
+    { occurrenceId: "event", eventHandle: 1 },
+    { occurrenceId: "event", eventHandle: "handle", threadTarget: { kind: "subscription" } },
+    { occurrenceId: "event", eventHandle: "handle", threadHandle: "orphan" },
+  ])("rejects malformed persisted auto-ping items: %j", (item) => {
+    const batch = requireBatch(
+      createSendBatchParser("github", "proj", "src")(githubEventData()),
+      "review batch",
+    );
+    expect(
+      restoreSendBatch({
+        ...batch.serialize(),
+        autoPing: {
+          routeFingerprint: "route",
+          destination: { kind: "session", sessionId: "api-1" },
+          subscriptionHandle: "subscription",
+          items: { "comment:1": item },
+        },
+      }),
+    ).toBeNull();
+  });
   it("reserves retained conflict replay budgets for GitHub without capping later GitLab episodes", () => {
     const data = githubEventData({
       signals: [{ key: "merge_conflict", kind: "merge_conflict", text: "Conflicts" }],

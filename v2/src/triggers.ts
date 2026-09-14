@@ -1485,6 +1485,25 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         continue;
       }
       const routeFingerprint = autoPingRouteFingerprint(route);
+      const storedPolicy = batch.serialize().autoPing;
+      if (
+        storedPolicy &&
+        (storedPolicy.routeFingerprint !== routeFingerprint ||
+          storedPolicy.destination.kind !== "session" ||
+          storedPolicy.destination.sessionId !== batch.sessionId)
+      ) {
+        deletePendingSendBatch(deps.config.dataDir, record.queueKey);
+        logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
+          level: "warn",
+          sessionId: batch.sessionId,
+          projectId: record.projectId,
+          sourceId: record.sourceId,
+          triggerId: record.triggerId,
+          message: `Skipped restoring persisted trigger update ${record.queueKey}: route changed`,
+          details: { reason: "route_changed", queueKey: record.queueKey },
+        });
+        continue;
+      }
       const routeLeaseId = leaseForRoute(routeFingerprint, route);
       const needsMigration =
         !record.batch.autoPing || record.workId === undefined || record.revision === undefined;

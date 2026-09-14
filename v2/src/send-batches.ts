@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAutoPingTarget } from "./auto-ping.js";
 import { readGitHubSourceSnapshot, readReviewSourceSnapshot } from "./metadata.js";
 import { reviewProvider } from "./review-providers/index.js";
 import type {
@@ -618,7 +619,33 @@ function parsePersistedAutoPingState(value: unknown): PersistedAutoPingBatchStat
   ) {
     return undefined;
   }
+  for (const value of Object.values(state["items"] as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const item = value as Record<string, unknown>;
+    if (typeof item["occurrenceId"] !== "string" || typeof item["eventHandle"] !== "string")
+      return undefined;
+    const target = item["threadTarget"];
+    if (
+      target !== undefined &&
+      (!isAutoPingTarget(target) || target.kind === "occurrence" || target.kind === "subscription")
+    )
+      return undefined;
+    if (
+      item["threadHandle"] !== undefined &&
+      (typeof item["threadHandle"] !== "string" || target === undefined)
+    )
+      return undefined;
+  }
   return value as PersistedAutoPingBatchState;
+}
+
+function restoreBatchPolicy(
+  batch: SendBatch | null,
+  state: PersistedAutoPingBatchState | undefined,
+): SendBatch | null {
+  if (!batch || (state && batch.retryItems().some((item) => !state.items[item.key]))) return null;
+  batch.restoreAutoPing(state);
+  return batch;
 }
 
 // Rehydrates a batch persisted via `SendBatch.serialize()` on daemon startup.
@@ -628,6 +655,8 @@ function parsePersistedAutoPingState(value: unknown): PersistedAutoPingBatchStat
 export function restoreSendBatch(data: unknown): SendBatch | null {
   if (!data || typeof data !== "object") return null;
   const record = data as Record<string, unknown>;
+  const autoPing = parsePersistedAutoPingState(record["autoPing"]);
+  if (record["autoPing"] !== undefined && !autoPing) return null;
 
   if (record["kind"] === "review") {
     const providerId = record["providerId"];
@@ -658,8 +687,7 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
           : {}),
       },
     );
-    batch?.restoreAutoPing(parsePersistedAutoPingState(record["autoPing"]));
-    return batch;
+    return restoreBatchPolicy(batch, autoPing);
   }
 
   if (record["kind"] === "service") {
@@ -676,8 +704,7 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
       serviceId: record["serviceId"],
       ruleIds: record["ruleIds"],
     });
-    batch.restoreAutoPing(parsePersistedAutoPingState(record["autoPing"]));
-    return batch;
+    return restoreBatchPolicy(batch, autoPing);
   }
 
   if (record["kind"] === "telegram") {
@@ -692,8 +719,7 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
       sessionId: record["sessionId"],
       messages: record["messages"],
     });
-    batch?.restoreAutoPing(parsePersistedAutoPingState(record["autoPing"]));
-    return batch;
+    return restoreBatchPolicy(batch, autoPing);
   }
 
   return null;

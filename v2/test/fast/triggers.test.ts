@@ -1132,15 +1132,13 @@ describe("startConfiguredTriggers", () => {
   it("delivers later GitLab conflict episodes after three successful notifications", async () => {
     const settings = gitlabConfig();
     settings.projects.api.triggers.send.event = "gitlab:merge_conflict";
-    const get = vi
-      .fn()
-      .mockResolvedValue({
-        id: "api-1",
-        state: "stale",
-        status: "stopped",
-        stopReason: "stale_timeout",
-        workspaceExists: true,
-      });
+    const get = vi.fn().mockResolvedValue({
+      id: "api-1",
+      state: "stale",
+      status: "stopped",
+      stopReason: "stale_timeout",
+      workspaceExists: true,
+    });
     const deliver = vi.fn().mockResolvedValue(undefined);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -4899,6 +4897,67 @@ describe("startConfiguredTriggers", () => {
       await controller.stop();
     }
   });
+
+  it.each(["event", "source", "destination", "malformed"])(
+    "rejects persisted route authority changed at %s",
+    async (change) => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-route-change-"));
+      const autoPing = new AutoPingService(dataDir);
+      const settings = { ...config(), dataDir };
+      const bus = new EventBus();
+      const get = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const deps = {
+        config: settings as never,
+        bus,
+        autoPing,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      };
+      let controller = startConfiguredTriggers(deps);
+      try {
+        readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(1);
+        await controller.stop();
+        const record = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+        if (change === "event") settings.projects.api.triggers.send.event = "github:merge_conflict";
+        else if (change === "source") settings.projects.api.sources["pr-watch"].type = "gitlab";
+        else if (change === "destination") record.batch.sessionId = "api-2";
+        else Object.assign(record.batch.autoPing?.items ?? {}, { "comment:1": null });
+        get.mockResolvedValue({
+          id: "api-1",
+          status: "running",
+          state: "waiting",
+          lastActivityAt: staleActivity(),
+          workspaceExists: true,
+        });
+        controller = startConfiguredTriggers(deps);
+        await advanceSendWindow();
+        expect(deliver).not.toHaveBeenCalled();
+        expect(readPendingSendBatchesMock().size).toBe(0);
+        expect(logSpurEventMock.mock.calls).toContainEqual([
+          dataDir,
+          expect.objectContaining({
+            event: "trigger.send.restore_skipped",
+            details: expect.objectContaining({
+              reason: change === "malformed" ? "invalid_payload" : "route_changed",
+            }),
+          }),
+        ]);
+      } finally {
+        await controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("deletes and logs restore_skipped for a persisted record whose trigger no longer exists", async () => {
     const stalePersisted: PersistedPendingBatch = {
