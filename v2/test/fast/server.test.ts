@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as hostMemory from "../../src/host-memory.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -190,12 +191,21 @@ describe("startServer", () => {
       "utf8",
     );
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
+    // Pin the host sensors; lifecycle assertions must not depend on runner pressure.
+    const memorySpy = vi.spyOn(hostMemory, "readHostMemory").mockReturnValue({
+      totalBytes: 64_000_000_000,
+      availableBytes: 32_000_000_000,
+      swapTotalBytes: 8_000_000_000,
+      swapFreeBytes: 8_000_000_000,
     });
-
+    const cgroupSpy = vi.spyOn(hostMemory, "readCgroupMemorySnapshot").mockReturnValue(null);
+    const pressureSpy = vi.spyOn(hostMemory, "readCgroupPressure").mockReturnValue(null);
+    let server: StartedServer | undefined;
     try {
+      server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       const response = await fetch(`http://127.0.0.1:${port}/info`);
       expect(response.status).toBe(200);
       const info = (await response.json()) as { port: number; version?: unknown };
@@ -208,17 +218,16 @@ describe("startServer", () => {
       const missing = await fetch(`http://127.0.0.1:${port}/missing`);
       expect(missing.status).toBe(404);
     } finally {
-      await server.stop();
+      try {
+        await server?.stop();
+      } finally {
+        memorySpy.mockRestore();
+        cgroupSpy.mockRestore();
+        pressureSpy.mockRestore();
+      }
     }
 
-    // Host memory pressure fires these on a loaded runner and not on an idle
-    // box. This test pins the startup/shutdown sequence, not memory behavior.
-    const hostMemoryEvents = new Set([
-      "daemon.memory.unbounded",
-      "daemon.memory.shed",
-      "daemon.memory.shed.failed",
-    ]);
-    const events = readEventLog(dataDir).filter((entry) => !hostMemoryEvents.has(entry.event));
+    const events = readEventLog(dataDir);
     expect(events[0]).toMatchObject({
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
