@@ -485,7 +485,7 @@ Source support:
 - `sentry`: event and subscription for spawn triggers; no thread.
 - `telegram`: event and subscription for send/spawn; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
 - `service`: no live automatic events.
-- `jira`: none. Connection only.
+- `jira`: event and subscription for work-item spawn when `query` is set; connection only without `query`; no thread or send triggers.
 - Cron, Sentry, and GitHub CI send triggers stay unsupported.
 
 - `cron`: `cron:tick`.
