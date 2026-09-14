@@ -130,7 +130,11 @@ Each session's ToDo ledger starts empty — no code path seeds an item; the agen
 
 `unsubscribe` requires exactly one scope flag. The flag must match the handle scope.
 
+Suppressions start empty and persist across daemon restart and config reload. Existing queued automatic updates gain controls when restored.
+
 Handles are session credentials. Do not log, persist, or share them. `grant_not_ready` means activation is still finishing; retry the same command with the same handle.
+
+Send controls belong to the recipient. Spawn controls belong to the first successfully spawned session, the anchor in a desk group; later blocks get none. Handoff and respawn do not transfer control ownership.
 
 `--event` suppresses one emitted source occurrence for this trigger route and destination.
 `--thread` suppresses one supported provider thread for this trigger route and destination.

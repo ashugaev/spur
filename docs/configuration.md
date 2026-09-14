@@ -468,11 +468,7 @@ Any system message wakes a parked session silently — GitHub/review event, trig
 
 Sources emit events; triggers `spawn` a new session or `send` into an existing one.
 
-Auto-ping scopes:
-
-- Event: one emitted occurrence for one trigger route and destination.
-- Thread: one supported provider thread for one trigger route and destination; future items in that thread stay suppressed until resume.
-- Subscription: one source/event/trigger/action route and destination.
+Auto-ping scopes and controls: [commands.md#auto-ping](commands.md#auto-ping).
 
 Source support:
 
@@ -482,7 +478,7 @@ Source support:
 - `gitlab`: event and subscription for review send/spawn; non-individual discussion notes add thread; individual notes have no thread.
 - `sentry`: event and subscription for spawn triggers; no thread.
 - `telegram`: event and subscription for send/spawn; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
-- `service`: future live parsed automatic events get event and subscription; no live source loop emits them.
+- `service`: no live automatic events.
 - `jira`: none. Connection only.
 - Cron, Sentry, and GitHub CI send triggers stay unsupported.
 
