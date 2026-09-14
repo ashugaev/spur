@@ -204,15 +204,9 @@ export function WakeControls({
           const rowBusy = busyTarget === summary.target;
           const otherRowBusy = busyTarget !== null && busyTarget !== summary.target;
           const saveDisabled =
-            otherRowBusy ||
-            !trimmedDraft ||
-            !dirty ||
-            (rowBusy && busyAction === "save");
+            otherRowBusy || !trimmedDraft || !dirty || (rowBusy && busyAction === "save");
           const wakeDisabled =
-            otherRowBusy ||
-            dirty ||
-            !wakeNowAllowed ||
-            (rowBusy && busyAction === "wake");
+            otherRowBusy || dirty || !wakeNowAllowed || (rowBusy && busyAction === "wake");
           const recordCountdown = formatWakeCountdown(summary.dueAt, nowMs);
 
           return (

@@ -9980,10 +9980,7 @@ export class SessionService {
     );
   }
 
-  async dispatchWake(
-    sessionId: string,
-    request: DispatchSessionWakeRequest,
-  ): Promise<SessionView> {
+  async dispatchWake(sessionId: string, request: DispatchSessionWakeRequest): Promise<SessionView> {
     return this.dispatchWakeLocked(sessionId, request);
   }
 
@@ -10045,9 +10042,7 @@ export class SessionService {
   private async dispatchScheduledWakeNow(session: SessionRecord): Promise<void> {
     const scheduledWake = session.scheduledWake;
     if (!scheduledWake) {
-      throw new WakeTargetMissingError(
-        `Wake target "scheduled" not found for ${session.id}`,
-      );
+      throw new WakeTargetMissingError(`Wake target "scheduled" not found for ${session.id}`);
     }
     await this.withWorkspaceLifecycleLocks(session.id, async () => {
       const current = readSession(this.config.dataDir, session.id) ?? session;
@@ -10055,9 +10050,7 @@ export class SessionService {
         current.scheduledWake?.dueAt === scheduledWake.dueAt &&
         current.scheduledWake.message === scheduledWake.message;
       if (!claimed) {
-        throw new WakeDispatchConflictError(
-          `Wake target "scheduled" changed for ${session.id}`,
-        );
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
       }
       const { scheduledWake: _scheduledWake, ...base } = current;
       writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });

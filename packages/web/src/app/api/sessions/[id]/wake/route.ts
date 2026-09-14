@@ -42,7 +42,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
   if (body.dispatch === true) {
     if (body.message !== undefined) {
-      return NextResponse.json({ error: "message cannot be combined with dispatch" }, { status: 400 });
+      return NextResponse.json(
+        { error: "message cannot be combined with dispatch" },
+        { status: 400 },
+      );
     }
     try {
       const response = await spurRequest(
