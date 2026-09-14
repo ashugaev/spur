@@ -150,7 +150,7 @@ describe("auto-ping CLI", () => {
 
   it("lists suppression ids accepted by resume", async () => {
     getJsonMock.mockResolvedValue({
-      records: [suppression("sup-list-1", "subscription")],
+      records: [suppression("sup-list-1", "subscription"), suppression("sup-list-2", "event")],
     });
 
     await parseAutoPing(["auto-ping", "list", "--session", "ses-1"]);
@@ -163,7 +163,7 @@ describe("auto-ping CLI", () => {
     expect(outputText()).toContain("sup-list-1\tsubscription\tses-1");
 
     postJsonMock.mockResolvedValue({
-      records: [suppression("sup-list-1", "subscription")],
+      records: [suppression("sup-list-2", "event")],
       removed: true,
     });
     await parseAutoPing(["auto-ping", "resume", "sup-list-1", "--session", "ses-1"]);
@@ -174,6 +174,7 @@ describe("auto-ping CLI", () => {
       "/tmp/spur.yaml",
     );
     expect(outputText()).toContain("Resumed auto-ping suppression sup-list-1.");
+    expect(outputText()).not.toContain("Resumed auto-ping suppression sup-list-2.");
   });
 
   it("posts resume and preserves the raw JSON response under --json", async () => {

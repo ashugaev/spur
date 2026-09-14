@@ -734,10 +734,9 @@ function renderAutoPingUnsubscribe(response: AutoPingUnsubscribeResponse): strin
   return `${prefix} auto-ping ${response.record.scope} suppression ${response.record.suppressionId}.`;
 }
 
-function renderAutoPingResume(response: AutoPingResumeResponse): string {
+function renderAutoPingResume(response: AutoPingResumeResponse, suppressionId: string): string {
   const prefix = response.removed ? "Resumed" : "Already resumed";
-  const ids = response.records.map((record) => record.suppressionId).join(", ");
-  return ids ? `${prefix} auto-ping suppression ${ids}.` : `${prefix} auto-ping suppression.`;
+  return `${prefix} auto-ping suppression ${suppressionId}.`;
 }
 
 function parsePrActionOption(value: string): OpenPrAction {
@@ -3416,7 +3415,7 @@ export function createProgram(cliEntrypoint: string): Command {
             {},
             configPath,
           ),
-        render: renderAutoPingResume,
+        render: (response) => renderAutoPingResume(response, suppressionId),
       });
     });
 
