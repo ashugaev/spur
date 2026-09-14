@@ -337,6 +337,39 @@ describe("client.ensureServer", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [409, "grant_not_ready", "Grant activation is still finishing; retry the same command"],
+    [400, "invalid_request", "Auto-ping scope does not match handle"],
+  ])(
+    "surfaces structured auto-ping errors with status %s and code %s",
+    async (status, code, message) => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: { code, message } }), { status }),
+        );
+      const { postJson } = await loadClientModule();
+      await expect(
+        postJson(
+          "/tmp/dist/cli.js",
+          "/sessions/test/auto-ping-suppressions/unsubscribe",
+          { scope: "event", handle: "ap1_test" },
+          "/tmp/spur.yaml",
+        ),
+      ).rejects.toThrow(message);
+    },
+  );
+
+  it("retains the HTTP status fallback when no error payload is present", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 503 }));
+    const { postJson } = await loadClientModule();
+    await expect(
+      postJson("/tmp/dist/cli.js", "/sessions/test/send", {}, "/tmp/spur.yaml"),
+    ).rejects.toThrow("Request failed with status 503");
+  });
+
   it("surfaces server error payloads from JSON requests", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
