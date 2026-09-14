@@ -2073,27 +2073,23 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("nudges an empty ledger, at most once per 60s", async () => {
-      const sessions = createSessionStore();
+    it("nudges an unchanged empty ledger once, even hours later", async () => {
       const session = runningSession();
-      sessions.set(session.id, session);
       await useRealTodoLedger();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
       const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+      const t0 = Date.now();
 
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(1);
       expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo is empty");
 
-      await internals.maybeNudgeTodo(session);
-      expect(send).toHaveBeenCalledTimes(1);
-
-      vi.setSystemTime(new Date("2026-03-18T10:06:01.000Z"));
-      await internals.maybeNudgeTodo(session);
-      expect(send).toHaveBeenCalledTimes(2);
-      service.dispose();
+      for (const elapsed of [0, 60_000, 120_000, 24 * 60 * 60_000]) {
+        vi.setSystemTime(t0 + elapsed);
+        await internals.maybeNudgeTodo(session);
+        expect(send).toHaveBeenCalledTimes(1);
+      }
     });
 
     it("backs off after a failed nudge and throttles successful delivery", async () => {
@@ -2172,6 +2168,115 @@ describe("SessionService", () => {
         finishOverrides: [],
       };
     }
+
+    it.each(["open", "human-held", "mixed"] as const)(
+      "nudges an unchanged %s ledger once",
+      async (kind) => {
+        const session = runningSession();
+        const projection = openLedgerProjection();
+        if (kind !== "open") {
+          const item = projection.items[0];
+          if (!item) throw new Error("Expected open ToDo fixture item");
+          const held = {
+            ...item,
+            id: "todo-held",
+            status: "held" as const,
+            latestTransition: {
+              type: "held" as const,
+              ...item.added,
+              blocker: { kind: "human" as const, requiredAction: "Choose the release window" },
+            },
+          };
+          projection.items = kind === "mixed" ? [item, held] : [held];
+          projection.counts = {
+            total: projection.items.length,
+            open: kind === "mixed" ? 1 : 0,
+            held: 1,
+            completed: 0,
+            cancelled: 0,
+          };
+        }
+        const todo = await import("../../src/todo.js");
+        vi.mocked(todo.ensureTodoLedger).mockReturnValue(projection);
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+        const t0 = Date.now();
+
+        for (const elapsed of [0, 60_000, 120_000, 24 * 60 * 60_000]) {
+          vi.setSystemTime(t0 + elapsed);
+          await internals.maybeNudgeTodo(session);
+          expect(send).toHaveBeenCalledTimes(1);
+        }
+        expect(send.mock.calls[0]?.[1]).toContain(
+          kind === "human-held" ? "Choose the release window" : "Spur ToDo still has open work",
+        );
+        if (kind === "mixed") {
+          expect(send.mock.calls[0]?.[1]).not.toContain("Choose the release window");
+        }
+      },
+    );
+
+    it.each(["empty", "open"])(
+      "rearms a nudged %s ledger on a new revision after the 60s floor",
+      async (kind) => {
+        const session = runningSession();
+        const todo = await import("../../src/todo.js");
+        const projection = openLedgerProjection();
+        vi.mocked(todo.ensureTodoLedger).mockReturnValue(
+          kind === "empty"
+            ? {
+                ...projection,
+                revision: "",
+                items: [],
+                counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+              }
+            : projection,
+        );
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+        const t0 = Date.now();
+
+        await internals.maybeNudgeTodo(session);
+        vi.mocked(todo.ensureTodoLedger).mockReturnValue({ ...projection, revision: "next" });
+        vi.setSystemTime(t0 + 59_999);
+        await internals.maybeNudgeTodo(session);
+        expect(send).toHaveBeenCalledTimes(1);
+        vi.setSystemTime(t0 + 60_000);
+        await internals.maybeNudgeTodo(session);
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1]?.[1]).toContain("Spur ToDo still has open work");
+        vi.setSystemTime(t0 + 120_000);
+        await internals.maybeNudgeTodo(session);
+        expect(send).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it("records the revision read before delivery when the ledger changes during a send", async () => {
+      const session = runningSession();
+      const todo = await import("../../src/todo.js");
+      const projection = openLedgerProjection();
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue(projection);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let resolveSend!: (outcome: AgentSendOutcome) => void;
+      const send = vi
+        .spyOn(internals, "sendAgentMessage")
+        .mockImplementationOnce(() => new Promise((resolve) => (resolveSend = resolve)))
+        .mockResolvedValue(SUBMITTED);
+      const pending = internals.maybeNudgeTodo(session);
+      projection.revision = "changed-during-send";
+      resolveSend(SUBMITTED);
+      await pending;
+
+      vi.setSystemTime(Date.now() + 60_000);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(2);
+      vi.setSystemTime(Date.now() + 60_000);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(2);
+    });
 
     it("stops nudging after an invalid-transition ledger error", async () => {
       const sessions = createSessionStore();
@@ -2409,13 +2514,17 @@ describe("SessionService", () => {
       expect(send).toHaveBeenCalledTimes(1);
 
       // At the retry boundary, the send succeeds: this must clear the
-      // backoff via the success path and set lastSuccessfulTodoNudgeAt.
+      // backoff via the success path and record the successful revision.
       vi.setSystemTime(t0 + 120_000);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalledTimes(2);
 
       // Wait past the 60s post-success throttle, then fail again. Restart
       // must be at BASE, not 2 * BASE.
+      vi.mocked(todo.ensureTodoLedger).mockReturnValue({
+        ...openLedgerProjection(),
+        revision: "fixture-open-next",
+      });
       const secondFailureAt = t0 + 120_000 + 61_000;
       vi.setSystemTime(secondFailureAt);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -39182,7 +39291,7 @@ describe("SessionService", () => {
       claudeRotationEpisode: Map<string, unknown>;
       wakeSuppressionNotified: Set<string>;
       attentionStates: Map<string, string>;
-      lastSuccessfulTodoNudgeAt: Map<string, number>;
+      lastSuccessfulTodoNudges: Map<string, { atMs: number; revision: string }>;
       todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
       todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
       attentionMonitorRunning: boolean;
@@ -39334,7 +39443,7 @@ describe("SessionService", () => {
         internals.usageMenuConfirmedAt.set(id, Date.now());
         internals.claudeRotationEpisode.set(id, { episode: "e1", count: 1 });
         internals.wakeSuppressionNotified.add(id);
-        internals.lastSuccessfulTodoNudgeAt.set(id, Date.now());
+        internals.lastSuccessfulTodoNudges.set(id, { atMs: Date.now(), revision: "seed" });
         internals.todoNudgeDisabled.set(id, { kind: "ledger_corrupt", reason: "seed" });
         internals.todoNudgeBackoff.set(id, { failures: 1, nextRetryAtMs: Date.now() });
       }
@@ -39367,7 +39476,7 @@ describe("SessionService", () => {
         ["prCheckTrackers", internals.prCheckTrackers],
         ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
         ["claudeRotationEpisode", internals.claudeRotationEpisode],
-        ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
+        ["lastSuccessfulTodoNudges", internals.lastSuccessfulTodoNudges],
         ["todoNudgeDisabled", internals.todoNudgeDisabled],
         ["todoNudgeBackoff", internals.todoNudgeBackoff],
       ];
@@ -39396,13 +39505,14 @@ describe("SessionService", () => {
         ["prCheckTrackers", internals.prCheckTrackers],
         ["usageMenuConfirmedAt", internals.usageMenuConfirmedAt],
         ["claudeRotationEpisode", internals.claudeRotationEpisode],
-        ["lastSuccessfulTodoNudgeAt", internals.lastSuccessfulTodoNudgeAt],
+        ["lastSuccessfulTodoNudges", internals.lastSuccessfulTodoNudges],
         ["todoNudgeDisabled", internals.todoNudgeDisabled],
         ["todoNudgeBackoff", internals.todoNudgeBackoff],
       ];
       for (const [name, map] of cleanMaps) {
         expect(map.has("api-1"), `${name} should keep the non-terminal id`).toBe(true);
       }
+      expect(internals.lastSuccessfulTodoNudges.get("api-1")?.revision).toBe("seed");
 
       // stateHistory is dashboard-scoped: its prune keeps only the last
       // element for included terminal sessions, so a

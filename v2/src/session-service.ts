@@ -2732,7 +2732,7 @@ export class SessionService {
   // Serializes sendAgentMessage per tmux pane so two trigger batches on one
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
-  private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  private readonly lastSuccessfulTodoNudges = new Map<string, { atMs: number; revision: string }>();
   private readonly todoNudgeDisabled = new Map<
     string,
     { kind: "ledger_corrupt" | "target_gone"; reason: string }
@@ -5427,8 +5427,8 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
-    for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
-      if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
+    for (const sessionId of this.lastSuccessfulTodoNudges.keys()) {
+      if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudges.delete(sessionId);
     }
     for (const sessionId of this.todoNudgeDisabled.keys()) {
       if (!liveIds.has(sessionId)) this.todoNudgeDisabled.delete(sessionId);
@@ -6446,10 +6446,12 @@ export class SessionService {
     }
     if (this.todoNudgeDisabled.has(session.id)) return;
     if ((this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now()) return;
-    const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
-    if (Date.now() - lastSuccessful < 60_000) return;
+    const lastSuccessful = this.lastSuccessfulTodoNudges.get(session.id);
+    if (lastSuccessful && Date.now() - lastSuccessful.atMs < 60_000) return;
     try {
       const projection = ensureTodoLedger(this.config.dataDir, session);
+      const revision = projection.revision;
+      if (lastSuccessful?.revision === revision) return;
       const open = projection.items.filter((item) => item.status === "open");
       const humanHeld = projection.items.filter(
         (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
@@ -6480,7 +6482,10 @@ export class SessionService {
         return;
       }
       await this.sendAgentMessage(session, message, { interrupt: false });
-      this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
+      this.lastSuccessfulTodoNudges.set(session.id, {
+        atMs: Date.now(),
+        revision,
+      });
       this.todoNudgeBackoff.delete(session.id);
     } catch (error) {
       if (
