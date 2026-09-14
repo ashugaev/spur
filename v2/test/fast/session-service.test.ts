@@ -7770,7 +7770,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("bounds heal-continues at DELIVERY_HEAL_CONTINUE_LIMIT so a flapping writer cannot spin the loop forever", async () => {
+    it("bounds TIGHT heal-continues at DELIVERY_HEAL_CONTINUE_LIMIT, then paces instead of retiring", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       sessions.set("api-1", parkedQueuedSession());
@@ -7811,13 +7811,30 @@ describe("SessionService", () => {
       await realTimers.setTimeout(50);
       phase = "armed";
 
+      // parkedQueuedSession's updatedAt is fresh against the pinned clock, so
+      // waitForQueuedMessage's first pass always falls through to one
+      // PIPELINE_POLL_INTERVAL_MS (1s) poll sleep before it observes the
+      // phase flip; the burst to the heal limit is then near-instant. 500ms
+      // is not enough to clear that first park (measured: still 0/0 at
+      // 900ms, 4/3 at 1000ms), so wait long enough to land inside the
+      // [1000ms, 2000ms) window opened by the park and closed by the first
+      // paced continue's own 1s sleep.
+      await realTimers.setTimeout(1_500);
+      expect({ armedServes, topServes }).toEqual({ armedServes: 4, topServes: 3 });
+
+      // A further wait crosses the paced continue's 1s sleep (armed at the
+      // exhausted 4th heal, ~1s in): armedServes must grow past 4 once it
+      // resolves, proving the loop paces instead of staying retired.
+      await realTimers.setTimeout(1_000);
+      expect(armedServes).toBeGreaterThan(4);
+
       const outcome = await Promise.race([
         run?.then((): "retired" => "retired"),
-        realTimers.setTimeout(3_000, "parked" as const),
+        realTimers.setTimeout(50, "parked" as const),
       ]);
 
-      expect(outcome).toBe("retired");
-      expect({ armedServes, topServes }).toEqual({ armedServes: 4, topServes: 3 });
+      expect(outcome).toBe("parked");
+      expect(sessionServiceInternals(service).deliveryRuns.has("api-1")).toBe(true);
       expect(messageStalledCalls()).toEqual([]);
       service.dispose();
     });
