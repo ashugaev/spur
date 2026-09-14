@@ -15278,6 +15278,13 @@ export class SessionService {
                   },
                 });
               }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
+              }
             }
             return;
           }
@@ -15338,6 +15345,13 @@ export class SessionService {
                     sessionStatus: latest.status,
                   },
                 });
+              }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
               }
             }
             return;
