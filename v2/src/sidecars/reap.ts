@@ -66,6 +66,13 @@ export interface PendingReap {
   snapshot: ProcSnapshot;
   /** Pgids proven fully contained in `tree` at signal time. */
   ownedGroups: readonly number[];
+  /**
+   * true when tmux was killed without any verified process-tree signal (no
+   * pane pid, or an unusable snapshot) and no identity fallback confirmed a
+   * reap either. A `survivors: []` alongside `blindKill: true` is NOT proof
+   * of death — nothing was ever checked.
+   */
+  blindKill: boolean;
 }
 
 export interface ReapOutcome {
@@ -73,6 +80,8 @@ export interface ReapOutcome {
   panePid: number | null;
   /** Pids still alive after SIGKILL and the confirmation window. */
   survivors: readonly number[];
+  /** See `PendingReap.blindKill`. Carried through unchanged from the pending. */
+  blindKill: boolean;
   /**
    * Recorded ports whose listener probe itself could not run (both `lsof`
    * and `ss` unavailable or timed out) — never proof the port is free.
@@ -393,22 +402,60 @@ async function confirmGone(pids: readonly number[]): Promise<number[]> {
   return [...pending];
 }
 
+/** Recorded identity a caller can supply so a BLIND branch below (no pane
+ * pid, or an unusable snapshot) still has a chance to reap the tree by
+ * identity instead of only killing the tmux socket. */
+export interface SidecarPaneFallback {
+  identity: SidecarProcessIdentity;
+  worktreePath: string;
+}
+
 /**
  * Step 1-9 of the reap algorithm: get the pane pid fresh, take the ONE
  * pre-signal snapshot, SIGTERM the tree (group-first where proven), then
  * `killTmuxSession` — after the group signal, so tmux's pty-close SIGHUP is
  * no longer the first thing the tree sees.
+ *
+ * Both BLIND branches (no pane pid; unusable snapshot) attempt
+ * `reapRecordedIdentity(fallback)` BEFORE `killTmuxSession`, when a fallback
+ * identity is supplied — never after, so the tree is signaled while tmux's
+ * pty-close SIGHUP hasn't fired yet. `blindKill` is false only when that
+ * fallback attempt actually found and confirmed a tree; a `null` result
+ * (no identity, unreadable, pid reused) still leaves the branch blind.
  */
-export async function signalSidecarPane(sessionName: string): Promise<PendingReap> {
+export async function signalSidecarPane(
+  sessionName: string,
+  fallback?: SidecarPaneFallback,
+): Promise<PendingReap> {
   const panePid = await getTmuxPanePid(sessionName, { fresh: true });
   if (panePid === null) {
+    const fallbackOutcome = fallback
+      ? await reapRecordedIdentity(fallback.identity, fallback.worktreePath)
+      : null;
     await killTmuxSession(sessionName);
-    return { sessionName, panePid: null, tree: [], ownedGroups: [], snapshot: emptySnapshot() };
+    return {
+      sessionName,
+      panePid: null,
+      tree: fallbackOutcome?.survivors ?? [],
+      ownedGroups: [],
+      snapshot: emptySnapshot(),
+      blindKill: fallbackOutcome === null,
+    };
   }
   const snapshot = await snapshotProcesses();
   if (!snapshot.ok || !snapshot.byPid.has(panePid)) {
+    const fallbackOutcome = fallback
+      ? await reapRecordedIdentity(fallback.identity, fallback.worktreePath)
+      : null;
     await killTmuxSession(sessionName);
-    return { sessionName, panePid, tree: [], ownedGroups: [], snapshot };
+    return {
+      sessionName,
+      panePid,
+      tree: fallbackOutcome?.survivors ?? [],
+      ownedGroups: [],
+      snapshot,
+      blindKill: fallbackOutcome === null,
+    };
   }
   const paneInfo = snapshot.byPid.get(panePid);
   const paneIsGroupLeader = paneInfo !== undefined && paneInfo.pgid === panePid;
@@ -416,7 +463,7 @@ export async function signalSidecarPane(sessionName: string): Promise<PendingRea
   const ownedGroups = computeOwnedGroups(tree, snapshot, paneIsGroupLeader);
   signalOwnedThenTree(tree, ownedGroups, snapshot, "SIGTERM");
   await killTmuxSession(sessionName);
-  return { sessionName, panePid, tree, ownedGroups, snapshot };
+  return { sessionName, panePid, tree, ownedGroups, snapshot, blindKill: false };
 }
 
 /**
@@ -464,6 +511,7 @@ export async function confirmReaps(
       sessionName: pending.sessionName,
       panePid: pending.panePid,
       survivors: [],
+      blindKill: pending.blindKill,
     }));
   }
   await sleep(graceMs);
@@ -475,6 +523,7 @@ export async function confirmReaps(
         sessionName: pending.sessionName,
         panePid: pending.panePid,
         survivors: [],
+        blindKill: pending.blindKill,
       });
       continue;
     }
@@ -510,20 +559,25 @@ export async function confirmReaps(
       sessionName: pending.sessionName,
       panePid: pending.panePid,
       survivors,
+      blindKill: pending.blindKill,
     });
   }
   return outcomes;
 }
 
 /** `signalSidecarPane` then `confirmReaps` for a single tmux sidecar pane. */
-export async function reapSidecarPane(sessionName: string): Promise<ReapOutcome> {
-  const pending = await signalSidecarPane(sessionName);
+export async function reapSidecarPane(
+  sessionName: string,
+  fallback?: SidecarPaneFallback,
+): Promise<ReapOutcome> {
+  const pending = await signalSidecarPane(sessionName, fallback);
   const [outcome] = await confirmReaps([pending]);
   return (
     outcome ?? {
       sessionName,
       panePid: pending.panePid,
       survivors: [],
+      blindKill: pending.blindKill,
     }
   );
 }
@@ -619,6 +673,7 @@ async function reapLeaderlessGroup(
     tree: proven,
     ownedGroups,
     snapshot,
+    blindKill: false,
   };
   const [outcome] = await confirmReaps([pending]);
   return outcome ?? null;
@@ -662,6 +717,7 @@ export async function reapRecordedIdentity(
     tree,
     ownedGroups,
     snapshot,
+    blindKill: false,
   };
   const [outcome] = await confirmReaps([pending]);
   return outcome ?? null;
@@ -788,6 +844,7 @@ export async function reapRecordedPortDaemon(
       sessionName: "sidecar-recorded-port",
       panePid: null,
       survivors,
+      blindKill: false,
       ...(unverifiedPorts.size > 0 ? { unverifiedPorts: [...unverifiedPorts] } : {}),
     };
   };
@@ -828,6 +885,7 @@ export async function reapRecordedPortDaemon(
       tree,
       ownedGroups,
       snapshot,
+      blindKill: false,
     });
   }
   if (pendings.length === 0) {
@@ -1289,6 +1347,7 @@ export async function sweepSidecars(input: SweepSidecarsInput): Promise<SidecarS
         tree: tree.tree,
         ownedGroups,
         snapshot,
+        blindKill: false,
       };
     });
   const reaped = await confirmReaps(pendings);
