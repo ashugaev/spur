@@ -235,6 +235,15 @@ Chats and forum topics bind to sessions with `/watch`. Without an id, Spur repli
 
 Attention-monitor pushes into a bound chat: `needs_input`, `error`, `rate_limited` once on entry (pane tail on the first two); a `working`→`waiting` transition with no reply since the last inbound message nudges once; `complete`/`kill` always send a farewell and drop the binding — the forum topic closes too, unless the session was spawned with `selfDestruct` enabled. Notice text and forum topic name carry the session title. Every send is best-effort — a failure never blocks the monitor tick or cleanup.
 
+`/spawn` picks an agent, then a project, before creating a session. Bare `/spawn` asks the agent first; `/spawn <agent>` and `/spawn <agent> <task>` go straight to the project step. The picked project overrides the source's own project.
+
+- Picker lists configured non-shepherd projects; a registry-discovered project is never a spawn target.
+- One configured project auto-picks — no keyboard. `/spawn <agent>` replies naming the project; `/spawn <agent> <task>` spawns immediately instead, replying `Spawning...`/`Spawned and bound...` with no project name.
+- A pending `/spawn` expires 10 minutes after its last step with no reply.
+- A stale project keyboard, from an overwritten or expired `/spawn`, answers `Spawn expired. Run /spawn again.` and spawns nothing.
+
+`autoSpawn` below skips the picker, always uses `autoSpawn.project`.
+
 ## Event log retention
 
 Two append-only logs under `dataDir`: `events.jsonl` (daemon/session events) and `user-actions.jsonl` (mutating API calls). Each also shards per session under `<dataDir>/sessions/<id>/`. `hotBytes` caps the root file before it rotates into a `.N.gz` archive, `shardHotBytes` caps each shard. Rotation is lossless and archives read through the same path as the live file. `retainArchives` bounds archives per file — the next rotation past that count deletes the oldest, so history past the window is pruned.
@@ -342,6 +351,12 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `sessionGc.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed, so a daemon restart never sweeps immediately.
 - `sessionGc.maxGroupsPerSweep`: optional positive integer, default `20`. Per-sweep group cap (the CLI's own default cap is `100`).
 - `sessionGc.statuses`: optional non-empty array, default `[completed, killed, stopped]`. Only these three values are accepted; anything else fails config parse.
+- `artifactRetention.enabled`: optional boolean, default `false`. Instance config only. `true` lets the daemon run the [`spur artifacts-gc`](commands.md#artifacts-gc) policy on the same 5-minute timer as `sessionGc`; `spur artifacts-gc` itself works regardless.
+- `artifactRetention.olderThanDays`: optional, default `30`. Age cutoff, applied only to a workspace whose every session is `completed`, `killed`, or `stopped`. Also the `spur artifacts-gc --older-than` default.
+- `artifactRetention.intervalMinutes`: optional, default `360`. Minimum gap between daemon sweeps; the timer ticks every 5 minutes and skips until the gap has passed.
+- `artifactRetention.maxAnchorsPerSweep`: optional positive integer, default `20`. Per-sweep workspace cap (the CLI's own default cap is `100`).
+- `artifactRetention.maxBytesPerSession`: optional positive integer, default `2147483648` (2GiB). `agent-history-*.jsonl` bytes kept per workspace; the oldest are evicted until the workspace fits. Applies at any session status.
+- `artifactRetention.maxFilesPerSession`: optional positive integer, default `500`. `agent-history-*.jsonl` file count kept per workspace, oldest evicted first. Applies at any session status.
 - `sidecarGc.enabled`: optional boolean, default `true`. Instance config only. On by default, unlike `sessionGc`: this reaper kills a restartable sidecar process, never a worktree or a record. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.idleTtlMinutes`: optional positive integer, default `120`. Workspace idle time that reaps a non-MCP project sidecar. Per-sidecar override: `projects.<id>.sidecars.<name>.idleTtlMinutes`. See [Sidecar reaping](#sidecar-reaping).
 - `sidecarGc.maxAgeWarnMinutes`: optional positive integer, default `360`. Process age at which a kept sidecar logs `session.sidecar.age_warning`. Warn only — it authorizes no kill.
@@ -389,6 +404,18 @@ While the guard would deny a wake, a host-wide memory hold engages on the same 1
 
 Hold events: `daemon.memory.hold.engaged` (warn) with `availableBytes`, `floorBytes`, `someAvg10`, `cause` (`legacy_available`, `legacy_swap`, `context_floor`, `pressure`); `daemon.memory.hold.cleared` (info) with `reason` (`recovered`, `admission_disabled`, or `sample_unavailable`), `availableBytes`, `floorBytes`, `marginBytes`, `durationMs`, `engagedCause` — `admission_disabled` and `sample_unavailable` report `availableBytes` and `marginBytes` as `null`; `daemon.memory.hold.failed` (warn) with `message`. A held trigger delivery logs `trigger.send.suppressed_memory_guard` (info) with `interrupt`, `attempt` in place of `trigger.send.failed`.
 
+## Artifact retention
+
+`artifactRetention` prunes `agent-history-*.jsonl` session artifacts. Never touches worktrees or session records — that is [`spur gc`](commands.md#gc).
+
+Unit is the artifacts directory of a [desk group](#desk-groups) workspace, shared by every member.
+
+Only an artifact that is agent-written (`origin: automatic`), named `agent-history-*`, and not user-added is evictable. A user upload, a startup attachment, and any other artifact in the same directory always survive. A directory listing that hits its walk cap blocks the whole workspace for that run.
+
+Eviction is oldest-first, per workspace, in this order: age (only when every member is `completed`, `killed`, or `stopped`), then `maxBytesPerSession`, then `maxFilesPerSession`.
+
+An `agent-history-*.jsonl` artifact after a session's first capture holds only the transcript lines appended since the previous state transition, not the whole transcript. The UI still links each file as a history snapshot. Oldest-first eviction removes the base full copy, so surviving files do not reconstruct a full transcript.
+
 ## Sidecar reaping
 
 `sidecarGc` kills idle and unowned project sidecar processes. Candidates: non-MCP sidecars under `projects.<id>.sidecars`; a built-in MCP sidecar (`playwright`) never is. Runs on the sidecar-reaper tick and once at boot.
@@ -424,6 +451,8 @@ Each pass logs `session.sidecar.reaped` per kill with the matched rule and freed
 `deadPane` (omitted when false) marks a sidecar whose tmux session exists but whose pane exited (`remain-on-exit`, same `alive`/`dead` split as [ports](commands.md#sidecars)); the session detail page keeps its Terminal button reachable but shows the Start action.
 
 Cross-workspace port collision: a sidecar start refuses when this workspace's recorded reservation for this sidecar matches a live other workspace's recorded reservation for a non-MCP sidecar in the same project AND that port is free right now. The error names the holding workspace and sidecar; stop that sidecar or its session first — Spur reuses no pane and reaps nothing across a workspace boundary. Refuses nothing: a shared `ports` range alone, an occupied colliding port (the start scans for another free port), a same-workspace sidecar, another project, a holder with no live pane, an explicit `clearPort`.
+
+Stale foreign reservation release: separately from the refusal above, a start's own reservation scan reclaims a port recorded by another session when that port falls inside this sidecar's own configured range, the recording owner's sidecar pane is no longer alive (checked fresh, bypassing the tmux fleet cache), and the port is free right now — the stale record is released (its entry dropped from the owning session, not merely skipped) before this start's port selection runs. A desk-shared sidecar's port is never reclaimed while any member of its desk is still running: liveness resolves through the sidecar's actual owner, not the raw session record that happened to carry the reservation.
 
 ## Stale mode
 
@@ -479,6 +508,8 @@ Session lifecycle events: `session.complete.completed`, `session.complete.failed
 - Cut note: events written before 2026-09-11 log `self_destruct`, `desk_complete`, and `handoff` under `session.complete.*`; a query over historical `events.jsonl` must union both names.
 
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
+
+Attention monitor events: `session.attention_monitor.failed` (a whole sweep threw). `session.attention_monitor.session_failed` (one session threw and was skipped for that sweep, its previous attention and run state carried forward; carries `sessionId`, `projectId`). `session.attention_monitor.slow` (a sweep's wall time reached the 5s poll interval; carries `durationMs`, `intervalMs`, `suppressedTicks` — ticks dropped while that sweep ran). `session.runtime.probe_unresponsive` (reconcile of a running session skipped, its tmux probe hit the 5s timeout; session record left untouched).
 
 Handoff/respawn events: `session.handoff.startup_attachment_missing`, `session.respawn.startup_attachment_missing` (warn when a record-listed startup attachment has no file on disk; handoff/respawn proceed with resolvable attachments only; `details.missingIds`).
 
