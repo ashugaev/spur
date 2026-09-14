@@ -149,7 +149,21 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     this.prTitle = data.prTitle;
     this.signals = new Map<string, ReviewSignal>();
     for (const signal of data.signals) {
-      this.signals.set(signal.key, signal);
+      const discussion =
+        providerId === "gitlab" ? /^discussion:([^:]+):[^:]+$/.exec(signal.key) : null;
+      this.signals.set(
+        signal.key,
+        discussion?.[1] && !signal.providerThreadTarget
+          ? {
+              ...signal,
+              providerThreadTarget: {
+                kind: "gitlab-discussion",
+                mergeRequestIid: data.prNumber,
+                discussionId: discussion[1],
+              },
+            }
+          : signal,
+      );
     }
   }
 

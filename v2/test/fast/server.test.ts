@@ -121,6 +121,16 @@ describe("startServer", () => {
     };
 
     try {
+      for (const suffix of ["unsubscribe", "suppression/resume"]) {
+        const malformed = await fetch(
+          `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/${suffix}`,
+          { method: "POST", headers, body: "{" },
+        );
+        expect(malformed.status).toBe(400);
+        await expect(malformed.json()).resolves.toMatchObject({
+          error: { code: "invalid_request", message: expect.any(String) },
+        });
+      }
       const unsubscribe = await fetch(
         `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/unsubscribe`,
         {

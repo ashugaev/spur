@@ -1482,7 +1482,9 @@ export async function startServer(
           targetSessionId,
           lookup: (sessionId) => service.get(sessionId),
         });
-        const body = await readJsonBody<unknown>(request);
+        const body = await readJsonBody<unknown>(request).catch(() => {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
+        });
         if (
           !isRecord(body) ||
           (body.scope !== "event" && body.scope !== "thread" && body.scope !== "subscription") ||
@@ -1510,7 +1512,9 @@ export async function startServer(
           lookup: (sessionId) => service.get(sessionId),
         });
         const suppressionId = decodeAutoPingPathSegment(autoPingResumeMatch[2]);
-        const body = await readJsonBody<unknown>(request);
+        const body = await readJsonBody<unknown>(request).catch(() => {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
+        });
         if (!isRecord(body) || Object.keys(body).length !== 0) {
           throw new AutoPingError("invalid_request", 400, "Auto-ping resume body must be empty");
         }

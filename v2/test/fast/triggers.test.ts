@@ -871,6 +871,66 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("prunes the authoritative claimed payload and releases reload occurrence references", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-gc-"));
+    const autoPing = new AutoPingService(dataDir);
+    const get = vi
+      .fn()
+      .mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const deps = {
+      config: { ...config(), dataDir } as never,
+      bus,
+      autoPing,
+      sessionService: { get, deliver } as never,
+      logger: { warn: vi.fn() },
+    };
+    let controller = startConfiguredTriggers(deps);
+    try {
+      bus.emit(githubEvent());
+      bus.emit({
+        ...githubEvent("comment:2"),
+        data: {
+          ...githubEvent("comment:2").data,
+          signals: [{ key: "comment:2", kind: "comment", text: "Live comment." }],
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot("comment:2"));
+      await controller.stop();
+      controller = startConfiguredTriggers(deps);
+      get.mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+      await advanceSendWindow();
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(deliver.mock.calls[0]?.[1]).toContain("Live comment.");
+      expect(deliver.mock.calls[0]?.[1]).not.toContain("A new comment arrived.");
+      const suffix = String(deliver.mock.calls[0]?.[2]?.sensitivePromptSuffix);
+      const handle = suffix.match(/comment:2 event:.*--event (ap1_[A-Za-z0-9_-]{43})/)?.[1];
+      expect(handle).toBeDefined();
+      await autoPing.unsubscribe("api-1", "event", handle ?? "");
+      await vi.advanceTimersByTimeAsync(25 * 60 * 60 * 1000);
+      autoPing.gc();
+      expect(autoPing.list("api-1")).toEqual([]);
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("suppresses a retried occurrence after its recipient redeems the event grant", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "spur-trigger-auto-ping-"));
     const getMock = vi.fn().mockResolvedValue({
@@ -1245,6 +1305,7 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("delivers GitHub updates immediately to a stale-parked session with no idle wait", async () => {
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "stopped",
@@ -3066,6 +3127,7 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("does not repeatedly interrupt the same busy interval", async () => {
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
@@ -3104,6 +3166,7 @@ describe("startConfiguredTriggers", () => {
   });
 
   it("re-delivers an interrupting trigger after the session was restarted", async () => {
+    readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(mergeConflictEvent().data.signals));
     vi.useRealTimers();
     const initial = {
       id: "api-1",

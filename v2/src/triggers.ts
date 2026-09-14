@@ -855,12 +855,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return { status: "suppressed" };
       }
       batch.batch = authoritativeBatch;
+      batch.batch.prune(deps.config.dataDir);
       batch.revision = persisted.revision ?? 0;
       syncBatchOccurrenceReferences(queueKey, batch);
       const claimId = randomUUID();
       const claimedRevision = (persisted.revision ?? 0) + 1;
       const claimed = {
         ...persisted,
+        batch: batch.batch.serialize(),
         revision: claimedRevision,
         claim: {
           controllerId: batch.routeLeaseId,
@@ -1774,6 +1776,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       }
 
       if (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+      for (const [queueKey, batch] of pendingBatches) {
+        clearBatch(queueKey, batch, { deletePersisted: false });
+      }
       for (const leaseId of routeLeases.values()) autoPing.releaseRoute(leaseId);
       routeLeases.clear();
     },

@@ -39,6 +39,19 @@ afterEach(() => {
 });
 
 describe("AutoPingService", () => {
+  it.each([
+    { routes: {} },
+    { grants: [{ scope: "event", target: { kind: "subscription" } }] },
+    { suppressions: [{ createdAt: "invalid" }] },
+  ])("rejects malformed present policy fields before mutation: %j", (fields) => {
+    const dir = createDir();
+    const path = join(dir, "auto-ping.json");
+    const raw = JSON.stringify({ version: 1, routes: [], grants: [], suppressions: [], ...fields });
+    writeFileSync(path, raw);
+    expect(() => new AutoPingService(dir)).toThrow(/Invalid auto-ping/);
+    expect(readFileSync(path, "utf8")).toBe(raw);
+  });
+
   it("persists only hashed owner-bound grants at mode 0600", async () => {
     const dir = createDir();
     const service = new AutoPingService(dir);

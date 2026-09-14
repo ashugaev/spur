@@ -168,12 +168,25 @@ function isRouteDescriptor(value: unknown): value is AutoPingRouteDescriptor {
   );
 }
 
+function isDate(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function matchesScope(scope: unknown, target: AutoPingTarget): boolean {
+  return scope === "event"
+    ? target.kind === "occurrence"
+    : scope === "subscription"
+      ? target.kind === "subscription"
+      : scope === "thread" && target.kind !== "occurrence" && target.kind !== "subscription";
+}
+
 function parseState(raw: unknown): AutoPingState {
   if (
     !isRecord(raw) ||
     raw.version !== STATE_VERSION ||
     !Array.isArray(raw.grants) ||
-    !Array.isArray(raw.suppressions)
+    !Array.isArray(raw.suppressions) ||
+    (raw.routes !== undefined && !Array.isArray(raw.routes))
   ) {
     throw new Error("Invalid auto-ping policy state");
   }
@@ -185,8 +198,15 @@ function parseState(raw: unknown): AutoPingState {
       typeof value.routeFingerprint !== "string" ||
       !isDestination(value.destination) ||
       !isTarget(value.target) ||
+      !matchesScope(value.scope, value.target) ||
       typeof value.canonicalKey !== "string" ||
-      typeof value.createdAt !== "string" ||
+      !isDate(value.createdAt) ||
+      (value.invalidatedAt !== undefined && !isDate(value.invalidatedAt)) ||
+      ((value.state === "bound" || value.state === "consumed") &&
+        typeof value.actorSessionId !== "string") ||
+      (value.state === "consumed" && typeof value.suppressionId !== "string") ||
+      ((value.state === "pending" || value.state === "revoked") &&
+        value.actorSessionId !== undefined) ||
       !["pending", "bound", "consumed", "revoked"].includes(String(value.state))
     ) {
       throw new Error("Invalid auto-ping grant state");
@@ -201,9 +221,12 @@ function parseState(raw: unknown): AutoPingState {
       typeof value.routeFingerprint !== "string" ||
       !isDestination(value.destination) ||
       !isTarget(value.target) ||
+      !matchesScope(value.scope, value.target) ||
       typeof value.canonicalKey !== "string" ||
       typeof value.actorSessionId !== "string" ||
-      typeof value.createdAt !== "string"
+      !isDate(value.createdAt) ||
+      (value.resumedAt !== undefined && !isDate(value.resumedAt)) ||
+      (value.unreferencedAt !== undefined && !isDate(value.unreferencedAt))
     ) {
       throw new Error("Invalid auto-ping suppression state");
     }

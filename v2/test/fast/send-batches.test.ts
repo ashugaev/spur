@@ -58,6 +58,29 @@ function requireBatch<T>(value: T | null, message: string): T {
 }
 
 describe("isGitHubEventData", () => {
+  it("restores proven legacy GitLab discussion targets without inventing individual threads", () => {
+    const batch = restoreSendBatch({
+      kind: "review",
+      providerId: "gitlab",
+      projectId: "proj",
+      sourceId: "src",
+      ...githubEventData({
+        signals: [
+          { key: "discussion:thread-1:note-2", kind: "comment", text: "thread" },
+          { key: "comment:3", kind: "comment", text: "individual" },
+        ],
+      }),
+    });
+    const stored = batch?.serialize();
+    expect(stored?.kind).toBe("review");
+    if (stored?.kind !== "review") throw new Error("missing review batch");
+    expect(stored.signals[0]?.providerThreadTarget).toEqual({
+      kind: "gitlab-discussion",
+      mergeRequestIid: 42,
+      discussionId: "thread-1",
+    });
+    expect(stored.signals[1]?.providerThreadTarget).toBeUndefined();
+  });
   it("returns true for valid data", () => {
     expect(isGitHubEventData(githubEventData())).toBe(true);
   });
