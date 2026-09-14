@@ -214,6 +214,7 @@ const findForeignAgentProcessesForSessionMock = vi.fn(() =>
 );
 const killTmuxSessionTreeMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
+const sendSensitiveMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
 const sendMenuSelectionKeysMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
@@ -688,6 +689,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
     sendMessageToTmux: sendMessageToTmuxMock,
+    sendSensitiveMessageToTmux: sendSensitiveMessageToTmuxMock,
     sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
     sendMenuSelectionKeys: sendMenuSelectionKeysMock,
     tmuxPaneDead: tmuxPaneDeadMock,
@@ -1277,7 +1279,12 @@ describe("SessionService", () => {
     buildAgentLaunchPlanMock
       .mockReset()
       .mockImplementation(
-        (agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
+        (
+          agent: string,
+          initialMessage: string,
+          options?: { planMode?: boolean },
+          deferredSensitiveInitialMessage?: { text: string; sensitive: true },
+        ) => ({
           agent,
           launchCommand:
             agent === "codex"
@@ -1287,6 +1294,7 @@ describe("SessionService", () => {
                 : "claude --dangerously-skip-permissions",
           initialMessage,
           readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
+          ...(deferredSensitiveInitialMessage ? { deferredSensitiveInitialMessage } : {}),
         }),
       );
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
@@ -1481,6 +1489,7 @@ describe("SessionService", () => {
       .mockResolvedValue({ status: "unavailable" });
     killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
+    sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
     tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
@@ -11298,6 +11307,32 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
+  it("delivers sensitive spawn controls after the ordinary prompt without persisting them", async () => {
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const sensitiveControls = "unsubscribe ap1_secret-control";
+
+    await service.spawn(
+      { project: "api", prompt: "hello" },
+      { sensitivePromptSuffix: sensitiveControls },
+    );
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      expect.not.stringContaining("ap1_secret-control"),
+      { agent: "claude" },
+    );
+    expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledOnce();
+    expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledWith("api-1", sensitiveControls, {
+      agent: "claude",
+    });
+    expect(sendMessageToTmuxMock.mock.invocationCallOrder[0]).toBeLessThan(
+      sendSensitiveMessageToTmuxMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(JSON.stringify(writeSessionMock.mock.calls)).not.toContain("ap1_secret-control");
+  });
+
   it("classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes", async () => {
     vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
     readSessionMock.mockReturnValue({
@@ -15941,6 +15976,49 @@ describe("SessionService", () => {
       0,
     );
     expect(writtenBytes).toBe(statSync(sourceHistoryPath).size);
+  });
+
+  it("redacts auto-ping handles from full and delta artifacts without changing the source", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-controls-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    const handle = `ap1_${"a".repeat(43)}`;
+    const line = (index: number, token: string) =>
+      `${JSON.stringify({ type: "assistant", i: index, message: `réponse ${token}` })}\n`;
+    writeFileSync(sourceHistoryPath, line(0, handle), "utf8");
+    const sessions = createSessionStore();
+    sessions.set("api-1", clone(sessionRecord({ id: "api-1", status: "running" })));
+    const reader = { filePath: sourceHistoryPath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.get("api-1");
+
+    for (let index = 1; index <= 3; index += 1) {
+      appendFileSync(sourceHistoryPath, line(index, handle), "utf8");
+      vi.advanceTimersByTime(5_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: index % 2 === 1 ? "needs_input" : "waiting",
+        reader,
+      });
+      await service.get("api-1");
+    }
+    const artifactIds = logSpurEventMock.mock.calls
+      .filter(([, entry]) => entry.event === "session.state.transition")
+      .map(([, entry]) => entry.details?.historyArtifactId);
+    expect(artifactIds).toHaveLength(3);
+    const copies = artifactIds.map((id) =>
+      readFileSync(join(artifactDirForSession("api-1"), String(id)), "utf8"),
+    );
+    expect(copies).toEqual([
+      line(0, "[auto-ping-handle]") + line(1, "[auto-ping-handle]"),
+      line(2, "[auto-ping-handle]"),
+      line(3, "[auto-ping-handle]"),
+    ]);
+    expect(copies.join("").includes(handle)).toBe(false);
+    expect(readFileSync(sourceHistoryPath, "utf8")).toBe(
+      [0, 1, 2, 3].map((index) => line(index, handle)).join(""),
+    );
+    service.dispose();
   });
 
   it("re-emits a partial trailing line whole once it ends on a newline", async () => {

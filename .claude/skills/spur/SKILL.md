@@ -20,6 +20,7 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
+  Stop unwanted auto-pings with `spur auto-ping unsubscribe`. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
 
@@ -42,5 +43,5 @@ DOCS
 
 EDITING THIS FILE
 
-  Reader has no checkout; resolve every doc path through the rule above, never a relative link.
+  Reader has no checkout; resolve each doc path through the rule above, never a relative link.
   Context only, never mechanism, repo internals, or a command/config field/workflow another doc owns.

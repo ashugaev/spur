@@ -474,6 +474,20 @@ ToDo reminder limits: [commands.md#todo](commands.md#todo). Manual messages and 
 
 Sources emit events; triggers `spawn` a new session or `send` into an existing one.
 
+Auto-ping scopes and controls: [commands.md#auto-ping](commands.md#auto-ping).
+
+Source support:
+
+- `cron`: event and subscription for spawn triggers; no thread.
+- `github`: event and subscription for review send/spawn and work-item spawn; inline review comments add thread; issue comments, review bodies, lifecycle items, and work items have no thread.
+- `github-ci`: event and subscription for spawn triggers; no thread.
+- `gitlab`: event and subscription for review send/spawn; non-individual discussion notes add thread; individual notes have no thread.
+- `sentry`: event and subscription for spawn triggers; no thread.
+- `telegram`: event and subscription for send/spawn; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
+- `service`: no live automatic events.
+- `jira`: event and subscription for work-item spawn when `query` is set; connection only without `query`; no thread or send triggers.
+- Cron, Sentry, and GitHub CI send triggers stay unsupported.
+
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
 - `github-ci`: `github-ci:run.completed`.
@@ -487,7 +501,11 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 `jira` with `query` set polls that JQL on `intervalMs`, fetching at most `maxResults` matches per poll, emits `jira:work_item.new` per unseen issue among those returned, and persists seen `<PROJECT>#<KEY>` ids (e.g. `WEBDEV#WEBDEV-5236`) — an id already in that registry never re-emits, even if the issue later leaves and re-enters the JQL result set. An issue that never falls inside the `maxResults` window is never recorded; if it later rotates into the window (a JQL ordering change, other issues resolving), it emits as new, uncapped by the first-poll backlog cap, which only applies before a project has any seen entries at all. Spawn prompts reference work-item fields with `{{key}}`, `{{title}}`, `{{url}}`, `{{externalId}}`, plus the inherited `{{number}}` (trailing digits of the key) and `{{repo}}` (the key's project prefix). `spawn.autoComplete` is supported on a `jira:work_item.new` trigger; it completes the Spur session only — no Jira issue transition is made.
 
-`github:ci_failed`: retry every 10 minutes, stop after 3 deliveries, reset when the failing signal leaves the snapshot. `github:merge_conflict`: one-shot on becoming conflicting, cleared when mergeable, re-emittable. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is never subject to this terminal-signal pause or the permanent not-found stop below (both require a bound PR number) — it can still be gated by the transient poll-failure backoff described next.
+`github:ci_failed`: retry every 10 minutes, stop after 3 attempts for an unchanged item. `github:merge_conflict`: at most 3 automatic delivery attempts per unchanged conflict and destination, including restore replay and daemon restart. A confirmed clear, changed conflict, or another PR permits a new budget. Comments observed alongside replay still emit. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is never subject to this terminal-signal pause or the permanent not-found stop below (both require a bound PR number) — it can still be gated by the transient poll-failure backoff described next.
+
+Pending automatic sends allow at most 8 submission attempts per unchanged item; CI reminders allow 3. Attempts survive controller reload, daemon restart, session restore, and repeated source envelopes. Changed items and new siblings get independent budgets. Memory, rate-limit, and admission holds consume none; uncertain submission consumes one. Manual sends and explicit schedules retain their existing behavior.
+
+Admission refusals log `trigger.send.suppressed_admission` with `interrupt` and `attempt`; memory refusals use [`trigger.send.suppressed_memory_guard`](#admission-control).
 
 A session bound to a PR number GitHub reports as nonexistent stops signal polling for that PR number after one attempt, logs `source.poll.disabled` once, and re-enables on rebinding away from that PR number (including rebinding back after an intermediate rebind), or on daemon restart — in-memory only, not sticky like the terminal-signal pause above. `source.poll.disabled` on a live PR usually means the token lost repo visibility; fix auth, rebind to a different PR number, or restart the daemon to re-probe once. Any other poll failure retries on a doubling backoff (2 minutes to a 30-minute cap) instead of every cycle.
 
@@ -525,7 +543,7 @@ Handoff/respawn events: `session.handoff.startup_attachment_missing`, `session.r
 
 Tmux agent sessions survive daemon restarts: the systemd unit uses `KillMode=process`, so `systemctl restart` stops the node process only. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, restarts attention monitoring.
 
-Trigger pending batches persist in `<dataDir>/pending-send-batches.json` and reload at startup, minus records whose trigger no longer matches config or whose payload no longer parses. Lost on restart: retry counters (a reloaded batch restarts at attempt 1), the send window (fresh window at restore), the state-classification cache (rebuilt in seconds), the state-history ring buffer.
+Trigger pending batches and item retry budgets persist in `<dataDir>/pending-send-batches.json` and reload at startup, minus records whose trigger no longer matches config or whose payload no longer parses. Lost on restart: the send window (fresh window at restore), the state-classification cache (rebuilt in seconds), the state-history ring buffer.
 
 Unit files here are templates. Source deployments apply them through [install-from-source.md#deploy](install-from-source.md#deploy); npm user units refresh through [install-from-npm.md#upgrade](install-from-npm.md#upgrade).
 

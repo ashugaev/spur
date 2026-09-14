@@ -1,15 +1,19 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveSessions,
   deletePendingSendBatch,
+  deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   listSessions,
   readCommentSeenRegistry,
   readPendingSendBatches,
+  readPendingSendBatch,
+  readReviewSourceSnapshot,
+  writeReviewSourceSnapshot,
   readTelegramBindings,
   readTelegramLastUpdateId,
   readTelegramReplyTarget,
@@ -23,6 +27,7 @@ import {
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
+  updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
 import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
@@ -41,6 +46,25 @@ async function newDataDir(): Promise<string> {
 }
 
 describe("work-item registry", () => {
+  it("round-trips confirmed conflict clear IDs and rejects malformed IDs", async () => {
+    const dataDir = await newDataDir();
+    const snapshot = {
+      prNumber: 42,
+      signals: new Map(),
+      mergeConflictClearId: "12345678-1234-1234-1234-123456789012",
+    };
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", snapshot);
+    expect(readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toEqual(
+      snapshot,
+    );
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", {
+      ...snapshot,
+      mergeConflictClearId: "bad",
+    });
+    expect(() => readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toThrow(
+      "Invalid merge-conflict clear identifier",
+    );
+  });
   it("round-trips recorded ids", async () => {
     const dataDir = await newDataDir();
     recordWorkItem(dataDir, "api", "pr-watch", "acme/api#1");
@@ -287,6 +311,31 @@ function telegramPendingBatch(
 }
 
 describe("pending send batches", () => {
+  it("round-trips retry tombstones and rejects malformed present accounting", async () => {
+    const dataDir = await newDataDir();
+    const entry = {
+      itemKey: "item",
+      fingerprint: "a".repeat(64),
+      deliveryAttempts: 8,
+      ciAttempts: 0,
+      nextAttemptAt: 1234,
+    };
+    const record = reviewPendingBatch({ retryAccounting: [entry] });
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)?.retryAccounting).toEqual([entry]);
+    for (const invalid of [
+      { ...entry, deliveryAttempts: 9 },
+      { ...entry, ciAttempts: -1 },
+      { ...entry, fingerprint: "bad" },
+      { ...entry, nextAttemptAt: "tomorrow" },
+    ]) {
+      writeFileSync(
+        join(dataDir, "pending-send-batches.json"),
+        JSON.stringify({ records: [{ ...record, retryAccounting: [invalid] }] }),
+      );
+      expect(readPendingSendBatches(dataDir).size).toBe(0);
+    }
+  });
   it("returns an empty map when the file is missing", async () => {
     const dataDir = await newDataDir();
     expect(readPendingSendBatches(dataDir).size).toBe(0);
@@ -323,6 +372,46 @@ describe("pending send batches", () => {
     const record = reviewPendingBatch();
     recordPendingSendBatch(dataDir, record);
     expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+    expect(statSync(join(dataDir, "pending-send-batches.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("updates and deletes only the matching work revision and claim", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch({ workId: "work-1", revision: 3 });
+    recordPendingSendBatch(dataDir, record);
+    const claimed = {
+      ...record,
+      revision: 4,
+      claim: {
+        controllerId: "controller-1",
+        routeLeaseId: "lease-1",
+        claimId: "claim-1",
+        claimedAt: "2026-09-01T00:00:00.000Z",
+      },
+    };
+
+    expect(
+      updatePendingSendBatchConditional(dataDir, { workId: "work-1", revision: 2 }, claimed),
+    ).toBe(false);
+    expect(
+      updatePendingSendBatchConditional(dataDir, { workId: "work-1", revision: 3 }, claimed),
+    ).toBe(true);
+    expect(readPendingSendBatch(dataDir, "work-1")).toEqual(claimed);
+    expect(
+      deletePendingSendBatchConditional(dataDir, {
+        workId: "work-1",
+        revision: 4,
+        claimId: "foreign-claim",
+      }),
+    ).toBe(false);
+    expect(
+      deletePendingSendBatchConditional(dataDir, {
+        workId: "work-1",
+        revision: 4,
+        claimId: "claim-1",
+      }),
+    ).toBe(true);
+    expect(readPendingSendBatch(dataDir, "work-1")).toBeNull();
   });
 
   it("round-trips a service batch record", async () => {

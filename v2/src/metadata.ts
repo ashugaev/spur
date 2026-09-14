@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -12,6 +13,8 @@ import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
+  DELIVERY_MAX_ATTEMPTS,
+  CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type ReviewProviderId,
@@ -194,6 +197,30 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
+  const accounting = value["retryAccounting"];
+  if (
+    accounting !== undefined &&
+    (!Array.isArray(accounting) ||
+      !accounting.every(
+        (entry: unknown) =>
+          isRecord(entry) &&
+          typeof entry["itemKey"] === "string" &&
+          typeof entry["fingerprint"] === "string" &&
+          /^[a-f0-9]{64}$/.test(entry["fingerprint"]) &&
+          typeof entry["deliveryAttempts"] === "number" &&
+          Number.isInteger(entry["deliveryAttempts"]) &&
+          entry["deliveryAttempts"] >= 0 &&
+          entry["deliveryAttempts"] <= DELIVERY_MAX_ATTEMPTS &&
+          typeof entry["ciAttempts"] === "number" &&
+          Number.isInteger(entry["ciAttempts"]) &&
+          entry["ciAttempts"] >= 0 &&
+          entry["ciAttempts"] <= CI_FAILED_MAX_ATTEMPTS &&
+          typeof entry["nextAttemptAt"] === "number" &&
+          Number.isFinite(entry["nextAttemptAt"]) &&
+          entry["nextAttemptAt"] >= 0,
+      ))
+  )
+    return false;
   return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
@@ -616,6 +643,18 @@ function writeJsonFile(path: string, value: unknown): FileFingerprint | null {
   return fingerprint;
 }
 
+function writePrivateJsonFile(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, path);
+  chmodSync(path, 0o600);
+}
+
 // Discriminates the current envelope (`{prNumber, signals}`) from the legacy
 // on-disk shape (a bare `ReviewSignal[]`) purely on `Array.isArray` — no
 // `version` field, since nothing would ever read one. A legacy file carries
@@ -629,8 +668,16 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
     | ReviewSignal[]
     | undefined;
   const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
+  const mergeConflictClearId = envelope?.mergeConflictClearId;
+  if (
+    mergeConflictClearId !== undefined &&
+    (typeof mergeConflictClearId !== "string" || !/^[0-9a-f-]{36}$/.test(mergeConflictClearId))
+  ) {
+    throw new Error("Invalid merge-conflict clear identifier");
+  }
   return {
     prNumber,
+    ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
     signals: new Map(
       (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
     ),
@@ -1082,6 +1129,9 @@ export function writeReviewSourceSnapshot(
   writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
     prNumber: snapshot.prNumber,
     signals: [...snapshot.signals.values()],
+    ...(snapshot.mergeConflictClearId !== undefined
+      ? { mergeConflictClearId: snapshot.mergeConflictClearId }
+      : {}),
   });
 }
 
@@ -1362,7 +1412,7 @@ export function readPendingSendBatches(dataDir: string): Map<string, PersistedPe
 export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
@@ -1372,11 +1422,70 @@ export function recordPendingSendBatch(dataDir: string, record: PersistedPending
 export function deletePendingSendBatch(dataDir: string, queueKey: string): void {
   const records = readPendingSendBatches(dataDir);
   if (!records.delete(queueKey)) return;
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
   });
+}
+
+export function readPendingSendBatch(
+  dataDir: string,
+  workId: string,
+): PersistedPendingBatch | null {
+  return (
+    [...readPendingSendBatches(dataDir).values()].find((record) => record.workId === workId) ?? null
+  );
+}
+
+export function updatePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision: number; claimId?: string },
+  next: PersistedPendingBatch,
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    current.revision !== expected.revision ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  records.set(next.queueKey, next);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
+}
+
+// Deletes the record owning `workId`, never the record sitting at a queue key.
+// A stale controller that deleted by queue key would drop a newer generation's
+// work. `revision`/`claimId` narrow the delete further when the caller holds a
+// claim.
+export function deletePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision?: number; claimId?: string },
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    (expected.revision !== undefined && current.revision !== expected.revision) ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
 }
 
 export function readServiceSourceState(
