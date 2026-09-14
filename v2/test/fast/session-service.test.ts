@@ -32707,7 +32707,9 @@ describe("SessionService", () => {
         expect.anything(),
       );
       expect(updated.intervalWake?.message).toBe("Interval msg");
-      expect(Date.parse(updated.intervalWake!.nextDueAt)).toBeGreaterThan(
+      const intervalNextDueAt = updated.intervalWake?.nextDueAt;
+      expect(intervalNextDueAt).toBeDefined();
+      expect(Date.parse(intervalNextDueAt ?? "")).toBeGreaterThan(
         Date.parse("2026-03-18T10:00:00.000Z"),
       );
       service.dispose();
