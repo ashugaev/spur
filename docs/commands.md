@@ -22,6 +22,7 @@ Commands that never reach that guard: `init`/`reinit` bootstrap the default path
 - `isolated-daemon`/`isolated-ui` sidecars add `spur-isolated`, a CLI wrapper bound to the throwaway isolated daemon; the plain `spur` wrapper still targets the real daemon.
 - Call each by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path — login shells rebuild `PATH`, drop the tool dir.
 - Identity: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
+- Closeout: `$SPUR_CLOSEOUT_OWNER=1` marks the assigned closeout owner for a writable worktree, including transferred handoff ownership on a reused workspace; `0` marks non-owners, including read-only and shared-workspace sessions. The Stop hook skips git and PR closeout for `0`. A missing variable preserves standalone hook enforcement outside Spur.
 - Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`; hook-state agents add `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE`.
 
 ## doctor
@@ -118,6 +119,8 @@ TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r`
 Each session's ToDo ledger starts empty — no code path seeds an item; the agent adds one per step, right before it, and resolves it right after. `add`/`complete`/`cancel`/`hold` require a reason; `--human-action` records a human blocker; `resume` reopens held work; no delete. A human can also `add` through the CLI or session-detail UI. An empty ledger, and open or held work, both block a session closing itself: completion, self-destruct, handoff, trigger+desk completion. The block is on the agent only — a `complete` or `handoff` a person issues from the CLI or the UI, with no session acting on its own behalf, goes through whatever the ledger holds.
 
 `$SPUR_TODO_COMMAND`: session-bound `spur-todo` wrapper, same actions, no `--session`, can't target another ledger. Routes/error codes: [daemon-api.md](daemon-api.md#session-routes).
+
+Automatic ToDo reminders stop after 3 attempts for unchanged open work, human blockers, or an empty ledger. A changed actionable item or a clean ledger resets the limit; restart, restore, and failed delivery do not.
 
 ## send, queue
 

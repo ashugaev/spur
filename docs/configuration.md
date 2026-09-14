@@ -464,6 +464,12 @@ Any system message wakes a parked session silently — GitHub/review event, trig
 
 `spur list` and the dashboard show a parked session as state `stale`, in the Stopped group, with its Resume action.
 
+## Automatic reminders
+
+Claude server-error continuation stops after 3 attempts per error episode, at least 30 minutes apart. Restart, restore, missing transcripts, and failed delivery preserve the limit. A substantive assistant response with its own timestamp newer than the error marker ends the episode; a retry prompt does not.
+
+ToDo reminder limits: [commands.md#todo](commands.md#todo). Manual messages and configured scheduled wakes retain their delivery behavior.
+
 ## Events
 
 Sources emit events; triggers `spawn` a new session or `send` into an existing one.
@@ -501,6 +507,7 @@ Message delivery events: `session.message.sent`, `session.message.delivery_recov
 Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff doubles from 2 minutes to a 30-minute cap), `session.todo.nudge_disabled` (give-up; `details.kind` is `ledger_corrupt` or `target_gone`). `session.todo.nudge_disabled` is emitted at most once per session per liveness episode.
 
 Successful ToDo nudges occur once per unchanged ledger revision. Ledger changes permit another nudge after 60 seconds. Session relaunch/restore and daemon restart reset suppression.
+`session.todo.nudge_exhausted` and `session.server_error.reactivation_exhausted` mark the final automatic reminder attempt for unchanged work or an error episode. Each emits once per exhausted budget.
 
 Session lifecycle events: `session.complete.completed`, `session.complete.failed`, `session.pause.completed`, `session.pause.failed`, `session.self_destruct.completed`, `session.self_destruct.failed`, `session.desk_complete.completed`, `session.desk_complete.failed`, `session.handoff.completed`, `session.handoff.failed`.
 

@@ -11,6 +11,7 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
+  AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type ReviewProviderId,
@@ -724,6 +725,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const workspaceId = workspaceIdOf(normalizedSession);
+  const closeoutOwner =
+    typeof normalizedSession.closeoutOwner === "boolean"
+      ? normalizedSession.closeoutOwner
+      : normalizedSession.restrictWrites !== true &&
+        normalizedSession.worktree === true &&
+        workspaceId === normalizedSession.id;
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
@@ -731,7 +739,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
     // stays written in exactly one place (session-desk.ts).
-    workspaceId: workspaceIdOf(normalizedSession),
+    workspaceId,
     agent: normalizedSession.agent,
     ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
     ...(normalizedSession.mode !== undefined ? { mode: normalizedSession.mode } : {}),
@@ -739,6 +747,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
       : {}),
+    closeoutOwner,
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
       : {}),
@@ -786,6 +795,20 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
+    ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
+    Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&
+    normalizedSession.serverErrorReactivationAttempts >= 0 &&
+    normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
+      : {}),
+    ...(normalizedSession.todoNudge &&
+    typeof normalizedSession.todoNudge.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(normalizedSession.todoNudge.fingerprint) &&
+    Number.isInteger(normalizedSession.todoNudge.attempts) &&
+    normalizedSession.todoNudge.attempts >= 0 &&
+    normalizedSession.todoNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { todoNudge: normalizedSession.todoNudge }
+      : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
