@@ -120,7 +120,7 @@ Each session's ToDo ledger starts empty — no code path seeds an item; the agen
 
 `$SPUR_TODO_COMMAND`: session-bound `spur-todo` wrapper, same actions, no `--session`, can't target another ledger. Routes/error codes: [daemon-api.md](daemon-api.md#session-routes).
 
-Automatic ToDo reminders stop after 3 attempts for unchanged open work, human blockers, or an empty ledger. A changed actionable item or a clean ledger resets the limit; restart, restore, and failed delivery do not. Successful reminders stay at least 60 seconds apart.
+Automatic ToDo reminders stop after 3 attempts for unchanged open work, human blockers, or an empty ledger. A changed actionable item or a clean ledger resets the limit; restart, restore, and failed delivery do not.
 
 ## send, queue
 
