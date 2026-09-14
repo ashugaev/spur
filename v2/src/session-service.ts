@@ -525,6 +525,11 @@ const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
+// classifySessionRecord (called from inside both waitForQueuedMessage and
+// waitForPipelineStep) runs reconcileUnexpectedStop and
+// reconcileStaleErroredSession, so the loop can heal its own record on every
+// pass -- the stopped-before-sleep return bounds nothing on its own.
+const DELIVERY_HEAL_CONTINUE_LIMIT = 3;
 const STATE_HOLD_MS = 4_000;
 // Codex turns that hang after their tool calls complete (model inference dies between/after tools)
 // pin state to "working" forever. The rollout JSONL emits no deterministic mid-inference liveness
@@ -15209,6 +15214,9 @@ export class SessionService {
   }
 
   private async runDeliveryLoop(sessionId: string): Promise<void> {
+    // Per-run state, not an instance field: the bound must not leak budget
+    // across separate delivery runs for the same session.
+    let healContinues = 0;
     try {
       for (;;) {
         if (this.deliveryStopped) {
@@ -15241,6 +15249,36 @@ export class SessionService {
           }
 
           if (waitOutcome === "stopped") {
+            // deliveryStopped means daemon shutdown, not drift: stay silent so
+            // dispose() never produces a diagnostic event, matching the
+            // pipeline branch below. isDeliveryStopped() is a call, not the
+            // field directly, because dispose() can flip the field during the
+            // wait above and this re-check must not inherit the loop-top
+            // guard's stale `false` narrowing.
+            if (!this.isDeliveryStopped()) {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
+              if (
+                latest?.queuedMessages?.awaitingPrompt === true &&
+                latest.status !== "running" &&
+                latest.stopReason === undefined &&
+                !isTerminalSessionStatus(latest.status)
+              ) {
+                this.logEvent("session.message.stalled", {
+                  level: "warn",
+                  sessionId,
+                  projectId: latest.project,
+                  message: `Message delivery stalled for ${sessionId}: session status is ${latest.status} while ${queuedMessages(latest).length} message(s) are still queued`,
+                  details: {
+                    queuedCount: queuedMessages(latest).length,
+                    sessionStatus: latest.status,
+                  },
+                });
+              }
+            }
             return;
           }
 
@@ -15275,6 +15313,10 @@ export class SessionService {
             // guard's stale `false` narrowing.
             if (!this.isDeliveryStopped()) {
               const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
               if (
                 latest?.pipeline?.status === "running" &&
                 latest.status !== "running" &&
