@@ -29,8 +29,6 @@ mkdir -p ~/.claude/skills ~/.codex/skills
 spur init                           # installs + starts the systemd user units, links host skills
 ```
 
-Agent CLIs and the two `skills` dirs come first: `spur init` links host skills only into a `skills` dir that already exists, so a fresh host that runs `init` first links nothing and needs a second `spur reinit`.
-
 Two non-obvious points:
 
 - Prefix must be `~/.local` — a system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path (`status=203/EXEC`). Put `~/.local/bin` on PATH, persisted for new logins. The `npm config set prefix ~/.local` above writes into `~/.npmrc`, needed once to land the very first `npm install -g @shugaev/spur` before Spur exists to pin anything. After the daemon's first boot (`spur init`/`update`/`reinit`, a reboot, or `systemctl restart`), the pin moves to Spur's own `~/.spur/npmrc` as npm's `--globalconfig` — never `~/.npmrc`, which `nvm` refuses to load once it carries a `prefix=`/`globalconfig=` line. `spur init`/`update`/`reinit` strip that line back out of `~/.npmrc` only on hosts with nvm installed — on a host without nvm the line stays, since it's what makes a bare `npm install -g` (outside any agent session) land in `~/.local` at all, and nothing there conflicts with it. A plain daemon boot leaves `~/.npmrc` alone either way. `spur doctor`'s `npmrc-nvm-conflict` check applies the same nvm gate and gives the one-liner to remove a leftover line (system-unit hosts, see below, can't run `spur reinit`).
