@@ -9984,9 +9984,7 @@ export class SessionService {
     sessionId: string,
     request: DispatchSessionWakeRequest,
   ): Promise<SessionView> {
-    return this.withSessionLifecycleLock(sessionId, () =>
-      this.dispatchWakeLocked(sessionId, request),
-    );
+    return this.dispatchWakeLocked(sessionId, request);
   }
 
   private wakeTargetProperty(target: WakeTarget): "scheduledWake" | "intervalWake" | "dailyWake" {

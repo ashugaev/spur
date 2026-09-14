@@ -32677,6 +32677,42 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("dispatchWake sends a formatted interval wake and advances nextDueAt", async () => {
+      const pastDue = "2026-03-18T09:00:00.000Z";
+      seedShepherdSession({
+        intervalWake: {
+          nextDueAt: pastDue,
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const updated = await service.dispatchWake("shp-1", {
+        target: "interval",
+        dispatch: true,
+      });
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Interval msg"),
+        { agent: "claude", interrupt: false },
+      );
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Stop condition: CI green"),
+        expect.anything(),
+      );
+      expect(updated.intervalWake?.message).toBe("Interval msg");
+      expect(Date.parse(updated.intervalWake!.nextDueAt)).toBeGreaterThan(
+        Date.parse("2026-03-18T10:00:00.000Z"),
+      );
+      service.dispose();
+    });
+
     it("advances a daily wake past a failed occurrence and keeps the message queued", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {

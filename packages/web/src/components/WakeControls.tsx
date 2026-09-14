@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
-import { errorMessage, readApiErrorMessage, readResponsePayload } from "@/lib/json-payload";
+import { errorMessage, readApiErrorMessage } from "@/lib/json-payload";
 import { toDashboardSession, type DashboardSession, type SpurSessionView } from "@/lib/types";
 import { Spinner } from "@/components/icons/Spinner";
 import {
