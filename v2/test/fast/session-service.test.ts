@@ -41775,7 +41775,11 @@ describe("SessionService", () => {
         createTmuxSessionMock.mockImplementation(async () => {
           memberPaneAlive = true;
         });
-        const service = await createDisposedSessionService();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        service.dispose();
         const internals = staleInternals(service);
 
         const stop = service.stopSidecar("api-1", "proxy");
