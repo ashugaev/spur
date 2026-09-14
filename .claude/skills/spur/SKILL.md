@@ -26,6 +26,7 @@ SAFETY
   Run non-default-instance CLI calls from a neutral cwd — `spawn`/`list` auto-connect the nearest `spur.yaml` upward from cwd and spawn real sessions.
   Never run `gc --execute` against a data dir you do not own; a bare `gc` is the dry run.
   Never run `cache --prune --yes` on a host running agents you do not own; a bare `cache` or `cache --prune` is a dry run.
+  Never run `disk-gc --execute` (or `--browser-revisions`) on a host running agents you do not own; a bare `disk-gc` is the dry run.
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, or Jira runs arbitrary commands as the daemon user.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
