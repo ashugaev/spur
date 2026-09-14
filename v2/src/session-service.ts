@@ -6469,6 +6469,10 @@ export class SessionService {
   }
 
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
+    return this.withWorkspaceLifecycleLocks(session.id, () => this.maybeNudgeTodoLocked(session));
+  }
+
+  private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||

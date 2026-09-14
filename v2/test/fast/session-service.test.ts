@@ -2139,6 +2139,60 @@ describe("SessionService", () => {
       },
     );
 
+    it("preserves the ToDo budget when delivery captured its session before a competing nudge", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      mockClaudeJsonlState("waiting");
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = service as unknown as SessionServiceInternals & {
+        ensureSessionReadyForSend(record: SessionRecord): Promise<SessionRecord>;
+      };
+      const ensureReady = internals.ensureSessionReadyForSend.bind(service);
+      const readySpy = vi.spyOn(internals, "ensureSessionReadyForSend");
+      sendMessageToTmuxMock.mockClear();
+      for (let round = 0; round < 5; round++) {
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let signalReady: (() => void) | undefined;
+        const reached = new Promise<void>((resolve) => {
+          signalReady = resolve;
+        });
+        readySpy.mockImplementationOnce(async (record) => {
+          const ready = await ensureReady(record);
+          signalReady?.();
+          await gate;
+          return ready;
+        });
+        const delivery = service.deliver(session.id, `Manual update ${round}`);
+        await reached;
+        const prior = sessions.get(session.id)?.todoNudge;
+        const nudge = internals.maybeNudgeTodo(session);
+        try {
+          await vi.advanceTimersByTimeAsync(0);
+          expect(sessions.get(session.id)?.todoNudge).toEqual(prior);
+        } finally {
+          release?.();
+          await Promise.all([delivery, nudge]);
+        }
+        expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(Math.min(round + 1, 3));
+        vi.setSystemTime(Date.now() + 60_001);
+      }
+      expect(
+        sendMessageToTmuxMock.mock.calls.filter(([, message]) =>
+          message.includes("Spur ToDo is empty"),
+        ),
+      ).toHaveLength(3);
+      expect(
+        sendMessageToTmuxMock.mock.calls.filter(([, message]) =>
+          message.startsWith("Manual update"),
+        ),
+      ).toHaveLength(5);
+    });
+
     it("backs off after a failed nudge and throttles successful delivery", async () => {
       const sessions = createSessionStore();
       const session = runningSession();
