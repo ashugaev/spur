@@ -129,4 +129,60 @@ describe("gitlabReviewProvider.collectSignals", () => {
     expect(keys).toContain("merge_conflict");
     expect(keys).toContain("ci_failed");
   });
+
+  it("adds discussion targets only for non-individual notes", async () => {
+    const mr = {
+      iid: 9,
+      title: "feat: x",
+      web_url: "https://gitlab.example.com/group/app/-/merge_requests/9",
+      has_conflicts: false,
+      detailed_merge_status: "mergeable",
+      blocking_discussions_resolved: true,
+    };
+    glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
+      const endpoint = String(args[1] ?? "");
+      if (endpoint.includes("/merge_requests?source_branch=")) return JSON.stringify([mr]);
+      if (endpoint.includes("/pipelines")) return "[]";
+      if (endpoint.includes("/discussions")) {
+        return JSON.stringify([
+          {
+            id: "disc-1",
+            individual_note: false,
+            notes: [
+              {
+                id: 100,
+                body: "threaded",
+                author: { username: "reviewer" },
+                position: { new_path: "src/api.ts", new_line: 7 },
+              },
+            ],
+          },
+          {
+            id: "note-1",
+            individual_note: true,
+            notes: [{ id: 101, body: "standalone", author: { username: "reviewer" } }],
+          },
+        ]);
+      }
+      throw new Error(`unexpected endpoint ${endpoint}`);
+    });
+
+    const result = await gitlabReviewProvider.collectSignals(
+      makeSession(),
+      "/tmp/data",
+      "proj",
+      "src",
+    );
+
+    expect(result?.snapshot.get("discussion:disc-1:100")).toEqual(
+      expect.objectContaining({
+        providerThreadTarget: {
+          kind: "gitlab-discussion",
+          mergeRequestIid: 9,
+          discussionId: "disc-1",
+        },
+      }),
+    );
+    expect(result?.snapshot.get("comment:101")).not.toHaveProperty("providerThreadTarget");
+  });
 });

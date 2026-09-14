@@ -171,6 +171,44 @@ describe("Spur ToDo ledger", () => {
     expect(() => replayTodo(dataDir, session.id)).toThrow(TodoLedgerCorruptError);
   });
 
+  it("classifies missing and truncated replay throws as transient for nudge give-up", async () => {
+    const { dataDir, session } = await fixture();
+    try {
+      replayTodo(dataDir, session.id);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).transient).toBe(true);
+    }
+
+    mutateTodo(
+      dataDir,
+      session,
+      { action: "add", text: "Implement native ToDo", reason: "Session objective" },
+      actor,
+    );
+    const path = join(dataDir, "sessions", session.id, "todo.jsonl");
+    const content = readFileSync(path, "utf8");
+    writeFileSync(path, content.slice(0, -1), "utf8");
+    try {
+      replayTodo(dataDir, session.id);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(TodoLedgerCorruptError);
+      expect((error as TodoLedgerCorruptError).transient).toBe(true);
+    }
+  });
+
+  it("classifies deterministic replay errors as non-transient for nudge give-up", () => {
+    expect(
+      new TodoLedgerCorruptError("s-1", "Event contains an invalid transition").transient,
+    ).toBe(false);
+    expect(new TodoLedgerCorruptError("s-1", "Duplicate item id").transient).toBe(false);
+    expect(new TodoLedgerCorruptError("s-1", "Event references an unknown item").transient).toBe(
+      false,
+    );
+  });
+
   it("rejects blank mutation fields before append", async () => {
     const { dataDir, session } = await fixture();
     mutateTodo(

@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_NESTED_ARTIFACT_ROWS,
+  deleteSessionArtifactById,
   deleteSessionArtifactsExcept,
   listSessionArtifacts,
   parseArtifactRelativePath,
@@ -382,5 +383,61 @@ describe("session artifact cleanup", () => {
     expect(existsSync(join(dir, "design", "design-spec.md"))).toBe(true);
     expect(existsSync(join(dir, "design", "scratch.md"))).toBe(false);
     expect(existsSync(join(dir, "notes"))).toBe(false);
+  });
+});
+
+describe("deleteSessionArtifactById", () => {
+  it("removes one file and its metadata entry, leaving siblings untouched", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-del-1";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "agent-history-a.jsonl"), "a\n", "utf8");
+    await writeFile(join(dir, "agent-history-b.jsonl"), "b\n", "utf8");
+    await writeFile(join(dir, "report.md"), "keep", "utf8");
+    setSessionArtifactOrigin(dataDir, sessionId, "agent-history-a.jsonl", "automatic");
+    setSessionArtifactOrigin(dataDir, sessionId, "agent-history-b.jsonl", "automatic");
+
+    expect(deleteSessionArtifactById(dataDir, sessionId, "agent-history-a.jsonl")).toBe(true);
+
+    const { artifacts } = listSessionArtifacts(dataDir, sessionId);
+    expect(artifacts.map((artifact) => artifact.id).sort()).toEqual([
+      "agent-history-b.jsonl",
+      "report.md",
+    ]);
+    // The surviving sibling keeps its "automatic" metadata: only the deleted id's entry goes.
+    expect(artifacts.find((artifact) => artifact.id === "agent-history-b.jsonl")?.origin).toBe(
+      "automatic",
+    );
+    const metadata = JSON.parse(
+      await readFile(join(dir, ".spur-artifacts.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(Object.keys(metadata)).toEqual(["agent-history-b.jsonl"]);
+  });
+
+  it("returns false for a missing id, a traversal id, and a directory", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-del-2";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    await mkdir(join(dir, "design"), { recursive: true });
+    await writeFile(join(dataDir, "outside.txt"), "outside", "utf8");
+
+    expect(deleteSessionArtifactById(dataDir, sessionId, "nope.jsonl")).toBe(false);
+    expect(deleteSessionArtifactById(dataDir, sessionId, "../outside.txt")).toBe(false);
+    expect(deleteSessionArtifactById(dataDir, sessionId, "design")).toBe(false);
+    expect(existsSync(join(dataDir, "outside.txt"))).toBe(true);
+    expect(existsSync(join(dir, "design"))).toBe(true);
+  });
+
+  it("never follows a symlink out of the artifacts root", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-del-3";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dataDir, "secret.txt"), "secret", "utf8");
+    await symlink(join(dataDir, "secret.txt"), join(dir, "agent-history-link.jsonl"));
+
+    expect(deleteSessionArtifactById(dataDir, sessionId, "agent-history-link.jsonl")).toBe(false);
+    expect(existsSync(join(dataDir, "secret.txt"))).toBe(true);
   });
 });

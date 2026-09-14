@@ -34,7 +34,7 @@ export interface SidecarReapCandidate {
   mcp: boolean;
   ownerExists: boolean;
   worktreeExists: boolean;
-  /** hasRunningWorkspaceMembers(owner) semantics, including the owner itself. */
+  /** Active-workspace semantics (any non-terminal member), including the owner itself. */
   workspaceRunning: boolean;
   hasRecordedIdentity: boolean;
   /** Max lastActivityAt over workspace members; null when unknown. */

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -30,6 +30,8 @@ import type { AgentName } from "./types.js";
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 let activeTmuxSocketName: string | null = null;
+const SENSITIVE_TMUX_CLOSE_WAIT_MS = 1_000;
+const SENSITIVE_TMUX_CLEANUP_ATTEMPTS = 3;
 
 // ── Shared short-TTL runtime-probe cache ──
 // With ~183 sessions, the dashboard-cache tick (every 2s in session-service.ts,
@@ -95,6 +97,13 @@ interface FleetSessionSnapshot {
   names: Set<string>;
   activity: Map<string, Date | null>;
   readable: boolean;
+  // True only when `readable` is false AND the fork that failed was killed by
+  // its own `TMUX_COMMAND_TIMEOUT_MS` timeout (see isTmuxTimeoutKill) rather
+  // than genuinely failing (e.g. no tmux server running). Ambiguous — the
+  // fleet could not be read, not "the fleet is empty" — so callers reasoning
+  // about a session's ABSENCE must treat this apart from an ordinary
+  // `readable: false`.
+  unresponsive: boolean;
 }
 
 const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>();
@@ -128,6 +137,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     const names = new Set<string>();
     const activity = new Map<string, Date | null>();
     let readable = true;
+    let unresponsive = false;
     try {
       const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
@@ -146,17 +156,31 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
             : previous,
         );
       }
-    } catch {
+    } catch (error) {
       // No tmux server running (or another list-windows failure) — an empty
       // fleet, never a thrown error.
       readable = false;
+      unresponsive = isTmuxTimeoutKill(error);
     }
-    return { names, activity, readable };
+    return { names, activity, readable, unresponsive };
   });
 }
 
 export async function listTmuxSessionNames(): Promise<Set<string>> {
   return (await getFleetSessionSnapshot()).names;
+}
+
+// Busts the fleet-wide cache and forces exactly one fresh fork, populating
+// the single shared entry for every plain (non-fresh) tmuxSessionExists /
+// sidecarTmuxAlive call made right after — those reuse this one fetch
+// instead of each forcing their own. For a caller that needs one genuinely
+// fresh read shared across a whole batch of liveness checks (e.g. scanning
+// N foreign reservations for staleness), never N independent `{fresh:
+// true}` calls, which would each discard the previous call's still-fresh
+// entry and re-fork.
+export async function refreshTmuxFleetSnapshot(): Promise<void> {
+  fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
+  await getFleetSessionSnapshot();
 }
 
 // `fresh` busts the shared fleet-existence cache before reading, forcing one
@@ -168,10 +192,32 @@ export async function tmuxSessionExists(
   sessionName: string,
   options?: { fresh?: boolean },
 ): Promise<boolean> {
+  return (await getTmuxSessionPresence(sessionName, options)).present;
+}
+
+// Combined presence+unresponsiveness read off ONE fleet-snapshot fetch.
+// Deliberately not two separate readers (one for `present`, a second for
+// `unresponsive`): memoizedProbe's cache entry expires RUNTIME_PROBE_CACHE_TTL_MS
+// (2s) after the fetch STARTS, and a timeout-killed `list-windows` takes
+// TMUX_COMMAND_TIMEOUT_MS (5s) — by the time a caller awaits this read and
+// then makes a SECOND top-level call for the other field, the entry is
+// already expired, gets swept, and re-forks a second 5s probe. Reading the
+// snapshot once and deriving both fields from it has no such gap.
+export async function getTmuxSessionPresence(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<{ present: boolean; unresponsive: boolean }> {
   if (options?.fresh) {
     fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
   }
-  return (await listTmuxSessionNames()).has(sessionName);
+  const snapshot = await getFleetSessionSnapshot();
+  return {
+    present: snapshot.names.has(sessionName),
+    // unresponsive is only ever set true alongside readable:false in the
+    // snapshot's own catch block, never otherwise — no `!snapshot.readable`
+    // guard needed here.
+    unresponsive: snapshot.unresponsive,
+  };
 }
 
 export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
@@ -189,6 +235,10 @@ interface FleetPaneEntry {
   // targeted before batching) — isProcessRunningInTmux needs all of them
   // since the agent process can be in any pane/window of the session.
   allTtys: string[];
+  // Every pane's pid across the whole session — the pane-child fallback in
+  // isProcessRunningInTmux uses these to recognize a wrapper-exec'd agent by
+  // parentage (ppid is a pane pid) when name matching misses (issue #806).
+  allPanePids: number[];
 }
 
 // `readable: false` means the `list-panes` fork itself failed, so the empty
@@ -198,6 +248,10 @@ interface FleetPaneEntry {
 // lookupTmuxPanePid).
 interface FleetPaneSnapshot {
   readable: boolean;
+  // Same meaning as FleetSessionSnapshot.unresponsive: only true when
+  // `readable` is false because the `list-panes` fork was killed by its own
+  // timeout, never for an ordinary probe failure.
+  unresponsive: boolean;
   panes: Map<string, FleetPaneEntry>;
 }
 
@@ -212,6 +266,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
   return memoizedProbe(fleetPaneCache, FLEET_PANE_CACHE_KEY, async () => {
     const panes = new Map<string, FleetPaneEntry>();
     let readable = true;
+    let unresponsive = false;
     try {
       const out = await tmux(
         "list-panes",
@@ -230,26 +285,33 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           activePaneDead: true,
           activePanePid: null,
           allTtys: [],
+          allPanePids: [],
         };
         if (paneTty) {
           entry.allTtys.push(paneTty);
         }
+        const parsedPanePid = Number.parseInt(panePid ?? "", 10);
+        const panePidValue =
+          Number.isFinite(parsedPanePid) && parsedPanePid > 0 ? parsedPanePid : null;
+        if (panePidValue !== null) {
+          entry.allPanePids.push(panePidValue);
+        }
         // window_active + pane_active together identify the exact pane a
         // no-window/no-pane target (`=name:`) resolves to.
         if (windowActive === "1" && paneActive === "1") {
-          const pid = Number.parseInt(panePid ?? "", 10);
           entry.activePaneDead = paneDead === "1";
-          entry.activePanePid = Number.isFinite(pid) && pid > 0 ? pid : null;
+          entry.activePanePid = panePidValue;
         }
         panes.set(sessionName, entry);
       }
-    } catch {
+    } catch (error) {
       // No tmux server running (or another list-panes failure) — an empty
       // fleet, never a thrown error. `readable: false` keeps that
       // distinguishable from a server that answered with no panes.
       readable = false;
+      unresponsive = isTmuxTimeoutKill(error);
     }
-    return { readable, panes };
+    return { readable, unresponsive, panes };
   });
 }
 
@@ -259,11 +321,26 @@ export async function tmuxPaneDead(
   sessionName: string,
   options?: { fresh?: boolean },
 ): Promise<boolean> {
+  return (await getTmuxPanePresence(sessionName, options)).dead;
+}
+
+// Combined pane-dead+unresponsiveness read off ONE fleet-pane-snapshot fetch —
+// same one-read rationale as getTmuxSessionPresence.
+export async function getTmuxPanePresence(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<{ dead: boolean; unresponsive: boolean }> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
   }
-  const { panes } = await getFleetPaneSnapshot();
-  return panes.get(sessionName)?.activePaneDead ?? true;
+  const snapshot = await getFleetPaneSnapshot();
+  return {
+    dead: snapshot.panes.get(sessionName)?.activePaneDead ?? true,
+    // unresponsive is only ever set true alongside readable:false in the
+    // snapshot's own catch block, never otherwise — no `!snapshot.readable`
+    // guard needed here.
+    unresponsive: snapshot.unresponsive,
+  };
 }
 
 const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
@@ -303,9 +380,83 @@ export function withTmuxSocketArgs(args: string[]): string[] {
   return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
 }
 
+// Every tmux() fork is a local, short-lived control command (list-windows,
+// list-panes, capture-pane, send-keys, ...) — never `attach-session`/`wait-for`
+// (those stay on execFileSync in cli.ts, outside this helper, and block by
+// design). Matches the sibling `getPsSnapshot`'s `timeout: 5_000` for the same
+// kind of local probe; ~250x the measured worst-case latency for these
+// commands on a 78-session fleet, so it only fires on a genuine hang.
+// `runTmuxNewSession` (new-session path) deliberately does NOT go through
+// `tmux()` and keeps no timeout — a new session's own launch command is
+// allowed to take longer.
+const TMUX_COMMAND_TIMEOUT_MS = 5_000;
+
 async function tmux(...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args));
+  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args), {
+    timeout: TMUX_COMMAND_TIMEOUT_MS,
+  });
   return stdout.trimEnd();
+}
+
+export type SensitiveTmuxOperation =
+  | "load-buffer"
+  | "paste-buffer"
+  | "scrub-buffer"
+  | "delete-buffer"
+  | "prove-buffer-absent";
+
+export class SensitiveTmuxTransportError extends Error {
+  readonly code: string;
+  readonly operation: SensitiveTmuxOperation;
+  readonly sessionName: string;
+
+  constructor(args: { code: string; operation: SensitiveTmuxOperation; sessionName: string }) {
+    super(
+      `Sensitive tmux transport failed during ${args.operation} for session "${args.sessionName}" (${args.code})`,
+    );
+    this.name = "SensitiveTmuxTransportError";
+    this.code = args.code;
+    this.operation = args.operation;
+    this.sessionName = args.sessionName;
+  }
+}
+
+export class SensitiveTmuxCleanupError extends Error {
+  readonly operation: SensitiveTmuxOperation;
+  readonly sessionName: string;
+  readonly primaryCode: string;
+  readonly cleanupCode: string;
+
+  constructor(args: {
+    operation: SensitiveTmuxOperation;
+    sessionName: string;
+    primaryCode: string;
+    cleanupCode: string;
+  }) {
+    super(
+      `Sensitive tmux cleanup failed during ${args.operation} for session "${args.sessionName}" (${args.cleanupCode}; primary ${args.primaryCode})`,
+    );
+    this.name = "SensitiveTmuxCleanupError";
+    this.operation = args.operation;
+    this.sessionName = args.sessionName;
+    this.primaryCode = args.primaryCode;
+    this.cleanupCode = args.cleanupCode;
+  }
+}
+
+// Node's execFile `timeout` option sends SIGTERM and reports `killed: true`,
+// `signal: "SIGTERM"` on the rejected error — distinct from an external
+// SIGTERM (`killed: false`), a maxBuffer overrun (`killed` undefined), and a
+// plain non-zero exit (`killed: false`). This is the only ambiguous failure:
+// the fork MIGHT still be alive server-side, so callers must not treat it the
+// same as a confirmed-absent tmux server.
+function isTmuxTimeoutKill(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const killed = "killed" in error ? error.killed : undefined;
+  const signal = "signal" in error ? error.signal : undefined;
+  return killed === true && signal === "SIGTERM";
 }
 
 function isSystemdRunUnavailable(error: unknown): boolean {
@@ -503,6 +654,10 @@ export async function lookupTmuxPanePid(
 }
 
 interface PsRow {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  tpgid: number;
   tty: string;
   rssKb: number;
   args: string;
@@ -522,25 +677,48 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
+// RESIDUAL (#857 P1, scoped): isProcessRunningInTmux's pane-child fallback
+// fails CLOSED, per row, when a candidate row's tty has no resolvable
+// foreground process group — see the fgPgid check there. This residual is
+// about a DIFFERENT failure mode: `ps` rejecting the `-eo` column spec
+// outright. That exits nonzero, the catch below returns [], and pass 1 above
+// reads the WHOLE fleet DEAD, not just the pane-child fallback. `pgid`/`tpgid`
+// are Linux procps/BSD ps fields, not POSIX; this repo already assumes a
+// Linux `ps` at runtime (see also process-tree.ts), so this is an existing
+// exposure shape, not a new one — documented here, not solved.
 function getPsSnapshot(): Promise<PsRow[]> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,rss,args"], {
-        timeout: 5_000,
-        maxBuffer: PS_MAX_BUFFER_BYTES,
-      });
+      const { stdout: psOut } = await execFileAsync(
+        "ps",
+        ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"],
+        {
+          timeout: 5_000,
+          maxBuffer: PS_MAX_BUFFER_BYTES,
+        },
+      );
       return psOut
         .split("\n")
         .map((line) => {
           const cols = line.trimStart().split(/\s+/);
-          if (cols.length < 4) {
+          if (cols.length < 7) {
             return null;
           }
-          const rssKb = Number.parseInt(cols[2] ?? "", 10);
+          const pid = Number.parseInt(cols[0] ?? "", 10);
+          const ppid = Number.parseInt(cols[1] ?? "", 10);
+          const pgid = Number.parseInt(cols[2] ?? "", 10);
+          const tpgid = Number.parseInt(cols[3] ?? "", 10);
+          const tty = cols[4] ?? "";
+          const rssKb = Number.parseInt(cols[5] ?? "", 10);
+          const args = cols.slice(6).join(" ");
           return {
-            tty: cols[1] ?? "",
+            pid: Number.isFinite(pid) ? pid : -1,
+            ppid: Number.isFinite(ppid) ? ppid : -1,
+            pgid: Number.isFinite(pgid) ? pgid : -1,
+            tpgid: Number.isFinite(tpgid) ? tpgid : -1,
+            tty,
             rssKb: Number.isFinite(rssKb) ? rssKb : 0,
-            args: cols.slice(3).join(" "),
+            args,
           };
         })
         .filter((row): row is PsRow => row !== null);
@@ -595,7 +773,7 @@ export async function getFleetSessionRssBytes(
 export async function isProcessRunningInTmux(
   sessionName: string,
   processMatchers: string[],
-  options?: { fresh?: boolean },
+  options?: { fresh?: boolean; paneChildFallback?: boolean },
 ): Promise<boolean> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
@@ -603,7 +781,8 @@ export async function isProcessRunningInTmux(
   }
   try {
     const { panes } = await getFleetPaneSnapshot();
-    const ttys = panes.get(sessionName)?.allTtys ?? [];
+    const entry = panes.get(sessionName);
+    const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
       return false;
     }
@@ -624,6 +803,52 @@ export async function isProcessRunningInTmux(
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
         return true;
+      }
+    }
+    // Pane-child fallback (issue #806, hardened against #857 P1): a
+    // SPUR_*_BIN wrapper that exec's a binary whose filename is not one of
+    // the agent's canonical process names never matches pass 1 above. Only
+    // reached when the caller has determined the launch binary is foreign to
+    // the agent (session-service's agentProcessAlive). "Any direct child of
+    // the pane shell" was too wide: after the agent exits, a persistent shell
+    // helper it (or the shell) spawned — gitstatusd, a `sleep 300 &` job —
+    // is still a direct child and kept the session reading ALIVE forever.
+    // The gate is instead the tty's current foreground process group: a live
+    // agent (or its wrapper) is the pane's foreground job, a leftover
+    // background helper is not. fgPgid per tty is read off the row whose pid
+    // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
+    // pgid, shared by every process attached to that tty.
+    const allPanePids = entry?.allPanePids ?? [];
+    if (options?.paneChildFallback && allPanePids.length > 0) {
+      const panePids = new Set(allPanePids);
+      const fgPgidByTty = new Map<string, number>();
+      for (const row of rows) {
+        if (panePids.has(row.pid) && ttySet.has(row.tty)) {
+          fgPgidByTty.set(row.tty, row.tpgid);
+        }
+      }
+      for (const row of rows) {
+        if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
+          continue;
+        }
+        const fgPgid = fgPgidByTty.get(row.tty);
+        // Fail CLOSED on an unresolvable foreground group. Reaching this needs
+        // either the pane pid's own row absent from this ps snapshot, or an
+        // unparseable tpgid (getPsSnapshot normalizes it to -1). Row-absent
+        // means the tty's controlling process is gone — and the kernel then
+        // dissociates that tty from every surviving session member, so their
+        // tty reads `?` and they never pass the ttySet guard above. A live
+        // agent therefore cannot be one of these rows. Admitting one on
+        // parentage alone re-admits the leftover-helper class this gate
+        // exists to exclude (#806 -> #857 P1), and a false ALIVE here
+        // send-keys the user's prose into a shell prompt. Excludes THIS ROW
+        // only; other rows and the session's other ttys still evaluate.
+        if (fgPgid === undefined || fgPgid <= 0) {
+          continue;
+        }
+        if (row.pgid === fgPgid) {
+          return true;
+        }
       }
     }
     return false;
@@ -781,6 +1006,192 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
 }
 
 const DEFAULT_SUBMIT_DELAY_MS = 300;
+
+function sensitiveErrorCode(error: unknown, fallback: string): string {
+  if (typeof error === "object" && error !== null) {
+    const code = "code" in error ? error.code : undefined;
+    if (typeof code === "string" && code.length > 0) {
+      return code;
+    }
+  }
+  return fallback;
+}
+
+function makeSensitiveTransportError(
+  sessionName: string,
+  operation: SensitiveTmuxOperation,
+  code: string,
+): SensitiveTmuxTransportError {
+  return new SensitiveTmuxTransportError({ sessionName, operation, code });
+}
+
+async function runTmuxWithStdin(
+  args: string[],
+  input: string,
+  context: { sessionName: string; operation: SensitiveTmuxOperation },
+): Promise<void> {
+  const child = spawn("tmux", withTmuxSocketArgs(args), { stdio: ["pipe", "ignore", "pipe"] });
+  const primaryError: { value: SensitiveTmuxTransportError | null } = { value: null };
+  child.stderr.on("data", () => {});
+  const recordError = (code: string) => {
+    primaryError.value ??= makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      code,
+    );
+  };
+  const closePromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    },
+  );
+  child.once("error", (error: unknown) => {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_child_error"));
+  });
+  child.stdin.once("error", (error: unknown) => {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_stdin_failed"));
+    child.stdin.destroy();
+  });
+
+  try {
+    child.stdin.end(input, "utf8");
+  } catch (error) {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_stdin_failed"));
+    try {
+      child.stdin.end();
+    } catch {
+      // Ignore close failures; the child close barrier is authoritative.
+    }
+    child.stdin.destroy();
+  }
+
+  const closeState = { closed: false };
+  const closeObserver = closePromise.then((closeResult) => {
+    closeState.closed = true;
+    return closeResult;
+  });
+  await Promise.race([closeObserver, sleep(SENSITIVE_TMUX_CLOSE_WAIT_MS)]);
+  const signalableChild = child as { pid: unknown; kill(signal: NodeJS.Signals): boolean };
+  if (!closeState.closed && typeof signalableChild.pid === "number") {
+    signalableChild.kill("SIGTERM");
+    await Promise.race([closeObserver, sleep(SENSITIVE_TMUX_CLOSE_WAIT_MS)]);
+  }
+  if (!closeState.closed && typeof signalableChild.pid === "number") {
+    signalableChild.kill("SIGKILL");
+  }
+  const result = await closeObserver;
+
+  if (primaryError.value !== null) {
+    throw primaryError.value;
+  }
+  if (result.signal) {
+    throw makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      `signal_${result.signal}`,
+    );
+  }
+  if (result.code !== 0) {
+    throw makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      `exit_${result.code ?? "unknown"}`,
+    );
+  }
+}
+
+async function sensitiveBufferAbsent(bufferName: string): Promise<boolean> {
+  try {
+    const output = await tmux("list-buffers", "-F", "#{buffer_name}");
+    return !output.split("\n").some((line) => line.trim() === bufferName);
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupSensitiveTmuxBuffer(
+  sessionName: string,
+  bufferName: string,
+  primaryError: SensitiveTmuxTransportError,
+): Promise<void> {
+  let lastCleanupError: SensitiveTmuxTransportError | null = null;
+  for (let attempt = 0; attempt < SENSITIVE_TMUX_CLEANUP_ATTEMPTS; attempt++) {
+    try {
+      await runTmuxWithStdin(["load-buffer", "-b", bufferName, "-"], "", {
+        sessionName,
+        operation: "scrub-buffer",
+      });
+    } catch {
+      // Delete/absence proof decides whether cleanup succeeded.
+    }
+    try {
+      await tmux("delete-buffer", "-b", bufferName);
+    } catch (error) {
+      lastCleanupError = makeSensitiveTransportError(
+        sessionName,
+        "delete-buffer",
+        sensitiveErrorCode(error, "sensitive_tmux_delete_failed"),
+      );
+    }
+    if (await sensitiveBufferAbsent(bufferName)) {
+      return;
+    }
+  }
+  const cleanupError =
+    lastCleanupError ??
+    makeSensitiveTransportError(sessionName, "scrub-buffer", "sensitive_tmux_cleanup_not_started");
+  throw new SensitiveTmuxCleanupError({
+    sessionName,
+    operation: cleanupError.operation,
+    primaryCode: primaryError.code,
+    cleanupCode: cleanupError.code,
+  });
+}
+
+export async function sendSensitiveMessageToTmux(
+  sessionName: string,
+  message: string,
+  options: { agent: AgentName },
+): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  const useBracketedPaste =
+    agentSendMode(options.agent) === "bracketed_paste" &&
+    !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+  const bufferName = `spur-sensitive-${randomUUID()}`;
+
+  await tmux("send-keys", "-t", target, "-X", "cancel").catch(() => {});
+  await tmux("send-keys", "-t", target, "C-u");
+  try {
+    await runTmuxWithStdin(["load-buffer", "-b", bufferName, "-"], message, {
+      sessionName,
+      operation: "load-buffer",
+    });
+    const args = ["paste-buffer", "-b", bufferName, "-t", target, "-d"];
+    if (useBracketedPaste) {
+      args.splice(1, 0, "-p");
+    }
+    try {
+      await tmux(...args);
+    } catch (error) {
+      const primaryError = makeSensitiveTransportError(
+        sessionName,
+        "paste-buffer",
+        sensitiveErrorCode(error, "sensitive_tmux_paste_failed"),
+      );
+      await cleanupSensitiveTmuxBuffer(sessionName, bufferName, primaryError);
+      throw primaryError;
+    }
+    if (!useBracketedPaste) {
+      await sleep(DEFAULT_SUBMIT_DELAY_MS);
+    }
+    await tmux("send-keys", "-t", target, "Enter");
+  } catch (error) {
+    if (error instanceof SensitiveTmuxTransportError && error.operation === "load-buffer") {
+      await cleanupSensitiveTmuxBuffer(sessionName, bufferName, error);
+    }
+    throw error;
+  }
+}
 
 export async function sendMessageToTmux(
   sessionName: string,

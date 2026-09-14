@@ -50,7 +50,12 @@ describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)",
     expect(existsSync(configPath)).toBe(false);
   });
 
-  it("resolveDaemonPort DOES bootstrap-create the pinned instance config when it is missing", async () => {
+  // Since #846 only the default instance config path bootstraps, so a pinned
+  // `SPUR_CONFIG` that does not exist is refused rather than seeded. The
+  // refusal is swallowed by `resolveDaemonPortImpl`'s catch, so the resolved
+  // port is unchanged — `spur update` still reads 4310, it just no longer
+  // leaves a defaults-seeded config behind at the pinned path.
+  it("resolveDaemonPort does not bootstrap-create a pinned instance config that does not exist", async () => {
     const dir = await createTempDir("spur-daemon-port-write-");
     tempDirs.push(dir);
     const configPath = join(dir, "does-not-exist.yaml");
@@ -59,7 +64,7 @@ describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)",
     const port = resolveDaemonPort();
 
     expect(port).toBe(DEFAULT_DAEMON_PORT);
-    expect(existsSync(configPath)).toBe(true);
+    expect(existsSync(configPath)).toBe(false);
   });
 });
 

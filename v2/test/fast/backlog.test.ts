@@ -20,9 +20,13 @@ const { startConfiguredBacklogs } = await import("../../src/backlog/index.js");
 
 const connection: JiraSourceConfig = {
   type: "jira",
+  runOnStart: false,
   baseUrl: "https://jira.example.com/",
   email: "bot@example.com",
   token: "token",
+  intervalMs: 60_000,
+  emitExisting: false,
+  maxResults: 50,
 };
 
 function binding(overrides: Partial<BacklogConfig> = {}): BacklogConfig {
@@ -61,6 +65,14 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    artifactRetention: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxAnchorsPerSweep: 20,
+      maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+      maxFilesPerSession: 500,
     },
     sidecarGc: {
       enabled: true,

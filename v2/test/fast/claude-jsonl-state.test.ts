@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyClaudeJsonlState,
   hasTrailingClaudeServerError,
+  hasClaudeRecoveryAfter,
   MAX_RETAINED_CONVERSATION_ENTRIES,
   parseConversationBatch,
   parseJsonlRecord,
@@ -339,6 +340,58 @@ describe("parseJsonlRecord interrupt detection", () => {
 });
 
 // ── parseJsonlRecord: server_error detector ──────────────────────────
+
+describe("server-error recovery evidence", () => {
+  it.each([
+    undefined,
+    "invalid",
+    "2026-03-18T09:00:00Z",
+    "2026-03-18T10:00:00Z",
+    "2026-03-18T11:00:00Z",
+  ])("uses the assistant's own timestamp: %s", (timestamp) => {
+    const fallback = Date.parse("2026-03-19T00:00:00Z");
+    const record = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        timestamp,
+        message: {
+          role: "assistant",
+          model: "test-model",
+          content: [{ type: "text", text: "Recovered" }],
+        },
+      }),
+      fallback,
+    );
+    expect(record).not.toBeNull();
+    if (!record) throw new Error("Expected assistant record");
+    const parsedTime = timestamp === undefined ? NaN : Date.parse(timestamp);
+    const valid = Number.isFinite(parsedTime);
+    expect(record.ownTimestampMs).toBe(valid ? parsedTime : undefined);
+    expect(record.timestampMs).toBe(valid ? parsedTime : fallback);
+    expect(hasClaudeRecoveryAfter([record], "2026-03-18T10:00:00Z")).toBe(
+      timestamp === "2026-03-18T11:00:00Z",
+    );
+  });
+
+  it.each(["user", "tool_result", "serverError", "rateLimited", "interrupted", "synthetic"])(
+    "rejects %s as recovery evidence",
+    (kind) => {
+      const record: ParsedRecord = {
+        type: "assistant",
+        role: "assistant",
+        model: "test-model",
+        timestampMs: 10,
+        ownTimestampMs: 10,
+      };
+      if (kind === "user" || kind === "tool_result") record.role = kind;
+      else if (kind === "synthetic") delete record.model;
+      else if (kind === "serverError") record.serverError = true;
+      else if (kind === "rateLimited") record.rateLimited = true;
+      else record.interrupted = true;
+      expect(hasClaudeRecoveryAfter([record], new Date(0).toISOString())).toBe(false);
+    },
+  );
+});
 
 describe("parseJsonlRecord server_error detection", () => {
   const CLAUDE_SERVER_ERROR_WITH_STATUS_LINE = JSON.stringify({
