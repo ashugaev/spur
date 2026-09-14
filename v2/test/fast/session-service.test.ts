@@ -7996,7 +7996,6 @@ describe("SessionService", () => {
     });
   });
 
-
   it("delivers a queued message immediately while the session is a live server-error wedge, instead of waiting up to 30 minutes for the reactivation nudge", async () => {
     mockClaudeSessionStatus("waiting", "idle");
     readClaudeJsonlStateMock.mockResolvedValue({
