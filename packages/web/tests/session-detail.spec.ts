@@ -578,7 +578,19 @@ test.describe("S1: Session detail header", () => {
     await mockSessionConversation(page, session.id, "working");
 
     await page.route(`**/api/sessions/${session.id}/wake`, async (route) => {
-      const body = route.request().postDataJSON() as { target: string; message: string };
+      const body = route.request().postDataJSON() as {
+        target: string;
+        message?: string;
+        dispatch?: boolean;
+      };
+      if (body.dispatch) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(session),
+        });
+        return;
+      }
       session = {
         ...session,
         intervalWake: session.intervalWake
@@ -589,16 +601,6 @@ test.describe("S1: Session detail header", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(session),
-      });
-    });
-
-    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
-      const body = route.request().postDataJSON() as { message: string; queue?: boolean };
-      expect(body).toEqual({ message: "Updated CI", queue: false });
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
       });
     });
 

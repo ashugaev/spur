@@ -1729,6 +1729,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     dismissLoadErrorToast();
   }, [dismissLoadErrorToast, sessionId]);
 
+  const applySessionUpdate = useCallback((next: DashboardSession) => {
+    loadRequestIdRef.current += 1;
+    setSession(next);
+  }, []);
+
   const loadSession = useCallback(async () => {
     const requestedSessionId = sessionId;
     const requestId = loadRequestIdRef.current + 1;
@@ -2823,7 +2828,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {session && getWakeSummary(session) ? (
                   <WakeControls
                     onRefresh={loadSession}
-                    onSessionUpdated={setSession}
+                    onSessionUpdated={applySessionUpdate}
                     session={session}
                     showErrorToast={showErrorToast}
                     showSuccessToast={showSuccessToast}

@@ -54,6 +54,7 @@ import {
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
+  WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
@@ -75,6 +76,7 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type DispatchSessionWakeRequest,
   type UpdateSessionWakeMessageRequest,
   type WakeTarget,
   type SendMessageRequest,
@@ -298,32 +300,58 @@ function parseWakeTarget(raw: unknown): WakeTarget {
   throw new InvalidWakeRequestError("target must be scheduled, interval, or daily");
 }
 
+function rejectWakeScheduleFields(raw: Record<string, unknown>): void {
+  for (const field of ["at", "delayMs", "intervalMs", "dailyAt", "stopCondition"] as const) {
+    if (raw[field] !== undefined) {
+      throw new InvalidWakeRequestError(`${field} cannot be combined with target`);
+    }
+  }
+}
+
 function parseUpdateSessionWakeMessageRequest(raw: unknown): UpdateSessionWakeMessageRequest {
   if (!isRecord(raw)) {
     throw new InvalidWakeRequestError("wake update body must be a JSON object");
+  }
+  if (raw["dispatch"] === true) {
+    throw new InvalidWakeRequestError("dispatch cannot be combined with message");
   }
   const target = parseWakeTarget(raw["target"]);
   const message = raw["message"];
   if (typeof message !== "string" || message.trim().length === 0) {
     throw new InvalidWakeRequestError("message must be a non-empty string");
   }
-  for (const field of ["at", "delayMs", "intervalMs", "dailyAt", "stopCondition"] as const) {
-    if (raw[field] !== undefined) {
-      throw new InvalidWakeRequestError(`${field} cannot be combined with target`);
-    }
-  }
+  rejectWakeScheduleFields(raw);
   return { target, message: message.trim() };
+}
+
+function parseDispatchSessionWakeRequest(raw: unknown): DispatchSessionWakeRequest {
+  if (!isRecord(raw)) {
+    throw new InvalidWakeRequestError("wake dispatch body must be a JSON object");
+  }
+  const target = parseWakeTarget(raw["target"]);
+  if (raw["dispatch"] !== true) {
+    throw new InvalidWakeRequestError("dispatch must be true");
+  }
+  if (raw["message"] !== undefined) {
+    throw new InvalidWakeRequestError("message cannot be combined with dispatch");
+  }
+  rejectWakeScheduleFields(raw);
+  return { target, dispatch: true };
 }
 
 type ParsedSessionWakeRequest =
   | { mode: "schedule"; request: ScheduleSessionWakeRequest }
-  | { mode: "update"; request: UpdateSessionWakeMessageRequest };
+  | { mode: "update"; request: UpdateSessionWakeMessageRequest }
+  | { mode: "dispatch"; request: DispatchSessionWakeRequest };
 
 function parseSessionWakeRequest(raw: unknown): ParsedSessionWakeRequest {
   if (!isRecord(raw)) {
     return { mode: "schedule", request: {} };
   }
   if (raw["target"] !== undefined) {
+    if (raw["dispatch"] === true) {
+      return { mode: "dispatch", request: parseDispatchSessionWakeRequest(raw) };
+    }
     return { mode: "update", request: parseUpdateSessionWakeMessageRequest(raw) };
   }
   const request: ScheduleSessionWakeRequest = {};
@@ -1590,6 +1618,8 @@ export async function startServer(
         const parsed = parseSessionWakeRequest(await readJsonBody<unknown>(request));
         if (parsed.mode === "update") {
           sendJson(response, 200, await service.updateWakeMessage(wakeSessionId, parsed.request));
+        } else if (parsed.mode === "dispatch") {
+          sendJson(response, 200, await service.dispatchWake(wakeSessionId, parsed.request));
         } else {
           sendJson(response, 200, await service.scheduleWake(wakeSessionId, parsed.request));
         }
@@ -1829,6 +1859,7 @@ export async function startServer(
         error instanceof InvalidWakeRequestError ||
         error instanceof InvalidJsonBodyError ||
         error instanceof WakeTargetMissingError ||
+        error instanceof WakeDispatchConflictError ||
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||

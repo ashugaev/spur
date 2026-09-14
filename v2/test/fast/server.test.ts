@@ -1880,6 +1880,91 @@ describe("startServer", () => {
     }
   });
 
+  it("routes targeted wake dispatch and rejects invalid dispatch bodies", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const dispatchWake = SessionService.prototype.dispatchWake;
+    const dispatchRequests: unknown[] = [];
+    SessionService.prototype.dispatchWake = async function mockDispatchWake(_sessionId, request) {
+      dispatchRequests.push(request);
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        intervalWake: {
+          nextDueAt: "2026-04-15T00:20:00.000Z",
+          intervalMs: 600_000,
+          message: "Updated CI",
+          stopCondition: "CI is green",
+        },
+        artifacts: [],
+        services: [],
+        sidecars: [],
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const dispatchResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "interval", dispatch: true }),
+      });
+      expect(dispatchResponse.status).toBe(200);
+      expect(dispatchRequests).toEqual([{ target: "interval", dispatch: true }]);
+
+      const mixedResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "interval", dispatch: true, message: "Updated CI" }),
+      });
+      expect(mixedResponse.status).toBe(400);
+      await expect(mixedResponse.json()).resolves.toEqual({
+        error: "message cannot be combined with dispatch",
+      });
+    } finally {
+      SessionService.prototype.dispatchWake = dispatchWake;
+      await server.stop();
+    }
+  });
+
   it("routes POST /sessions/:id/complete by default, desk scope, and invalid scope", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

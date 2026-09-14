@@ -116,12 +116,11 @@ export function WakeControls({
   const primarySummary = summaries[0];
   const countdown = formatWakeCountdown(primarySummary.dueAt, nowMs);
   const wakeNowAllowed = canWakeNow(session);
-  const busy = busyTarget !== null;
 
   async function saveMessage(target: WakeTarget) {
     const draft = drafts[target]?.trim() ?? "";
     const summary = summaries.find((entry) => entry.target === target);
-    if (!summary || !draft || draft === summary.message || busy) return;
+    if (!summary || !draft || draft === summary.message || busyTarget === target) return;
 
     setBusyTarget(target);
     setBusyAction("save");
@@ -159,23 +158,24 @@ export function WakeControls({
   async function wakeNow(target: WakeTarget) {
     const summary = summaries.find((entry) => entry.target === target);
     const draft = drafts[target];
-    if (!summary || busy) return;
-    if (draft !== undefined && draft !== summary.message) return;
+    if (!summary || busyTarget === target) return;
+    if (draft !== undefined && draft.trim() !== summary.message) return;
     if (!wakeNowAllowed) return;
 
     setBusyTarget(target);
     setBusyAction("wake");
     setError(null);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/send`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/wake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: summary.message, queue: false }),
+        body: JSON.stringify({ target, dispatch: true }),
       });
       if (!response.ok) {
         throw new Error(await readApiErrorMessage(response, "Failed to wake session"));
       }
-      await readResponsePayload(response);
+      const payload = (await response.json()) as SpurSessionView;
+      onSessionUpdated(toDashboardSession(payload));
       showSuccessToast("Wake message sent");
     } catch (wakeError) {
       const message = errorMessage(wakeError, "Failed to wake session");
@@ -200,17 +200,19 @@ export function WakeControls({
         {summaries.map((summary) => {
           const draft = drafts[summary.target] ?? summary.message;
           const trimmedDraft = draft.trim();
-          const dirty = draft !== summary.message;
+          const dirty = trimmedDraft !== summary.message;
+          const rowBusy = busyTarget === summary.target;
+          const otherRowBusy = busyTarget !== null && busyTarget !== summary.target;
           const saveDisabled =
-            busy ||
+            otherRowBusy ||
             !trimmedDraft ||
             !dirty ||
-            (busyTarget === summary.target && busyAction === "save");
+            (rowBusy && busyAction === "save");
           const wakeDisabled =
-            busy ||
+            otherRowBusy ||
             dirty ||
             !wakeNowAllowed ||
-            (busyTarget === summary.target && busyAction === "wake");
+            (rowBusy && busyAction === "wake");
           const recordCountdown = formatWakeCountdown(summary.dueAt, nowMs);
 
           return (
@@ -246,7 +248,7 @@ export function WakeControls({
                 <textarea
                   aria-label={`${summary.label} message`}
                   className="mt-1 block w-full min-h-[4.5rem] resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5 text-[var(--color-text-primary)]"
-                  disabled={busy}
+                  disabled={rowBusy}
                   onChange={(event) => {
                     const value = event.target.value;
                     setDrafts((current) => ({ ...current, [summary.target]: value }));

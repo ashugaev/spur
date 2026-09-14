@@ -384,6 +384,7 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type DispatchSessionWakeRequest,
   type UpdateSessionWakeMessageRequest,
   type WakeTarget,
   type RuntimeInfo,
@@ -839,6 +840,10 @@ export class QueueDeliveryInFlightError extends Error {
 }
 
 export class WakeTargetMissingError extends Error {
+  readonly statusCode = 409;
+}
+
+export class WakeDispatchConflictError extends Error {
   readonly statusCode = 409;
 }
 
@@ -9975,6 +9980,15 @@ export class SessionService {
     );
   }
 
+  async dispatchWake(
+    sessionId: string,
+    request: DispatchSessionWakeRequest,
+  ): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.dispatchWakeLocked(sessionId, request),
+    );
+  }
+
   private wakeTargetProperty(target: WakeTarget): "scheduledWake" | "intervalWake" | "dailyWake" {
     if (target === "scheduled") return "scheduledWake";
     if (target === "interval") return "intervalWake";
@@ -10006,6 +10020,210 @@ export class SessionService {
     };
     writeSession(this.config.dataDir, updated);
     return this.enrich(updated);
+  }
+
+  private async dispatchWakeLocked(
+    sessionId: string,
+    request: DispatchSessionWakeRequest,
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (request.target === "scheduled") {
+      await this.dispatchScheduledWakeNow(session);
+    } else if (request.target === "interval") {
+      await this.dispatchIntervalWakeNow(session);
+    } else {
+      await this.dispatchDailyWakeNow(session);
+    }
+    const updated = readSession(this.config.dataDir, sessionId);
+    if (!updated) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    return this.enrich(updated);
+  }
+
+  private async dispatchScheduledWakeNow(session: SessionRecord): Promise<void> {
+    const scheduledWake = session.scheduledWake;
+    if (!scheduledWake) {
+      throw new WakeTargetMissingError(
+        `Wake target "scheduled" not found for ${session.id}`,
+      );
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const current = readSession(this.config.dataDir, session.id) ?? session;
+      const claimed =
+        current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+        current.scheduledWake.message === scheduledWake.message;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(
+          `Wake target "scheduled" changed for ${session.id}`,
+        );
+      }
+      const { scheduledWake: _scheduledWake, ...base } = current;
+      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+      try {
+        await this.sendLocked(session.id, { message: scheduledWake.message });
+        this.logEvent("session.wake.sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched scheduled wake to ${session.id}`,
+          details: {
+            dueAt: scheduledWake.dueAt,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        if (error instanceof SessionAdmissionDeniedError) {
+          const afterDenial = readSession(this.config.dataDir, session.id);
+          if (afterDenial && !afterDenial.scheduledWake) {
+            writeSession(this.config.dataDir, {
+              ...afterDenial,
+              scheduledWake,
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async dispatchIntervalWakeNow(session: SessionRecord): Promise<void> {
+    const intervalWake = session.intervalWake;
+    if (!intervalWake) {
+      throw new WakeTargetMissingError(`Wake target "interval" not found for ${session.id}`);
+    }
+    if (!(await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))) {
+      throw new Error(`Cannot dispatch interval wake for ${session.id}: session not deliverable`);
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const now = Date.now();
+      const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
+      const current = readSession(this.config.dataDir, session.id);
+      if (current === null || !isRestorableStatus(current.status)) {
+        throw new WakeDispatchConflictError(`Wake target "interval" unavailable for ${session.id}`);
+      }
+      const claimed =
+        current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+        current.intervalWake.intervalMs === intervalWake.intervalMs &&
+        current.intervalWake.message === intervalWake.message &&
+        current.intervalWake.stopCondition === intervalWake.stopCondition;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "interval" changed for ${session.id}`);
+      }
+      writeSession(this.config.dataDir, {
+        ...current,
+        intervalWake: { ...intervalWake, nextDueAt },
+        updatedAt: nowIso(),
+      });
+      try {
+        await this.sendLocked(session.id, {
+          message: this.formatIntervalWakeMessage(
+            session.id,
+            intervalWake.message,
+            intervalWake.stopCondition,
+          ),
+        });
+        this.logEvent("session.wake.interval_sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched interval wake to ${session.id}`,
+          details: {
+            nextDueAt,
+            intervalMs: intervalWake.intervalMs,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        if (error instanceof SessionAdmissionDeniedError) {
+          const afterDenial = readSession(this.config.dataDir, session.id);
+          if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+            writeSession(this.config.dataDir, {
+              ...afterDenial,
+              intervalWake: {
+                ...afterDenial.intervalWake,
+                nextDueAt: intervalWake.nextDueAt,
+              },
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async dispatchDailyWakeNow(session: SessionRecord): Promise<void> {
+    const dailyWake = session.dailyWake;
+    if (!dailyWake) {
+      throw new WakeTargetMissingError(`Wake target "daily" not found for ${session.id}`);
+    }
+    if (!(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))) {
+      throw new Error(`Cannot dispatch daily wake for ${session.id}: session not deliverable`);
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const now = Date.now();
+      const current = readSession(this.config.dataDir, session.id);
+      if (current === null || !isRestorableStatus(current.status)) {
+        throw new WakeDispatchConflictError(`Wake target "daily" unavailable for ${session.id}`);
+      }
+      const claimed =
+        current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+        current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+        current.dailyWake.message === dailyWake.message &&
+        current.dailyWake.stopCondition === dailyWake.stopCondition;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "daily" changed for ${session.id}`);
+      }
+      let nextDueAt: Date;
+      try {
+        nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to resolve next daily wake time for ${session.id}: ${message}`);
+      }
+      writeSession(this.config.dataDir, {
+        ...current,
+        dailyWake: { ...dailyWake, nextDueAt: nextDueAt.toISOString() },
+        updatedAt: nowIso(),
+      });
+      try {
+        await this.sendLocked(session.id, {
+          message: this.formatDailyWakeMessage(
+            session.id,
+            dailyWake.message,
+            dailyWake.stopCondition,
+          ),
+        });
+        this.logEvent("session.wake.daily_sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched daily wake to ${session.id}`,
+          details: {
+            nextDueAt: dailyWake.nextDueAt,
+            dailyAt: dailyWake.dailyAt,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        if (error instanceof SessionAdmissionDeniedError) {
+          const afterDenial = readSession(this.config.dataDir, session.id);
+          if (afterDenial?.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
+            writeSession(this.config.dataDir, {
+              ...afterDenial,
+              dailyWake: { ...dailyWake },
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        throw error;
+      }
+    });
   }
 
   private async scheduleWakeLocked(

@@ -382,8 +382,27 @@ describe("SessionDetail wake markers", () => {
       }
 
       if (url === "/api/sessions/api-a1/wake" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as { target: string; message: string };
-        intervalWakeMessage = body.message;
+        const body = JSON.parse(String(init?.body)) as {
+          target: string;
+          message?: string;
+          dispatch?: boolean;
+        };
+        if (body.dispatch === true) {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                intervalWake: {
+                  nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                  intervalMs: 300_000,
+                  message: intervalWakeMessage,
+                  stopCondition: "CI is green",
+                },
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        intervalWakeMessage = body.message ?? intervalWakeMessage;
         return new Response(
           JSON.stringify(
             sessionFixture({
@@ -397,12 +416,6 @@ describe("SessionDetail wake markers", () => {
           ),
           { status: 200 },
         );
-      }
-
-      if (url === "/api/sessions/api-a1/send" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as { message: string; queue?: boolean };
-        expect(body).toEqual({ message: "Updated CI", queue: false });
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
 
       throw new Error(`Unexpected fetch: ${url} ${method}`);
@@ -436,10 +449,10 @@ describe("SessionDetail wake markers", () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/sessions/api-a1/send",
+        "/api/sessions/api-a1/wake",
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ message: "Updated CI", queue: false }),
+          body: JSON.stringify({ target: "interval", dispatch: true }),
         }),
       );
     });

@@ -1152,6 +1152,11 @@ export interface UpdateSessionWakeMessageRequest {
   message: string;
 }
 
+export interface DispatchSessionWakeRequest {
+  target: WakeTarget;
+  dispatch: true;
+}
+
 export interface RunServiceRequest {
   command: string;
   cwd: string;
