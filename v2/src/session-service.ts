@@ -243,6 +243,7 @@ import {
   getTmuxSessionPresence,
   lookupTmuxPanePid,
   isProcessRunningInTmux,
+  probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
@@ -1461,27 +1462,28 @@ async function agentProcessAlive(
 // agentProcessAlive's signature and all nine call sites unchanged.
 type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
 
+// Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
+// second isProcessRunningInTmux read: two separate top-level calls would each
+// hit runtime-tmux's shared pane/ps cache independently, and that cache's TTL
+// runs from fetch START, not completion (runtime-tmux.ts). A first probe slow
+// enough to exceed the TTL (getPsSnapshot's own timeout is 5s) leaves the
+// cache already expired by the time the second call checks it, forking again
+// and comparing two different instants — which can mislabel `via` or miss a
+// real pane_child_fallback episode entirely (issue #871 P2).
 async function probeAgentProcess(
   input: { tmuxSession: string; agent: AgentName; launchCommand: string },
   options?: { fresh?: boolean },
 ): Promise<AgentProcessProbe> {
-  const alive = await agentProcessAlive(input, options);
-  if (!alive) {
+  const matchers = agentProcessMatchers(input.agent, input.launchCommand);
+  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  const result = await probeTmuxProcessMatch(input.tmuxSession, matchers, {
+    ...(options?.fresh ? { fresh: true } : {}),
+    ...(foreign ? { paneChildFallback: true } : {}),
+  });
+  if (!result.alive) {
     return { alive: false };
   }
-  if (!agentLaunchUsesForeignBinary(input.agent, input.launchCommand)) {
-    return { alive: true, via: "matcher" };
-  }
-  // Option-free on purpose: a `fresh` here would bust the fleet-pane and ps
-  // caches a second time and re-fork, comparing two different instants
-  // instead of classifying the SAME read agentProcessAlive just returned
-  // ALIVE for. No `paneChildFallback` either — the disagreement this checks
-  // for IS "pass 1 alone does not see it".
-  const matched = await isProcessRunningInTmux(
-    input.tmuxSession,
-    agentProcessMatchers(input.agent, input.launchCommand),
-  );
-  return { alive: true, via: matched ? "matcher" : "pane_child" };
+  return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
 }
 
 function withProjectAgentOptions(
