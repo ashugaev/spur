@@ -55,6 +55,8 @@ import {
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
+  WakeDispatchConflictError,
+  WakeTargetMissingError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import { updateLedgerPath } from "./update-ledger.js";
@@ -75,6 +77,9 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type DispatchSessionWakeRequest,
+  type UpdateSessionWakeMessageRequest,
+  type WakeTarget,
   type SendMessageRequest,
   type SourceReplyRequest,
   type StartSidecarRequest,
@@ -100,6 +105,10 @@ interface JsonError {
 interface ServiceLogger {
   info?: (message: string) => void;
   warn?: (message: string) => void;
+}
+
+class InvalidWakeRequestError extends Error {
+  readonly statusCode = 400;
 }
 
 class InvalidJsonBodyError extends Error {
@@ -318,9 +327,56 @@ function parseSweepSidecarsRequest(raw: unknown): { reap: boolean } {
   return { reap: raw["reap"] === true };
 }
 
-function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
+function parseWakeTarget(raw: unknown): WakeTarget {
+  if (raw === "scheduled" || raw === "interval" || raw === "daily") {
+    return raw;
+  }
+  throw new InvalidWakeRequestError("target must be scheduled, interval, or daily");
+}
+
+function rejectWakeScheduleFields(raw: Record<string, unknown>): void {
+  for (const field of ["at", "delayMs", "intervalMs", "dailyAt", "stopCondition"] as const) {
+    if (raw[field] !== undefined) {
+      throw new InvalidWakeRequestError(`${field} cannot be combined with target`);
+    }
+  }
+}
+
+function parseUpdateSessionWakeMessageRequest(
+  raw: Record<string, unknown>,
+): UpdateSessionWakeMessageRequest {
+  const target = parseWakeTarget(raw["target"]);
+  const message = raw["message"];
+  if (typeof message !== "string" || message.trim().length === 0) {
+    throw new InvalidWakeRequestError("message must be a non-empty string");
+  }
+  rejectWakeScheduleFields(raw);
+  return { target, message: message.trim() };
+}
+
+function parseDispatchSessionWakeRequest(raw: Record<string, unknown>): DispatchSessionWakeRequest {
+  const target = parseWakeTarget(raw["target"]);
+  if (raw["message"] !== undefined) {
+    throw new InvalidWakeRequestError("message cannot be combined with dispatch");
+  }
+  rejectWakeScheduleFields(raw);
+  return { target, dispatch: true };
+}
+
+type ParsedSessionWakeRequest =
+  | { mode: "schedule"; request: ScheduleSessionWakeRequest }
+  | { mode: "update"; request: UpdateSessionWakeMessageRequest }
+  | { mode: "dispatch"; request: DispatchSessionWakeRequest };
+
+function parseSessionWakeRequest(raw: unknown): ParsedSessionWakeRequest {
   if (!isRecord(raw)) {
-    return {};
+    return { mode: "schedule", request: {} };
+  }
+  if (raw["target"] !== undefined) {
+    if (raw["dispatch"] === true) {
+      return { mode: "dispatch", request: parseDispatchSessionWakeRequest(raw) };
+    }
+    return { mode: "update", request: parseUpdateSessionWakeMessageRequest(raw) };
   }
   const request: ScheduleSessionWakeRequest = {};
   const at = raw["at"];
@@ -350,7 +406,7 @@ function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeReque
   if (typeof message === "string") {
     request.message = message;
   }
-  return request;
+  return { mode: "schedule", request };
 }
 
 export function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
@@ -1651,8 +1707,14 @@ export async function startServer(
 
       const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
       if (method === "POST" && wakeSessionId) {
-        const body = parseScheduleSessionWakeRequest(await readJsonBody<unknown>(request));
-        sendJson(response, 200, await service.scheduleWake(wakeSessionId, body));
+        const parsed = parseSessionWakeRequest(await readJsonBody<unknown>(request));
+        if (parsed.mode === "update") {
+          sendJson(response, 200, await service.updateWakeMessage(wakeSessionId, parsed.request));
+        } else if (parsed.mode === "dispatch") {
+          sendJson(response, 200, await service.dispatchWake(wakeSessionId, parsed.request));
+        } else {
+          sendJson(response, 200, await service.scheduleWake(wakeSessionId, parsed.request));
+        }
         return;
       }
 
@@ -1896,7 +1958,10 @@ export async function startServer(
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
+        error instanceof InvalidWakeRequestError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof WakeTargetMissingError ||
+        error instanceof WakeDispatchConflictError ||
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||

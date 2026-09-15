@@ -37221,6 +37221,164 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("updateWakeMessage changes only the selected wake message", async () => {
+      const pastDue = "2026-03-18T09:00:00.000Z";
+      const sessions = seedShepherdSession({
+        scheduledWake: { dueAt: pastDue, message: "One shot" },
+        intervalWake: {
+          nextDueAt: pastDue,
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+        dailyWake: {
+          dailyAt: ["09:00"],
+          nextDueAt: pastDue,
+          message: "Daily msg",
+          stopCondition: "Daily done",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const updated = await service.updateWakeMessage("shp-1", {
+        target: "interval",
+        message: "Updated interval",
+      });
+
+      expect(updated.intervalWake).toEqual({
+        nextDueAt: pastDue,
+        intervalMs: 300_000,
+        message: "Updated interval",
+        stopCondition: "CI green",
+      });
+      expect(updated.scheduledWake).toEqual({ dueAt: pastDue, message: "One shot" });
+      expect(updated.dailyWake).toEqual({
+        dailyAt: ["09:00"],
+        nextDueAt: pastDue,
+        message: "Daily msg",
+        stopCondition: "Daily done",
+      });
+      expect(sessions.get("shp-1")?.intervalWake?.message).toBe("Updated interval");
+      service.dispose();
+    });
+
+    it("updateWakeMessage rejects a missing target without writing", async () => {
+      const sessions = seedShepherdSession({
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:05:00.000Z",
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+      });
+      const { SessionService, WakeTargetMissingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.updateWakeMessage("shp-1", { target: "daily", message: "New daily" }),
+      ).rejects.toBeInstanceOf(WakeTargetMissingError);
+      expect(sessions.get("shp-1")?.intervalWake?.message).toBe("Interval msg");
+      service.dispose();
+    });
+
+    it("dispatchWake sends a formatted interval wake and advances nextDueAt", async () => {
+      const pastDue = "2026-03-18T09:00:00.000Z";
+      seedShepherdSession({
+        intervalWake: {
+          nextDueAt: pastDue,
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const updated = await service.dispatchWake("shp-1", {
+        target: "interval",
+        dispatch: true,
+      });
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Interval msg"),
+        { agent: "claude", interrupt: false },
+      );
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Stop condition: CI green"),
+        expect.anything(),
+      );
+      expect(updated.intervalWake?.message).toBe("Interval msg");
+      const intervalNextDueAt = updated.intervalWake?.nextDueAt;
+      expect(intervalNextDueAt).toBeDefined();
+      expect(Date.parse(intervalNextDueAt ?? "")).toBeGreaterThan(
+        Date.parse("2026-03-18T10:00:00.000Z"),
+      );
+      service.dispose();
+    });
+
+    it("dispatchWake rejects a non-deliverable interval wake with WakeDispatchConflictError", async () => {
+      seedShepherdSession({
+        status: "killed",
+        intervalWake: {
+          nextDueAt: "2026-03-18T09:00:00.000Z",
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+      });
+      const { SessionService, WakeDispatchConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+      ).rejects.toBeInstanceOf(WakeDispatchConflictError);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("dispatchWake rejects a non-deliverable scheduled wake without clearing it", async () => {
+      const scheduledWake = {
+        dueAt: "2026-03-18T11:00:00.000Z",
+        message: "One shot",
+      };
+      const sessions = seedShepherdSession({ status: "killed", scheduledWake });
+      const { SessionService, WakeDispatchConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.dispatchWake("shp-1", { target: "scheduled", dispatch: true }),
+      ).rejects.toBeInstanceOf(WakeDispatchConflictError);
+      expect(sessions.get("shp-1")?.scheduledWake).toEqual(scheduledWake);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("dispatchWake restores scheduledWake when send fails", async () => {
+      const scheduledWake = {
+        dueAt: "2026-03-18T11:00:00.000Z",
+        message: "One shot",
+      };
+      const sessions = seedShepherdSession({ scheduledWake });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const sendLockedSpy = vi.spyOn(
+        SessionService.prototype as unknown as { sendLocked: () => Promise<unknown> },
+        "sendLocked",
+      );
+      sendLockedSpy.mockRejectedValueOnce(new Error("send failed"));
+
+      await expect(
+        service.dispatchWake("shp-1", { target: "scheduled", dispatch: true }),
+      ).rejects.toThrow("send failed");
+      expect(sessions.get("shp-1")?.scheduledWake).toEqual(scheduledWake);
+      sendLockedSpy.mockRestore();
+      service.dispose();
+    });
+
     it("advances a daily wake past a failed occurrence and keeps the message queued", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
