@@ -32760,9 +32760,11 @@ describe("SessionService", () => {
       const sessions = seedShepherdSession({ scheduledWake });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const sendLockedSpy = vi
-        .spyOn(SessionService.prototype as never, "sendLocked" as never)
-        .mockRejectedValueOnce(new Error("send failed"));
+      const sendLockedSpy = vi.spyOn(
+        SessionService.prototype as unknown as { sendLocked: () => Promise<unknown> },
+        "sendLocked",
+      );
+      sendLockedSpy.mockRejectedValueOnce(new Error("send failed"));
 
       await expect(
         service.dispatchWake("shp-1", { target: "scheduled", dispatch: true }),
