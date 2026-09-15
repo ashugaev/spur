@@ -290,9 +290,13 @@ function defaultProcessMatchers(agent: AgentName, launchCommand: string): string
 // already failed on THIS snapshot (runtime-tmux.ts:822), so "cannot be matched by
 // pass 1" already IS the arming condition — no further stateless fact narrows it.
 // (b) launchCommand's first token is always agentExecutableCommand(agent)
-// (executable.ts:33-36): a bare canonical name or an SPUR_*_BIN path, never a
-// user-authored `exec ...` prefix — the `exec $BIN "$@"` shape in issue #871 is
-// wrapper-script CONTENT a plan never records as the launch command itself.
+// (executable.ts:33-36), never a user-authored `exec ...` prefix — the
+// `exec $BIN "$@"` shape in issue #871 is wrapper-script CONTENT a plan never
+// records as the launch command itself. That token is not always what
+// extractCommandBinary derives, though: a quoted env prefix whose value
+// contains whitespace (OpenCode's restrictWrites OPENCODE_CONFIG_CONTENT)
+// mis-tokenizes to an arbitrary fragment, neither the canonical name nor an
+// SPUR_*_BIN path.
 // (c) The remaining real case is a non-exec wrapper (e.g. matchers
 // ["codex-wrap.sh","codex"]) whose pass 1 matches for the agent's whole life: the
 // gate still arms there, and on such a host RESIDUAL 2's `set +m` shape can read a

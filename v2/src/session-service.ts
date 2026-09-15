@@ -13022,6 +13022,7 @@ export class SessionService {
           level: "error",
           sessionId: session.id,
           message,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
         });
         throw new Error(message);
       }
