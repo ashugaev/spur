@@ -1454,6 +1454,36 @@ async function agentProcessAlive(
   });
 }
 
+// Distinguishes which pass answered ALIVE without widening agentProcessAlive's
+// own boolean return: four call sites are `!(await agentProcessAlive(...))`,
+// and an object return there would silently read as "always alive" (tsc
+// cannot catch it; only eslint no-unnecessary-condition would). Keeps
+// agentProcessAlive's signature and all nine call sites unchanged.
+type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
+
+async function probeAgentProcess(
+  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
+  options?: { fresh?: boolean },
+): Promise<AgentProcessProbe> {
+  const alive = await agentProcessAlive(input, options);
+  if (!alive) {
+    return { alive: false };
+  }
+  if (!agentLaunchUsesForeignBinary(input.agent, input.launchCommand)) {
+    return { alive: true, via: "matcher" };
+  }
+  // Option-free on purpose: a `fresh` here would bust the fleet-pane and ps
+  // caches a second time and re-fork, comparing two different instants
+  // instead of classifying the SAME read agentProcessAlive just returned
+  // ALIVE for. No `paneChildFallback` either — the disagreement this checks
+  // for IS "pass 1 alone does not see it".
+  const matched = await isProcessRunningInTmux(
+    input.tmuxSession,
+    agentProcessMatchers(input.agent, input.launchCommand),
+  );
+  return { alive: true, via: matched ? "matcher" : "pane_child" };
+}
+
 function withProjectAgentOptions(
   agent: AgentName,
   project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
@@ -2611,6 +2641,13 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  // Tracks sessions currently reading ALIVE via the pane-child fallback (not
+  // matched by pass 1), so session.runtime.pane_child_fallback fires once on
+  // the transition into that state instead of every readRuntimeSnapshot call
+  // for the session's whole life. Cleared on any probe that is not
+  // `via: "pane_child"`. In-memory only, no persisted field. Swept alongside
+  // the other session-scoped maps in pruneSessionScopedState.
+  private readonly paneChildFallbackNotified = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Ticks the re-entrancy guard dropped while the CURRENTLY running sweep was
@@ -5518,6 +5555,11 @@ export class SessionService {
     for (const sessionId of this.wakeSuppressionNotified) {
       if (!liveIds.has(sessionId)) {
         this.wakeSuppressionNotified.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.paneChildFallbackNotified) {
+      if (!liveIds.has(sessionId)) {
+        this.paneChildFallbackNotified.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -15737,7 +15779,7 @@ export class SessionService {
   // processAlive on both samples closes the pane-leg hole the same way
   // ensureSessionReadyForSend's probe gate does.
   private async confirmAgentExited(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
     const first = await this.readRuntimeSnapshot(session);
     if (first.processAlive || first.probeUnresponsive) {
@@ -15888,7 +15930,7 @@ export class SessionService {
   // be read again 1s later, agreeing with itself and marking a live session
   // stopped.
   private async readRuntimeSnapshot(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
     const fresh = options?.fresh ?? false;
@@ -15904,9 +15946,9 @@ export class SessionService {
     // condition just above) — narrow on the value itself rather than assert.
     const paneUsable = panePresence ? !panePresence.dead : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive =
+    const processProbe: AgentProcessProbe =
       runtimeAlive && paneUsable
-        ? await agentProcessAlive(
+        ? await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -15914,7 +15956,23 @@ export class SessionService {
             },
             { fresh },
           )
-        : false;
+        : { alive: false };
+    // Fires once on the transition into the pane-child fallback answering
+    // ALIVE instead of every readRuntimeSnapshot call — see
+    // paneChildFallbackNotified's own comment for the event-volume math.
+    if (processProbe.alive && processProbe.via === "pane_child") {
+      if (!this.paneChildFallbackNotified.has(session.id)) {
+        this.paneChildFallbackNotified.add(session.id);
+        this.logEvent("session.runtime.pane_child_fallback", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Session ${session.id}: the pane-child fallback supplied the ALIVE verdict for tmux session ${session.tmuxSession}`,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
+        });
+      }
+    } else {
+      this.paneChildFallbackNotified.delete(session.id);
+    }
     // Guarded so neither call can force a snapshot that was never fetched:
     // sessionsUnresponsive only matters when the session read itself came up
     // absent, panesUnresponsive only when the pane read came up dead.
@@ -15923,7 +15981,7 @@ export class SessionService {
     return {
       runtimeAlive,
       paneUsable,
-      processAlive,
+      processAlive: processProbe.alive,
       tmuxActivityAt,
       probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
     };
