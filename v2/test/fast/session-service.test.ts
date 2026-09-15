@@ -1193,7 +1193,7 @@ type SessionServiceInternals = {
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
   confirmAgentExited(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean>;
   runAttentionMonitor(baseline: boolean): Promise<void>;
   pollAttentionStates(baseline: boolean): Promise<void>;
@@ -12955,6 +12955,32 @@ describe("SessionService", () => {
 
     const confirmCall = isProcessRunningInTmuxMock.mock.calls.at(-1);
     expect(confirmCall?.[2]).toEqual({ fresh: true });
+  });
+
+  it("logs once when the pane-child fallback supplies the ALIVE verdict", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    // Pass 1 (agentProcessAlive's own call, carries paneChildFallback:true for
+    // this foreign launch) reads ALIVE; probeAgentProcess's own option-free
+    // re-probe then disagrees (reads no match), which is exactly the
+    // "pane-child fallback answered ALIVE" shape.
+    isProcessRunningInTmuxMock.mockImplementation(
+      async (_tmuxSession: string, _matchers: string[], opts?: { paneChildFallback?: boolean }) =>
+        opts?.paneChildFallback === true,
+    );
+
+    const service = await createDisposedSessionService();
+    const countPaneChildFallbackEvents = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => (entry as { event: string }).event === "session.runtime.pane_child_fallback",
+      ).length;
+
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
+
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
   });
 
   it("restoreRebootedSessions restores only flag-enabled projects", async () => {
