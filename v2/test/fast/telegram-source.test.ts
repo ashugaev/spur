@@ -1597,7 +1597,7 @@ describe("telegramSourceModule", () => {
       enabled: true,
       project: "spur-shepherd",
       agent: "opencode",
-      model: "google/gemini-3.7-flash",
+      model: "google/gemini-3.8-flash",
       selfDestruct: { enabled: true },
     },
   };
@@ -1623,7 +1623,7 @@ describe("telegramSourceModule", () => {
     expect(spawnSession).toHaveBeenCalledWith({
       project: "spur-shepherd",
       agent: "opencode",
-      model: "google/gemini-3.7-flash",
+      model: "google/gemini-3.8-flash",
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("help me out"),
     });

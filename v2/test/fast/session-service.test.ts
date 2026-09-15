@@ -36579,7 +36579,7 @@ describe("SessionService", () => {
         project: "spur-shepherd",
         prompt: "Watch project health",
         agent: "opencode",
-        model: "google/gemini-3.7-flash",
+        model: "google/gemini-3.8-flash",
         selfDestruct: { enabled: true },
       });
 

@@ -71,7 +71,7 @@ projects:
         allowedUsers: [444269670, 6211305103]
         autoSpawn:
           agent: opencode
-          model: google/gemini-3.7-flash
+          model: google/gemini-3.8-flash
       itest-schedule:
         type: cron
         schedule: "0 3 */3 * *"

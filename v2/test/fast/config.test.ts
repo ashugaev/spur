@@ -1228,7 +1228,7 @@ projects:
         allowedUsers: [123]
         autoSpawn:
           agent: opencode
-          model: google/gemini-3.7-flash
+          model: google/gemini-3.8-flash
 `);
 
     const config = loadConfig(configPath);
@@ -1237,7 +1237,7 @@ projects:
       autoSpawn: {
         enabled: true,
         agent: "opencode",
-        model: "google/gemini-3.7-flash",
+        model: "google/gemini-3.8-flash",
       },
     });
   });

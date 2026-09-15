@@ -211,7 +211,7 @@ describe("OpenCode adapter", () => {
                 reasoning: 0,
                 cache: { read: 0, write: 0 },
               },
-              modelID: "gemini-3.7-flash",
+              modelID: "gemini-3.8-flash",
               providerID: "google",
               time: { created: 1787369893115, completed: 1787369901319 },
               error: { name: "MessageAbortedError", data: { message: "Aborted" } },
