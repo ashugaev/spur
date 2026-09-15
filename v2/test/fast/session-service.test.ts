@@ -194,6 +194,20 @@ const readCgroupPressureMock = vi.fn();
 const readCgroupMemorySnapshotMock = vi.fn();
 const isSystemdOomdPresentMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
+// Defaults to delegating to isProcessRunningInTmuxMock (see beforeEach) so
+// every existing isProcessRunningInTmuxMock-driven test keeps controlling
+// probeAgentProcess's single probeTmuxProcessMatch call unchanged. A test
+// that needs to express a genuine matcher/pane_child disagreement (alive
+// true, matchedByName false) overrides this mock directly instead — a plain
+// boolean delegate cannot produce that shape.
+const probeTmuxProcessMatchMock =
+  vi.fn<
+    (
+      sessionName: string,
+      matchers: string[],
+      options?: { fresh?: boolean; paneChildFallback?: boolean },
+    ) => Promise<{ alive: boolean; matchedByName: boolean }>
+  >();
 const killTmuxSessionMock = vi.fn();
 const capturePaneAgentProcessesMock = vi.fn(() =>
   Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
@@ -685,6 +699,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     lookupTmuxPanePid: lookupTmuxPanePidMock,
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
+    probeTmuxProcessMatch: probeTmuxProcessMatchMock,
     killTmuxSession: killTmuxSessionMock,
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
@@ -1193,7 +1208,7 @@ type SessionServiceInternals = {
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
   confirmAgentExited(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean>;
   runAttentionMonitor(baseline: boolean): Promise<void>;
   pollAttentionStates(baseline: boolean): Promise<void>;
@@ -1481,6 +1496,12 @@ describe("SessionService", () => {
     readCgroupMemorySnapshotMock.mockReset().mockReturnValue(null);
     isSystemdOomdPresentMock.mockReset().mockReturnValue(false);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockImplementation(async (sessionName, matchers, options) => {
+        const alive = await isProcessRunningInTmuxMock(sessionName, matchers, options);
+        return { alive, matchedByName: alive };
+      });
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
     terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
@@ -12955,6 +12976,123 @@ describe("SessionService", () => {
 
     const confirmCall = isProcessRunningInTmuxMock.mock.calls.at(-1);
     expect(confirmCall?.[2]).toEqual({ fresh: true });
+  });
+
+  it("logs once when the pane-child fallback supplies the ALIVE verdict", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    // probeTmuxProcessMatch answers the "matched by name or by the pane-child
+    // fallback" question from ONE fetch (issue #871 P2): a foreign launch
+    // that is alive only via the fallback reports matchedByName: false in
+    // that single call, no separate disagreement re-probe needed.
+    probeTmuxProcessMatchMock.mockImplementation(async () => ({
+      alive: true,
+      matchedByName: false,
+    }));
+
+    const service = await createDisposedSessionService();
+    const countPaneChildFallbackEvents = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => (entry as { event: string }).event === "session.runtime.pane_child_fallback",
+      ).length;
+
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
+    // Pins the fix for #871 P2: reconcileStoppedSessions' three
+    // readRuntimeSnapshot reads (classification, reconcileUnexpectedStop's
+    // fresh:true confirm re-read, and the post-reconcile re-read) each cost
+    // exactly one probeTmuxProcessMatch call — never a SECOND, separately-
+    // fetched disagreement re-probe per read, which is what the old two-probe
+    // design added on top (doubling this to 6) and which a slow (>2s) first
+    // fetch could race against a second, differently-timed snapshot.
+    expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(3);
+
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
+  });
+
+  it("re-arms the pane-child fallback latch after a probe matches by name in between", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    // "pane_child": the single probeTmuxProcessMatch call reports alive only
+    // via the fallback (matchedByName: false) — same shape as the sibling
+    // test above. "matcher": it reports matched by name, which is the
+    // transition that must clear the once-per-episode latch.
+    let mode: "pane_child" | "matcher" = "pane_child";
+    probeTmuxProcessMatchMock.mockImplementation(async () => ({
+      alive: true,
+      matchedByName: mode === "matcher",
+    }));
+
+    const service = await createDisposedSessionService();
+    const countPaneChildFallbackEvents = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => (entry as { event: string }).event === "session.runtime.pane_child_fallback",
+      ).length;
+
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
+
+    mode = "matcher";
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
+
+    // Without the latch's clear-on-non-pane_child branch, this second entry
+    // into the fallback would still read as "already notified" and stay
+    // suppressed at 1 instead of logging the new episode.
+    mode = "pane_child";
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(2);
+  });
+
+  it("drops the pane-child fallback latch once its session goes terminal, keeping the Set from leaking", async () => {
+    // pruneSessionScopedState's own liveIds sweep is the ONLY path that
+    // clears the latch for a session that has gone terminal —
+    // readRuntimeSnapshot's clear-on-non-pane_child branch only fires on a
+    // later snapshot of a still-live session, which never happens once
+    // nothing probes this session again.
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    // Same pane_child-arming shape as "logs once when the pane-child
+    // fallback supplies the ALIVE verdict" above.
+    probeTmuxProcessMatchMock.mockImplementation(async () => ({
+      alive: true,
+      matchedByName: false,
+    }));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = service as unknown as {
+      paneChildFallbackNotified: Set<string>;
+      attentionMonitorRunning: boolean;
+      dashboardLoopRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      pollAttentionStates(baseline: boolean): Promise<void>;
+    };
+    // Flush the constructor's fire-and-forget baseline poll before driving
+    // pollAttentionStates ourselves — otherwise our call would just hit the
+    // in-flight baseline's own reentrancy guard and return immediately.
+    await internals.dashboardCacheReady;
+    for (
+      let i = 0;
+      i < 100 && (internals.attentionMonitorRunning || internals.dashboardLoopRunning);
+      i += 1
+    ) {
+      await Promise.resolve();
+    }
+
+    await service.reconcileStoppedSessions();
+    expect(internals.paneChildFallbackNotified.has("api-1")).toBe(true);
+
+    sessions.set("api-1", runningSession({ id: "api-1", status: "killed" }));
+    await internals.pollAttentionStates(false);
+
+    expect(internals.paneChildFallbackNotified.has("api-1")).toBe(false);
+
+    service.dispose();
   });
 
   it("restoreRebootedSessions restores only flag-enabled projects", async () => {
@@ -39708,6 +39846,119 @@ describe("SessionService", () => {
 
       await expect(service.restore("api-1")).rejects.toThrow(/could not read the process table/);
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses to launch a replacement when the pane still reads alive but nothing was captured", async () => {
+      // capturePaneAgentProcessesMock stays at its ok+empty default: the
+      // matchers found nothing owned. isProcessRunningInTmuxMock disagrees
+      // with itself on purpose: classification (no `fresh`) and
+      // reconcileUnexpectedStop's own confirmation re-probe (its own
+      // `{fresh:true}` call, unrelated to this guard) must both still read
+      // dead so restore() proceeds past the "not restorable" gate at all —
+      // only the SECOND `fresh` probe, the one inside
+      // killAgentPaneAndConfirmExit's new ownership-blind check, reads alive,
+      // simulating a process the ownership matchers cannot see.
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      let freshProbes = 0;
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
+          if (opts?.fresh !== true) return false;
+          freshProbes += 1;
+          return freshProbes >= 2;
+        },
+      );
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(/no owned process was captured/);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      // The failing killAgentPaneAndConfirmExit call itself never reaches
+      // killTmuxSession. restoreLocked's own catch-all cleanup then calls
+      // killAgentPaneAndConfirmExit a SECOND time with failOnSurvivors:false
+      // (unrelated to D3, same as the "process table could not be read"
+      // sibling above) and that second call does reach killTmuxSession —
+      // exactly once. If D3 ever moved to after killTmuxSession in the
+      // failing call, this would read 2: the ordering invariant this pins.
+      expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.agent_process.capture_blind",
+          details: { tmuxSession: "api-1", agent: "claude" },
+        }),
+      );
+    });
+
+    it("does not refuse a replacement when the ownership-blind probe reads dead — a genuinely exited foreign agent", async () => {
+      // The negative-polarity sibling of the test above: ownership
+      // (ok+empty capture) and liveness disagreeing is what makes D3 fire,
+      // not the ok+empty capture on its own. mockExitedThenRestoredProcess's
+      // default already reads every pre-relaunch probe (fresh or not,
+      // including D3's own) as dead until createTmuxSession has actually
+      // run, which is exactly the genuinely-exited shape: D3's fresh recheck
+      // must read dead too and let the relaunch proceed. Without the
+      // `stillAlive` condition gating the throw, this would refuse every
+      // foreign-binary relaunch of a session that simply exited cleanly.
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+
+      const service = await createDisposedSessionService();
+
+      const restored = await service.restore("api-1");
+
+      expect(restored.status).toBe("running");
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.agent_process.capture_blind" }),
+      );
+    });
+
+    it("never treats a pane-pid-unreadable episode as an ownership-blind capture, even when the agent still reads alive", async () => {
+      // D3 must skip entirely when paneLookup.status !== "ok": that episode
+      // is already reported by session.agent_process.pane_pid_unreadable
+      // above, and re-reporting it here as capture_blind would double-log
+      // the same episode under two different causes (Amendment 1 GAP 2).
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "unavailable" });
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      let restoredTmuxCreated = false;
+      createTmuxSessionMock.mockImplementation(async () => {
+        restoredTmuxCreated = true;
+      });
+      // Same disagreement shape as the sibling above: classification's own
+      // reads (including reconcileUnexpectedStop's `{fresh:true}` confirm)
+      // must stay dead so restore() proceeds; only a SECOND `fresh` probe —
+      // reachable only if the paneLookup.status gate were ever dropped —
+      // would read alive. With the gate intact, killAgentPaneAndConfirmExit
+      // never issues that second probe at all.
+      let freshProbes = 0;
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
+          if (opts?.fresh === true) {
+            freshProbes += 1;
+            return freshProbes >= 2;
+          }
+          return restoredTmuxCreated;
+        },
+      );
+
+      const service = await createDisposedSessionService();
+
+      await service.restore("api-1");
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.agent_process.capture_blind" }),
+      );
     });
 
     it("still tears down on an unreadable process table when no relaunch follows — kill()", async () => {

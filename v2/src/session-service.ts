@@ -243,6 +243,7 @@ import {
   getTmuxSessionPresence,
   lookupTmuxPanePid,
   isProcessRunningInTmux,
+  probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
@@ -1454,6 +1455,37 @@ async function agentProcessAlive(
   });
 }
 
+// Distinguishes which pass answered ALIVE without widening agentProcessAlive's
+// own boolean return: four call sites are `!(await agentProcessAlive(...))`,
+// and an object return there would silently read as "always alive" (tsc
+// cannot catch it; only eslint no-unnecessary-condition would). Keeps
+// agentProcessAlive's signature and all nine call sites unchanged.
+type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
+
+// Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
+// second isProcessRunningInTmux read: two separate top-level calls would each
+// hit runtime-tmux's shared pane/ps cache independently, and that cache's TTL
+// runs from fetch START, not completion (runtime-tmux.ts). A first probe slow
+// enough to exceed the TTL (getPsSnapshot's own timeout is 5s) leaves the
+// cache already expired by the time the second call checks it, forking again
+// and comparing two different instants — which can mislabel `via` or miss a
+// real pane_child_fallback episode entirely (issue #871 P2).
+async function probeAgentProcess(
+  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
+  options?: { fresh?: boolean },
+): Promise<AgentProcessProbe> {
+  const matchers = agentProcessMatchers(input.agent, input.launchCommand);
+  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  const result = await probeTmuxProcessMatch(input.tmuxSession, matchers, {
+    ...(options?.fresh ? { fresh: true } : {}),
+    ...(foreign ? { paneChildFallback: true } : {}),
+  });
+  if (!result.alive) {
+    return { alive: false };
+  }
+  return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
+}
+
 function withProjectAgentOptions(
   agent: AgentName,
   project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
@@ -2611,6 +2643,13 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  // Tracks sessions currently reading ALIVE via the pane-child fallback (not
+  // matched by pass 1), so session.runtime.pane_child_fallback fires once on
+  // the transition into that state instead of every readRuntimeSnapshot call
+  // for the session's whole life. Cleared on any probe that is not
+  // `via: "pane_child"`. In-memory only, no persisted field. Swept alongside
+  // the other session-scoped maps in pruneSessionScopedState.
+  private readonly paneChildFallbackNotified = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Ticks the re-entrancy guard dropped while the CURRENTLY running sweep was
@@ -5518,6 +5557,11 @@ export class SessionService {
     for (const sessionId of this.wakeSuppressionNotified) {
       if (!liveIds.has(sessionId)) {
         this.wakeSuppressionNotified.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.paneChildFallbackNotified) {
+      if (!liveIds.has(sessionId)) {
+        this.paneChildFallbackNotified.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -12949,6 +12993,42 @@ export class SessionService {
         );
       }
     }
+    // Ownership (capturePaneAgentProcesses, matcher-based) and liveness
+    // (agentProcessAlive, matcher + pane-child fallback) can disagree for a
+    // foreign-binary launch: an ok+empty capture plus a still-ALIVE probe
+    // means the pane's real occupant is invisible to the matchers that would
+    // have named it a survivor. Gated on paneLookup.status === "ok" so a
+    // pane-pid-unreadable episode (already reported above) is not
+    // re-reported here as a capture failure; `fresh: true` because the
+    // capture above is a just-taken read and a TTL-cached liveness verdict
+    // could predate the agent's exit by up to 2s and refuse a legitimate
+    // relaunch.
+    if (
+      options.failOnSurvivors &&
+      paneLookup.status === "ok" &&
+      capture.status === "ok" &&
+      capture.processes.length === 0 &&
+      agentLaunchUsesForeignBinary(session.agent, session.launchCommand)
+    ) {
+      const stillAlive = await agentProcessAlive(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      );
+      if (stillAlive) {
+        const message = `Session ${session.id}: the agent process still reads alive but no owned process was captured; refusing to launch a replacement`;
+        this.logEvent("session.agent_process.capture_blind", {
+          level: "error",
+          sessionId: session.id,
+          message,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
+        });
+        throw new Error(message);
+      }
+    }
     await killTmuxSession(session.tmuxSession);
     const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
     if (outcome.status === "clear") {
@@ -15702,7 +15782,7 @@ export class SessionService {
   // processAlive on both samples closes the pane-leg hole the same way
   // ensureSessionReadyForSend's probe gate does.
   private async confirmAgentExited(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
     const first = await this.readRuntimeSnapshot(session);
     if (first.processAlive || first.probeUnresponsive) {
@@ -15853,7 +15933,7 @@ export class SessionService {
   // be read again 1s later, agreeing with itself and marking a live session
   // stopped.
   private async readRuntimeSnapshot(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
     const fresh = options?.fresh ?? false;
@@ -15869,9 +15949,9 @@ export class SessionService {
     // condition just above) — narrow on the value itself rather than assert.
     const paneUsable = panePresence ? !panePresence.dead : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive =
+    const processProbe: AgentProcessProbe =
       runtimeAlive && paneUsable
-        ? await agentProcessAlive(
+        ? await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -15879,7 +15959,23 @@ export class SessionService {
             },
             { fresh },
           )
-        : false;
+        : { alive: false };
+    // Fires once on the transition into the pane-child fallback answering
+    // ALIVE instead of every readRuntimeSnapshot call — see
+    // paneChildFallbackNotified's own comment for the event-volume math.
+    if (processProbe.alive && processProbe.via === "pane_child") {
+      if (!this.paneChildFallbackNotified.has(session.id)) {
+        this.paneChildFallbackNotified.add(session.id);
+        this.logEvent("session.runtime.pane_child_fallback", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Session ${session.id}: the pane-child fallback supplied the ALIVE verdict for tmux session ${session.tmuxSession}`,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
+        });
+      }
+    } else {
+      this.paneChildFallbackNotified.delete(session.id);
+    }
     // Guarded so neither call can force a snapshot that was never fetched:
     // sessionsUnresponsive only matters when the session read itself came up
     // absent, panesUnresponsive only when the pane read came up dead.
@@ -15888,7 +15984,7 @@ export class SessionService {
     return {
       runtimeAlive,
       paneUsable,
-      processAlive,
+      processAlive: processProbe.alive,
       tmuxActivityAt,
       probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
     };
