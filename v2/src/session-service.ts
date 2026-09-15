@@ -12949,6 +12949,41 @@ export class SessionService {
         );
       }
     }
+    // Ownership (capturePaneAgentProcesses, matcher-based) and liveness
+    // (agentProcessAlive, matcher + pane-child fallback) can disagree for a
+    // foreign-binary launch: an ok+empty capture plus a still-ALIVE probe
+    // means the pane's real occupant is invisible to the matchers that would
+    // have named it a survivor. Gated on paneLookup.status === "ok" so a
+    // pane-pid-unreadable episode (already reported above) is not
+    // re-reported here as a capture failure; `fresh: true` because the
+    // capture above is a just-taken read and a TTL-cached liveness verdict
+    // could predate the agent's exit by up to 2s and refuse a legitimate
+    // relaunch.
+    if (
+      options.failOnSurvivors &&
+      paneLookup.status === "ok" &&
+      capture.status === "ok" &&
+      capture.processes.length === 0 &&
+      agentLaunchUsesForeignBinary(session.agent, session.launchCommand)
+    ) {
+      const stillAlive = await agentProcessAlive(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      );
+      if (stillAlive) {
+        const message = `Session ${session.id}: the agent process still reads alive but no owned process was captured; refusing to launch a replacement`;
+        this.logEvent("session.agent_process.capture_blind", {
+          level: "error",
+          sessionId: session.id,
+          message,
+        });
+        throw new Error(message);
+      }
+    }
     await killTmuxSession(session.tmuxSession);
     const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
     if (outcome.status === "clear") {
