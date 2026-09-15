@@ -32715,6 +32715,63 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("dispatchWake rejects a non-deliverable interval wake with WakeDispatchConflictError", async () => {
+      seedShepherdSession({
+        status: "killed",
+        intervalWake: {
+          nextDueAt: "2026-03-18T09:00:00.000Z",
+          intervalMs: 300_000,
+          message: "Interval msg",
+          stopCondition: "CI green",
+        },
+      });
+      const { SessionService, WakeDispatchConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+      ).rejects.toBeInstanceOf(WakeDispatchConflictError);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("dispatchWake rejects a non-deliverable scheduled wake without clearing it", async () => {
+      const scheduledWake = {
+        dueAt: "2026-03-18T11:00:00.000Z",
+        message: "One shot",
+      };
+      const sessions = seedShepherdSession({ status: "killed", scheduledWake });
+      const { SessionService, WakeDispatchConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.dispatchWake("shp-1", { target: "scheduled", dispatch: true }),
+      ).rejects.toBeInstanceOf(WakeDispatchConflictError);
+      expect(sessions.get("shp-1")?.scheduledWake).toEqual(scheduledWake);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("dispatchWake restores scheduledWake when send fails", async () => {
+      const scheduledWake = {
+        dueAt: "2026-03-18T11:00:00.000Z",
+        message: "One shot",
+      };
+      const sessions = seedShepherdSession({ scheduledWake });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const sendLockedSpy = vi
+        .spyOn(SessionService.prototype as never, "sendLocked" as never)
+        .mockRejectedValueOnce(new Error("send failed"));
+
+      await expect(
+        service.dispatchWake("shp-1", { target: "scheduled", dispatch: true }),
+      ).rejects.toThrow("send failed");
+      expect(sessions.get("shp-1")?.scheduledWake).toEqual(scheduledWake);
+      sendLockedSpy.mockRestore();
+      service.dispose();
+    });
+
     it("advances a daily wake past a failed occurrence and keeps the message queued", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {

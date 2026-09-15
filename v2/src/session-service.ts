@@ -10044,6 +10044,11 @@ export class SessionService {
     if (!scheduledWake) {
       throw new WakeTargetMissingError(`Wake target "scheduled" not found for ${session.id}`);
     }
+    if ((await wakeDeliverability(session)) !== "deliverable") {
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch scheduled wake for ${session.id}: session not deliverable`,
+      );
+    }
     await this.withWorkspaceLifecycleLocks(session.id, async () => {
       const current = readSession(this.config.dataDir, session.id) ?? session;
       const claimed =
@@ -10055,7 +10060,7 @@ export class SessionService {
       const { scheduledWake: _scheduledWake, ...base } = current;
       writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
       try {
-        await this.sendLocked(session.id, { message: scheduledWake.message });
+        await this.sendLocked(session.id, { message: scheduledWake.message, queue: false });
         this.logEvent("session.wake.sent", {
           level: "info",
           sessionId: session.id,
@@ -10067,15 +10072,13 @@ export class SessionService {
           },
         });
       } catch (error) {
-        if (error instanceof SessionAdmissionDeniedError) {
-          const afterDenial = readSession(this.config.dataDir, session.id);
-          if (afterDenial && !afterDenial.scheduledWake) {
-            writeSession(this.config.dataDir, {
-              ...afterDenial,
-              scheduledWake,
-              updatedAt: nowIso(),
-            });
-          }
+        const afterFailure = readSession(this.config.dataDir, session.id);
+        if (afterFailure && !afterFailure.scheduledWake) {
+          writeSession(this.config.dataDir, {
+            ...afterFailure,
+            scheduledWake,
+            updatedAt: nowIso(),
+          });
         }
         throw error;
       }
@@ -10088,7 +10091,9 @@ export class SessionService {
       throw new WakeTargetMissingError(`Wake target "interval" not found for ${session.id}`);
     }
     if (!(await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))) {
-      throw new Error(`Cannot dispatch interval wake for ${session.id}: session not deliverable`);
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch interval wake for ${session.id}: session not deliverable`,
+      );
     }
     await this.withWorkspaceLifecycleLocks(session.id, async () => {
       const now = Date.now();
@@ -10117,6 +10122,7 @@ export class SessionService {
             intervalWake.message,
             intervalWake.stopCondition,
           ),
+          queue: false,
         });
         this.logEvent("session.wake.interval_sent", {
           level: "info",
@@ -10154,7 +10160,9 @@ export class SessionService {
       throw new WakeTargetMissingError(`Wake target "daily" not found for ${session.id}`);
     }
     if (!(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))) {
-      throw new Error(`Cannot dispatch daily wake for ${session.id}: session not deliverable`);
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch daily wake for ${session.id}: session not deliverable`,
+      );
     }
     await this.withWorkspaceLifecycleLocks(session.id, async () => {
       const now = Date.now();
@@ -10191,6 +10199,7 @@ export class SessionService {
             dailyWake.message,
             dailyWake.stopCondition,
           ),
+          queue: false,
         });
         this.logEvent("session.wake.daily_sent", {
           level: "info",

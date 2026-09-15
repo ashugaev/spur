@@ -308,13 +308,9 @@ function rejectWakeScheduleFields(raw: Record<string, unknown>): void {
   }
 }
 
-function parseUpdateSessionWakeMessageRequest(raw: unknown): UpdateSessionWakeMessageRequest {
-  if (!isRecord(raw)) {
-    throw new InvalidWakeRequestError("wake update body must be a JSON object");
-  }
-  if (raw["dispatch"] === true) {
-    throw new InvalidWakeRequestError("dispatch cannot be combined with message");
-  }
+function parseUpdateSessionWakeMessageRequest(
+  raw: Record<string, unknown>,
+): UpdateSessionWakeMessageRequest {
   const target = parseWakeTarget(raw["target"]);
   const message = raw["message"];
   if (typeof message !== "string" || message.trim().length === 0) {
@@ -324,14 +320,10 @@ function parseUpdateSessionWakeMessageRequest(raw: unknown): UpdateSessionWakeMe
   return { target, message: message.trim() };
 }
 
-function parseDispatchSessionWakeRequest(raw: unknown): DispatchSessionWakeRequest {
-  if (!isRecord(raw)) {
-    throw new InvalidWakeRequestError("wake dispatch body must be a JSON object");
-  }
+function parseDispatchSessionWakeRequest(
+  raw: Record<string, unknown>,
+): DispatchSessionWakeRequest {
   const target = parseWakeTarget(raw["target"]);
-  if (raw["dispatch"] !== true) {
-    throw new InvalidWakeRequestError("dispatch must be true");
-  }
   if (raw["message"] !== undefined) {
     throw new InvalidWakeRequestError("message cannot be combined with dispatch");
   }
