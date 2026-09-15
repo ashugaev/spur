@@ -13026,6 +13026,54 @@ describe("SessionService", () => {
     expect(countPaneChildFallbackEvents()).toBe(2);
   });
 
+  it("drops the pane-child fallback latch once its session goes terminal, keeping the Set from leaking", async () => {
+    // pruneSessionScopedState's own liveIds sweep is the ONLY path that
+    // clears the latch for a session that has gone terminal —
+    // readRuntimeSnapshot's clear-on-non-pane_child branch only fires on a
+    // later snapshot of a still-live session, which never happens once
+    // nothing probes this session again.
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    // Same pane_child-arming shape as "logs once when the pane-child
+    // fallback supplies the ALIVE verdict" above.
+    isProcessRunningInTmuxMock.mockImplementation(
+      async (_tmuxSession: string, _matchers: string[], opts?: { paneChildFallback?: boolean }) =>
+        opts?.paneChildFallback === true,
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = service as unknown as {
+      paneChildFallbackNotified: Set<string>;
+      attentionMonitorRunning: boolean;
+      dashboardLoopRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      pollAttentionStates(baseline: boolean): Promise<void>;
+    };
+    // Flush the constructor's fire-and-forget baseline poll before driving
+    // pollAttentionStates ourselves — otherwise our call would just hit the
+    // in-flight baseline's own reentrancy guard and return immediately.
+    await internals.dashboardCacheReady;
+    for (
+      let i = 0;
+      i < 100 && (internals.attentionMonitorRunning || internals.dashboardLoopRunning);
+      i += 1
+    ) {
+      await Promise.resolve();
+    }
+
+    await service.reconcileStoppedSessions();
+    expect(internals.paneChildFallbackNotified.has("api-1")).toBe(true);
+
+    sessions.set("api-1", runningSession({ id: "api-1", status: "killed" }));
+    await internals.pollAttentionStates(false);
+
+    expect(internals.paneChildFallbackNotified.has("api-1")).toBe(false);
+
+    service.dispose();
+  });
+
   it("restoreRebootedSessions restores only flag-enabled projects", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -39821,6 +39869,34 @@ describe("SessionService", () => {
           event: "session.agent_process.capture_blind",
           details: { tmuxSession: "api-1", agent: "claude" },
         }),
+      );
+    });
+
+    it("does not refuse a replacement when the ownership-blind probe reads dead — a genuinely exited foreign agent", async () => {
+      // The negative-polarity sibling of the test above: ownership
+      // (ok+empty capture) and liveness disagreeing is what makes D3 fire,
+      // not the ok+empty capture on its own. mockExitedThenRestoredProcess's
+      // default already reads every pre-relaunch probe (fresh or not,
+      // including D3's own) as dead until createTmuxSession has actually
+      // run, which is exactly the genuinely-exited shape: D3's fresh recheck
+      // must read dead too and let the relaunch proceed. Without the
+      // `stillAlive` condition gating the throw, this would refuse every
+      // foreign-binary relaunch of a session that simply exited cleanly.
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+
+      const service = await createDisposedSessionService();
+
+      const restored = await service.restore("api-1");
+
+      expect(restored.status).toBe("running");
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.agent_process.capture_blind" }),
       );
     });
 
