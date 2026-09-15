@@ -1384,11 +1384,9 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            // The pane pid's own row is short — a truncated/malformed ps
-            // line. getPsSnapshot's < 7 column guard drops it entirely, so
+            // The pane pid's own row is absent from this ps snapshot, so
             // fgPgid is unresolvable for this tty: this row never reaches
             // `panePids.has(row.pid)` in the fgPgidByTty pass.
-            "100 1 pts/1",
             "101 100 101 100 pts/1 2048 codex-wrapper-child",
           ].join("\n"),
           stderr: "",
@@ -1415,10 +1413,9 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            // pane A (pts/1): the pane pid's own row is short and dropped,
-            // so fgPgid is unresolvable for pts/1 — a helper child alone
-            // must not read alive here.
-            "100 1 pts/1",
+            // pane A (pts/1): the pane pid's own row is absent from this ps
+            // snapshot, so fgPgid is unresolvable for pts/1 — a helper child
+            // alone must not read alive here.
             "101 100 101 100 pts/1 2048 codex-wrapper-child",
             // pane B (pts/2): the pane pid's own row is intact and the
             // wrapper-exec'd agent IS pts/2's foreground job.
