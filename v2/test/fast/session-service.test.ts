@@ -12990,6 +12990,42 @@ describe("SessionService", () => {
     expect(countPaneChildFallbackEvents()).toBe(1);
   });
 
+  it("re-arms the pane-child fallback latch after a probe matches by name in between", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+    // "pane_child": pass 1 answers ALIVE only under the fallback flag and the
+    // option-free re-probe disagrees (matcher miss) — same shape as the sibling
+    // test above. "matcher": every call answers ALIVE regardless of options, so
+    // the option-free re-probe agrees too and via becomes "matcher", which is
+    // the transition that must clear the once-per-episode latch.
+    let mode: "pane_child" | "matcher" = "pane_child";
+    isProcessRunningInTmuxMock.mockImplementation(
+      async (_tmuxSession: string, _matchers: string[], opts?: { paneChildFallback?: boolean }) =>
+        mode === "matcher" ? true : opts?.paneChildFallback === true,
+    );
+
+    const service = await createDisposedSessionService();
+    const countPaneChildFallbackEvents = () =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => (entry as { event: string }).event === "session.runtime.pane_child_fallback",
+      ).length;
+
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
+
+    mode = "matcher";
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(1);
+
+    // Without the latch's clear-on-non-pane_child branch, this second entry
+    // into the fallback would still read as "already notified" and stay
+    // suppressed at 1 instead of logging the new episode.
+    mode = "pane_child";
+    await service.reconcileStoppedSessions();
+    expect(countPaneChildFallbackEvents()).toBe(2);
+  });
+
   it("restoreRebootedSessions restores only flag-enabled projects", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -39781,7 +39817,10 @@ describe("SessionService", () => {
       expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
       expect(logSpurEventMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
-        expect.objectContaining({ event: "session.agent_process.capture_blind" }),
+        expect.objectContaining({
+          event: "session.agent_process.capture_blind",
+          details: { tmuxSession: "api-1", agent: "claude" },
+        }),
       );
     });
 
