@@ -194,6 +194,20 @@ const readCgroupPressureMock = vi.fn();
 const readCgroupMemorySnapshotMock = vi.fn();
 const isSystemdOomdPresentMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
+// Defaults to delegating to isProcessRunningInTmuxMock (see beforeEach) so
+// every existing isProcessRunningInTmuxMock-driven test keeps controlling
+// probeAgentProcess's single probeTmuxProcessMatch call unchanged. A test
+// that needs to express a genuine matcher/pane_child disagreement (alive
+// true, matchedByName false) overrides this mock directly instead — a plain
+// boolean delegate cannot produce that shape.
+const probeTmuxProcessMatchMock =
+  vi.fn<
+    (
+      sessionName: string,
+      matchers: string[],
+      options?: { fresh?: boolean; paneChildFallback?: boolean },
+    ) => Promise<{ alive: boolean; matchedByName: boolean }>
+  >();
 const killTmuxSessionMock = vi.fn();
 const capturePaneAgentProcessesMock = vi.fn(() =>
   Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
@@ -685,6 +699,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     lookupTmuxPanePid: lookupTmuxPanePidMock,
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
+    probeTmuxProcessMatch: probeTmuxProcessMatchMock,
     killTmuxSession: killTmuxSessionMock,
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
@@ -1481,6 +1496,12 @@ describe("SessionService", () => {
     readCgroupMemorySnapshotMock.mockReset().mockReturnValue(null);
     isSystemdOomdPresentMock.mockReset().mockReturnValue(false);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockImplementation(async (sessionName, matchers, options) => {
+        const alive = await isProcessRunningInTmuxMock(sessionName, matchers, options);
+        return { alive, matchedByName: alive };
+      });
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
     terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
@@ -12961,14 +12982,14 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession());
     agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
-    // Pass 1 (agentProcessAlive's own call, carries paneChildFallback:true for
-    // this foreign launch) reads ALIVE; probeAgentProcess's own option-free
-    // re-probe then disagrees (reads no match), which is exactly the
-    // "pane-child fallback answered ALIVE" shape.
-    isProcessRunningInTmuxMock.mockImplementation(
-      async (_tmuxSession: string, _matchers: string[], opts?: { paneChildFallback?: boolean }) =>
-        opts?.paneChildFallback === true,
-    );
+    // probeTmuxProcessMatch answers the "matched by name or by the pane-child
+    // fallback" question from ONE fetch (issue #871 P2): a foreign launch
+    // that is alive only via the fallback reports matchedByName: false in
+    // that single call, no separate disagreement re-probe needed.
+    probeTmuxProcessMatchMock.mockImplementation(async () => ({
+      alive: true,
+      matchedByName: false,
+    }));
 
     const service = await createDisposedSessionService();
     const countPaneChildFallbackEvents = () =>
@@ -12978,13 +12999,14 @@ describe("SessionService", () => {
 
     await service.reconcileStoppedSessions();
     expect(countPaneChildFallbackEvents()).toBe(1);
-    // probeAgentProcess's disagreement re-probe must pass NO options at all
-    // (no `fresh`, no `paneChildFallback`) — it re-reads the SAME instant
-    // agentProcessAlive just called ALIVE for, not a fresh one. A call
-    // recorded with only 2 arguments is exactly that option-free re-probe;
-    // adding any options object there would make every recorded call carry
-    // a third argument.
-    expect(isProcessRunningInTmuxMock.mock.calls.some((call) => call.length === 2)).toBe(true);
+    // Pins the fix for #871 P2: reconcileStoppedSessions' three
+    // readRuntimeSnapshot reads (classification, reconcileUnexpectedStop's
+    // fresh:true confirm re-read, and the post-reconcile re-read) each cost
+    // exactly one probeTmuxProcessMatch call — never a SECOND, separately-
+    // fetched disagreement re-probe per read, which is what the old two-probe
+    // design added on top (doubling this to 6) and which a slow (>2s) first
+    // fetch could race against a second, differently-timed snapshot.
+    expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(3);
 
     await service.reconcileStoppedSessions();
     expect(countPaneChildFallbackEvents()).toBe(1);
@@ -12994,16 +13016,15 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession());
     agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
-    // "pane_child": pass 1 answers ALIVE only under the fallback flag and the
-    // option-free re-probe disagrees (matcher miss) — same shape as the sibling
-    // test above. "matcher": every call answers ALIVE regardless of options, so
-    // the option-free re-probe agrees too and via becomes "matcher", which is
-    // the transition that must clear the once-per-episode latch.
+    // "pane_child": the single probeTmuxProcessMatch call reports alive only
+    // via the fallback (matchedByName: false) — same shape as the sibling
+    // test above. "matcher": it reports matched by name, which is the
+    // transition that must clear the once-per-episode latch.
     let mode: "pane_child" | "matcher" = "pane_child";
-    isProcessRunningInTmuxMock.mockImplementation(
-      async (_tmuxSession: string, _matchers: string[], opts?: { paneChildFallback?: boolean }) =>
-        mode === "matcher" ? true : opts?.paneChildFallback === true,
-    );
+    probeTmuxProcessMatchMock.mockImplementation(async () => ({
+      alive: true,
+      matchedByName: mode === "matcher",
+    }));
 
     const service = await createDisposedSessionService();
     const countPaneChildFallbackEvents = () =>
@@ -13037,10 +13058,10 @@ describe("SessionService", () => {
     agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
     // Same pane_child-arming shape as "logs once when the pane-child
     // fallback supplies the ALIVE verdict" above.
-    isProcessRunningInTmuxMock.mockImplementation(
-      async (_tmuxSession: string, _matchers: string[], opts?: { paneChildFallback?: boolean }) =>
-        opts?.paneChildFallback === true,
-    );
+    probeTmuxProcessMatchMock.mockImplementation(async () => ({
+      alive: true,
+      matchedByName: false,
+    }));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

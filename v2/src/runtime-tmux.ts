@@ -766,15 +766,27 @@ export async function getFleetSessionRssBytes(
   return rssBytesBySessionId;
 }
 
+// Typed result of a single pane/ps fetch, so a caller that needs to know
+// WHICH pass answered ALIVE (session-service's probeAgentProcess, issue #871
+// P2) can read it off one snapshot instead of issuing a second, separately
+// memoized call: memoizedProbe's TTL runs from fetch START (:78, :92), so a
+// probe that itself takes >2s (getPsSnapshot's own timeout is 5s, :696)
+// leaves the cache already expired by the time a second top-level call
+// checks it, forking again and comparing two different instants.
+export interface TmuxProcessMatch {
+  alive: boolean;
+  matchedByName: boolean;
+}
+
 // `fresh` busts the shared fleet-pane and ps-snapshot caches before reading —
 // same rationale as tmuxSessionExists's `fresh`: a session created after the
 // last fleet-pane snapshot is invisible to it until the cache naturally
 // expires, which would wrongly fail a post-create recovery/restore check.
-export async function isProcessRunningInTmux(
+export async function probeTmuxProcessMatch(
   sessionName: string,
   processMatchers: string[],
   options?: { fresh?: boolean; paneChildFallback?: boolean },
-): Promise<boolean> {
+): Promise<TmuxProcessMatch> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
     psSnapshotCache.delete(PS_SNAPSHOT_CACHE_KEY);
@@ -784,7 +796,7 @@ export async function isProcessRunningInTmux(
     const entry = panes.get(sessionName);
     const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
-      return false;
+      return { alive: false, matchedByName: false };
     }
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
     const processRes = processMatchers
@@ -794,7 +806,7 @@ export async function isProcessRunningInTmux(
           new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
       );
     if (processRes.length === 0) {
-      return false;
+      return { alive: false, matchedByName: false };
     }
     const rows = await getPsSnapshot();
     for (const row of rows) {
@@ -802,7 +814,7 @@ export async function isProcessRunningInTmux(
         continue;
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
-        return true;
+        return { alive: true, matchedByName: true };
       }
     }
     // Pane-child fallback (issue #806, hardened against #857 P1): a
@@ -847,14 +859,24 @@ export async function isProcessRunningInTmux(
           continue;
         }
         if (row.pgid === fgPgid) {
-          return true;
+          return { alive: true, matchedByName: false };
         }
       }
     }
-    return false;
+    return { alive: false, matchedByName: false };
   } catch {
-    return false;
+    return { alive: false, matchedByName: false };
   }
+}
+
+// Thin boolean wrapper, kept byte-identical in signature and return type:
+// 169 boolean mock occurrences in session-service.test.ts depend on it.
+export async function isProcessRunningInTmux(
+  sessionName: string,
+  processMatchers: string[],
+  options?: { fresh?: boolean; paneChildFallback?: boolean },
+): Promise<boolean> {
+  return (await probeTmuxProcessMatch(sessionName, processMatchers, options)).alive;
 }
 
 // Fleet snapshots (existence+activity, panes, ps) are TTL-cached for periodic
