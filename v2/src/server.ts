@@ -320,9 +320,7 @@ function parseUpdateSessionWakeMessageRequest(
   return { target, message: message.trim() };
 }
 
-function parseDispatchSessionWakeRequest(
-  raw: Record<string, unknown>,
-): DispatchSessionWakeRequest {
+function parseDispatchSessionWakeRequest(raw: Record<string, unknown>): DispatchSessionWakeRequest {
   const target = parseWakeTarget(raw["target"]);
   if (raw["message"] !== undefined) {
     throw new InvalidWakeRequestError("message cannot be combined with dispatch");
