@@ -12978,6 +12978,13 @@ describe("SessionService", () => {
 
     await service.reconcileStoppedSessions();
     expect(countPaneChildFallbackEvents()).toBe(1);
+    // probeAgentProcess's disagreement re-probe must pass NO options at all
+    // (no `fresh`, no `paneChildFallback`) — it re-reads the SAME instant
+    // agentProcessAlive just called ALIVE for, not a fresh one. A call
+    // recorded with only 2 arguments is exactly that option-free re-probe;
+    // adding any options object there would make every recorded call carry
+    // a third argument.
+    expect(isProcessRunningInTmuxMock.mock.calls.some((call) => call.length === 2)).toBe(true);
 
     await service.reconcileStoppedSessions();
     expect(countPaneChildFallbackEvents()).toBe(1);
@@ -39763,14 +39770,56 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
 
       await expect(service.restore("api-1")).rejects.toThrow(/no owned process was captured/);
-      // The failing killAgentPaneAndConfirmExit call itself never reaches
-      // killTmuxSession or launches a replacement. restoreLocked's own
-      // catch-all cleanup still tears the (already-failed) pane down with
-      // failOnSurvivors:false afterward — same as the unrelated
-      // "process table could not be read" sibling above, which is why
-      // neither test pins killTmuxSessionMock.
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      // The failing killAgentPaneAndConfirmExit call itself never reaches
+      // killTmuxSession. restoreLocked's own catch-all cleanup then calls
+      // killAgentPaneAndConfirmExit a SECOND time with failOnSurvivors:false
+      // (unrelated to D3, same as the "process table could not be read"
+      // sibling above) and that second call does reach killTmuxSession —
+      // exactly once. If D3 ever moved to after killTmuxSession in the
+      // failing call, this would read 2: the ordering invariant this pins.
+      expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
       expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.agent_process.capture_blind" }),
+      );
+    });
+
+    it("never treats a pane-pid-unreadable episode as an ownership-blind capture, even when the agent still reads alive", async () => {
+      // D3 must skip entirely when paneLookup.status !== "ok": that episode
+      // is already reported by session.agent_process.pane_pid_unreadable
+      // above, and re-reporting it here as capture_blind would double-log
+      // the same episode under two different causes (Amendment 1 GAP 2).
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "unavailable" });
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      let restoredTmuxCreated = false;
+      createTmuxSessionMock.mockImplementation(async () => {
+        restoredTmuxCreated = true;
+      });
+      // Same disagreement shape as the sibling above: classification's own
+      // reads (including reconcileUnexpectedStop's `{fresh:true}` confirm)
+      // must stay dead so restore() proceeds; only a SECOND `fresh` probe —
+      // reachable only if the paneLookup.status gate were ever dropped —
+      // would read alive. With the gate intact, killAgentPaneAndConfirmExit
+      // never issues that second probe at all.
+      let freshProbes = 0;
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
+          if (opts?.fresh === true) {
+            freshProbes += 1;
+            return freshProbes >= 2;
+          }
+          return restoredTmuxCreated;
+        },
+      );
+
+      const service = await createDisposedSessionService();
+
+      await service.restore("api-1");
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
         TEST_DATA_DIR,
         expect.objectContaining({ event: "session.agent_process.capture_blind" }),
       );
