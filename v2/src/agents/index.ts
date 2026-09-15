@@ -285,6 +285,21 @@ function defaultProcessMatchers(agent: AgentName, launchCommand: string): string
 //     it and it reads false-ALIVE, same as before.
 // Accepted because it is confined to hosts that are otherwise 100% destructively
 // false-DEAD today.
+// RESIDUAL 3: this gate cannot separate "pass 1 serves this host" from "pass 1 never
+// will" from (agent, launchCommand) alone. (a) Pass 2 is reached only after pass 1
+// already failed on THIS snapshot (runtime-tmux.ts:822), so "cannot be matched by
+// pass 1" already IS the arming condition — no further stateless fact narrows it.
+// (b) launchCommand's first token is always agentExecutableCommand(agent)
+// (executable.ts:33-36): a bare canonical name or an SPUR_*_BIN path, never a
+// user-authored `exec ...` prefix — the `exec $BIN "$@"` shape in issue #871 is
+// wrapper-script CONTENT a plan never records as the launch command itself.
+// (c) The remaining real case is a non-exec wrapper (e.g. matchers
+// ["codex-wrap.sh","codex"]) whose pass 1 matches for the agent's whole life: the
+// gate still arms there, and on such a host RESIDUAL 2's `set +m` shape can read a
+// leftover pane-shell child as ALIVE. Rejected: a sticky "pass 1 matched once" latch
+// (poisons a session that later hits a genuinely dead-pass-1 host, agent-helpers.test.ts:122)
+// and exec-token handling in extractCommandBinary (inert — the canonical name is
+// re-appended unconditionally at :260-265, so it changes no matcher set today).
 export function agentLaunchUsesForeignBinary(agent: AgentName, launchCommand: string): boolean {
   return !agentProcessNames(agent).includes(derivedLaunchBinaryName(agent, launchCommand));
 }
