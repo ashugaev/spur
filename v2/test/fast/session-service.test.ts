@@ -39710,6 +39710,46 @@ describe("SessionService", () => {
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
     });
 
+    it("refuses to launch a replacement when the pane still reads alive but nothing was captured", async () => {
+      // capturePaneAgentProcessesMock stays at its ok+empty default: the
+      // matchers found nothing owned. isProcessRunningInTmuxMock disagrees
+      // with itself on purpose: classification (no `fresh`) and
+      // reconcileUnexpectedStop's own confirmation re-probe (its own
+      // `{fresh:true}` call, unrelated to this guard) must both still read
+      // dead so restore() proceeds past the "not restorable" gate at all —
+      // only the SECOND `fresh` probe, the one inside
+      // killAgentPaneAndConfirmExit's new ownership-blind check, reads alive,
+      // simulating a process the ownership matchers cannot see.
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      let freshProbes = 0;
+      isProcessRunningInTmuxMock.mockImplementation(
+        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
+          if (opts?.fresh !== true) return false;
+          freshProbes += 1;
+          return freshProbes >= 2;
+        },
+      );
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(/no owned process was captured/);
+      // The failing killAgentPaneAndConfirmExit call itself never reaches
+      // killTmuxSession or launches a replacement. restoreLocked's own
+      // catch-all cleanup still tears the (already-failed) pane down with
+      // failOnSurvivors:false afterward — same as the unrelated
+      // "process table could not be read" sibling above, which is why
+      // neither test pins killTmuxSessionMock.
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.agent_process.capture_blind" }),
+      );
+    });
+
     it("still tears down on an unreadable process table when no relaunch follows — kill()", async () => {
       // The mirror of the case above: a teardown heading to a terminal
       // status must not become an unkillable session just because the
