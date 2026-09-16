@@ -1961,10 +1961,22 @@ const ATTENTION_PANE_TAIL_LINES = 15;
 
 /**
  * Detection-only pass over one shared `ps` snapshot: finds every leaked
- * sidecar tree via `findLeakedSidecarTrees` and emits
- * `session.sidecar.orphan_detected` for each. Signals or kills NOTHING —
- * I10. A plain exported function (no `this`) so it is testable against a
- * synthetic snapshot/claims triple without booting a SessionService.
+ * `worktree-tree` sidecar process tree via `findLeakedSidecarTrees` and
+ * emits `session.sidecar.orphan_detected` for each. Signals or kills
+ * NOTHING — I10. A plain exported function (no `this`) so it is testable
+ * against a synthetic snapshot/claims triple without booting a
+ * SessionService.
+ *
+ * `orphan-daemon` rows are deliberately excluded from both the emitted
+ * events and the returned list: `findLeakedSidecarTrees` scans the WHOLE
+ * host process table for that population (spur#859), not just this
+ * instance's own worktreeDir, so auto-firing it on every reaper tick would
+ * log an event for every reparented Spur daemon on a shared host — most of
+ * them belonging to an unrelated instance this daemon has no business
+ * reporting on. That population is already surfaced on demand via
+ * `spur sidecar sweep` and the `sidecar-orphans` doctor check; this
+ * function stays scoped to the original population — sidecar trees under
+ * THIS instance's own running sessions.
  */
 export async function detectOrphanedSidecarTrees(
   snapshot: ProcSnapshot,
@@ -1980,7 +1992,8 @@ export async function detectOrphanedSidecarTrees(
   if (!supported) {
     return [];
   }
-  for (const tree of leaked) {
+  const worktreeTrees = leaked.filter((tree) => tree.kind === "worktree-tree");
+  for (const tree of worktreeTrees) {
     logEvent("session.sidecar.orphan_detected", {
       level: "info",
       message: `Orphaned sidecar process tree detected at pid ${tree.rootPid} under ${tree.worktreePath}${tree.sidecarName ? ` (${tree.sidecarName})` : ""}.`,
@@ -1995,7 +2008,7 @@ export async function detectOrphanedSidecarTrees(
       },
     });
   }
-  return leaked;
+  return worktreeTrees;
 }
 
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
