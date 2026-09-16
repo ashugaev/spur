@@ -844,6 +844,7 @@ export async function reapRecordedPortDaemon(
       sessionName: "sidecar-recorded-port",
       panePid: null,
       survivors,
+      blindKill: false,
       ...(unverifiedPorts.size > 0 ? { unverifiedPorts: [...unverifiedPorts] } : {}),
     };
   };
@@ -884,6 +885,7 @@ export async function reapRecordedPortDaemon(
       tree,
       ownedGroups,
       snapshot,
+      blindKill: false,
     });
   }
   if (pendings.length === 0) {
