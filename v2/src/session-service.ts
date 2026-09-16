@@ -15777,6 +15777,8 @@ export class SessionService {
                   details: {
                     awaitingStepIndex: latest.pipeline.awaitingStepIndex ?? null,
                     nextStepIndex: latest.pipeline.nextStepIndex,
+                    totalSteps: latest.pipeline.steps.length,
+                    stepsPending: latest.pipeline.nextStepIndex < latest.pipeline.steps.length,
                     sessionStatus: latest.status,
                   },
                 });
