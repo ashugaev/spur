@@ -10,6 +10,7 @@ import {
 
 export interface SpurEvent<T = unknown> {
   name: string;
+  occurrenceId: string;
   projectId: string;
   sourceId: string;
   data?: T;

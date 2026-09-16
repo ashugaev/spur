@@ -17,6 +17,7 @@ import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
   GitHubPrSummary,
+  AutoPingThreadTarget,
   ReviewEventData,
   ReviewSignal,
   SessionPrBinding,
@@ -253,9 +254,14 @@ type IssueComment = {
 type PullRequestReviewComment = {
   id: number;
   body: string;
+  reviewThreadId?: string;
   path?: string | null;
   line?: number | null;
   user?: { login?: string | null } | null;
+};
+
+type ReviewSignalWithThreadTarget = ReviewSignal & {
+  providerThreadTarget?: AutoPingThreadTarget;
 };
 
 type GitHubPrStatusSummary = GitHubPrSummary & {
@@ -473,6 +479,7 @@ function reviewCommentsFromPrNode(value: Record<string, unknown>): PullRequestRe
   const comments: PullRequestReviewComment[] = [];
   for (const rawThread of connectionNodes(value.reviewThreads)) {
     if (!isRecord(rawThread)) continue;
+    const reviewThreadId = readString(rawThread.id);
     for (const raw of connectionNodes(rawThread.comments)) {
       if (!isRecord(raw)) continue;
       const id = readNumber(raw.databaseId);
@@ -482,6 +489,7 @@ function reviewCommentsFromPrNode(value: Record<string, unknown>): PullRequestRe
       comments.push({
         id,
         body,
+        ...(reviewThreadId ? { reviewThreadId } : {}),
         path: readString(raw.path),
         line: readNumber(raw.line),
         user: { login: author },
@@ -651,11 +659,20 @@ function reviewSignalsFromComments(
     const location = comment.path
       ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}`
       : "";
-    signals.push({
+    const signal: ReviewSignalWithThreadTarget = {
       key: reviewCommentSeenKey(comment.id),
       kind: "comment",
       text: `New review comment from ${author}${location}: "${shortText(comment.body)}"`,
-    });
+      ...(comment.reviewThreadId
+        ? {
+            providerThreadTarget: {
+              kind: "github-review-thread",
+              threadId: comment.reviewThreadId,
+            },
+          }
+        : {}),
+    };
+    signals.push(signal);
   }
   return signals;
 }

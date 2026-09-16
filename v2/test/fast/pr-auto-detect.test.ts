@@ -17,6 +17,16 @@ const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
+// Delegates to isProcessRunningInTmuxMock so this file's existing
+// isProcessRunningInTmuxMock.mockResolvedValue(...) setups keep driving
+// probeAgentProcess's single probeTmuxProcessMatch call unchanged; none of
+// this file's tests exercise a matcher/pane_child disagreement.
+const probeTmuxProcessMatchMock = vi.fn(
+  async (name: string, matchers: string[], options?: { fresh?: boolean }) => {
+    const alive: boolean = await isProcessRunningInTmuxMock(name, matchers, options);
+    return { alive, matchedByName: alive };
+  },
+);
 const getTmuxSessionActivityMock = vi.fn();
 const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const setTmuxSocketNameMock = vi.fn();
@@ -133,6 +143,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   })),
   getTmuxPanePresence: vi.fn(async () => ({ dead: false, unresponsive: false })),
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
+  probeTmuxProcessMatch: probeTmuxProcessMatchMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),

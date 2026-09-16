@@ -66,9 +66,10 @@ describe("captureCursorSubmitBaseline", () => {
   it("returns the file path and current size when a transcript exists", async () => {
     const filePath = await makeJsonl("a.jsonl", [userTurn("hi")]);
     findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
-    const result = await captureCursorSubmitBaseline("/tmp/worktree");
+    const result = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
     expect(result?.file).toBe(filePath);
     expect(result?.size).toBeGreaterThan(0);
+    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
   });
 
   // AC4: a pinned path that does not yet exist yields a WAITING baseline, never
@@ -93,6 +94,20 @@ describe("captureCursorSubmitBaseline", () => {
 });
 
 describe("scanCursorJsonlForMessage", () => {
+  it("forwards pinned agentSessionId to findCursorAckTranscriptFile on rotation check", async () => {
+    const filePath = await makeJsonl("init.jsonl", [userTurn("hi")]);
+    const rotatedPath = await makeJsonl("rotated.jsonl", [userTurn("target")]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(rotatedPath);
+    const result = await scanCursorJsonlForMessage(
+      { file: filePath, size: (await stat(filePath)).size },
+      "target",
+      "/tmp/worktree",
+      "pinned-id",
+    );
+    expect(result.found).toBe(true);
+    expect(result.scannedFile).toBe(rotatedPath);
+    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
+  });
   it("matches a user turn that wraps the sent text in cursor context tags", async () => {
     const filePath = await makeJsonl("wrap.jsonl", []);
     findCursorAckTranscriptFileMock.mockResolvedValue(filePath);

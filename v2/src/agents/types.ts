@@ -3,6 +3,7 @@ export interface AgentLaunchPlan {
   initialMessage: string;
   initialMessageDeliveredOnLaunch?: boolean;
   readyMarkers: string[];
+  deferredSensitiveInitialMessage?: { text: string; sensitive: true };
 }
 
 export interface AgentResumePlan {
