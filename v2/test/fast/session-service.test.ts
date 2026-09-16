@@ -33046,7 +33046,7 @@ describe("SessionService", () => {
     const reapRuntime = await import("../../src/sidecars/reap.js");
     const reapSpy = vi.spyOn(reapRuntime, "reapSidecarPane").mockImplementation(async () => {
       ownKillRan = true;
-      return { sessionName: "api-1--dev", panePid: 4242, survivors: [] };
+      return { sessionName: "api-1--dev", panePid: 4242, survivors: [], blindKill: false };
     });
     isHostPortFreeMock.mockImplementation(async (port: number) =>
       port === sharedPort ? ownKillRan : true,
@@ -33142,6 +33142,7 @@ describe("SessionService", () => {
       sessionName: "api-1--dev",
       panePid: 4242,
       survivors: [777],
+      blindKill: false,
     });
 
     const { SessionService } = await loadSessionServiceModule();

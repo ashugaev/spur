@@ -41,7 +41,6 @@ const execFileAsync = promisify(execFile);
 // overrides it.
 const timerPromisesSleepMock = vi.hoisted(() => vi.fn<(ms: number) => Promise<void>>());
 
-
 // signalSidecarPane's two blind branches are driven by these two
 // runtime-tmux reads; mocking them lets the blind-branch/blindKill tests
 // below stay host-safe — no real tmux session is ever touched.
@@ -837,6 +836,7 @@ describe("confirmReaps", () => {
         tree: [zombiePid],
         ownedGroups: [],
         snapshot: { ok: true, byPid: new Map(), byPgid: new Map() } as ProcSnapshot,
+        blindKill: false,
       };
       const [outcome] = await confirmReaps([pending], 50);
       expect(outcome?.survivors).toEqual([]);
