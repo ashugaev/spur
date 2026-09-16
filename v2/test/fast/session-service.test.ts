@@ -3155,7 +3155,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("keeps nudging open work while a human-held item is suppressed", async () => {
+    it("nudges open work once per revision while a human-held item is suppressed", async () => {
       const sessions = createSessionStore();
       const session = runningSession();
       sessions.set(session.id, session);
@@ -3183,15 +3183,14 @@ describe("SessionService", () => {
         ],
       });
 
-      for (let call = 0; call < 3; call += 1) {
+      const t0 = Date.now();
+      for (const elapsed of [0, 61_000, 122_000]) {
+        vi.setSystemTime(t0 + elapsed);
         await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
-        vi.setSystemTime(new Date(Date.now() + 61_000));
+        expect(send).toHaveBeenCalledTimes(1);
       }
-
-      expect(send).toHaveBeenCalledTimes(3);
-      for (const call of send.mock.calls) {
-        expect(call[1]).toContain("Spur ToDo still has open work");
-      }
+      expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo still has open work");
+      expect(send.mock.calls[0]?.[1]).not.toContain("Choose the release window");
       service.dispose();
     });
 
