@@ -137,7 +137,22 @@ async function expectSidecarPortConflict(
   } catch {
     throw new Error(`Expected JSON sidecar port conflict payload: ${caught.message}`);
   }
-  expect(payload).toEqual(expected);
+  const actual = payload as SidecarPortConflictPayload;
+  expect(actual.code).toBe(expected.code);
+  expect(actual.sidecarName).toBe(expected.sidecarName);
+  expect(actual.candidates).toHaveLength(expected.candidates.length);
+  for (let i = 0; i < expected.candidates.length; i += 1) {
+    const candidate = actual.candidates[i];
+    expect(candidate).toMatchObject(expected.candidates[i] as object);
+    if (!candidate) continue;
+    if (candidate.reservedBy !== undefined) {
+      expect(candidate.reservedBy).toContain("/");
+    }
+    if (candidate.holder !== undefined) {
+      expect(candidate.holder.pid).toBeTypeOf("number");
+      expect(candidate.holder.cwd === null || typeof candidate.holder.cwd === "string").toBe(true);
+    }
+  }
 }
 
 function requireSessionRecord(dataDir: string, sessionId: string): SessionRecord {
@@ -5791,6 +5806,7 @@ projects:
               env: "SPUR_RESERVED_PORT_DEV",
               port: reservedRange.end,
               owner: first.id,
+              reservedBy: `${first.id}/dev`,
             },
           ],
         },
@@ -5861,6 +5877,7 @@ projects:
             env: "SPUR_RESERVED_PORT_DEV",
             port: 4700,
             owner: first.id,
+            reservedBy: `${first.id}/dev`,
           },
         ],
       },

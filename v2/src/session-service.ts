@@ -6,7 +6,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -112,10 +112,12 @@ import {
   CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
   readClaudeJsonlState,
+  hasClaudeRecoveryAfter,
   type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
+import { redactAutoPingHandles } from "./auto-ping.js";
 import {
   type HistoryCaptureStamp,
   AGENT_HISTORY_ARTIFACT_PREFIX,
@@ -182,7 +184,13 @@ import {
   NPM_GLOBALCONFIG_ENV_LOWER,
   npmPinConfigPath,
 } from "./npm-prefix.js";
-import { clearPortListener, hasEstablishedConnections, isHostPortFree } from "./port-probe.js";
+import {
+  clearPortListener,
+  findListenerPids,
+  hasEstablishedConnections,
+  isHostPortFree,
+} from "./port-probe.js";
+import { readProcessCwd } from "./process-tree.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   closeTelegramTopic,
@@ -238,10 +246,12 @@ import {
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
+  refreshTmuxFleetSnapshot,
   sendSubmitKeyToTmux,
   sendMenuSelectionKeys,
   setTmuxSocketName,
   sendMessageToTmux,
+  sendSensitiveMessageToTmux,
   tmuxPaneDead,
   tmuxSessionExists,
   waitForTmuxReady,
@@ -450,6 +460,7 @@ import {
   type TranscriptEntry,
   type UpdateSessionSlotsRequest,
   type TodoActor,
+  AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
 } from "./types.js";
@@ -462,6 +473,7 @@ import {
   todoLedgerBlock,
   unfinishedTodo,
 } from "./todo.js";
+import { cursorShowsReadyPrompt } from "./cursor-state.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
 import {
   formatNestedSidecarStartError,
@@ -516,6 +528,11 @@ const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
+// classifySessionRecord (called from inside both waitForQueuedMessage and
+// waitForPipelineStep) runs reconcileUnexpectedStop and
+// reconcileStaleErroredSession, so the loop can heal its own record on every
+// pass -- the stopped-before-sleep return bounds nothing on its own.
+const DELIVERY_HEAL_CONTINUE_LIMIT = 3;
 const STATE_HOLD_MS = 4_000;
 // Codex turns that hang after their tool calls complete (model inference dies between/after tools)
 // pin state to "working" forever. The rollout JSONL emits no deterministic mid-inference liveness
@@ -576,6 +593,25 @@ const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const TODO_NUDGE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
+// Shared derivation, one path for every collapseWindowMs-scaled backoff
+// (todo nudge, sidecar start-conflict refusal): a tiny configured
+// collapseWindowMs must never shrink a backoff below its fixed floor, and
+// the cap must never fall below the (possibly derived-up) base.
+function backoffBaseMs(fixedFloorMs: number, collapseWindowMs: number): number {
+  return Math.max(fixedFloorMs, collapseWindowMs * 2);
+}
+function backoffCapMs(fixedCapMs: number, base: number): number {
+  return Math.max(fixedCapMs, base);
+}
+// Bounded, self-clearing sidecar-start port-conflict refusal (measured
+// incident: 21/22 conflicts were foreign and self-cleared within 53
+// minutes; a permanent latch would have killed the one attempt that later
+// succeeded). base > collapseWindowMs, cap >= base, deadline >= cap — all
+// derived so a wide configured collapseWindowMs can never let the deadline
+// fire on the very first conflict.
+const SIDECAR_START_CONFLICT_BACKOFF_BASE_MS = 60_000;
+const SIDECAR_START_CONFLICT_BACKOFF_MAX_MS = 900_000;
+const SIDECAR_START_CONFLICT_DEADLINE_MS = 1_800_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
 // (workspaceExists, hasServiceIssues, workspace slots), never from agent
@@ -606,6 +642,8 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
+// Same outlast-the-sweep-gap reasoning for cursor ready prompt override.
+const CURSOR_PANE_READY_OVERRIDE_TTL_MS = 15_000;
 // Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
 // still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
 // only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
@@ -962,6 +1000,7 @@ interface SessionStateResult {
   historySourcePath?: string | null;
   workspacePresent: boolean;
   serverError: boolean;
+  serverErrorEvidence?: "error" | "recovered";
   // When the agent last wrote to its own structured artifact (claude transcript
   // JSONL / codex rollout + hook state / cursor transcript JSONL). Null only
   // when the agent has no such artifact yet. Every value here is a byproduct of
@@ -1291,6 +1330,18 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
 
 function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): boolean {
   return session.restrictWrites === true;
+}
+
+function resolveCloseoutOwner(args: {
+  restrictWrites: boolean;
+  worktree: boolean;
+  reusesWorkspace: boolean;
+  transferredOwner?: boolean;
+}): boolean {
+  if (args.restrictWrites) return false;
+  if (args.transferredOwner !== undefined) return args.transferredOwner;
+  if (args.reusesWorkspace) return false;
+  return args.worktree;
 }
 
 async function setupSessionAgentHooks(args: {
@@ -1746,12 +1797,14 @@ function buildSessionEnv(args: {
   dataDir: string;
   repoPath: string;
   symlinks: string[];
+  closeoutOwner?: boolean;
   extraEnv?: Record<string, string>;
 }): Record<string, string> {
   const env: Record<string, string> = {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
+    SPUR_CLOSEOUT_OWNER: args.closeoutOwner === true ? "1" : "0",
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
@@ -2521,6 +2574,7 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  private readonly cursorPaneReadyOverrides = new Map<string, number>();
   // Evidence-gated override (not TTL-gated) for a live usage-limit menu that
   // re-confirmed an expired claude rate-limit detection: keyed by session id.
   // A sweep can take longer than any fixed TTL to reach a given session (its
@@ -2715,6 +2769,35 @@ export class SessionService {
     string,
     { failures: number; nextRetryAtMs: number }
   >();
+  // Bounded, self-clearing sidecar-start port-conflict refusal, keyed
+  // `${sessionId}\0${sidecarName}`. Read outside withSidecarPortLock,
+  // mutated only inside startSidecarInternal's gate (before the lock) or
+  // one of the clear sites.
+  private readonly sidecarStartConflictState = new Map<
+    string,
+    {
+      failures: number;
+      nextProbeAtMs: number;
+      firstConflictAtMs: number;
+      terminalEmitted: boolean;
+      candidates: SidecarPortConflictCandidate[];
+    }
+  >();
+  // Own-identity-no-op dedup, same key shape, deliberately its OWN map: a
+  // no-op is not a conflict, and an earlier version folded this into
+  // sidecarStartConflictState — sharing one entry meant seeding
+  // firstConflictAtMs with 0 (no-op has no real conflict start time), and
+  // `0 ?? now` in recordSidecarStartConflict evaluates to 0 (nullish
+  // coalescing does not catch zero), which silently backdated a session's
+  // first REAL conflict to epoch and skipped its entire retry window
+  // straight to the post-deadline terminal branch. Cleared by
+  // clearSidecarStartConflict (this session's own success/stop/relaunch/
+  // restore/prune sites) — NOT by the cross-session reservedBy clear in
+  // sessionWithReleasedSidecarPorts, which only ever touches
+  // sidecarStartConflictState: this map is about THIS session's own pane
+  // identity, unrelated to which OTHER session was holding a port it was
+  // waiting on.
+  private readonly sidecarStartNoopIdentity = new Map<string, { pid: number; starttime: number }>();
   // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
   // process trees" over the real HTTP /sidecars/sweep route would
   // otherwise scan the real host process table — on a host with even one
@@ -4247,43 +4330,58 @@ export class SessionService {
         if (!this.memoryHold.engaged && session.serverErrorAt) {
           const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
           if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
-            try {
-              await this.send(session.id, {
-                message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
-                queue: false,
-              });
-              this.logEvent("session.server_error.reactivated", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent server-error reactivation to ${session.id}`,
-                details: {
-                  serverErrorAt: session.serverErrorAt,
-                },
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.server_error.reactivation_failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send server-error reactivation to ${session.id}: ${message}`,
-                details: {
-                  serverErrorAt: session.serverErrorAt,
-                },
-              });
-            }
-            // Re-arm under CAS: only if the marker is still what this tick read
-            // (a concurrent clear/re-arm wins otherwise), so the next attempt is
-            // a fresh 30 minutes out.
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (current.serverErrorAt === session.serverErrorAt) {
+            await this.withWorkspaceLifecycleLocks(session.id, async () => {
+              const current = readSession(this.config.dataDir, session.id);
+              if (
+                !current?.serverErrorAt ||
+                current.status !== "running" ||
+                this.memoryHold.engaged ||
+                now - Date.parse(current.serverErrorAt) < CLAUDE_SERVER_ERROR_REACTIVATION_MS ||
+                (current.serverErrorReactivationAttempts ?? 0) >= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+              )
+                return;
+              const attempts = (current.serverErrorReactivationAttempts ?? 0) + 1;
               writeSession(this.config.dataDir, {
                 ...current,
                 serverErrorAt: new Date(now).toISOString(),
+                serverErrorReactivationAttempts: attempts,
                 updatedAt: nowIso(),
               });
-            }
+              if (attempts === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
+                this.logEvent("session.server_error.reactivation_exhausted", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Server-error reminder budget exhausted for ${session.id}`,
+                });
+              }
+              try {
+                await this.sendLocked(session.id, {
+                  message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+                  queue: false,
+                });
+                this.logEvent("session.server_error.reactivated", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent server-error reactivation to ${session.id}`,
+                  details: {
+                    serverErrorAt: session.serverErrorAt,
+                  },
+                });
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.server_error.reactivation_failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send server-error reactivation to ${session.id}: ${message}`,
+                  details: {
+                    serverErrorAt: session.serverErrorAt,
+                  },
+                });
+              }
+            });
           }
         }
 
@@ -5381,6 +5479,16 @@ export class SessionService {
     for (const sessionId of this.todoNudgeBackoff.keys()) {
       if (!liveIds.has(sessionId)) this.todoNudgeBackoff.delete(sessionId);
     }
+    // Keyed `${sessionId}\0${sidecarName}`, unlike every other map here —
+    // test only the first \0-split segment against liveIds.
+    for (const key of this.sidecarStartConflictState.keys()) {
+      const sessionId = key.split("\0")[0] ?? key;
+      if (!liveIds.has(sessionId)) this.sidecarStartConflictState.delete(key);
+    }
+    for (const key of this.sidecarStartNoopIdentity.keys()) {
+      const sessionId = key.split("\0")[0] ?? key;
+      if (!liveIds.has(sessionId)) this.sidecarStartNoopIdentity.delete(key);
+    }
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.codexMcpDialogOverrides.delete(sessionId);
@@ -5389,6 +5497,11 @@ export class SessionService {
     for (const sessionId of this.claudeCompactingOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeCompactingOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.cursorPaneReadyOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.cursorPaneReadyOverrides.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeRateLimitReconfirmOverrides.keys()) {
@@ -6399,9 +6512,7 @@ export class SessionService {
   private todoNudgeBackoffBaseMs(): number {
     const collapseWindowMs =
       this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
-    // Floor at the original fixed base: a tiny configured collapseWindowMs
-    // must not shrink the nudge backoff below its pre-derivation floor.
-    return Math.max(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs * 2);
+    return backoffBaseMs(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs);
   }
 
   // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
@@ -6415,6 +6526,10 @@ export class SessionService {
   }
 
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
+    return this.withWorkspaceLifecycleLocks(session.id, () => this.maybeNudgeTodoLocked(session));
+  }
+
+  private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
@@ -6427,39 +6542,102 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
-      const projection = ensureTodoLedger(this.config.dataDir, session);
-      const open = projection.items.filter((item) => item.status === "open");
-      const humanHeld = projection.items.filter(
-        (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
-      );
-      let message: string | null = null;
-      if (open.length > 0) {
-        message = `Spur ToDo still has open work:\n${open
-          .map((item) => `- ${item.id}: ${item.text}`)
-          .join(
-            "\n",
-          )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
-      } else if (humanHeld.length > 0) {
-        message = `Spur ToDo needs human input:\n${humanHeld
-          .map((item) => {
-            const blocker = item.latestTransition?.blocker;
-            return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
-          })
-          .join("\n")}\nRequest the required input before continuing.`;
-      } else if (projection.counts.total === 0) {
-        message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
-      }
-      if (!message) {
-        // A clean observation with nothing to send: #836's "cleared on a
-        // clean observation". Not moved above the ensureTodoLedger read —
-        // that read succeeds on every send-failure cycle, so clearing there
-        // would zero `failures` forever and flatten the backoff to the base.
+      await this.withPaneWriteLock(session.tmuxSession, async () => {
+        const current = readSession(this.config.dataDir, session.id);
+        if (
+          !current ||
+          current.status !== "running" ||
+          hasQueuedMessages(current) ||
+          current.queuedMessages?.awaitingPrompt ||
+          current.pipeline?.status === "running"
+        )
+          return;
+        if (
+          this.todoNudgeDisabled.has(session.id) ||
+          (this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now() ||
+          Date.now() - (this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0) < 60_000
+        )
+          return;
+        session = current;
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const ledgerSession = readSession(this.config.dataDir, session.id);
+        if (!ledgerSession) return;
+        session = ledgerSession;
+        const open = projection.items
+          .filter((item) => item.status === "open")
+          .sort((a, b) => a.id.localeCompare(b.id));
+        const humanHeld = projection.items
+          .filter(
+            (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
+          )
+          .sort((a, b) => a.id.localeCompare(b.id));
+        let message: string | null = null;
+        if (open.length > 0) {
+          message = `Spur ToDo still has open work:\n${open
+            .map((item) => `- ${item.id}: ${item.text}`)
+            .join(
+              "\n",
+            )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
+        } else if (humanHeld.length > 0) {
+          message = `Spur ToDo needs human input:\n${humanHeld
+            .map((item) => {
+              const blocker = item.latestTransition?.blocker;
+              return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
+            })
+            .join("\n")}\nRequest the required input before continuing.`;
+        } else if (projection.counts.total === 0) {
+          message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
+        }
+        if (!message) {
+          // A clean observation with nothing to send: #836's "cleared on a
+          // clean observation". Not moved above the ensureTodoLedger read —
+          // that read succeeds on every send-failure cycle, so clearing there
+          // would zero `failures` forever and flatten the backoff to the base.
+          this.todoNudgeBackoff.delete(session.id);
+          if (session.todoNudge) {
+            const { todoNudge: _todoNudge, ...base } = session;
+            writeSession(this.config.dataDir, base);
+          }
+          return;
+        }
+        const fingerprint = createHash("sha256")
+          .update(
+            JSON.stringify(
+              open.length
+                ? ["open", open.map((item) => [item.id, item.text])]
+                : humanHeld.length
+                  ? [
+                      "human",
+                      humanHeld.map((item) => [
+                        item.id,
+                        item.latestTransition?.blocker?.kind === "human"
+                          ? item.latestTransition.blocker.requiredAction
+                          : item.text,
+                      ]),
+                    ]
+                  : ["empty"],
+            ),
+          )
+          .digest("hex");
+        const attempts =
+          session.todoNudge?.fingerprint === fingerprint ? session.todoNudge.attempts : 0;
+        if (attempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return;
+        writeSession(this.config.dataDir, {
+          ...session,
+          todoNudge: { fingerprint, attempts: attempts + 1 },
+        });
+        if (attempts + 1 === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
+          this.logEvent("session.todo.nudge_exhausted", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Spur ToDo reminder budget exhausted for ${session.id}`,
+          });
+        }
+        await this.writeAgentMessage(session, message, { interrupt: false });
+        this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
         this.todoNudgeBackoff.delete(session.id);
-        return;
-      }
-      await this.sendAgentMessage(session, message, { interrupt: false });
-      this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
-      this.todoNudgeBackoff.delete(session.id);
+      });
     } catch (error) {
       if (
         (error instanceof TodoLedgerCorruptError && !error.transient) ||
@@ -6492,7 +6670,7 @@ export class SessionService {
       // collapseWindowMs derives a base above the fixed 30-minute cap, and
       // clamping to that fixed cap would put every retry back under the
       // collapse window it exists to clear.
-      const cap = Math.max(TODO_NUDGE_BACKOFF_MAX_MS, base);
+      const cap = backoffCapMs(TODO_NUDGE_BACKOFF_MAX_MS, base);
       this.todoNudgeBackoff.set(session.id, {
         failures,
         nextRetryAtMs: Date.now() + Math.min(base * 2 ** (failures - 1), cap),
@@ -6567,6 +6745,197 @@ export class SessionService {
     }
 
     return localProject ?? daemonProject;
+  }
+
+  private sidecarConflictKey(sessionId: string, sidecarName: string): string {
+    return `${sessionId}\0${sidecarName}`;
+  }
+
+  private sidecarStartConflictBaseMs(): number {
+    const collapseWindowMs =
+      this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
+    return backoffBaseMs(SIDECAR_START_CONFLICT_BACKOFF_BASE_MS, collapseWindowMs);
+  }
+
+  private sidecarStartConflictDeadlineMs(): number {
+    const base = this.sidecarStartConflictBaseMs();
+    const cap = backoffCapMs(SIDECAR_START_CONFLICT_BACKOFF_MAX_MS, base);
+    return Math.max(SIDECAR_START_CONFLICT_DEADLINE_MS, cap);
+  }
+
+  // A blocked candidate carrying `reservedBy` (`sessionId/sidecarName`) is
+  // blocked by a live Spur reservation, not raw host occupancy — the port
+  // itself can be perfectly free (isHostPortFree true) while the recording
+  // session still owns it with an alive pane, exactly the reservedBy shape
+  // buildRangeCandidates emits. Re-probing with isHostPortFree alone would
+  // read that as "freed" every time and clear the refusal state before it
+  // ever reaches the terminal event, defeating the whole point of the
+  // bounded-refusal cache (REQ1). Mirrors the same two facts
+  // ensureSidecarReservation's own `unavailable` scan checks: is the port
+  // still recorded there, and is that owner's pane still alive.
+  private async isConflictCandidateStillBlocked(
+    candidate: SidecarPortConflictCandidate,
+  ): Promise<boolean> {
+    const slashIdx = candidate.reservedBy?.indexOf("/") ?? -1;
+    if (candidate.reservedBy && slashIdx > 0) {
+      const ownerId = candidate.reservedBy.slice(0, slashIdx);
+      const scName = candidate.reservedBy.slice(slashIdx + 1);
+      const owner = readSession(this.config.dataDir, ownerId);
+      const stillRecorded = Object.values(owner?.sidecarPorts?.[scName] ?? {}).includes(
+        candidate.port,
+      );
+      if (!stillRecorded) return false;
+      // Unreachable at runtime (stillRecorded already required owner to
+      // exist), kept only to narrow `owner` to non-null for
+      // resolveProjectForSession below.
+      if (!owner) return !(await isHostPortFree(candidate.port));
+      let project: ProjectConfig | undefined;
+      try {
+        project = this.resolveProjectForSession(owner);
+      } catch {
+        project = undefined;
+      }
+      const tmuxOwnerId = this.sidecarOwnerIdForName(owner, project, scName);
+      return sidecarTmuxAlive(tmuxOwnerId, scName);
+    }
+    // No parseable session/sidecar owner (host-occupied, unattributed, or a
+    // service-held port with no session record to consult): the only
+    // available signal is raw host occupancy.
+    return !(await isHostPortFree(candidate.port));
+  }
+
+  // Checked BEFORE withSidecarPortLock so a cached refusal never queues on
+  // the process-global lock. Never a permanent latch: an explicit
+  // clearPort bypasses this gate entirely, as do stop/complete/relaunch/
+  // restore/prune (this session's own lifecycle) AND sessionWithReleased
+  // SidecarPorts' cross-session clear (any OTHER session whose sidecar
+  // port this one's cached refusal named in reservedBy, the moment that
+  // OTHER session's release ACTUALLY drops the port — kill, stale-timeout
+  // park, worktree rebuild, restore rollback, or reconcileUnexpectedStop's
+  // crashed-holder path, every release site funnels through it). Beyond
+  // all of those, a post-deadline re-probe — at most once per backoff
+  // window, never on every attempt, since nextProbeAtMs is re-armed after
+  // each terminal refusal and failures is frozen once the gate starts
+  // short-circuiting the body's catch — runs the full start the moment it
+  // finds a blocked port has freed.
+  private async sidecarStartConflictGate(
+    sessionId: string,
+    sidecarName: string,
+  ): Promise<SidecarPortConflictError | null> {
+    const key = this.sidecarConflictKey(sessionId, sidecarName);
+    const state = this.sidecarStartConflictState.get(key);
+    // A defensive guard, not an active code path: sidecarStartConflictState
+    // now holds only real conflicts (recordSidecarStartConflict is the sole
+    // writer, always called with >=1 candidate per invariant 9 — the
+    // own-identity no-op dedup lives in its own sidecarStartNoopIdentity
+    // map, never here), so an empty candidates list on an existing entry
+    // should never occur.
+    if (!state || state.candidates.length === 0) {
+      return null;
+    }
+    const now = Date.now();
+    const deadlineAtMs = state.firstConflictAtMs + this.sidecarStartConflictDeadlineMs();
+    if (now >= deadlineAtMs) {
+      // Bounds the post-deadline re-probe to at most once per backoff
+      // window, not once per attempt: an unfreed port past the deadline
+      // still throws the cached payload here without a re-probe until
+      // nextProbeAtMs, which this branch re-arms below every time it stays
+      // blocked (failures is frozen once the gate starts short-circuiting
+      // the body's catch, so that cadence is a fixed
+      // min(base * 2^(failures-1), cap) from here on).
+      if (now < state.nextProbeAtMs) {
+        return new SidecarPortConflictError(sidecarName, state.candidates);
+      }
+      // One fleet refresh for the whole batch — same pattern as the reclaim
+      // scan, never N independent fresh reads.
+      await refreshTmuxFleetSnapshot();
+      // Cheap re-probe over only the previously blocked candidates — reuses
+      // the same reservation-or-occupancy predicate the initial scan used,
+      // never raw isHostPortFree alone.
+      const stillBlocked = await Promise.all(
+        state.candidates.map((candidate) => this.isConflictCandidateStillBlocked(candidate)),
+      );
+      if (stillBlocked.some((blocked) => !blocked)) {
+        this.sidecarStartConflictState.delete(key);
+        return null;
+      }
+      const base = this.sidecarStartConflictBaseMs();
+      const cap = backoffCapMs(SIDECAR_START_CONFLICT_BACKOFF_MAX_MS, base);
+      state.nextProbeAtMs = now + Math.min(base * 2 ** (state.failures - 1), cap);
+      if (!state.terminalEmitted) {
+        state.terminalEmitted = true;
+        this.logEvent("session.sidecar.start_rejected", {
+          level: "warn",
+          sessionId,
+          message: `Sidecar ${sidecarName} start refused: port conflict persisted past the retry deadline`,
+          details: {
+            reason: "port_conflict",
+            sidecarName,
+            candidates: state.candidates,
+            terminal: true,
+          },
+        });
+      }
+      return new SidecarPortConflictError(sidecarName, state.candidates);
+    }
+    if (now < state.nextProbeAtMs) {
+      return new SidecarPortConflictError(sidecarName, state.candidates);
+    }
+    return null;
+  }
+
+  private recordSidecarStartConflict(
+    sessionId: string,
+    sidecarName: string,
+    candidates: SidecarPortConflictCandidate[],
+  ): void {
+    const key = this.sidecarConflictKey(sessionId, sidecarName);
+    const existing = this.sidecarStartConflictState.get(key);
+    const base = this.sidecarStartConflictBaseMs();
+    const cap = backoffCapMs(SIDECAR_START_CONFLICT_BACKOFF_MAX_MS, base);
+    const failures = (existing?.failures ?? 0) + 1;
+    const now = Date.now();
+    this.sidecarStartConflictState.set(key, {
+      failures,
+      nextProbeAtMs: now + Math.min(base * 2 ** (failures - 1), cap),
+      // Safe to read via a bare `?? now`: sidecarStartConflictState now
+      // holds ONLY real conflicts (the no-op path writes its own separate
+      // sidecarStartNoopIdentity map), so an `existing` entry here always
+      // carries a genuine prior firstConflictAtMs, never a seeded 0.
+      firstConflictAtMs: existing?.firstConflictAtMs ?? now,
+      terminalEmitted: existing?.terminalEmitted ?? false,
+      candidates,
+    });
+  }
+
+  private clearSidecarStartConflict(sessionId: string, sidecarName: string): void {
+    const key = this.sidecarConflictKey(sessionId, sidecarName);
+    this.sidecarStartConflictState.delete(key);
+    this.sidecarStartNoopIdentity.delete(key);
+  }
+
+  // A cached refusal on session B can name session A's sidecar in a
+  // candidate's reservedBy (built as exactly `${sessionId}/${sidecarName}`,
+  // :6874-6879 — the record id, never a workspace/anchor id, so this is
+  // unrelated to the sidecarOwnerIdForName desk-shared class of bug).
+  // Called only from sessionWithReleasedSidecarPorts, once per sidecar name
+  // that call ACTUALLY drops — never for one it keeps (a kept desk-shared
+  // entry still blocks a waiting sibling; clearing there would let B's
+  // deadline restart on every kill of an unrelated desk member without the
+  // block it was waiting on ever actually lifting, re-arming exactly the
+  // bound this cache exists to enforce). Synchronous, no I/O: preserves
+  // sessionWithReleasedSidecarPorts' own no-await contract, so there is no
+  // withSidecarPortLock interleave hazard.
+  private clearSidecarStartConflictsReferencingReservedBy(reservedBy: string): void {
+    for (const key of [...this.sidecarStartConflictState.keys()]) {
+      const state = this.sidecarStartConflictState.get(key);
+      if (!state) {
+        continue;
+      }
+      if (state.candidates.some((candidate) => candidate.reservedBy === reservedBy)) {
+        this.sidecarStartConflictState.delete(key);
+      }
+    }
   }
 
   private releaseSidecarPortFromSession(
@@ -6868,6 +7237,18 @@ export class SessionService {
         liveDeskAnchors.add(workspaceIdOf(candidate));
       }
     }
+    // At most ONE fresh tmux fleet read per call (never per candidate): the
+    // fleet cache is a single shared entry, so N independent `{fresh: true}`
+    // reads inside the loop below would each discard the previous
+    // candidate's still-fresh snapshot and fork again — measured on this
+    // host as ~29 stale cross-desk duplicates, i.e. ~29 forks on every start
+    // attempt, on the exact retry path this bounded-refusal cache exists to
+    // relieve. One read taken here, before any candidate's liveness is
+    // decided, still closes GAP 1 (a booting sibling's reservation write
+    // races this scan's cached read): every candidate in this pass reads
+    // off the SAME post-refresh snapshot, none older than the instant this
+    // call started deciding.
+    let freshFleetReadDone = false;
     for (const liveSession of allSessions) {
       const holdsSidecarPorts =
         !isTerminalSessionStatus(liveSession.status) ||
@@ -6889,6 +7270,59 @@ export class SessionService {
             });
             continue;
           }
+          // A foreign recorded port that falls inside this sidecar's own
+          // configured ranges, whose recording owner's pane is no longer
+          // alive, and whose host port is genuinely free right now is a
+          // stale reservation (a session record that outlived its tmux
+          // pane) rather than a live collision — release it before it
+          // blocks every future start of this sidecar forever. Liveness is
+          // resolved through sidecarOwnerIdForName/sidecarTmuxAlive (never
+          // liveSession.id directly): a desk member's own record can be the
+          // one holding the port while the anchor's pane is what is
+          // actually alive, and this loop iterates raw session records.
+          // Liveness reads off the ONE fleet snapshot refreshed at most
+          // once per call (see freshFleetReadDone above), bypassing the
+          // ~2s tmux fleet cache exactly once, not once per candidate:
+          // ensureSidecarReservation writes sidecarPorts before
+          // createTmuxSidecarSession runs, so a cached read taken inside
+          // that window can see a brand-new sibling reservation's pane as
+          // "gone" before it has bound its port, reclaiming a port that is
+          // about to be live.
+          // Never a reclaim candidate when this record's OWN status is
+          // terminal and it only remains in this scan because a live desk
+          // sibling still needs the shared port (liveDeskAnchors above): a
+          // live member is exactly the case an anchor-owned reservation
+          // must survive, regardless of the anchor's own pane state.
+          const withinOwnRange =
+            !isTerminalSessionStatus(liveSession.status) &&
+            Object.values(sidecar.ports).some(
+              (portConfig) => port >= portConfig.start && port <= portConfig.end,
+            );
+          if (withinOwnRange) {
+            let otherProject: ProjectConfig | undefined;
+            try {
+              otherProject = this.resolveProjectForSession(liveSession);
+            } catch {
+              otherProject = undefined;
+            }
+            const otherOwnerId = this.sidecarOwnerIdForName(liveSession, otherProject, scName);
+            if (!freshFleetReadDone) {
+              await refreshTmuxFleetSnapshot();
+              freshFleetReadDone = true;
+            }
+            const otherAlive = await sidecarTmuxAlive(otherOwnerId, scName);
+            if (!otherAlive && (await isHostPortFree(port))) {
+              // The one write in this scan pass that escapes the plan/apply
+              // split below (:6890): it writes liveSession's record
+              // immediately, before this attempt's own reservation is known
+              // to succeed. Benign — the port is proven both pane-dead and
+              // host-free right here, so releasing it can never be
+              // rolled back into a wrong state even if this attempt later
+              // fails for an unrelated portId.
+              this.releaseSidecarPortFromSession(liveSession.id, scName, port);
+              continue;
+            }
+          }
           unavailable.add(port);
           portOwnership.set(port, {
             owner: liveSession.id,
@@ -6899,17 +7333,84 @@ export class SessionService {
       }
     }
 
-    const buildRangeCandidates = (
+    // Bounds the total holder-attribution work (findListenerPids +
+    // readProcessCwd) for one reservation attempt, not per port: 2x
+    // LISTENER_LOOKUP_TIMEOUT_MS (port-probe.ts) so a wedged lsof/ss on one
+    // port can never make attributing the rest of a wide range hang the
+    // whole start. Ports past the budget degrade to holder-unknown, never
+    // to "free".
+    const SIDECAR_CONFLICT_ATTRIBUTION_BUDGET_MS = 4_000;
+    const attributionDeadlineMs = Date.now() + SIDECAR_CONFLICT_ATTRIBUTION_BUDGET_MS;
+
+    // Emits a candidate ONLY for a port carrying a concrete block reason —
+    // already reserved (portOwnership), claimed by a sibling portId in this
+    // same attempt, or host-occupied. A free, unreserved, unclaimed port in
+    // the range is never offered: the caller's dropdown must only ever list
+    // what is actually blocking this start (measured bug: a free port named
+    // in the refusal message alongside the genuinely occupied ones).
+    const buildRangeCandidates = async (
       portId: string,
       portConfig: SidecarPortConfig,
-    ): SidecarPortConflictCandidate[] => {
+      claimedPorts: ReadonlySet<number>,
+      blockedAtSelection: ReadonlySet<number>,
+    ): Promise<SidecarPortConflictCandidate[]> => {
       const candidates: SidecarPortConflictCandidate[] = [];
       for (let port = portConfig.start; port <= portConfig.end; port += 1) {
+        const ownership = portOwnership.get(port);
+        if (ownership) {
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: ownership.owner,
+            reservedBy:
+              ownership.sessionId !== undefined
+                ? `${ownership.sessionId}${ownership.sidecarName ? `/${ownership.sidecarName}` : ""}`
+                : ownership.owner,
+          });
+          continue;
+        }
+        if (claimedPorts.has(port)) {
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: "external",
+            clearable: false,
+          });
+          continue;
+        }
+        if (await isHostPortFree(port)) {
+          if (!blockedAtSelection.has(port)) {
+            continue;
+          }
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: "external",
+          });
+          continue;
+        }
+        let holder: SidecarPortConflictCandidate["holder"];
+        if (Date.now() < attributionDeadlineMs) {
+          try {
+            const pids = await findListenerPids(port);
+            const pid = pids[0];
+            if (pid !== undefined) {
+              holder = { pid, cwd: await readProcessCwd(pid) };
+            }
+          } catch {
+            // Neither lsof nor ss ran: stays occupied-holder-unknown, never
+            // "free" and never a 500 replacing the 409.
+          }
+        }
         candidates.push({
           portId,
           env: portConfig.env,
           port,
-          owner: portOwnership.get(port)?.owner ?? "external",
+          owner: "external",
+          ...(holder ? { holder } : {}),
         });
       }
       return candidates;
@@ -6929,6 +7430,7 @@ export class SessionService {
     const plans: ReservationPlan[] = [];
     const claimed = new Set<number>();
     const conflictCandidates: SidecarPortConflictCandidate[] = [];
+    const failedPortIds: string[] = [];
     for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
       const env = portConfig.env;
       const existingPort = currentSidecarPorts[env];
@@ -6946,6 +7448,13 @@ export class SessionService {
 
       // The user chose a specific port to clear within this range: assume the
       // clear resolves it (host clear, plus tearing down any owning session).
+      // `!claimed.has(clearPort)` is also the GAP-2 safety guard: a port
+      // already claimed by a sibling portId in THIS attempt (surfaced to the
+      // caller as a conflict candidate with clearable:false) can never enter
+      // this branch, so the crossSession teardown below can never reap
+      // another session's sidecar for a port that attempt is about to use
+      // itself. Do not remove this condition, and do not add a second guard
+      // for the same case elsewhere — one path, already sufficient.
       if (
         clearPort !== undefined &&
         clearPort >= portConfig.start &&
@@ -6971,9 +7480,16 @@ export class SessionService {
 
       // Scan the range for a free, unclaimed port.
       let selectedPort: number | undefined;
+      const blockedAtSelection = new Set<number>();
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        if (claimed.has(candidate) || unavailable.has(candidate)) continue;
-        if (!(await isHostPortFree(candidate))) continue;
+        if (claimed.has(candidate) || unavailable.has(candidate)) {
+          blockedAtSelection.add(candidate);
+          continue;
+        }
+        if (!(await isHostPortFree(candidate))) {
+          blockedAtSelection.add(candidate);
+          continue;
+        }
         selectedPort = candidate;
         break;
       }
@@ -6983,11 +7499,28 @@ export class SessionService {
         continue;
       }
 
-      // Whole range occupied: offer every occupied port for the user to clear.
-      conflictCandidates.push(...buildRangeCandidates(portId, portConfig));
+      // Whole range occupied: offer every blocked port for the user to clear.
+      // The reservation for this portId is unsatisfiable — throw is driven
+      // by this explicit flag, never by conflictCandidates.length, so a
+      // portId that fails after another portId already narrowed candidates
+      // can never fall through into the apply pass.
+      conflictCandidates.push(
+        ...(await buildRangeCandidates(portId, portConfig, claimed, blockedAtSelection)),
+      );
+      failedPortIds.push(portId);
     }
 
-    if (conflictCandidates.length > 0) {
+    if (failedPortIds.length > 0) {
+      this.logEvent("session.sidecar.start_rejected", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Sidecar ${sidecarName} start refused: port conflict on ${failedPortIds.join(", ")}`,
+        details: {
+          reason: "port_conflict",
+          sidecarName,
+          candidates: conflictCandidates,
+        },
+      });
       throw new SidecarPortConflictError(sidecarName, conflictCandidates);
     }
 
@@ -7044,184 +7577,309 @@ export class SessionService {
     sidecarDepth: number;
     clearPort?: number;
   }): Promise<SessionRecord> {
+    if (args.clearPort === undefined) {
+      const cached = await this.sidecarStartConflictGate(args.session.id, args.sidecarName);
+      if (cached) {
+        throw cached;
+      }
+    }
+    return this.startSidecarInternalLocked(args);
+  }
+
+  private async startSidecarInternalLocked(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecar: ProjectConfig["sidecars"][string];
+    sidecarDepth: number;
+    clearPort?: number;
+  }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
-      const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
-      const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
-      // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
-      // "session exists" — that pane's escapee tree can hold a reserved port
-      // forever unless treated as not-alive here and reaped before restart.
-      const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
-      if (alive && !paneDead) {
-        if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
-          this.scheduleSidecarUrlReadyAndPublish(
+      // Mutated only while the lock is held: the only racer is
+      // startMcpSidecars during spawn, and a lost increment there only
+      // delays the terminal event, never a false refusal.
+      if (args.clearPort !== undefined) {
+        this.clearSidecarStartConflict(args.session.id, args.sidecarName);
+      }
+      try {
+        return await this.startSidecarInternalBody(args);
+      } catch (error) {
+        if (error instanceof SidecarPortConflictError) {
+          this.recordSidecarStartConflict(
             args.session.id,
             args.sidecarName,
-            args.sidecar,
-            args.session,
-          );
-        }
-        return args.session;
-      }
-      if (paneDead) {
-        await this.reapSidecarByName(args.session.id, args.sidecarName);
-        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
-      } else if (!alive) {
-        // tmux session/window is gone entirely (killed externally, crashed)
-        // rather than merely pane-dead. Mirrors killSidecarAndUnlinkSlot:
-        // fall through to the recorded sidecarProcs identity — the exact
-        // leak shape reapRecordedIdentity targets — before reserving the
-        // port for a new instance, or a still-live escapee tree from the
-        // old instance keeps running under the reused port.
-        const owner = readSession(this.config.dataDir, args.session.id);
-        const identity = owner?.sidecarProcs?.[args.sidecarName];
-        if (owner && identity) {
-          const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
-          this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
-        }
-        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
-      }
-
-      // REQ5: refuse rather than reuse or auto-reap a genuine cross-workspace
-      // port collision. Checked after the stale-pane cleanup above (which
-      // only ever touches this session's own pane/identity) but before
-      // ensureSidecarReservation, so a real collision is caught before any
-      // reservation side effect runs.
-      await this.refuseOverlappingCrossWorkspaceSidecar(
-        args.session,
-        args.sidecarName,
-        args.sidecar,
-        args.clearPort,
-      );
-
-      // Built-ins may defer command resolution (e.g. a bundle-resolved bin
-      // path) to this point instead of config load — see BuiltinSidecarDef.
-      const resolvedCommand =
-        BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
-
-      const agentConfig = this.sessionAgentConfig(args.session);
-      const reservedSession = await this.ensureSidecarReservation(
-        args.session,
-        args.sidecarName,
-        args.sidecar,
-        args.clearPort,
-      );
-
-      const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
-      const sessionToolDir = existsSync(existingToolDir)
-        ? existingToolDir
-        : this.prepareSessionTools(
-            reservedSession.id,
-            reservedSession.agent,
-            reservedSession.project,
-          );
-      const sessionEnv = buildSessionEnv({
-        agent: reservedSession.agent,
-        projectId: reservedSession.project,
-        sessionId: reservedSession.id,
-        artifactsSessionId: workspaceIdOf(reservedSession),
-        sessionToolDir,
-        dataDir: this.config.dataDir,
-        repoPath: args.project.path,
-        symlinks: args.project.symlinks,
-        ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
-      });
-
-      try {
-        await createTmuxSidecarSession({
-          sessionId: reservedSession.id,
-          sidecarName: args.sidecarName,
-          cwd: reservedSession.worktreePath,
-          command: resolvedCommand,
-          env: buildSidecarRuntimeEnv(
-            sessionEnv,
-            reservedSession,
-            args.sidecarName,
-            args.sidecar.env,
-            args.sidecarDepth,
-          ),
-        });
-        await verifySidecarStartup(reservedSession.id, args.sidecarName);
-
-        // Record this instance's identity so a tree that outlives its
-        // tmux supervisor is still identifiable and reapable later — see
-        // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
-        // (race, no procfs) leaves sidecarProcs unset for this name rather
-        // than blocking the start.
-        const freshPanePid = await getTmuxPanePid(
-          sidecarTmuxSession(reservedSession.id, args.sidecarName),
-          { fresh: true },
-        );
-        const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
-        const identity: SidecarProcessIdentity | undefined =
-          freshPanePid !== null && starttime !== null
-            ? { pid: freshPanePid, pgid: freshPanePid, starttime }
-            : undefined;
-
-        const sidecarNames = sessionSidecarNames(reservedSession, args.project);
-        // clearSidecarProcEntry above already dropped this name from disk
-        // when the pane was dead or the tmux session was gone —
-        // reservedSession can still be a stale
-        // in-memory copy from before that write (ensureSidecarReservation
-        // returns the untouched `session` param when the sidecar has no
-        // ports to reserve). Build sidecarProcs explicitly rather than
-        // trusting the `...reservedSession` spread, so an unreadable
-        // identity persists as cleared instead of resurrecting the stale
-        // pgid clearSidecarProcEntry just removed.
-        const sidecarProcsWithoutStale = Object.fromEntries(
-          Object.entries(reservedSession.sidecarProcs ?? {}).filter(
-            ([name]) => name !== args.sidecarName,
-          ),
-        );
-        const nextSidecarProcs = identity
-          ? { ...sidecarProcsWithoutStale, [args.sidecarName]: identity }
-          : sidecarProcsWithoutStale;
-        const updated: SessionRecord = {
-          ...reservedSession,
-          updatedAt: nowIso(),
-          ...(sidecarNames.includes(args.sidecarName)
-            ? {}
-            : { sidecarNames: [...sidecarNames, args.sidecarName] }),
-        };
-        if (Object.keys(nextSidecarProcs).length > 0) {
-          updated.sidecarProcs = nextSidecarProcs;
-        } else {
-          delete updated.sidecarProcs;
-        }
-        writeSession(this.config.dataDir, updated);
-        this.scheduleSidecarUrlReadyAndPublish(
-          reservedSession.id,
-          args.sidecarName,
-          args.sidecar,
-          updated,
-        );
-        return readSession(this.config.dataDir, updated.id) ?? updated;
-      } catch (error) {
-        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
-        this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
-        const baseRecord =
-          reservedSession !== args.session
-            ? args.session
-            : (readSession(this.config.dataDir, args.session.id) ?? args.session);
-        const resolved = resolveWorkspaceState(this.config.dataDir, baseRecord);
-        const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, args.sidecarName);
-        const slotsChanged = nextSlots !== resolved.slots;
-        if (reservedSession !== args.session || slotsChanged) {
-          // Rolls the reserved-port state back off this session's own record.
-          writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
-        }
-        if (slotsChanged) {
-          this.writeWorkspaceStateWithLegacyMirror(
-            baseRecord,
-            {
-              ...(nextSlots ? { slots: nextSlots } : {}),
-              ...(resolved.pr ? { pr: resolved.pr } : {}),
-            },
-            { touchUpdatedAt: true },
+            error.payload.candidates,
           );
         }
         throw error;
       }
     });
+  }
+
+  private async startSidecarInternalBody(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecar: ProjectConfig["sidecars"][string];
+    sidecarDepth: number;
+    clearPort?: number;
+  }): Promise<SessionRecord> {
+    const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
+    const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
+    // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
+    // "session exists" — that pane's escapee tree can hold a reserved port
+    // forever unless treated as not-alive here and reaped before restart.
+    const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
+    if (alive && !paneDead) {
+      if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
+        this.scheduleSidecarUrlReadyAndPublish(
+          args.session.id,
+          args.sidecarName,
+          args.sidecar,
+          args.session,
+        );
+      }
+      return args.session;
+    }
+    if (paneDead) {
+      await this.reapSidecarByName(args.session.id, args.sidecarName);
+      this.clearSidecarProcEntry(args.session.id, args.sidecarName);
+    } else if (!alive) {
+      // tmux session/window is gone entirely (killed externally, crashed)
+      // rather than merely pane-dead. Mirrors killSidecarAndUnlinkSlot:
+      // fall through to the recorded sidecarProcs identity — the exact
+      // leak shape reapRecordedIdentity targets — before reserving the
+      // port for a new instance, or a still-live escapee tree from the
+      // old instance keeps running under the reused port.
+      const owner = readSession(this.config.dataDir, args.session.id);
+      const identity = owner?.sidecarProcs?.[args.sidecarName];
+      // Own-identity no-op: the tmux supervisor is gone, but the recorded
+      // process is still the exact one genuinely serving the recorded
+      // ports — a retry against a repeat-failing caller (e.g. a wake
+      // retry loop) must not reap and relaunch a healthy instance out
+      // from under itself. Order is load-bearing: staleness -> occupancy
+      // -> one snapshot for listener attribution, never a snapshot
+      // before staleness/occupancy have narrowed the candidate, and never
+      // before this point (a match here skips reapRecordedIdentity
+      // entirely, so it must run first).
+      const recordedPorts = Object.values(owner?.sidecarPorts?.[args.sidecarName] ?? {});
+      if (owner && identity && recordedPorts.length > 0) {
+        const starttime = await readProcessStarttime(identity.pid);
+        const stillSameProcess = starttime !== null && starttime === identity.starttime;
+        const stillOccupied =
+          stillSameProcess &&
+          (await Promise.all(recordedPorts.map((port) => isHostPortFree(port)))).every(
+            (free) => !free,
+          );
+        if (stillOccupied) {
+          const snapshot = await snapshotProcesses();
+          const attributed =
+            snapshot.ok &&
+            (
+              await Promise.all(
+                recordedPorts.map(async (port) => {
+                  let listenerPids: number[];
+                  try {
+                    listenerPids = await findListenerPids(port);
+                  } catch {
+                    return false;
+                  }
+                  return listenerPids.some(
+                    (pid) =>
+                      pid === identity.pid || snapshot.byPid.get(pid)?.pgid === identity.pgid,
+                  );
+                }),
+              )
+            ).every(Boolean);
+          if (attributed) {
+            const noopKey = this.sidecarConflictKey(args.session.id, args.sidecarName);
+            const seen = this.sidecarStartNoopIdentity.get(noopKey);
+            if (seen?.pid !== identity.pid || seen.starttime !== identity.starttime) {
+              this.sidecarStartNoopIdentity.set(noopKey, {
+                pid: identity.pid,
+                starttime: identity.starttime,
+              });
+              this.logEvent("session.sidecar.start_noop", {
+                level: "info",
+                sessionId: args.session.id,
+                message: `Sidecar ${args.sidecarName} start is a no-op: the recorded process is still serving its reserved ports`,
+                details: { sidecarName: args.sidecarName },
+              });
+            }
+            // Mirrors the pane-alive early return's call exactly, but the
+            // eventual publishSidecarLink write is gated on
+            // sidecarTmuxAlive(sessionId, sidecarName) (see :7599's real
+            // gate) — and by this path's own definition tmux is gone, so
+            // that gate always blocks the write here. Harmless in the
+            // common case: a recorded sidecarProcs identity implies a
+            // prior successful start that already published the link, and
+            // tmux death alone does not unlink the slot. Narrow real gap:
+            // if an earlier probe failure ran
+            // writeSessionWithUnlinkedSidecarSlot, the link can never come
+            // back through this path — only an explicit stop+start
+            // recovers it. Not fixed here; tracked as
+            // https://github.com/ashugaev/spur/issues/912.
+            if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
+              this.scheduleSidecarUrlReadyAndPublish(
+                args.session.id,
+                args.sidecarName,
+                args.sidecar,
+                args.session,
+              );
+            }
+            return args.session;
+          }
+        }
+      }
+      if (owner && identity) {
+        const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+        this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
+      }
+      this.clearSidecarProcEntry(args.session.id, args.sidecarName);
+    }
+
+    // REQ5: refuse rather than reuse or auto-reap a genuine cross-workspace
+    // port collision. Checked after the stale-pane cleanup above (which
+    // only ever touches this session's own pane/identity) but before
+    // ensureSidecarReservation, so a real collision is caught before any
+    // reservation side effect runs.
+    await this.refuseOverlappingCrossWorkspaceSidecar(
+      args.session,
+      args.sidecarName,
+      args.sidecar,
+      args.clearPort,
+    );
+
+    // Built-ins may defer command resolution (e.g. a bundle-resolved bin
+    // path) to this point instead of config load — see BuiltinSidecarDef.
+    const resolvedCommand =
+      BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
+
+    const agentConfig = this.sessionAgentConfig(args.session);
+    const reservedSession = await this.ensureSidecarReservation(
+      args.session,
+      args.sidecarName,
+      args.sidecar,
+      args.clearPort,
+    );
+
+    const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
+    const sessionToolDir = existsSync(existingToolDir)
+      ? existingToolDir
+      : this.prepareSessionTools(
+          reservedSession.id,
+          reservedSession.agent,
+          reservedSession.project,
+        );
+    const sessionEnv = buildSessionEnv({
+      agent: reservedSession.agent,
+      projectId: reservedSession.project,
+      sessionId: reservedSession.id,
+      artifactsSessionId: workspaceIdOf(reservedSession),
+      sessionToolDir,
+      dataDir: this.config.dataDir,
+      repoPath: args.project.path,
+      symlinks: args.project.symlinks,
+      closeoutOwner: reservedSession.closeoutOwner === true,
+      ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
+    });
+
+    try {
+      await createTmuxSidecarSession({
+        sessionId: reservedSession.id,
+        sidecarName: args.sidecarName,
+        cwd: reservedSession.worktreePath,
+        command: resolvedCommand,
+        env: buildSidecarRuntimeEnv(
+          sessionEnv,
+          reservedSession,
+          args.sidecarName,
+          args.sidecar.env,
+          args.sidecarDepth,
+        ),
+      });
+      await verifySidecarStartup(reservedSession.id, args.sidecarName);
+
+      // Record this instance's identity so a tree that outlives its
+      // tmux supervisor is still identifiable and reapable later — see
+      // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
+      // (race, no procfs) leaves sidecarProcs unset for this name rather
+      // than blocking the start.
+      const freshPanePid = await getTmuxPanePid(
+        sidecarTmuxSession(reservedSession.id, args.sidecarName),
+        { fresh: true },
+      );
+      const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
+      const identity: SidecarProcessIdentity | undefined =
+        freshPanePid !== null && starttime !== null
+          ? { pid: freshPanePid, pgid: freshPanePid, starttime }
+          : undefined;
+
+      const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+      // clearSidecarProcEntry above already dropped this name from disk
+      // when the pane was dead or the tmux session was gone —
+      // reservedSession can still be a stale
+      // in-memory copy from before that write (ensureSidecarReservation
+      // returns the untouched `session` param when the sidecar has no
+      // ports to reserve). Build sidecarProcs explicitly rather than
+      // trusting the `...reservedSession` spread, so an unreadable
+      // identity persists as cleared instead of resurrecting the stale
+      // pgid clearSidecarProcEntry just removed.
+      const sidecarProcsWithoutStale = Object.fromEntries(
+        Object.entries(reservedSession.sidecarProcs ?? {}).filter(
+          ([name]) => name !== args.sidecarName,
+        ),
+      );
+      const nextSidecarProcs = identity
+        ? { ...sidecarProcsWithoutStale, [args.sidecarName]: identity }
+        : sidecarProcsWithoutStale;
+      const updated: SessionRecord = {
+        ...reservedSession,
+        updatedAt: nowIso(),
+        ...(sidecarNames.includes(args.sidecarName)
+          ? {}
+          : { sidecarNames: [...sidecarNames, args.sidecarName] }),
+      };
+      if (Object.keys(nextSidecarProcs).length > 0) {
+        updated.sidecarProcs = nextSidecarProcs;
+      } else {
+        delete updated.sidecarProcs;
+      }
+      writeSession(this.config.dataDir, updated);
+      this.clearSidecarStartConflict(args.session.id, args.sidecarName);
+      this.scheduleSidecarUrlReadyAndPublish(
+        reservedSession.id,
+        args.sidecarName,
+        args.sidecar,
+        updated,
+      );
+      return readSession(this.config.dataDir, updated.id) ?? updated;
+    } catch (error) {
+      await this.reapSidecarByName(reservedSession.id, args.sidecarName);
+      this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+      const baseRecord =
+        reservedSession !== args.session
+          ? args.session
+          : (readSession(this.config.dataDir, args.session.id) ?? args.session);
+      const resolved = resolveWorkspaceState(this.config.dataDir, baseRecord);
+      const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, args.sidecarName);
+      const slotsChanged = nextSlots !== resolved.slots;
+      if (reservedSession !== args.session || slotsChanged) {
+        // Rolls the reserved-port state back off this session's own record.
+        writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
+      }
+      if (slotsChanged) {
+        this.writeWorkspaceStateWithLegacyMirror(
+          baseRecord,
+          {
+            ...(nextSlots ? { slots: nextSlots } : {}),
+            ...(resolved.pr ? { pr: resolved.pr } : {}),
+          },
+          { touchUpdatedAt: true },
+        );
+      }
+      throw error;
+    }
   }
 
   // Pre-launch pass for sidecars that must exist before the agent's launch
@@ -8786,6 +9444,8 @@ export class SessionService {
       replacingSessionId?: string;
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
+      closeoutOwnerTransfer?: boolean;
+      sensitivePromptSuffix?: string;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -8940,6 +9600,14 @@ export class SessionService {
       const tmuxSession = sessionId;
       createdAt = nowIso();
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+        ...(options?.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
+      });
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -8965,6 +9633,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -9119,7 +9788,7 @@ export class SessionService {
           );
         }
       }
-      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+      const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
           id: sessionId,
@@ -9129,7 +9798,13 @@ export class SessionService {
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
-      });
+      };
+      const launchPlan = options?.sensitivePromptSuffix
+        ? buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions, {
+            text: options.sensitivePromptSuffix,
+            sensitive: true,
+          })
+        : buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
       const promptDeliveredOnLaunch =
         launchPlan.initialMessageDeliveredOnLaunch === true ||
         (startupImagePaths.length > 0 &&
@@ -9173,6 +9848,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
@@ -9263,6 +9939,25 @@ export class SessionService {
       }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
+      }
+
+      if (launchPlan.deferredSensitiveInitialMessage) {
+        stage = "prompt.sensitive_controls";
+        await this.sendDeferredSensitiveInitialMessage(
+          runningRecord,
+          launchPlan.deferredSensitiveInitialMessage.text,
+        );
+        this.logEvent("session.spawn.sensitive_controls_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent automatic ping controls to ${sessionId}`,
+          details: {
+            controlCount: (launchPlan.deferredSensitiveInitialMessage.text.match(/ap1_/g) ?? [])
+              .length,
+            outcome: "submitted",
+          },
+        });
       }
 
       stage = "record.write";
@@ -9771,6 +10466,11 @@ export class SessionService {
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+      });
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -9780,6 +10480,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
@@ -10166,6 +10867,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -10737,7 +11439,7 @@ export class SessionService {
   async deliver(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean },
+    options?: { interrupt?: boolean; sensitivePromptSuffix?: string },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -10750,7 +11452,16 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
+    const result = await this.deliverPrepared(sessionId, message, {
+      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+      entryPoint: "deliver",
+    });
+    if (options?.sensitivePromptSuffix) {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) throw new Error(`Session not found: ${sessionId}`);
+      await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+    }
+    return result;
   }
 
   // Content-keyed: both queue ops locate the exact string in the queue rather
@@ -11140,7 +11851,11 @@ export class SessionService {
         this.historyCaptureStamps.get(stampKey),
         (payload) => {
           const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, anchorId);
-          writeFileSync(join(artifactDir, artifactId), payload);
+          writeFileSync(
+            join(artifactDir, artifactId),
+            redactAutoPingHandles(payload.toString("utf8")),
+            "utf8",
+          );
         },
       );
       // Nothing new in the source: no file, no metadata entry, no artifact id.
@@ -11231,6 +11946,37 @@ export class SessionService {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
     );
+  }
+
+  private async sendDeferredSensitiveInitialMessage(
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
+    message: string,
+  ): Promise<AgentSendOutcome> {
+    return this.withPaneWriteLock(session.tmuxSession, async () => {
+      const binding = agentWaitsForSubmitAck(session.agent)
+        ? await createAgentSubmitAckBinding(session.agent, {
+            worktreePath: session.worktreePath,
+            codexSessionsDir: join(
+              codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+              "sessions",
+            ),
+            ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+            freshLaunch: false,
+          })
+        : null;
+      await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+      if (!binding) return "submitted" as const;
+      const pacing = agentSubmitAckPacing(session.agent, { freshLaunch: false });
+      for (let attempt = 0; attempt <= pacing.maxResends; attempt += 1) {
+        const result = await this.waitForSubmitAck(binding, message, pacing.windowMs);
+        if (result.found) return "submitted" as const;
+        if (attempt < pacing.maxResends) await sendSubmitKeyToTmux(session.tmuxSession);
+      }
+      throw new Error(`Agent did not acknowledge deferred controls for ${session.id}`);
+    });
   }
 
   private async writeAgentMessage(
@@ -11903,6 +12649,10 @@ export class SessionService {
     if (!sidecarNames.includes(sidecarName)) {
       throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
     }
+    // A stopped sidecar can free the exact port a cached refusal is waiting
+    // on; never make the next start wait out the backoff for a condition
+    // this stop just resolved.
+    this.clearSidecarStartConflict(sessionId, sidecarName);
     const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
     const sidecar = project?.sidecars[sidecarName];
     const clearsWorkspaceReplay = sidecar !== undefined && !sidecar.mcp;
@@ -12080,7 +12830,20 @@ export class SessionService {
   // Strips sidecarPorts from a going-terminal record, keeping only the
   // anchor-owned (non-mcp, desk-shared) entries while another desk member's
   // agent is still running and using them. Route every terminal-write site
-  // through this instead of a wholesale delete.
+  // through this instead of a wholesale delete — the single choke point
+  // for "this session no longer holds this sidecar's port(s)", covering
+  // every release path (kill, stop, complete, stale-timeout park, restore
+  // rollback, relaunch, reconcileUnexpectedStop's crashed-holder path, ...).
+  //
+  // A cached start-conflict refusal on another (waiting) session can name
+  // this session's sidecar in a candidate's reservedBy. As a side effect,
+  // for every sidecar name this call ACTUALLY drops (never one it keeps —
+  // releasableSidecarPorts keeps a whole name or drops it whole, never
+  // partially), clear any such cached refusal: the deadline/backoff bound
+  // (invariant 6, "no permanent latch") is a session's OWN gate, but its
+  // only invalidation hooks are its own lifecycle and its own elapsed
+  // time — nothing else fires just because the OTHER session actually
+  // holding the port went away, whichever of the 9 call sites that was.
   private sessionWithReleasedSidecarPorts(session: SessionRecord): SessionRecord {
     if (!session.sidecarPorts) {
       return session;
@@ -12090,6 +12853,12 @@ export class SessionService {
       this.resolveProjectForSession(session),
       this.hasRunningWorkspaceMembers(session),
     );
+    for (const sidecarName of Object.keys(session.sidecarPorts)) {
+      if (kept?.[sidecarName] !== undefined) {
+        continue;
+      }
+      this.clearSidecarStartConflictsReferencingReservedBy(`${session.id}/${sidecarName}`);
+    }
     const { sidecarPorts: _dropped, ...rest } = session;
     return kept ? { ...rest, sidecarPorts: kept } : rest;
   }
@@ -12133,6 +12902,7 @@ export class SessionService {
     this.conversationReadChain.delete(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
+    this.cursorPaneReadyOverrides.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
@@ -12644,10 +13414,13 @@ export class SessionService {
       return session;
     }
 
-    // Claude and OpenCode sessions pin their native session id. Never overwrite
+    // Claude, OpenCode, and Cursor sessions pin their native session id. Never overwrite
     // one with newest-session discovery, which could bind a sibling session
     // sharing the worktree. Legacy records without an id keep discovery below.
-    if ((session.agent === "claude" || session.agent === "opencode") && session.agentSessionId) {
+    if (
+      (session.agent === "claude" || session.agent === "opencode" || session.agent === "cursor") &&
+      session.agentSessionId
+    ) {
       return session;
     }
 
@@ -12883,6 +13656,11 @@ export class SessionService {
     project: ProjectConfig,
   ): Promise<SessionRecord> {
     this.clearTargetGoneNudgeGate(session.id);
+    // A relaunch replays every sidecar from scratch; a cached refusal from
+    // before this relaunch must never carry over.
+    for (const name of Object.keys(project.sidecars)) {
+      this.clearSidecarStartConflict(session.id, name);
+    }
     await this.assertNoForeignAgentForSession(
       session,
       await this.lookupPanePidQuietly(session.tmuxSession),
@@ -12970,6 +13748,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
+      closeoutOwner: session.closeoutOwner === true,
       ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
     });
 
@@ -13197,6 +13976,17 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     this.clearTargetGoneNudgeGate(sessionId);
+    // A restore can replay every sidecar afresh (directly, or via
+    // relaunchSessionInPlace on the fresh-launch fallback); a cached
+    // refusal from before this restore must never carry over.
+    try {
+      const restoreProject = this.resolveProjectForSession(session);
+      for (const name of Object.keys(restoreProject?.sidecars ?? {})) {
+        this.clearSidecarStartConflict(sessionId, name);
+      }
+    } catch {
+      // Unknown project: nothing recorded to clear.
+    }
     // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
     // path reads the session directly rather than through that method, so
     // isRestorableSession's workspaceExists (computed by enrich() below) would
@@ -13410,6 +14200,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: this.getProject(current.project).path,
         symlinks: this.getProject(current.project).symlinks,
+        closeoutOwner: current.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
@@ -14061,6 +14852,13 @@ export class SessionService {
     return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
+  private clearCloseoutOwner(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (session?.closeoutOwner !== true) return;
+    writeSession(this.config.dataDir, { ...session, closeoutOwner: false, updatedAt: nowIso() });
+    this.stateCache.delete(sessionId);
+  }
+
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -14127,9 +14925,11 @@ export class SessionService {
       }),
       {
         modeResolution: "carried",
+        closeoutOwnerTransfer: session.closeoutOwner === true,
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
+    this.clearCloseoutOwner(session.id);
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
@@ -14276,9 +15076,11 @@ export class SessionService {
           replacingSessionId: session.id,
           admissionReservation,
           modeResolution: "carried",
+          closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
           ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
         },
       );
+      this.clearCloseoutOwner(session.id);
 
       const spawnedRecord = readSession(this.config.dataDir, spawned.id);
       if (spawnedRecord) {
@@ -14534,6 +15336,9 @@ export class SessionService {
   }
 
   private async runDeliveryLoop(sessionId: string): Promise<void> {
+    // Per-run state, not an instance field: the bound must not leak budget
+    // across separate delivery runs for the same session.
+    let healContinues = 0;
     try {
       for (;;) {
         if (this.deliveryStopped) {
@@ -14566,6 +15371,43 @@ export class SessionService {
           }
 
           if (waitOutcome === "stopped") {
+            // deliveryStopped means daemon shutdown, not drift: stay silent so
+            // dispose() never produces a diagnostic event, matching the
+            // pipeline branch below. isDeliveryStopped() is a call, not the
+            // field directly, because dispose() can flip the field during the
+            // wait above and this re-check must not inherit the loop-top
+            // guard's stale `false` narrowing.
+            if (!this.isDeliveryStopped()) {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
+              if (
+                latest?.queuedMessages?.awaitingPrompt === true &&
+                latest.status !== "running" &&
+                latest.stopReason === undefined &&
+                !isTerminalSessionStatus(latest.status)
+              ) {
+                this.logEvent("session.message.stalled", {
+                  level: "warn",
+                  sessionId,
+                  projectId: latest.project,
+                  message: `Message delivery stalled for ${sessionId}: session status is ${latest.status} while ${queuedMessages(latest).length} message(s) are still queued`,
+                  details: {
+                    queuedCount: queuedMessages(latest).length,
+                    sessionStatus: latest.status,
+                  },
+                });
+              }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
+              }
+            }
             return;
           }
 
@@ -14600,6 +15442,10 @@ export class SessionService {
             // guard's stale `false` narrowing.
             if (!this.isDeliveryStopped()) {
               const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
               if (
                 latest?.pipeline?.status === "running" &&
                 latest.status !== "running" &&
@@ -14621,6 +15467,13 @@ export class SessionService {
                     sessionStatus: latest.status,
                   },
                 });
+              }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
               }
             }
             return;
@@ -15533,16 +16386,13 @@ export class SessionService {
     stateSource: StateSource,
     historySourcePath: string | null,
     serverError: boolean,
+    serverErrorEvidence?: "error" | "recovered",
   ): Promise<SessionStateTransition[]> {
-    // The state can stay "error" across many ticks while the marker must
-    // still be armed/cleared, so this runs outside the transition branch
-    // below. Gated on the in-hand session record (no extra readSession) so
-    // the steady state (serverError already agrees with session.serverErrorAt)
-    // costs nothing.
+    // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
       this.writeServerErrorMarker(session.id, nowIso());
-    } else if (!serverError && session.serverErrorAt) {
-      this.writeServerErrorMarker(session.id, null);
+    } else if (serverErrorEvidence === "recovered" && session.serverErrorAt) {
+      this.writeServerErrorMarker(session.id, null, session.serverErrorAt);
     }
 
     const history = this.stateHistory.get(session.id) ?? [];
@@ -15593,7 +16443,11 @@ export class SessionService {
 
   // Sole writer/clearer of serverErrorAt outside the wake-loop CAS re-arm.
   // Re-reads before writing since this runs off the in-hand session record.
-  private writeServerErrorMarker(sessionId: string, serverErrorAt: string | null): void {
+  private writeServerErrorMarker(
+    sessionId: string,
+    serverErrorAt: string | null,
+    observedMarker?: string,
+  ): void {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) return;
     if (serverErrorAt) {
@@ -15604,8 +16458,12 @@ export class SessionService {
       if (current.serverErrorAt) return;
       writeSession(this.config.dataDir, { ...current, serverErrorAt, updatedAt: nowIso() });
     } else {
-      if (!current.serverErrorAt) return;
-      const { serverErrorAt: _serverErrorAt, ...base } = current;
+      if (!current.serverErrorAt || current.serverErrorAt !== observedMarker) return;
+      const {
+        serverErrorAt: _serverErrorAt,
+        serverErrorReactivationAttempts: _attempts,
+        ...base
+      } = current;
       writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
     }
   }
@@ -15953,6 +16811,7 @@ export class SessionService {
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
+    let serverErrorEvidence: "error" | "recovered" | undefined;
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
@@ -15975,6 +16834,14 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
+          if (jsonlResult.serverError) serverErrorEvidence = "error";
+          else if (
+            session.agentSessionId &&
+            session.serverErrorAt &&
+            hasClaudeRecoveryAfter(jsonlResult.reader.tailRecords, session.serverErrorAt)
+          ) {
+            serverErrorEvidence = "recovered";
+          }
           serverErrorJsonlPath = jsonlResult.reader.filePath;
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
@@ -16025,6 +16892,11 @@ export class SessionService {
           session.worktreePath,
           this.cursorJsonlReaders.get(session.id),
           session.agentSessionId,
+          {
+            minMtimeMs: session.agentSessionId
+              ? undefined
+              : Math.max(0, new Date(session.createdAt).getTime() - 60_000),
+          },
         );
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
@@ -16211,6 +17083,36 @@ export class SessionService {
           rateLimit = null;
           classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         }
+      } else if (scanPane && strategy === "cursor_jsonl") {
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        if (!rateLimit?.limited) {
+          const tmuxHit = scanTmuxRateLimit(paneText);
+          if (tmuxHit?.limited) {
+            rateLimit = tmuxHit;
+          }
+        }
+        if (
+          state === "error" &&
+          cursorShowsReadyPrompt(paneText) &&
+          !rateLimitActive(rateLimit, nowMs)
+        ) {
+          state = "waiting";
+          this.cursorPaneReadyOverrides.set(session.id, nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS);
+          classifiedDetail = "State: waiting (cursor pane ready override)";
+        } else {
+          this.cursorPaneReadyOverrides.delete(session.id);
+        }
+      } else if (!scanPane && strategy === "cursor_jsonl") {
+        const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
+        if (
+          expiresAt !== undefined &&
+          expiresAt > nowMs &&
+          state === "error" &&
+          !rateLimitActive(rateLimit, nowMs)
+        ) {
+          state = "waiting";
+          classifiedDetail = "State: waiting (cursor pane ready override)";
+        }
       } else if (scanPane && !rateLimit?.limited && strategy !== "opencode") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         const tmuxHit = scanTmuxRateLimit(paneText);
@@ -16271,11 +17173,9 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
-      // Only true when the hasServerErrorRecord arm above actually applied. A
-      // live rate_limit record wins state outright, so this reports false and
-      // updateStateHistory's clear branch drops any stale serverErrorAt
-      // instead of arming it.
+      // Keep queue/state classification separate from positive recovery evidence.
       serverError: state === "error" && hasServerErrorRecord,
+      ...(serverErrorEvidence ? { serverErrorEvidence } : {}),
       workspacePresent: workspace.exists,
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
@@ -16311,6 +17211,7 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
+      classified.serverErrorEvidence,
     );
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
@@ -16456,6 +17357,7 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
+      classified.serverErrorEvidence,
     );
 
     const services: ServiceInstanceView[] = [];

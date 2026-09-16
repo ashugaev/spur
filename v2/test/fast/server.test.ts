@@ -1,9 +1,11 @@
 import * as fs from "node:fs";
+import * as hostMemory from "../../src/host-memory.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { logSpurEvent, readEventLog } from "../../src/event-log.js";
+import { logSpurEvent, readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
+import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
@@ -42,6 +44,130 @@ describe("startServer", () => {
     expect(fs.existsSync(configPath)).toBe(false);
   });
 
+  const autoPingServerTest = async (): Promise<void> => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    sources:",
+        "      clock:",
+        "        type: cron",
+        "        schedule: '* * * * *'",
+        "    triggers:",
+        "      reminder:",
+        "        source: clock",
+        "        event: cron:tick",
+        "        spawn:",
+        "          blocks:",
+        "            - prompt: reminder",
+      ].join("\n"),
+      "utf8",
+    );
+    writeSession(dataDir, {
+      id: "demo-1",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "main",
+      worktree: false,
+      worktreePath: repoDir,
+      tmuxSession: "demo-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    });
+    const policy = new AutoPingService(dataDir);
+    const routeFingerprint = autoPingRouteFingerprint({
+      version: 1,
+      projectId: "demo",
+      triggerId: "reminder",
+      sourceId: "clock",
+      sourceType: "cron",
+      eventName: "cron:tick",
+      actionKind: "spawn",
+      destination: { kind: "trigger" },
+      spawnDeskGroup: false,
+    });
+    const grant = policy.createGrant({
+      scope: "event",
+      routeFingerprint,
+      destination: { kind: "trigger" },
+      target: { kind: "occurrence", occurrenceId: "occurrence-1" },
+      actorSessionId: "demo-1",
+    });
+    policy.dispose();
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+    const headers = {
+      "content-type": "application/json",
+      "x-spur-origin": "cli",
+      "x-spur-caller-session": "demo-1",
+    };
+
+    try {
+      for (const suffix of ["unsubscribe", "suppression/resume"]) {
+        const malformed = await fetch(
+          `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/${suffix}`,
+          { method: "POST", headers, body: "{" },
+        );
+        expect(malformed.status).toBe(400);
+        await expect(malformed.json()).resolves.toMatchObject({
+          error: { code: "invalid_request", message: expect.any(String) },
+        });
+      }
+      const unsubscribe = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/unsubscribe`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ scope: "event", handle: grant.handle }),
+        },
+      );
+      expect(unsubscribe.status).toBe(200);
+      const created = (await unsubscribe.json()) as {
+        record: { suppressionId: string };
+        created: boolean;
+      };
+      expect(created.created).toBe(true);
+
+      const list = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions`, {
+        headers,
+      });
+      expect(list.status).toBe(200);
+      await expect(list.json()).resolves.toMatchObject({
+        records: [{ suppressionId: created.record.suppressionId, scope: "event" }],
+      });
+
+      const resume = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/${created.record.suppressionId}/resume`,
+        { method: "POST", headers, body: "{}" },
+      );
+      expect(resume.status).toBe(200);
+      await expect(resume.json()).resolves.toMatchObject({ records: [], removed: true });
+    } finally {
+      await server.stop();
+      resetEventLogCollapse();
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
   it("serves runtime info and stops cleanly in-process", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -65,12 +191,21 @@ describe("startServer", () => {
       "utf8",
     );
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
+    // Pin the host sensors; lifecycle assertions must not depend on runner pressure.
+    const memorySpy = vi.spyOn(hostMemory, "readHostMemory").mockReturnValue({
+      totalBytes: 64_000_000_000,
+      availableBytes: 32_000_000_000,
+      swapTotalBytes: 8_000_000_000,
+      swapFreeBytes: 8_000_000_000,
     });
-
+    const cgroupSpy = vi.spyOn(hostMemory, "readCgroupMemorySnapshot").mockReturnValue(null);
+    const pressureSpy = vi.spyOn(hostMemory, "readCgroupPressure").mockReturnValue(null);
+    let server: StartedServer | undefined;
     try {
+      server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       const response = await fetch(`http://127.0.0.1:${port}/info`);
       expect(response.status).toBe(200);
       const info = (await response.json()) as { port: number; version?: unknown };
@@ -83,17 +218,16 @@ describe("startServer", () => {
       const missing = await fetch(`http://127.0.0.1:${port}/missing`);
       expect(missing.status).toBe(404);
     } finally {
-      await server.stop();
+      try {
+        await server?.stop();
+      } finally {
+        memorySpy.mockRestore();
+        cgroupSpy.mockRestore();
+        pressureSpy.mockRestore();
+      }
     }
 
-    // Host memory pressure fires these on a loaded runner and not on an idle
-    // box. This test pins the startup/shutdown sequence, not memory behavior.
-    const hostMemoryEvents = new Set([
-      "daemon.memory.unbounded",
-      "daemon.memory.shed",
-      "daemon.memory.shed.failed",
-    ]);
-    const events = readEventLog(dataDir).filter((entry) => !hostMemoryEvents.has(entry.event));
+    const events = readEventLog(dataDir);
     expect(events[0]).toMatchObject({
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
@@ -117,6 +251,8 @@ describe("startServer", () => {
     });
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
+
+  it("redeems, lists, and resumes an actor-bound auto-ping suppression", autoPingServerTest);
 
   it("POST /sidecars/sweep defaults to report-only — reap absent kills nothing", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
@@ -952,6 +1088,9 @@ describe("startServer", () => {
           portId: "http",
           env: "SPUR_RESERVED_PORT_DEV",
           port: 3000,
+          owner: "external",
+          holder: { pid: 4242, cwd: "/tmp/foo" },
+          clearable: false,
         },
       ]);
     };
@@ -976,6 +1115,9 @@ describe("startServer", () => {
             portId: "http",
             env: "SPUR_RESERVED_PORT_DEV",
             port: 3000,
+            owner: "external",
+            holder: { pid: 4242, cwd: "/tmp/foo" },
+            clearable: false,
           },
         ],
       });
