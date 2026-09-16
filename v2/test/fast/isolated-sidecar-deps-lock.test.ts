@@ -52,7 +52,7 @@ function makeExecutable(path: string, source: string): void {
 // engines check and the next/node-pty probe genuinely inspect the fixture's
 // tree. The cli.js branch mirrors the shape spur-isolated-daemon.sh actually
 // execs: --version for the load probe, otherwise the daemon-start form,
-// which can optionally block on a FIFO so a test can hold "the daemon" alive.
+// which can optionally block on stdin so a test can hold "the daemon" alive.
 function nodeFakeSource(): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -73,8 +73,9 @@ case "$1" in
       exit 0
     fi
     echo "daemon-start" >> "$SPUR_TEST_LOG"
-    if [[ -n "\${SPUR_TEST_DAEMON_FIFO:-}" ]]; then
-      cat "$SPUR_TEST_DAEMON_FIFO" > /dev/null
+    if [[ "\${SPUR_TEST_DAEMON_STDIN:-}" == "1" ]]; then
+      echo "daemon-ready"
+      read -r release || true
     fi
     exit 0
     ;;
@@ -432,25 +433,37 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
 
   it("AC4: the lock is free once the daemon has exec'd, while that daemon process is alive", async () => {
     const worktree = createFixture();
-    const daemonFifoPath = join(worktree.repoDir, "daemon.fifo");
-    await execFileAsync("mkfifo", [daemonFifoPath]);
-
-    const daemonPromise = runIsolatedDaemon(worktree, { SPUR_TEST_DAEMON_FIFO: daemonFifoPath });
-
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (existsSync(join(worktree.toolDir, "isolated-env.sh"))) {
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 50));
+    const daemonPromise = execFileAsync(
+      "bash",
+      [join(worktree.repoDir, "scripts", "spur-isolated-daemon.sh")],
+      {
+        env: testEnv(worktree, { SPUR_TEST_DAEMON_STDIN: "1" }),
+        timeout: 25_000,
+      },
+    );
+    let readinessTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await new Promise<void>((resolveReady, reject) => {
+        // Match AC2's bootstrap bound: startup scans host process cwds before
+        // exec, so a five-second handshake poll fails under full-suite load.
+        readinessTimer = setTimeout(() => reject(new Error("Daemon did not exec")), 20_000);
+        let output = "";
+        daemonPromise.child.stdout?.on("data", (chunk: Buffer) => {
+          output += chunk.toString("utf8");
+          if (output.includes("daemon-ready\n")) resolveReady();
+        });
+        void daemonPromise.then(() => reject(new Error("Daemon exited before release")), reject);
+      });
+      expect(daemonPromise.child.exitCode).toBeNull();
+      expect(existsSync(join(worktree.toolDir, "isolated-env.sh"))).toBe(true);
+      const lockPath = join(worktree.toolDir, "workspace-deps.lock");
+      const { stdout } = await execFileAsync("flock", ["-n", lockPath, "echo", "unlocked"]);
+      expect(stdout.trim()).toBe("unlocked");
+    } finally {
+      clearTimeout(readinessTimer);
+      daemonPromise.child.stdin?.end("go\n");
+      await daemonPromise;
     }
-    expect(existsSync(join(worktree.toolDir, "isolated-env.sh"))).toBe(true);
-
-    const lockPath = join(worktree.toolDir, "workspace-deps.lock");
-    const { stdout } = await execFileAsync("flock", ["-n", lockPath, "echo", "unlocked"]);
-    expect(stdout.trim()).toBe("unlocked");
-
-    writeFileSync(daemonFifoPath, "go\n");
-    await daemonPromise;
   });
 
   // Daemon-first order against a ready tree is exactly the AC3 case above

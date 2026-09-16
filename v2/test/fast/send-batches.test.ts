@@ -58,6 +58,29 @@ function requireBatch<T>(value: T | null, message: string): T {
 }
 
 describe("isGitHubEventData", () => {
+  it("restores proven legacy GitLab discussion targets without inventing individual threads", () => {
+    const batch = restoreSendBatch({
+      kind: "review",
+      providerId: "gitlab",
+      projectId: "proj",
+      sourceId: "src",
+      ...githubEventData({
+        signals: [
+          { key: "discussion:thread-1:note-2", kind: "comment", text: "thread" },
+          { key: "comment:3", kind: "comment", text: "individual" },
+        ],
+      }),
+    });
+    const stored = batch?.serialize();
+    expect(stored?.kind).toBe("review");
+    if (stored?.kind !== "review") throw new Error("missing review batch");
+    expect(stored.signals[0]?.providerThreadTarget).toEqual({
+      kind: "gitlab-discussion",
+      mergeRequestIid: 42,
+      discussionId: "thread-1",
+    });
+    expect(stored.signals[1]?.providerThreadTarget).toBeUndefined();
+  });
   it("returns true for valid data", () => {
     expect(isGitHubEventData(githubEventData())).toBe(true);
   });
@@ -434,7 +457,135 @@ describe("Service batch", () => {
   });
 });
 
+describe("automatic ping controls", () => {
+  it("filters one suppressed thread item while preserving its sibling and one subscription control", () => {
+    const parse = createSendBatchParser("github", "proj", "src-1");
+    const batch = requireBatch(
+      parse(
+        githubEventData({
+          signals: [
+            {
+              key: "review-comment:1",
+              kind: "comment",
+              text: "inline",
+              providerThreadTarget: { kind: "github-review-thread", threadId: "thread-1" },
+            },
+            { key: "ready_for_review", kind: "ready_for_review", text: "ready" },
+          ],
+        }),
+      ),
+      "expected review batch",
+    );
+    let grant = 0;
+    batch.attachAutoPing({
+      occurrenceId: "occurrence",
+      routeFingerprint: "route",
+      destination: { kind: "session", sessionId: "api-1" },
+      createGrant: () => `ap1_${String(++grant).padStart(43, "a")}`,
+    });
+    batch.filterAutoPing(
+      (_occurrenceId, threadTarget) =>
+        threadTarget?.kind === "github-review-thread" && threadTarget.threadId === "thread-1",
+    );
+
+    expect(batch.format()).toContain("ready");
+    expect(batch.format()).not.toContain("inline");
+    expect(batch.formatAutoPingControls()).toContain("--event");
+    expect(batch.formatAutoPingControls().match(/--subscription/g)).toHaveLength(1);
+    expect(batch.formatAutoPingControls()).not.toContain("--thread");
+    expect(restoreSendBatch(batch.serialize())?.format()).toContain("ready");
+  });
+});
+
 describe("restoreSendBatch", () => {
+  it("rejects present policy state that omits targets for a restored payload", () => {
+    const batch = requireBatch(
+      createSendBatchParser("github", "proj", "src")(githubEventData()),
+      "review batch",
+    );
+    expect(
+      restoreSendBatch({
+        ...batch.serialize(),
+        autoPing: {
+          routeFingerprint: "route",
+          destination: { kind: "session", sessionId: "api-1" },
+          subscriptionHandle: "subscription",
+          items: {},
+        },
+      }),
+    ).toBeNull();
+    expect(restoreSendBatch(batch.serialize())).not.toBeNull();
+  });
+  it.each([
+    null,
+    {},
+    { occurrenceId: "event", eventHandle: 1 },
+    { occurrenceId: "event", eventHandle: "handle", threadTarget: { kind: "subscription" } },
+    { occurrenceId: "event", eventHandle: "handle", threadHandle: "orphan" },
+  ])("rejects malformed persisted auto-ping items: %j", (item) => {
+    const batch = requireBatch(
+      createSendBatchParser("github", "proj", "src")(githubEventData()),
+      "review batch",
+    );
+    expect(
+      restoreSendBatch({
+        ...batch.serialize(),
+        autoPing: {
+          routeFingerprint: "route",
+          destination: { kind: "session", sessionId: "api-1" },
+          subscriptionHandle: "subscription",
+          items: { "comment:1": item },
+        },
+      }),
+    ).toBeNull();
+  });
+  it("reserves retained conflict replay budgets for GitHub without capping later GitLab episodes", () => {
+    const data = githubEventData({
+      signals: [{ key: "merge_conflict", kind: "merge_conflict", text: "Conflicts" }],
+    });
+    const github = requireBatch(
+      createSendBatchParser("github", "proj", "src")(data),
+      "GitHub batch",
+    );
+    const gitlab = requireBatch(
+      createSendBatchParser("gitlab", "proj", "src")(data),
+      "GitLab batch",
+    );
+    expect(github.retryItems()[0]?.mergeConflict).toEqual({ prNumber: 42 });
+    expect(gitlab.retryItems()[0]?.mergeConflict).toBeUndefined();
+    expect(restoreSendBatch(gitlab.serialize())?.retryItems()[0]?.mergeConflict).toBeUndefined();
+  });
+  it("preserves semantic identity across control and title changes while separating edited items", () => {
+    const parse = createSendBatchParser("github", "proj", "src-1");
+    const batch = requireBatch(parse(githubEventData()), "review batch");
+    const [before] = batch.retryItems();
+    batch.merge(requireBatch(parse(githubEventData({ prTitle: "renamed" })), "renamed batch"));
+    expect(batch.retryItems()).toEqual([before]);
+    batch.merge(
+      requireBatch(
+        parse(
+          githubEventData({ signals: [{ key: "comment:1", kind: "comment", text: "Changed" }] }),
+        ),
+        "edited batch",
+      ),
+    );
+    expect(batch.retryItems()[0]?.itemKey).toBe(before?.itemKey);
+    expect(batch.retryItems()[0]?.fingerprint).not.toBe(before?.fingerprint);
+    expect(restoreSendBatch(batch.serialize())?.retryItems()).toEqual(batch.retryItems());
+  });
+
+  it("deduplicates a Telegram item while retaining same-text messages and separate chats", () => {
+    const parse = createSendBatchParser("telegram", "proj", "src-1");
+    const batch = requireBatch(parse(telegramEventData()), "Telegram batch");
+    batch.merge(requireBatch(parse(telegramEventData()), "duplicate"));
+    batch.merge(requireBatch(parse(telegramEventData({ messageId: 100 })), "new message"));
+    batch.merge(requireBatch(parse(telegramEventData({ chatId: -200 })), "other chat"));
+    expect(batch.retryItems()).toHaveLength(3);
+    const retained = batch.retryItems()[2]?.itemKey;
+    batch.filterItems((item) => item.itemKey === retained);
+    expect(batch.retryItems()).toHaveLength(1);
+    expect(batch.format()).toContain("chat -200");
+  });
   it("round-trips a multi-signal review batch through serialize()", () => {
     const parse = createSendBatchParser("github", "proj", "src-1");
     const batch = requireBatch(

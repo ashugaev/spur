@@ -183,7 +183,7 @@ With `steps`, Spur sends "step 1/N: research" plus the prompt. Without, it sends
 
 - `session.pipeline.completed` (level info) — pipeline ran every step.
 - `session.pipeline.errored` (level error) — `details.nextStepIndex`, `details.awaitingStepIndex` (0-based, or `null`).
-- `session.pipeline.stalled` (level warn) — the delivery loop exited because the session left `running` for a non-terminal status with no `stopReason` while a step was still awaited; `details.awaitingStepIndex` (0-based, or `null`), `details.nextStepIndex`, `details.sessionStatus`. Diagnostic only, delivery is not resumed.
+- `session.pipeline.stalled` (level warn) — the delivery loop exited because the session left `running` for a non-terminal status with no `stopReason` while a step was still awaited; `details.awaitingStepIndex` (0-based, or `null`), `details.nextStepIndex`, `details.totalSteps`, `details.stepsPending` (`nextStepIndex < totalSteps`), `details.sessionStatus`. Diagnostic only, delivery is not resumed.
 
 ## Desk groups
 
@@ -288,7 +288,7 @@ Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `event
 - `projects.<id>.defaultModels`: optional per-agent default model map, applied when that agent is chosen without an explicit model. Full spawn model-resolution order: request model, then this map, then Spur's built-in per-agent default (`claude` and `cursor` only — `codex` and `opencode` have none), then the agent's own default. The web spawn/respawn/handoff modal always sends a concrete model, resolved in order: carried session model (same agent only), first favorite, this map, agent's first catalog entry. So a web-launched `codex` spawn never falls back to codex's own `config.toml` default, and a `cursor` spawn shows and sends the concrete model cursor's auto-select would land on, not the `auto` placeholder (`auto` only when cursor's catalog offers nothing else).
 - `GET /projects/:id/spawn-defaults?agent=<name>`: what the picker calls. Returns `{model, worktree}` — what a spawn with no `model` / `overrides.worktree` would resolve to, model already through the per-agent launch-model rewrite. The web layer caps this route and `/models` at 8s; a direct daemon client is unbounded. `cursor models` is capped at 5s and on timeout returns the built-in `auto` fallback catalog with a 200, same as cursor not installed.
 - `projects.<id>.reasoningEffort`: optional `claude` and `codex` map with `low|medium|high`. An omitted provider emits no effort flag. The current project value applies to fresh and background launches, native resume, restore, and `send` relaunch. Cursor ignores this field.
-- `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins.
+- `projects.<id>.codexArgs`: optional raw Codex arguments. Legacy `model_reasoning_effort` values remain valid. A typed `reasoningEffort.codex` value is appended after raw arguments and wins. `--disable hooks` here drops codex hook state, and with it the only signal that a tool is still running: a codex tool call past 5 minutes then classifies `waiting`, and a pipeline's next timed step goes out mid-work.
 - `projects.<id>.modes.<name>.skill`: required, non-empty; the skill a session in this mode loads.
 - `projects.<id>.modes.<name>.default`: optional boolean; at most one mode per project may set it `true`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`.
@@ -474,6 +474,20 @@ ToDo reminder limits: [commands.md#todo](commands.md#todo). Manual messages and 
 
 Sources emit events; triggers `spawn` a new session or `send` into an existing one.
 
+Auto-ping scopes and controls: [commands.md#auto-ping](commands.md#auto-ping).
+
+Source support:
+
+- `cron`: event and subscription for spawn triggers; no thread.
+- `github`: event and subscription for review send/spawn and work-item spawn; inline review comments add thread; issue comments, review bodies, lifecycle items, and work items have no thread.
+- `github-ci`: event and subscription for spawn triggers; no thread.
+- `gitlab`: event and subscription for review send/spawn; non-individual discussion notes add thread; individual notes have no thread.
+- `sentry`: event and subscription for spawn triggers; no thread.
+- `telegram`: event and subscription for send/spawn; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
+- `service`: no live automatic events.
+- `jira`: event and subscription for work-item spawn when `query` is set; connection only without `query`; no thread or send triggers.
+- Cron, Sentry, and GitHub CI send triggers stay unsupported.
+
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
 - `github-ci`: `github-ci:run.completed`.
@@ -487,7 +501,11 @@ Sources emit events; triggers `spawn` a new session or `send` into an existing o
 
 `jira` with `query` set polls that JQL on `intervalMs`, fetching at most `maxResults` matches per poll, emits `jira:work_item.new` per unseen issue among those returned, and persists seen `<PROJECT>#<KEY>` ids (e.g. `WEBDEV#WEBDEV-5236`) — an id already in that registry never re-emits, even if the issue later leaves and re-enters the JQL result set. An issue that never falls inside the `maxResults` window is never recorded; if it later rotates into the window (a JQL ordering change, other issues resolving), it emits as new, uncapped by the first-poll backlog cap, which only applies before a project has any seen entries at all. Spawn prompts reference work-item fields with `{{key}}`, `{{title}}`, `{{url}}`, `{{externalId}}`, plus the inherited `{{number}}` (trailing digits of the key) and `{{repo}}` (the key's project prefix). `spawn.autoComplete` is supported on a `jira:work_item.new` trigger; it completes the Spur session only — no Jira issue transition is made.
 
-`github:ci_failed`: retry every 10 minutes, stop after 3 deliveries, reset when the failing signal leaves the snapshot. `github:merge_conflict`: one-shot on becoming conflicting, cleared when mergeable, re-emittable. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is never subject to this terminal-signal pause or the permanent not-found stop below (both require a bound PR number) — it can still be gated by the transient poll-failure backoff described next.
+`github:ci_failed`: retry every 10 minutes, stop after 3 attempts for an unchanged item. `github:merge_conflict`: at most 3 automatic delivery attempts per unchanged conflict and destination, including restore replay and daemon restart. A confirmed clear, changed conflict, or another PR permits a new budget. Comments observed alongside replay still emit. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is never subject to this terminal-signal pause or the permanent not-found stop below (both require a bound PR number) — it can still be gated by the transient poll-failure backoff described next.
+
+Pending automatic sends allow at most 8 submission attempts per unchanged item; CI reminders allow 3. Attempts survive controller reload, daemon restart, session restore, and repeated source envelopes. Changed items and new siblings get independent budgets. Memory, rate-limit, and admission holds consume none; uncertain submission consumes one. Manual sends and explicit schedules retain their existing behavior.
+
+Admission refusals log `trigger.send.suppressed_admission` with `interrupt` and `attempt`; memory refusals use [`trigger.send.suppressed_memory_guard`](#admission-control).
 
 A session bound to a PR number GitHub reports as nonexistent stops signal polling for that PR number after one attempt, logs `source.poll.disabled` once, and re-enables on rebinding away from that PR number (including rebinding back after an intermediate rebind), or on daemon restart — in-memory only, not sticky like the terminal-signal pause above. `source.poll.disabled` on a live PR usually means the token lost repo visibility; fix auth, rebind to a different PR number, or restart the daemon to re-probe once. Any other poll failure retries on a doubling backoff (2 minutes to a 30-minute cap) instead of every cycle.
 
@@ -502,7 +520,7 @@ GitHub poll-cost events: `gh.poll_cycle` (`gh` cost of a poll cycle or of a wind
 - Window with `calls` and `graphqlCost` both 0 and no `errors` emits nothing on close; its counts and window start carry forward, so an idle key stays silent until it spends again. A window with `errors` but no calls or cost still emits — a source that only ever fails stays visible instead of accumulating silently.
 - Key untouched for 60 minutes is dropped, its window closed under the same zero-cost gate; the next cycle on that key emits a single cycle again. Daemon shutdown closes every open window the same way, including a `dispose()` throw or the shutdown force-exit backstop; only `SIGKILL` skips this flush and drops any open window. Both shapes require an event sink; a process with none, such as the CLI, emits neither and tracks nothing for this event.
 
-Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`.
+Message delivery events: `session.message.sent`, `session.message.delivery_recovered` (submit ack timed out, process alive), `session.message.delivery_failed` (retried next poll, repeats suppressed after the first), `session.message.queue_removed`, `session.message.stalled` (level warn; delivery loop exited because the session left `running` for a non-terminal status with no `stopReason` while still awaiting a prompt; `details.queuedCount`, `details.sessionStatus`).
 
 Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff doubles from 2 minutes to a 30-minute cap), `session.todo.nudge_disabled` (give-up; `details.kind` is `ledger_corrupt` or `target_gone`). `session.todo.nudge_disabled` is emitted at most once per session per liveness episode.
 
@@ -518,7 +536,9 @@ Session lifecycle events: `session.complete.completed`, `session.complete.failed
 
 Wake events: a synchronous send failure logs `session.wake.failed`/`daily_failed`/`interval_failed`; a queued pane-write failure logs `session.wake.sent`/`daily_sent`/`interval_sent` instead. A recurring wake dropped on `killed` logs `session.wake.interval_cancelled`/`daily_cancelled`. An unrecoverable-but-restorable session logs `session.wake.suppressed` once on that transition.
 
-Attention monitor events: `session.attention_monitor.failed` (a whole sweep threw). `session.attention_monitor.session_failed` (one session threw and was skipped for that sweep, its previous attention and run state carried forward; carries `sessionId`, `projectId`). `session.attention_monitor.slow` (a sweep's wall time reached the 5s poll interval; carries `durationMs`, `intervalMs`, `suppressedTicks` — ticks dropped while that sweep ran). `session.runtime.probe_unresponsive` (reconcile of a running session skipped, its tmux probe hit the 5s timeout; session record left untouched).
+Attention monitor events: `session.attention_monitor.failed` (a whole sweep threw). `session.attention_monitor.session_failed` (one session threw and was skipped for that sweep, its previous attention and run state carried forward; carries `sessionId`, `projectId`). `session.attention_monitor.slow` (a sweep's wall time reached the 5s poll interval; carries `durationMs`, `intervalMs`, `suppressedTicks` — ticks dropped while that sweep ran). `session.runtime.probe_unresponsive` (reconcile of a running session skipped, its tmux probe hit the 5s timeout; session record left untouched). `session.runtime.pane_child_fallback` (warn; a liveness check's ALIVE verdict came from the tty foreground-process fallback, not a process-name match; once per session per liveness episode; `details.tmuxSession`, `details.agent`).
+
+Agent process events: `session.agent_process.capture_blind` (error; a relaunch was refused — process capture came back empty while the pane's occupant still read alive; `details.tmuxSession`, `details.agent`). Both this and `session.runtime.pane_child_fallback` fire when the launch command's derived binary doesn't match the agent's canonical process name — not only for an agent executable override (`SPUR_*_BIN`).
 
 Handoff/respawn events: `session.handoff.startup_attachment_missing`, `session.respawn.startup_attachment_missing` (warn when a record-listed startup attachment has no file on disk; handoff/respawn proceed with resolvable attachments only; `details.missingIds`).
 
@@ -526,7 +546,7 @@ Handoff/respawn events: `session.handoff.startup_attachment_missing`, `session.r
 
 Tmux agent sessions survive daemon restarts: the systemd unit uses `KillMode=process`, so `systemctl restart` stops the node process only. On boot the daemon re-discovers living sessions, resumes delivery loops and pipelines, restarts attention monitoring.
 
-Trigger pending batches persist in `<dataDir>/pending-send-batches.json` and reload at startup, minus records whose trigger no longer matches config or whose payload no longer parses. Lost on restart: retry counters (a reloaded batch restarts at attempt 1), the send window (fresh window at restore), the state-classification cache (rebuilt in seconds), the state-history ring buffer.
+Trigger pending batches and item retry budgets persist in `<dataDir>/pending-send-batches.json` and reload at startup, minus records whose trigger no longer matches config or whose payload no longer parses. Lost on restart: the send window (fresh window at restore), the state-classification cache (rebuilt in seconds), the state-history ring buffer.
 
 Unit files here are templates. Source deployments apply them through [install-from-source.md#deploy](install-from-source.md#deploy); npm user units refresh through [install-from-npm.md#upgrade](install-from-npm.md#upgrade).
 

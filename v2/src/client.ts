@@ -156,6 +156,15 @@ function formatDaemonError(status: number, payload: unknown, path: string): stri
     return `${payload.reason}. Try ${hints.join(" or ")}.`;
   }
   if (typeof payload === "object" && payload !== null && "error" in payload) {
+    const error = payload.error;
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "message" in error &&
+      typeof error.message === "string"
+    ) {
+      return error.message;
+    }
     return String(payload.error);
   }
   return `Request failed with status ${status}`;

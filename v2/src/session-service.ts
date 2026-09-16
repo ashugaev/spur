@@ -117,6 +117,7 @@ import {
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
+import { redactAutoPingHandles } from "./auto-ping.js";
 import {
   type HistoryCaptureStamp,
   AGENT_HISTORY_ARTIFACT_PREFIX,
@@ -242,6 +243,7 @@ import {
   getTmuxSessionPresence,
   lookupTmuxPanePid,
   isProcessRunningInTmux,
+  probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
@@ -250,6 +252,7 @@ import {
   sendMenuSelectionKeys,
   setTmuxSocketName,
   sendMessageToTmux,
+  sendSensitiveMessageToTmux,
   tmuxPaneDead,
   tmuxSessionExists,
   waitForTmuxReady,
@@ -407,6 +410,9 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type DispatchSessionWakeRequest,
+  type UpdateSessionWakeMessageRequest,
+  type WakeTarget,
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
@@ -525,6 +531,11 @@ const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
+// classifySessionRecord (called from inside both waitForQueuedMessage and
+// waitForPipelineStep) runs reconcileUnexpectedStop and
+// reconcileStaleErroredSession, so the loop can heal its own record on every
+// pass -- the stopped-before-sleep return bounds nothing on its own.
+const DELIVERY_HEAL_CONTINUE_LIMIT = 3;
 const STATE_HOLD_MS = 4_000;
 // Codex turns that hang after their tool calls complete (model inference dies between/after tools)
 // pin state to "working" forever. The rollout JSONL emits no deterministic mid-inference liveness
@@ -907,6 +918,14 @@ export class SessionNotReopenableError extends Error {
 // already in flight (either the drain or another flush), so serializing
 // behind it could hang the HTTP request for a whole ack window.
 export class QueueDeliveryInFlightError extends Error {
+  readonly statusCode = 409;
+}
+
+export class WakeTargetMissingError extends Error {
+  readonly statusCode = 409;
+}
+
+export class WakeDispatchConflictError extends Error {
   readonly statusCode = 409;
 }
 
@@ -1445,6 +1464,37 @@ async function agentProcessAlive(
     ...(options?.fresh ? { fresh: true } : {}),
     ...(foreign ? { paneChildFallback: true } : {}),
   });
+}
+
+// Distinguishes which pass answered ALIVE without widening agentProcessAlive's
+// own boolean return: four call sites are `!(await agentProcessAlive(...))`,
+// and an object return there would silently read as "always alive" (tsc
+// cannot catch it; only eslint no-unnecessary-condition would). Keeps
+// agentProcessAlive's signature and all nine call sites unchanged.
+type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
+
+// Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
+// second isProcessRunningInTmux read: two separate top-level calls would each
+// hit runtime-tmux's shared pane/ps cache independently, and that cache's TTL
+// runs from fetch START, not completion (runtime-tmux.ts). A first probe slow
+// enough to exceed the TTL (getPsSnapshot's own timeout is 5s) leaves the
+// cache already expired by the time the second call checks it, forking again
+// and comparing two different instants — which can mislabel `via` or miss a
+// real pane_child_fallback episode entirely (issue #871 P2).
+async function probeAgentProcess(
+  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
+  options?: { fresh?: boolean },
+): Promise<AgentProcessProbe> {
+  const matchers = agentProcessMatchers(input.agent, input.launchCommand);
+  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  const result = await probeTmuxProcessMatch(input.tmuxSession, matchers, {
+    ...(options?.fresh ? { fresh: true } : {}),
+    ...(foreign ? { paneChildFallback: true } : {}),
+  });
+  if (!result.alive) {
+    return { alive: false };
+  }
+  return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
 }
 
 function withProjectAgentOptions(
@@ -2604,6 +2654,13 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  // Tracks sessions currently reading ALIVE via the pane-child fallback (not
+  // matched by pass 1), so session.runtime.pane_child_fallback fires once on
+  // the transition into that state instead of every readRuntimeSnapshot call
+  // for the session's whole life. Cleared on any probe that is not
+  // `via: "pane_child"`. In-memory only, no persisted field. Swept alongside
+  // the other session-scoped maps in pruneSessionScopedState.
+  private readonly paneChildFallbackNotified = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Ticks the re-entrancy guard dropped while the CURRENTLY running sweep was
@@ -2746,6 +2803,9 @@ export class SessionService {
   private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarUrlProbeControllers = new Map<string, AbortController>();
+  // sessionId -> the ToDo projection revision whose human-held items were last
+  // nudged, so a static human-blocked ledger is nudged once, not once a sweep.
+  private readonly lastHumanHeldNudgeRevisions = new Map<string, string>();
   // Serializes sendAgentMessage per tmux pane so two trigger batches on one
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
@@ -5517,6 +5577,11 @@ export class SessionService {
         this.wakeSuppressionNotified.delete(sessionId);
       }
     }
+    for (const sessionId of this.paneChildFallbackNotified) {
+      if (!liveIds.has(sessionId)) {
+        this.paneChildFallbackNotified.delete(sessionId);
+      }
+    }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeJsonlReaders.delete(sessionId);
@@ -5550,6 +5615,11 @@ export class SessionService {
     for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
       if (!liveIds.has(sessionId)) {
         this.queuedMessageDeliveryLastFailure.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.lastHumanHeldNudgeRevisions.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.lastHumanHeldNudgeRevisions.delete(sessionId);
       }
     }
   }
@@ -6527,7 +6597,14 @@ export class SessionService {
             .join(
               "\n",
             )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
-        } else if (humanHeld.length > 0) {
+        } else if (
+          humanHeld.length > 0 &&
+          this.lastHumanHeldNudgeRevisions.get(session.id) !== projection.revision
+        ) {
+          // A human blocker cannot be advanced by the agent, so repeating this
+          // nudge every sweep manufactures work. One per ledger revision: any
+          // append (resume, add, re-hold) re-arms it, a frozen ledger does not.
+          this.lastHumanHeldNudgeRevisions.set(session.id, projection.revision);
           message = `Spur ToDo needs human input:\n${humanHeld
             .map((item) => {
               const blocker = item.latestTransition?.blocker;
@@ -9397,6 +9474,7 @@ export class SessionService {
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
       closeoutOwnerTransfer?: boolean;
+      sensitivePromptSuffix?: string;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -9739,7 +9817,7 @@ export class SessionService {
           );
         }
       }
-      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+      const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
           id: sessionId,
@@ -9749,7 +9827,13 @@ export class SessionService {
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
-      });
+      };
+      const launchPlan = options?.sensitivePromptSuffix
+        ? buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions, {
+            text: options.sensitivePromptSuffix,
+            sensitive: true,
+          })
+        : buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
       const promptDeliveredOnLaunch =
         launchPlan.initialMessageDeliveredOnLaunch === true ||
         (startupImagePaths.length > 0 &&
@@ -9884,6 +9968,25 @@ export class SessionService {
       }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
+      }
+
+      if (launchPlan.deferredSensitiveInitialMessage) {
+        stage = "prompt.sensitive_controls";
+        await this.sendDeferredSensitiveInitialMessage(
+          runningRecord,
+          launchPlan.deferredSensitiveInitialMessage.text,
+        );
+        this.logEvent("session.spawn.sensitive_controls_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent automatic ping controls to ${sessionId}`,
+          details: {
+            controlCount: (launchPlan.deferredSensitiveInitialMessage.text.match(/ap1_/g) ?? [])
+              .length,
+            outcome: "submitted",
+          },
+        });
       }
 
       stage = "record.write";
@@ -11055,6 +11158,263 @@ export class SessionService {
     );
   }
 
+  async updateWakeMessage(
+    sessionId: string,
+    request: UpdateSessionWakeMessageRequest,
+  ): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.updateWakeMessageLocked(sessionId, request),
+    );
+  }
+
+  async dispatchWake(sessionId: string, request: DispatchSessionWakeRequest): Promise<SessionView> {
+    return this.dispatchWakeLocked(sessionId, request);
+  }
+
+  private wakeTargetProperty(target: WakeTarget): "scheduledWake" | "intervalWake" | "dailyWake" {
+    if (target === "scheduled") return "scheduledWake";
+    if (target === "interval") return "intervalWake";
+    return "dailyWake";
+  }
+
+  private async updateWakeMessageLocked(
+    sessionId: string,
+    request: UpdateSessionWakeMessageRequest,
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const property = this.wakeTargetProperty(request.target);
+    const current = session[property];
+    if (!current) {
+      throw new WakeTargetMissingError(
+        `Wake target "${request.target}" not found for ${sessionId}`,
+      );
+    }
+    const updated: SessionRecord = {
+      ...session,
+      [property]: {
+        ...current,
+        message: request.message,
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    return this.enrich(updated);
+  }
+
+  private async dispatchWakeLocked(
+    sessionId: string,
+    request: DispatchSessionWakeRequest,
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (request.target === "scheduled") {
+      await this.dispatchScheduledWakeNow(session);
+    } else if (request.target === "interval") {
+      await this.dispatchIntervalWakeNow(session);
+    } else {
+      await this.dispatchDailyWakeNow(session);
+    }
+    const updated = readSession(this.config.dataDir, sessionId);
+    if (!updated) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    return this.enrich(updated);
+  }
+
+  private async dispatchScheduledWakeNow(session: SessionRecord): Promise<void> {
+    const scheduledWake = session.scheduledWake;
+    if (!scheduledWake) {
+      throw new WakeTargetMissingError(`Wake target "scheduled" not found for ${session.id}`);
+    }
+    if ((await wakeDeliverability(session)) !== "deliverable") {
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch scheduled wake for ${session.id}: session not deliverable`,
+      );
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const current = readSession(this.config.dataDir, session.id) ?? session;
+      const claimed =
+        current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+        current.scheduledWake.message === scheduledWake.message;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+      }
+      const { scheduledWake: _scheduledWake, ...base } = current;
+      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+      try {
+        await this.sendLocked(session.id, { message: scheduledWake.message, queue: false });
+        this.logEvent("session.wake.sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched scheduled wake to ${session.id}`,
+          details: {
+            dueAt: scheduledWake.dueAt,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        const afterFailure = readSession(this.config.dataDir, session.id);
+        if (afterFailure && !afterFailure.scheduledWake) {
+          writeSession(this.config.dataDir, {
+            ...afterFailure,
+            scheduledWake,
+            updatedAt: nowIso(),
+          });
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async dispatchIntervalWakeNow(session: SessionRecord): Promise<void> {
+    const intervalWake = session.intervalWake;
+    if (!intervalWake) {
+      throw new WakeTargetMissingError(`Wake target "interval" not found for ${session.id}`);
+    }
+    if (!(await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))) {
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch interval wake for ${session.id}: session not deliverable`,
+      );
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const now = Date.now();
+      const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
+      const current = readSession(this.config.dataDir, session.id);
+      if (current === null || !isRestorableStatus(current.status)) {
+        throw new WakeDispatchConflictError(`Wake target "interval" unavailable for ${session.id}`);
+      }
+      const claimed =
+        current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+        current.intervalWake.intervalMs === intervalWake.intervalMs &&
+        current.intervalWake.message === intervalWake.message &&
+        current.intervalWake.stopCondition === intervalWake.stopCondition;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "interval" changed for ${session.id}`);
+      }
+      writeSession(this.config.dataDir, {
+        ...current,
+        intervalWake: { ...intervalWake, nextDueAt },
+        updatedAt: nowIso(),
+      });
+      try {
+        await this.sendLocked(session.id, {
+          message: this.formatIntervalWakeMessage(
+            session.id,
+            intervalWake.message,
+            intervalWake.stopCondition,
+          ),
+          queue: false,
+        });
+        this.logEvent("session.wake.interval_sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched interval wake to ${session.id}`,
+          details: {
+            nextDueAt,
+            intervalMs: intervalWake.intervalMs,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        if (error instanceof SessionAdmissionDeniedError) {
+          const afterDenial = readSession(this.config.dataDir, session.id);
+          if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+            writeSession(this.config.dataDir, {
+              ...afterDenial,
+              intervalWake: {
+                ...afterDenial.intervalWake,
+                nextDueAt: intervalWake.nextDueAt,
+              },
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async dispatchDailyWakeNow(session: SessionRecord): Promise<void> {
+    const dailyWake = session.dailyWake;
+    if (!dailyWake) {
+      throw new WakeTargetMissingError(`Wake target "daily" not found for ${session.id}`);
+    }
+    if (!(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))) {
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch daily wake for ${session.id}: session not deliverable`,
+      );
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const now = Date.now();
+      const current = readSession(this.config.dataDir, session.id);
+      if (current === null || !isRestorableStatus(current.status)) {
+        throw new WakeDispatchConflictError(`Wake target "daily" unavailable for ${session.id}`);
+      }
+      const claimed =
+        current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+        current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+        current.dailyWake.message === dailyWake.message &&
+        current.dailyWake.stopCondition === dailyWake.stopCondition;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "daily" changed for ${session.id}`);
+      }
+      let nextDueAt: Date;
+      try {
+        nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to resolve next daily wake time for ${session.id}: ${message}`, {
+          cause: error,
+        });
+      }
+      writeSession(this.config.dataDir, {
+        ...current,
+        dailyWake: { ...dailyWake, nextDueAt: nextDueAt.toISOString() },
+        updatedAt: nowIso(),
+      });
+      try {
+        await this.sendLocked(session.id, {
+          message: this.formatDailyWakeMessage(
+            session.id,
+            dailyWake.message,
+            dailyWake.stopCondition,
+          ),
+          queue: false,
+        });
+        this.logEvent("session.wake.daily_sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched daily wake to ${session.id}`,
+          details: {
+            nextDueAt: dailyWake.nextDueAt,
+            dailyAt: dailyWake.dailyAt,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        if (error instanceof SessionAdmissionDeniedError) {
+          const afterDenial = readSession(this.config.dataDir, session.id);
+          if (afterDenial?.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
+            writeSession(this.config.dataDir, {
+              ...afterDenial,
+              dailyWake: { ...dailyWake },
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
   private async scheduleWakeLocked(
     sessionId: string,
     request: ScheduleSessionWakeRequest,
@@ -11365,7 +11725,7 @@ export class SessionService {
   async deliver(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean },
+    options?: { interrupt?: boolean; sensitivePromptSuffix?: string },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -11378,7 +11738,16 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
+    const result = await this.deliverPrepared(sessionId, message, {
+      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+      entryPoint: "deliver",
+    });
+    if (options?.sensitivePromptSuffix) {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) throw new Error(`Session not found: ${sessionId}`);
+      await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+    }
+    return result;
   }
 
   // Content-keyed: both queue ops locate the exact string in the queue rather
@@ -11768,7 +12137,11 @@ export class SessionService {
         this.historyCaptureStamps.get(stampKey),
         (payload) => {
           const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, anchorId);
-          writeFileSync(join(artifactDir, artifactId), payload);
+          writeFileSync(
+            join(artifactDir, artifactId),
+            redactAutoPingHandles(payload.toString("utf8")),
+            "utf8",
+          );
         },
       );
       // Nothing new in the source: no file, no metadata entry, no artifact id.
@@ -11859,6 +12232,37 @@ export class SessionService {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
     );
+  }
+
+  private async sendDeferredSensitiveInitialMessage(
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
+    message: string,
+  ): Promise<AgentSendOutcome> {
+    return this.withPaneWriteLock(session.tmuxSession, async () => {
+      const binding = agentWaitsForSubmitAck(session.agent)
+        ? await createAgentSubmitAckBinding(session.agent, {
+            worktreePath: session.worktreePath,
+            codexSessionsDir: join(
+              codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+              "sessions",
+            ),
+            ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+            freshLaunch: false,
+          })
+        : null;
+      await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+      if (!binding) return "submitted" as const;
+      const pacing = agentSubmitAckPacing(session.agent, { freshLaunch: false });
+      for (let attempt = 0; attempt <= pacing.maxResends; attempt += 1) {
+        const result = await this.waitForSubmitAck(binding, message, pacing.windowMs);
+        if (result.found) return "submitted" as const;
+        if (attempt < pacing.maxResends) await sendSubmitKeyToTmux(session.tmuxSession);
+      }
+      throw new Error(`Agent did not acknowledge deferred controls for ${session.id}`);
+    });
   }
 
   private async writeAgentMessage(
@@ -12879,6 +13283,42 @@ export class SessionService {
         throw new Error(
           `Session ${session.id}: could not read the process table to confirm the prior agent process exited; refusing to launch a replacement`,
         );
+      }
+    }
+    // Ownership (capturePaneAgentProcesses, matcher-based) and liveness
+    // (agentProcessAlive, matcher + pane-child fallback) can disagree for a
+    // foreign-binary launch: an ok+empty capture plus a still-ALIVE probe
+    // means the pane's real occupant is invisible to the matchers that would
+    // have named it a survivor. Gated on paneLookup.status === "ok" so a
+    // pane-pid-unreadable episode (already reported above) is not
+    // re-reported here as a capture failure; `fresh: true` because the
+    // capture above is a just-taken read and a TTL-cached liveness verdict
+    // could predate the agent's exit by up to 2s and refuse a legitimate
+    // relaunch.
+    if (
+      options.failOnSurvivors &&
+      paneLookup.status === "ok" &&
+      capture.status === "ok" &&
+      capture.processes.length === 0 &&
+      agentLaunchUsesForeignBinary(session.agent, session.launchCommand)
+    ) {
+      const stillAlive = await agentProcessAlive(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      );
+      if (stillAlive) {
+        const message = `Session ${session.id}: the agent process still reads alive but no owned process was captured; refusing to launch a replacement`;
+        this.logEvent("session.agent_process.capture_blind", {
+          level: "error",
+          sessionId: session.id,
+          message,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
+        });
+        throw new Error(message);
       }
     }
     await killTmuxSession(session.tmuxSession);
@@ -15218,6 +15658,9 @@ export class SessionService {
   }
 
   private async runDeliveryLoop(sessionId: string): Promise<void> {
+    // Per-run state, not an instance field: the bound must not leak budget
+    // across separate delivery runs for the same session.
+    let healContinues = 0;
     try {
       for (;;) {
         if (this.deliveryStopped) {
@@ -15250,6 +15693,43 @@ export class SessionService {
           }
 
           if (waitOutcome === "stopped") {
+            // deliveryStopped means daemon shutdown, not drift: stay silent so
+            // dispose() never produces a diagnostic event, matching the
+            // pipeline branch below. isDeliveryStopped() is a call, not the
+            // field directly, because dispose() can flip the field during the
+            // wait above and this re-check must not inherit the loop-top
+            // guard's stale `false` narrowing.
+            if (!this.isDeliveryStopped()) {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
+              if (
+                latest?.queuedMessages?.awaitingPrompt === true &&
+                latest.status !== "running" &&
+                latest.stopReason === undefined &&
+                !isTerminalSessionStatus(latest.status)
+              ) {
+                this.logEvent("session.message.stalled", {
+                  level: "warn",
+                  sessionId,
+                  projectId: latest.project,
+                  message: `Message delivery stalled for ${sessionId}: session status is ${latest.status} while ${queuedMessages(latest).length} message(s) are still queued`,
+                  details: {
+                    queuedCount: queuedMessages(latest).length,
+                    sessionStatus: latest.status,
+                  },
+                });
+              }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
+              }
+            }
             return;
           }
 
@@ -15284,6 +15764,10 @@ export class SessionService {
             // guard's stale `false` narrowing.
             if (!this.isDeliveryStopped()) {
               const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
               if (
                 latest?.pipeline?.status === "running" &&
                 latest.status !== "running" &&
@@ -15302,9 +15786,18 @@ export class SessionService {
                   details: {
                     awaitingStepIndex: latest.pipeline.awaitingStepIndex ?? null,
                     nextStepIndex: latest.pipeline.nextStepIndex,
+                    totalSteps: latest.pipeline.steps.length,
+                    stepsPending: latest.pipeline.nextStepIndex < latest.pipeline.steps.length,
                     sessionStatus: latest.status,
                   },
                 });
+              }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
               }
             }
             return;
@@ -15583,7 +16076,7 @@ export class SessionService {
   // processAlive on both samples closes the pane-leg hole the same way
   // ensureSessionReadyForSend's probe gate does.
   private async confirmAgentExited(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
     const first = await this.readRuntimeSnapshot(session);
     if (first.processAlive || first.probeUnresponsive) {
@@ -15734,7 +16227,7 @@ export class SessionService {
   // be read again 1s later, agreeing with itself and marking a live session
   // stopped.
   private async readRuntimeSnapshot(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
     const fresh = options?.fresh ?? false;
@@ -15750,9 +16243,9 @@ export class SessionService {
     // condition just above) — narrow on the value itself rather than assert.
     const paneUsable = panePresence ? !panePresence.dead : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive =
+    const processProbe: AgentProcessProbe =
       runtimeAlive && paneUsable
-        ? await agentProcessAlive(
+        ? await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -15760,7 +16253,23 @@ export class SessionService {
             },
             { fresh },
           )
-        : false;
+        : { alive: false };
+    // Fires once on the transition into the pane-child fallback answering
+    // ALIVE instead of every readRuntimeSnapshot call — see
+    // paneChildFallbackNotified's own comment for the event-volume math.
+    if (processProbe.alive && processProbe.via === "pane_child") {
+      if (!this.paneChildFallbackNotified.has(session.id)) {
+        this.paneChildFallbackNotified.add(session.id);
+        this.logEvent("session.runtime.pane_child_fallback", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Session ${session.id}: the pane-child fallback supplied the ALIVE verdict for tmux session ${session.tmuxSession}`,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
+        });
+      }
+    } else {
+      this.paneChildFallbackNotified.delete(session.id);
+    }
     // Guarded so neither call can force a snapshot that was never fetched:
     // sessionsUnresponsive only matters when the session read itself came up
     // absent, panesUnresponsive only when the pane read came up dead.
@@ -15769,7 +16278,7 @@ export class SessionService {
     return {
       runtimeAlive,
       paneUsable,
-      processAlive,
+      processAlive: processProbe.alive,
       tmuxActivityAt,
       probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
     };

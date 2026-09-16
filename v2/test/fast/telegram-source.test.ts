@@ -306,6 +306,26 @@ describe("telegramSourceModule", () => {
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"sourceId": "telegram"');
   });
 
+  it("omits messageThreadId for bound main-chat messages", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    await mkdir(dataDir, { recursive: true });
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(
+      telegramContext({ text: "/watch api-1", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+    await bot.emitText(
+      telegramContext({ chat: { id: 123 }, message_thread_id: undefined, text: "hello main" }),
+    );
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.not.objectContaining({ messageThreadId: expect.any(Number) }),
+    );
+  });
+
   it("shows project selection when /watch or /agents has no session id", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -1577,7 +1597,7 @@ describe("telegramSourceModule", () => {
       enabled: true,
       project: "spur-shepherd",
       agent: "opencode",
-      model: "google/gemini-3.7-flash",
+      model: "google/gemini-3.8-flash",
       selfDestruct: { enabled: true },
     },
   };
@@ -1603,7 +1623,7 @@ describe("telegramSourceModule", () => {
     expect(spawnSession).toHaveBeenCalledWith({
       project: "spur-shepherd",
       agent: "opencode",
-      model: "google/gemini-3.7-flash",
+      model: "google/gemini-3.8-flash",
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("help me out"),
     });
