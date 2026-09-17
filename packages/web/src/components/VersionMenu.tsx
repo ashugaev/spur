@@ -365,13 +365,14 @@ export function VersionMenu() {
         onClick={popover.toggle}
       >
         <span
-          className={
+          key={triggerLabel}
+          className={`inline-block min-w-[13ch] text-center motion-safe:animate-pulse motion-safe:[animation-duration:800ms] motion-safe:[animation-iteration-count:1] ${
             updateFailure
               ? "font-bold text-[var(--color-status-error)]"
               : severity === "none"
-                ? undefined
+                ? ""
                 : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`
-          }
+          }`}
           data-severity={severity}
         >
           {triggerLabel}

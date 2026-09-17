@@ -1209,8 +1209,8 @@ describe("live version from the heartbeat", () => {
     vi.useRealTimers();
   });
 
-  it("moves the trigger to the version the heartbeat reports, without a remount or an extra poller", async () => {
-    let daemonVersion = "1.4.2";
+  it("acknowledges only changed heartbeat versions while keeping the trigger mounted", async () => {
+    let daemonVersion = "1.4.0";
     let infoFetches = 0;
     let versionsFetches = 0;
     mockFetch({
@@ -1227,22 +1227,38 @@ describe("live version from the heartbeat", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     renderWithHeartbeat(<VersionMenu />);
     const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
-    await waitFor(() => expect(trigger).toHaveTextContent("1.4.2"));
+    await waitFor(() => expect(trigger).toHaveTextContent("1.4.0"));
+    const initialLabel = trigger.querySelector("span");
+    expect(initialLabel).not.toBeNull();
+    expect(initialLabel).toHaveClass(
+      "inline-block",
+      "min-w-[13ch]",
+      "text-center",
+      "motion-safe:animate-pulse",
+      "motion-safe:[animation-duration:800ms]",
+      "motion-safe:[animation-iteration-count:1]",
+    );
 
-    daemonVersion = "1.5.0";
     await act(async () => {
       await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     });
-    // Same captured node: proves the label updated in place, not via a remount.
-    await waitFor(() => expect(trigger).toHaveTextContent("1.5.0"));
+    await waitFor(() => expect(trigger).toHaveTextContent("1.4.0"));
+    expect(trigger.querySelector("span")).toBe(initialLabel);
+
+    daemonVersion = "9.9.9-alpha";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    await waitFor(() => expect(trigger).toHaveTextContent("9.9.9-alpha"));
+    expect(trigger.querySelector("span")).not.toBe(initialLabel);
 
     expect(window.location.reload).not.toHaveBeenCalled();
-    // The 60s versions poll never fired inside one 5s heartbeat, so the new
+    // The 60s versions poll never fired inside two 5s heartbeats, so the new
     // label can only have come from the heartbeat.
     expect(versionsFetches).toBe(1);
-    // infoQuery mount + provider mount probe + exactly one heartbeat: pins
+    // infoQuery mount + provider mount probe + exactly two heartbeats: pins
     // "no second poller" on the info endpoint.
-    expect(infoFetches).toBe(3);
+    expect(infoFetches).toBe(4);
   });
 
   it("keeps the popover header, the severity glyph and the current row on the heartbeat version", async () => {
