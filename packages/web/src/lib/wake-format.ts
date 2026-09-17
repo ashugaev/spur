@@ -5,7 +5,10 @@ type WakeSession = Pick<
   "scheduledWake" | "intervalWake" | "dailyWake"
 >;
 
+export type WakeTarget = "scheduled" | "interval" | "daily";
+
 export interface WakeSummary {
+  target: WakeTarget;
   kind: "one-shot" | "interval" | "daily";
   label: "Wake" | "Interval wake" | "Daily wake";
   dueAt: string;
@@ -15,39 +18,48 @@ export interface WakeSummary {
   stopCondition?: string;
 }
 
-export function getWakeSummary(session: WakeSession): WakeSummary | null {
+export function getWakeSummaries(session: WakeSession): WakeSummary[] {
+  const summaries: WakeSummary[] = [];
+
   if (session.intervalWake) {
-    return {
+    summaries.push({
+      target: "interval",
       kind: "interval",
       label: "Interval wake",
       dueAt: session.intervalWake.nextDueAt,
       intervalMs: session.intervalWake.intervalMs,
       message: session.intervalWake.message,
       stopCondition: session.intervalWake.stopCondition,
-    };
+    });
   }
 
   if (session.dailyWake) {
-    return {
+    summaries.push({
+      target: "daily",
       kind: "daily",
       label: "Daily wake",
       dueAt: session.dailyWake.nextDueAt,
       dailyAt: session.dailyWake.dailyAt,
       message: session.dailyWake.message,
       stopCondition: session.dailyWake.stopCondition,
-    };
+    });
   }
 
   if (session.scheduledWake) {
-    return {
+    summaries.push({
+      target: "scheduled",
       kind: "one-shot",
       label: "Wake",
       dueAt: session.scheduledWake.dueAt,
       message: session.scheduledWake.message,
-    };
+    });
   }
 
-  return null;
+  return summaries;
+}
+
+export function getWakeSummary(session: WakeSession): WakeSummary | null {
+  return getWakeSummaries(session)[0] ?? null;
 }
 
 export function formatWakeCountdown(dueAt: string, nowMs = Date.now()): string {

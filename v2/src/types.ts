@@ -2,6 +2,7 @@ import type { HostMemory } from "./host-memory.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
+export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -167,11 +168,13 @@ export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
+export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   GITHUB_CI_RUN_COMPLETED_EVENT,
+  JIRA_WORK_ITEM_NEW_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -180,6 +183,10 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export interface JiraWorkItemEventData extends WorkItemEventData {
+  key: string;
 }
 
 export type BacklogProviderId = "jira";
@@ -248,6 +255,10 @@ export interface GitHubAdaptivePollConfig {
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   adaptivePoll?: GitHubAdaptivePollConfig;
+  // Caps how many sessions one review poll batches into a single GraphQL call.
+  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+  maxReviewBatchTargets?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -263,11 +274,15 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
-export interface JiraSourceConfig {
+export interface JiraSourceConfig extends BaseSourceConfig {
   type: "jira";
   baseUrl: string;
   email: string;
   token: string;
+  query?: string;
+  intervalMs: number;
+  emitExisting: boolean;
+  maxResults: number;
 }
 
 export interface BacklogConfig {
@@ -463,6 +478,56 @@ export interface ReviewSignal {
   key: string;
   kind: ReviewSignalKind | GitHubLifecycleKind;
   text: string;
+  providerThreadTarget?: AutoPingThreadTarget;
+}
+
+export type AutoPingScope = "event" | "thread" | "subscription";
+
+export type AutoPingDestination = { kind: "session"; sessionId: string } | { kind: "trigger" };
+
+export type AutoPingThreadTarget =
+  | { kind: "github-review-thread"; threadId: string }
+  | { kind: "gitlab-discussion"; mergeRequestIid: number; discussionId: string }
+  | { kind: "telegram-topic"; chatId: number; messageThreadId: number };
+
+export type AutoPingTarget =
+  | { kind: "occurrence"; occurrenceId: string }
+  | AutoPingThreadTarget
+  | { kind: "subscription" };
+
+export interface AutoPingRouteDescriptor {
+  version: 1;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  sourceType: SourceType;
+  eventName: string;
+  actionKind: "send" | "spawn";
+  destination: AutoPingDestination;
+  spawnDeskGroup: boolean;
+}
+
+export interface AutoPingSuppressionView {
+  suppressionId: string;
+  scope: AutoPingScope;
+  routeFingerprint: string;
+  destination: AutoPingDestination;
+  target: AutoPingTarget;
+  createdAt: string;
+}
+
+export interface AutoPingSuppressionListResponse {
+  records: AutoPingSuppressionView[];
+}
+
+export interface AutoPingUnsubscribeResponse {
+  record: AutoPingSuppressionView;
+  created: boolean;
+}
+
+export interface AutoPingResumeResponse {
+  records: AutoPingSuppressionView[];
+  removed: boolean;
 }
 
 // The PR/MR the snapshot's signals were collected from. `null` covers legacy
@@ -471,6 +536,7 @@ export interface ReviewSignal {
 export interface ReviewSnapshot {
   prNumber: number | null;
   signals: Map<string, ReviewSignal>;
+  mergeConflictClearId?: string;
 }
 
 // The baseline to diff the next poll's signals against: the stored snapshot's
@@ -492,6 +558,7 @@ export interface ReviewEventData {
   prNumber: number;
   prTitle: string;
   signals: ReviewSignal[];
+  mergeConflictClearId?: string;
 }
 
 export interface ReviewRequestSummary {
@@ -523,7 +590,21 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
-export type PersistedSendBatch =
+export interface PersistedAutoPingBatchItem {
+  occurrenceId: string;
+  eventHandle: string;
+  threadTarget?: AutoPingThreadTarget;
+  threadHandle?: string;
+}
+
+export interface PersistedAutoPingBatchState {
+  routeFingerprint: string;
+  destination: AutoPingDestination;
+  subscriptionHandle: string;
+  items: Record<string, PersistedAutoPingBatchItem>;
+}
+
+export type PersistedSendBatch = (
   | {
       kind: "review";
       providerId: ReviewProviderId;
@@ -534,6 +615,7 @@ export type PersistedSendBatch =
       prNumber: number;
       prTitle: string;
       signals: ReviewSignal[];
+      mergeConflictClearId?: string;
     }
   | {
       kind: "service";
@@ -547,15 +629,36 @@ export type PersistedSendBatch =
       prompt?: string;
       sessionId: string;
       messages: TelegramMessageEventData[];
-    };
+    }
+) & { autoPing?: PersistedAutoPingBatchState };
 
 export interface PersistedPendingBatch {
   queueKey: string;
+  workId?: string;
+  revision?: number;
+  claim?: {
+    controllerId: string;
+    routeLeaseId: string;
+    claimId: string;
+    claimedAt: string;
+  };
   projectId: string;
   triggerId: string;
   sourceId: string;
   batch: PersistedSendBatch;
+  retryAccounting?: SendBatchRetryEntry[];
 }
+
+export interface SendBatchRetryEntry {
+  itemKey: string;
+  fingerprint: string;
+  deliveryAttempts: number;
+  ciAttempts: number;
+  nextAttemptAt: number;
+}
+
+export const DELIVERY_MAX_ATTEMPTS = 8;
+export const CI_FAILED_MAX_ATTEMPTS = 3;
 
 export interface SessionModeConfig {
   skill: string;
@@ -738,10 +841,28 @@ export interface AppConfig {
     maxGroupsPerSweep: number;
     statuses: SessionGcStatus[];
   };
+  // Prunes agent-history artifacts only. Disjoint from sessionGc, which owns
+  // worktrees and session records.
+  artifactRetention: {
+    enabled: boolean;
+    olderThanDays: number;
+    intervalMinutes: number;
+    maxAnchorsPerSweep: number;
+    maxBytesPerSession: number;
+    maxFilesPerSession: number;
+  };
   sidecarGc: {
     enabled: boolean;
     idleTtlMinutes: number;
     maxAgeWarnMinutes: number;
+  };
+  diskBudget: {
+    enabled: boolean;
+    intervalMinutes: number;
+    warnAttributableGb: number;
+    npmCacheMaxGb: number;
+    buildCacheOlderThanDays: number;
+    maxWorktreesPerSweep: number;
   };
   admission: AdmissionConfig;
   staleAfterMinutes: number;
@@ -863,6 +984,7 @@ export interface SessionRecord {
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  closeoutOwner?: boolean;
   claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
@@ -902,6 +1024,8 @@ export interface SessionRecord {
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
   serverErrorAt?: string;
+  serverErrorReactivationAttempts?: number;
+  todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
@@ -914,6 +1038,15 @@ export function isTerminalSessionStatus(
   status: SessionRecord["status"],
 ): status is "completed" | "killed" {
   return status === "completed" || status === "killed";
+}
+
+// respawn()'s own gate. One definition consumed by the hint builders in
+// session-service.ts and cli.ts so a hint can never name respawn for a
+// status respawn's own throw would reject.
+export function isRespawnableStatus(
+  status: SessionRecord["status"],
+): status is "completed" | "killed" | "errored" {
+  return status === "completed" || status === "killed" || status === "errored";
 }
 
 export interface ServiceInstanceRecord {
@@ -961,6 +1094,9 @@ export interface SessionSidecarView {
   ageSeconds?: number;
   /** True once ageSeconds has reached sidecarGc.maxAgeWarnMinutes; omitted (falsy) otherwise. */
   ageWarn?: boolean;
+  /** True when the sidecar's tmux session exists but its pane has exited
+   * (remain-on-exit); omitted otherwise. */
+  deadPane?: boolean;
 }
 
 export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
@@ -982,7 +1118,24 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   queuedMessages?: SessionQueuedMessagesView;
 }
 
-export interface DashboardSessionView extends SessionRecord {
+/**
+ * Fields enrichDashboard strips: the runtime detail the dashboard listing never
+ * renders. `launchCommand`, `stateSubscriptions`, `allowedTriggers`,
+ * `agentSessionId` and `branchSource` are read only from the single-session
+ * views, and together they were ~14% of the listing payload.
+ */
+export type DashboardOmittedField =
+  | "queuedMessages"
+  | "pipeline"
+  | "sidecarNames"
+  | "sidecarPorts"
+  | "launchCommand"
+  | "stateSubscriptions"
+  | "allowedTriggers"
+  | "agentSessionId"
+  | "branchSource";
+
+export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -994,7 +1147,31 @@ export interface DashboardSessionView extends SessionRecord {
   deskGroupMembers?: SessionDeskMember[];
 }
 
-export type SessionListView = SessionView | DashboardSessionView;
+export type SidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
+export type SidecarStopView = SessionView & { sidecarStop: SidecarStopReport };
+
+// Dropped from the list projection because they are the byte-heavy or
+// filesystem-walk-backed fields: `artifacts`/`artifactsTruncated` require a
+// per-session recursive readdir+stat walk, `stateHistory` and the prompt
+// bodies dominate the pretty-printed payload at production scale. Full
+// detail for all six stays on GET /sessions/:id (SessionView via `get`).
+// Not exported — no consumer outside this file needs the field-name union
+// itself, only the resulting `SessionListItemView` shape.
+type SessionListOmittedField =
+  | "artifacts"
+  | "artifactsTruncated"
+  | "stateHistory"
+  | "launchCommand"
+  | "prompt"
+  | "originalTaskPrompt";
+
+export type SessionListItemView = Omit<SessionView, SessionListOmittedField>;
+
+export type SessionListView = SessionListItemView | DashboardSessionView;
 
 export interface SessionWorkspaceAccessItem {
   label: string;
@@ -1083,6 +1260,8 @@ export interface SourceReplyResponse {
   messageThreadId?: number;
 }
 
+export type WakeTarget = "scheduled" | "interval" | "daily";
+
 export interface ScheduleSessionWakeRequest {
   at?: string;
   delayMs?: number;
@@ -1090,6 +1269,16 @@ export interface ScheduleSessionWakeRequest {
   dailyAt?: string[];
   stopCondition?: string;
   message?: string;
+}
+
+export interface UpdateSessionWakeMessageRequest {
+  target: WakeTarget;
+  message: string;
+}
+
+export interface DispatchSessionWakeRequest {
+  target: WakeTarget;
+  dispatch: true;
 }
 
 export interface RunServiceRequest {
@@ -1109,6 +1298,12 @@ export interface SidecarPortConflictCandidate {
   env: string;
   port: number;
   owner?: string;
+  /** Session/sidecar name that recorded a reservation for this port, when known. */
+  reservedBy?: string;
+  /** Attributed foreign listener, when the port is host-occupied by an untracked process. */
+  holder?: { pid: number; cwd: string | null };
+  /** False for a port already claimed by a sibling portId in this same attempt: clearing it would break that other reservation. */
+  clearable?: boolean;
 }
 
 export interface SidecarPortConflictPayload {
