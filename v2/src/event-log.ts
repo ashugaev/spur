@@ -17,6 +17,7 @@ export interface SpurLogEntry {
   triggerId?: string;
   method?: string;
   path?: string;
+  status?: number;
   details?: Record<string, unknown>;
 }
 

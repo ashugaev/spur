@@ -4379,6 +4379,65 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("clears the work item when auto-complete hits a SessionResourceNotFoundError", async () => {
+    // Dynamic import so the error class comes from the same session-service.js
+    // module instance triggers.ts uses. isSessionNotFoundError matches on
+    // .message, so this pins that the typed class preserves the message text
+    // of the converted `Session not found:` throws.
+    const { SessionResourceNotFoundError } = await import("../../src/session-service.js");
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-9",
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const completeMock = vi
+      .fn()
+      .mockRejectedValue(new SessionResourceNotFoundError("Session not found: api-9"));
+    readWorkItemLifecyclesMock.mockReturnValue(
+      new Map([
+        [
+          "acme/api#42",
+          runningWorkItemLifecycle({
+            createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+          }),
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, complete: completeMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(deleteWorkItemLifecycleMock).toHaveBeenCalledWith(
+          DATA_DIR,
+          "api",
+          "pr-watch",
+          "acme/api#42",
+        );
+      });
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        DATA_DIR,
+        expect.objectContaining({
+          event: "trigger.work_item_auto_complete.noop",
+          level: "info",
+        }),
+      );
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        DATA_DIR,
+        expect.objectContaining({ event: "trigger.work_item_auto_complete.failed" }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("blocks auto-complete before the minimum age or while needs_input", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-9",

@@ -252,6 +252,8 @@ A 5-minute sweep gzips a terminal (`killed`/`completed`/`stopped`) session's sha
 
 Repeated `warn`/`error` events sharing `level`+`event`+`sessionId` inside `eventLog.collapseWindowMs` are counted, not appended; the next occurrence past the window flushes one summary line first. The summary carries the LATEST occurrence's `message`/`details` plus `details.suppressedCount` / `details.suppressedSince` — the suppressed occurrences' own payloads are gone, so do not rely on collapse during an incident. Pending counts are in memory only: flushed on clean shutdown and by the sweep, lost on a crash. `info` events and the user-action log are never collapsed. `collapseWindowMs: 0` disables collapsing.
 
+`http.request.failed` entries carry `status`, the HTTP status sent for that request. A missing session id or project id logs `level: "warn"` with `status: 404`; only an unclassified failure logs `level: "error"` with `status: 500`.
+
 `eventLog` and `userActionLog` are instance config only — a project-config block parses and is discarded. `spur doctor`'s `data-dir-log-bytes` warns above 5GB (`warn`, no exit-code effect). The number is `du -sk <dataDir>/sessions` plus the root `events.jsonl` / `user-actions.jsonl` and their archives, so it runs wider than the log files alone.
 
 ## Field reference

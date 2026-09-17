@@ -6704,7 +6704,7 @@ export class SessionService {
     }
     const project = this.config.projects[projectId];
     if (!project) {
-      throw new Error(`Unknown project: ${projectId}`);
+      throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
     }
     return project;
   }
@@ -11174,7 +11174,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const property = this.wakeTargetProperty(request.target);
     const current = session[property];
@@ -11201,7 +11201,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (request.target === "scheduled") {
       await this.dispatchScheduledWakeNow(session);
@@ -11212,7 +11212,7 @@ export class SessionService {
     }
     const updated = readSession(this.config.dataDir, sessionId);
     if (!updated) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     return this.enrich(updated);
   }
@@ -11412,7 +11412,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const {
       intervalWake: _intervalWake,
@@ -11520,7 +11520,7 @@ export class SessionService {
   private async cancelWakeLocked(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = session;
     const updated: SessionRecord = { ...base, updatedAt: nowIso() };

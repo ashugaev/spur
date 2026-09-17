@@ -1971,6 +1971,7 @@ export async function startServer(
           level: "warn",
           ...(method ? { method } : {}),
           ...(path ? { path } : {}),
+          status: error.statusCode,
           message,
         });
         sendError(response, error.statusCode, message);
@@ -2065,6 +2066,7 @@ export async function startServer(
         level: "error",
         ...(method ? { method } : {}),
         ...(path ? { path } : {}),
+        status: 500,
         message,
       });
       sendError(response, 500, message);
