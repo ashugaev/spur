@@ -20,6 +20,12 @@ For a throwaway verification daemon instead of pointing `--config` at an ad hoc 
 
 First start of either sidecar in a fresh worktree pays a full cold `pnpm install --frozen-lockfile`: it replaces the worktree's symlinked `node_modules` trees with a real install.
 
+`packages/web` Playwright runs start Next themselves, in CI and locally alike, through the `webServer` block in `packages/web/playwright.config.ts`. It targets an isolated daemon URL, config, tmux socket, and UI port allocated by `packages/web/tests/harness/daemon-target.ts` — free loopback ports, nothing listening on the daemon one. `SPUR_WEB_TEST_ISOLATION=1` comes with it and makes both web-side resolvers (`src/lib/spur-daemon.ts`, `server/spur-instance.ts`) throw instead of falling back to `127.0.0.1:4310`, `~/.spur/config.yaml`, socket `spur-4310`, or UI port `5555`. Run needs `pnpm --dir packages/web build` first: `next start` serves the built app.
+
+Setting `PLAYWRIGHT_BASE_URL`, or running inside a Spur session with an `isolated-ui` sidecar, switches to the external-server path: that URL is used as is and no Next is started.
+
+Specs import `test`, `expect`, and `devices` from `./fixtures.js`, never `playwright/test` — ESLint enforces it, type-only imports excepted. The extended `test` aborts and records any `/api` request no spec mocked, then fails the test at teardown; app-shell routes (`runtime/*`, `tags`, `todo`, `conversation`, ...) carry neutral defaults a spec can override.
+
 ## PR Checks
 
 Before opening or updating a PR:

@@ -1,6 +1,14 @@
-import { devices, test, expect, type Locator, type Page } from "playwright/test";
 import { join } from "node:path";
-import { makeWorkingSession, mockSessions, type ProjectInfo } from "./fixtures.js";
+import {
+  devices,
+  test,
+  expect,
+  type Locator,
+  type Page,
+  makeWorkingSession,
+  mockSessions,
+  type ProjectInfo,
+} from "./fixtures.js";
 
 type WorkingSession = ReturnType<typeof makeWorkingSession>;
 

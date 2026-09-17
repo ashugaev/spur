@@ -1,5 +1,11 @@
-import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession, makeSessionWithSidecar, mockTagCatalog } from "./fixtures.js";
+import {
+  test,
+  expect,
+  type Page,
+  makeWorkingSession,
+  makeSessionWithSidecar,
+  mockTagCatalog,
+} from "./fixtures.js";
 
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return Promise.all([

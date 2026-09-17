@@ -1,5 +1,11 @@
-import { test, expect } from "playwright/test";
-import { makeStoppedSession, makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
+import {
+  test,
+  expect,
+  makeStoppedSession,
+  makeWorkingSession,
+  mockSessions,
+  gotoMocked,
+} from "./fixtures.js";
 
 // Header controls share one row but not one exact pixel — the 17px brand
 // glyph sits inside a row of 28px (h-7) controls, so `items-center` offsets

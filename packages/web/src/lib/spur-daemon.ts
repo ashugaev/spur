@@ -39,11 +39,24 @@ function daemonBaseUrlFromConfig(): string | null {
 }
 
 function daemonBaseUrl(): string {
-  return (
+  // Under SPUR_WEB_TEST_ISOLATION a production default means the harness env
+  // did not reach this process and the request would hit the host's real
+  // daemon. The config-path check runs before the read, so an isolated run
+  // never parses ~/.spur/config.yaml.
+  const isolated = Boolean(process.env["SPUR_WEB_TEST_ISOLATION"]);
+  if (isolated && resolveConfigPath() === DEFAULT_SPUR_CONFIG_PATH) {
+    throw new Error(
+      `Test isolation: SPUR_CONFIG fell back to the production default (${DEFAULT_SPUR_CONFIG_PATH})`,
+    );
+  }
+  const resolved =
     process.env["SPUR_DAEMON_URL"]?.replace(/\/+$/, "") ||
     daemonBaseUrlFromConfig() ||
-    DEFAULT_SPUR_DAEMON_URL
-  );
+    DEFAULT_SPUR_DAEMON_URL;
+  if (isolated && resolved === DEFAULT_SPUR_DAEMON_URL) {
+    throw new Error(`Test isolation: daemon URL fell back to the production default (${resolved})`);
+  }
+  return resolved;
 }
 
 function jsonHeaders(): Record<string, string> {
