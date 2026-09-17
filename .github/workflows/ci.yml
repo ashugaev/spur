@@ -22,7 +22,7 @@ jobs:
           dest: ${{ runner.temp }}/pnpm-setup
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
@@ -44,7 +44,7 @@ jobs:
           dest: ${{ runner.temp }}/pnpm-setup
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir packages/web exec playwright install chromium
@@ -71,7 +71,7 @@ jobs:
           dest: ${{ runner.temp }}/pnpm-setup
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
       - name: Start tmux server
         run: tmux start-server
       - run: pnpm install --frozen-lockfile
@@ -89,7 +89,7 @@ jobs:
           dest: ${{ runner.temp }}/pnpm-setup
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
       - name: Start tmux server
         run: tmux start-server
       - run: pnpm install --frozen-lockfile

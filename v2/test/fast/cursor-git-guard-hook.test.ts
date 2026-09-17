@@ -116,4 +116,65 @@ describe("CURSOR_GIT_GUARD_SCRIPT", () => {
     const decision = await runGuardRaw("not json");
     expect(decision.permission).toBe("deny");
   });
+
+  function runGuardWithoutStdinEnd(
+    writeStdin: (stdin: NodeJS.WritableStream) => void,
+  ): Promise<HookDecision> {
+    return new Promise((resolve, reject) => {
+      const child = execFile(
+        process.execPath,
+        [scriptPath],
+        {
+          env: {
+            PATH: process.env["PATH"] ?? "",
+            [CURSOR_RESTRICT_WRITES_ENV]: "1",
+          },
+        },
+        (error, stdout) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(JSON.parse(stdout) as HookDecision);
+        },
+      );
+      child.stdin?.on("error", () => {});
+      if (child.stdin) {
+        writeStdin(child.stdin);
+      }
+    });
+  }
+
+  it("responds immediately on data write without waiting for stdin to close", async () => {
+    const decision = await runGuardWithoutStdinEnd((stdin) => {
+      stdin.write(JSON.stringify({ command: "git status" }));
+    });
+    expect(decision.permission).toBe("allow");
+  });
+
+  it("denies git push on data write without waiting for stdin to close", async () => {
+    const decision = await runGuardWithoutStdinEnd((stdin) => {
+      stdin.write(JSON.stringify({ command: "git push" }));
+    });
+    expect(decision.permission).toBe("deny");
+  });
+
+  it("denies a fragmented git push payload without waiting for stdin to close", async () => {
+    const payload = JSON.stringify({ command: "git push" });
+    const decision = await runGuardWithoutStdinEnd((stdin) => {
+      stdin.write(payload.slice(0, 12));
+      stdin.write(payload.slice(12));
+    });
+    expect(decision.permission).toBe("deny");
+  });
+
+  it("fails safe (deny) on numeric JSON when the gate is on", async () => {
+    const decision = await runGuardRaw("12");
+    expect(decision.permission).toBe("deny");
+  });
+
+  it("denies when no stdin arrives before the no-input timer", async () => {
+    const decision = await runGuardWithoutStdinEnd(() => {});
+    expect(decision.permission).toBe("deny");
+  }, 10_000);
 });

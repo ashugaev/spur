@@ -25,6 +25,7 @@ WORKFLOW
        Wrong/incorrect            skip with reasoning
        Stylistic nitpick          skip unless matches project rules
        Already fixed              skip, note it
+       Valid, PR already merged   never fix here; file an issue per the `github` skill, reply with its link
 
   3  Apply fixes. Minimal change, verify no regressions.
 

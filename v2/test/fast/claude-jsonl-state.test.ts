@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyClaudeJsonlState,
   hasTrailingClaudeServerError,
+  hasClaudeRecoveryAfter,
   MAX_RETAINED_CONVERSATION_ENTRIES,
   parseConversationBatch,
   parseJsonlRecord,
@@ -162,6 +163,37 @@ describe("classifyClaudeJsonlState", () => {
     expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("waiting");
   });
 
+  // ── interrupted turn → waiting (idle prompt) ───────────────────────
+
+  it("returns working for an interrupted record still inside the activity window", () => {
+    const records = [
+      rec({ type: "user", role: "tool_result", interrupted: true, timestampMs: NOW - 5_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
+  it("returns waiting for an interrupted tool_result past the activity window", () => {
+    const records = [
+      rec({ type: "user", role: "tool_result", interrupted: true, timestampMs: NOW - 120_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("waiting");
+  });
+
+  it("returns waiting for a bare interrupted user record past the activity window", () => {
+    const records = [
+      rec({ type: "user", role: "user", interrupted: true, timestampMs: NOW - 120_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("waiting");
+  });
+
+  it("returns working again once a real user message follows the interrupt", () => {
+    const records = [
+      rec({ type: "user", role: "tool_result", interrupted: true, timestampMs: NOW - 20_000 }),
+      rec({ type: "user", role: "user", timestampMs: NOW - 1_000 }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
   // ── progress → working ─────────────────────────────────────────────
 
   it("returns working for progress record", () => {
@@ -226,7 +258,140 @@ describe("classifyClaudeJsonlState", () => {
   });
 });
 
+// ── parseJsonlRecord: interrupt marker ───────────────────────────────
+
+describe("parseJsonlRecord interrupt detection", () => {
+  const TS = 1_700_000_000_000;
+  const marker = "[Request interrupted by user]";
+  const toolMarker = "[Request interrupted by user for tool use]";
+
+  it("flags a tool_result interrupt record", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: toolMarker }],
+      },
+    });
+    expect(parseJsonlRecord(line, TS)).toMatchObject({
+      type: "user",
+      role: "tool_result",
+      interrupted: true,
+    });
+  });
+
+  it("flags a bare text-block interrupt record", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: marker }] },
+    });
+    expect(parseJsonlRecord(line, TS)).toMatchObject({
+      type: "user",
+      role: "user",
+      interrupted: true,
+    });
+  });
+
+  it("flags a string-content interrupt record", () => {
+    const line = JSON.stringify({ type: "user", message: { role: "user", content: marker } });
+    expect(parseJsonlRecord(line, TS)).toMatchObject({ type: "user", interrupted: true });
+  });
+
+  it("leaves a tool_result whose stdout merely starts with the marker unflagged", () => {
+    // A genuine stalled Bash call whose output quotes the marker: flagging it
+    // would suppress the needs_input alert it must raise.
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_2",
+            content: `${toolMarker}\n${marker}\nmatches in 3 files`,
+          },
+        ],
+      },
+    });
+    const record = parseJsonlRecord(line, TS);
+    expect(record?.interrupted).toBeUndefined();
+  });
+
+  it("leaves an ordinary user message unflagged", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "keep going" }] },
+    });
+    const record = parseJsonlRecord(line, TS);
+    expect(record?.interrupted).toBeUndefined();
+  });
+
+  it("leaves a message that merely quotes the marker mid-text unflagged", () => {
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: `the transcript shows ${marker} after an esc` }],
+      },
+    });
+    const record = parseJsonlRecord(line, TS);
+    expect(record?.interrupted).toBeUndefined();
+  });
+});
+
 // ── parseJsonlRecord: server_error detector ──────────────────────────
+
+describe("server-error recovery evidence", () => {
+  it.each([
+    undefined,
+    "invalid",
+    "2026-03-18T09:00:00Z",
+    "2026-03-18T10:00:00Z",
+    "2026-03-18T11:00:00Z",
+  ])("uses the assistant's own timestamp: %s", (timestamp) => {
+    const fallback = Date.parse("2026-03-19T00:00:00Z");
+    const record = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        timestamp,
+        message: {
+          role: "assistant",
+          model: "test-model",
+          content: [{ type: "text", text: "Recovered" }],
+        },
+      }),
+      fallback,
+    );
+    expect(record).not.toBeNull();
+    if (!record) throw new Error("Expected assistant record");
+    const parsedTime = timestamp === undefined ? NaN : Date.parse(timestamp);
+    const valid = Number.isFinite(parsedTime);
+    expect(record.ownTimestampMs).toBe(valid ? parsedTime : undefined);
+    expect(record.timestampMs).toBe(valid ? parsedTime : fallback);
+    expect(hasClaudeRecoveryAfter([record], "2026-03-18T10:00:00Z")).toBe(
+      timestamp === "2026-03-18T11:00:00Z",
+    );
+  });
+
+  it.each(["user", "tool_result", "serverError", "rateLimited", "interrupted", "synthetic"])(
+    "rejects %s as recovery evidence",
+    (kind) => {
+      const record: ParsedRecord = {
+        type: "assistant",
+        role: "assistant",
+        model: "test-model",
+        timestampMs: 10,
+        ownTimestampMs: 10,
+      };
+      if (kind === "user" || kind === "tool_result") record.role = kind;
+      else if (kind === "synthetic") delete record.model;
+      else if (kind === "serverError") record.serverError = true;
+      else if (kind === "rateLimited") record.rateLimited = true;
+      else record.interrupted = true;
+      expect(hasClaudeRecoveryAfter([record], new Date(0).toISOString())).toBe(false);
+    },
+  );
+});
 
 describe("parseJsonlRecord server_error detection", () => {
   const CLAUDE_SERVER_ERROR_WITH_STATUS_LINE = JSON.stringify({

@@ -53,6 +53,31 @@ const TMUX_BANNER_MARKERS: readonly string[] = [
 const TMUX_GUTTER_GLYPHS: ReadonlySet<string> = new Set(["▎", "│", "┃", "|", ">", "+"]);
 const TMUX_QUOTE_CHARS: ReadonlySet<string> = new Set(['"', "'", "`"]);
 
+// The two observed banner-chrome glyphs: claude's "⚠ Usage limit reached ·
+// continuing automatically at Sep 2, 8am" and codex's "■ Your workspace is out
+// of credits". Deliberately excludes claude's own content bullets and spinner
+// frames ("⏺", "●", "✻", "✢") — those prefix ordinary assistant and tool-call
+// lines, so admitting them would strip the chrome off agent output that merely
+// mentions rate-limit vocabulary.
+const TMUX_BANNER_GLYPHS: ReadonlySet<string> = new Set(["■", "⚠"]);
+
+// Emoji presentation selector: "⚠️" is "⚠" + U+FE0F, so the glyph check above
+// must consume it or the banner body would start with an invisible codepoint.
+const VARIATION_SELECTOR_16 = "\uFE0F";
+
+// Returns the banner body with a single leading status glyph (and its emoji
+// selector and following spaces) removed, or null when the line carries no
+// such glyph.
+function stripBannerGlyph(content: string): string | null {
+  const first = content[0];
+  if (first === undefined || !TMUX_BANNER_GLYPHS.has(first)) {
+    return null;
+  }
+  const rest = content.slice(1);
+  const body = rest.startsWith(VARIATION_SELECTOR_16) ? rest.slice(1) : rest;
+  return body.replace(/^\s+/, "");
+}
+
 function matchMarker(text: string): string | null {
   const haystack = text.toLowerCase();
   for (const marker of RATE_LIMIT_MARKERS) {
@@ -260,8 +285,13 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
 // lines — both menu options plus the confirm/cancel footer — rather than a
 // whole-buffer substring scan, so prose or fixtures that merely mention the
 // menu's wording don't bare-reproduce a matching line and can't self-trigger.
+// Claude Code renders the admin option as "2." on the two-option menu and as
+// "3." on the newer three-option one, whose extra middle option is "2. Wait
+// here, then continue automatically at <date>". Matching either index keeps
+// one detector for both layouts; the three required distinct physical lines
+// stay option one, the admin option, and the footer.
 const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
-const CLAUDE_USAGE_MENU_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*ask your admin for more usage$/i;
+const CLAUDE_USAGE_MENU_OPTION_ADMIN = /^[^0-9a-z]{0,3}[23]\.\s*ask your admin for more usage$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
 // captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
@@ -280,18 +310,21 @@ export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection
   while (end > 0 && allLines[end - 1] === "") end--;
   const lines = allLines.slice(Math.max(0, end - CLAUDE_USAGE_MENU_TAIL_LINES), end);
   const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
-  const hasOptionTwo = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_TWO.test(line));
+  const hasAdminOption = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ADMIN.test(line));
   const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
-  if (hasOptionOne && hasOptionTwo && hasFooter) {
+  if (hasOptionOne && hasAdminOption && hasFooter) {
     return { limited: true, reason: "claude usage limit menu" };
   }
   return null;
 }
 
-const CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED = /^>\s*1\.\s*stop and wait for limit to reset$/i;
+// Claude Code renders the selection cursor as "❯" (U+276F) in its current TUI
+// and as ">" in older builds; both mean option 1 is highlighted.
+const CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED = /^[>❯]\s*1\.\s*stop and wait for limit to reset$/i;
 
 // True only when the pane's cursor is on "Stop and wait for limit to reset"
-// (option 1), not "Ask your admin for more usage" (option 2). Confirming via
+// (option 1), not on any other option ("Wait here, then continue
+// automatically at <date>", "Ask your admin for more usage"). Confirming via
 // Enter must be gated on this specifically — detectClaudeUsageLimitMenu only
 // proves the menu is showing, not which option is currently highlighted, so
 // blindly sending Enter could otherwise select "Ask your admin" instead.
@@ -370,20 +403,29 @@ export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
     if (firstChar !== undefined && TMUX_GUTTER_GLYPHS.has(firstChar)) {
       continue;
     }
-    const lower = content.toLowerCase();
+    // A leading status glyph is part of the banner chrome, not of its text:
+    // strip it so the marker is judged against the line's real start.
+    const body = stripBannerGlyph(content) ?? content;
+    const lower = body.toLowerCase();
     const marker = TMUX_BANNER_MARKERS.find((phrase) => lower.includes(phrase));
     if (marker === undefined) {
       continue;
     }
     const start = lower.indexOf(marker);
-    const before = start > 0 ? content[start - 1] : undefined;
-    const after = content[start + marker.length];
+    const before = start > 0 ? body[start - 1] : undefined;
+    const after = body[start + marker.length];
     if (
       (before !== undefined && TMUX_QUOTE_CHARS.has(before)) ||
       (after !== undefined && TMUX_QUOTE_CHARS.has(after))
     ) {
       continue;
     }
+    // Only codex's "■" keeps the marker-anywhere allowance: its banner reads
+    // "■ Your workspace is out of credits …", marker mid-line. Every other
+    // status glyph buys nothing but the strip — the marker must still lead the
+    // line underneath, because claude prefixes its OWN assistant and tool-call
+    // lines with "⏺"/"●"/"✻"/"✢", so a line like "⏺ Updated the usage limit
+    // reached marker handling" would otherwise flag a healthy session.
     if (content.startsWith("■") || lower.startsWith(marker)) {
       return { limited: true, reason: `tmux ${marker}` };
     }

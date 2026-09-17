@@ -3,7 +3,11 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertConfigMayUseProdSlot, defaultInstanceConfigPath } from "../../src/config.js";
+import {
+  assertConfigMayUseProdSlot,
+  assertInstanceConfigPathExists,
+  defaultInstanceConfigPath,
+} from "../../src/config.js";
 
 // This file must never create, write, or delete anything under the real
 // ~/.spur. Every write below goes to a fresh temp dir; reading homedir() to
@@ -87,5 +91,52 @@ describe("assertConfigMayUseProdSlot", () => {
     await writeFile(configPath, "server:\n  port: [unterminated\n", "utf8");
 
     expect(() => assertConfigMayUseProdSlot(configPath)).not.toThrow();
+  });
+});
+
+// Issue #846: before this guard, a non-existent `--config` path was seeded
+// from defaults (server.port 4310, dataDir ~/.spur) by any command, which then
+// answered from the production daemon and exited 0.
+describe("assertInstanceConfigPathExists", () => {
+  it("passes for the default instance config path even when it does not exist (first boot still bootstraps)", () => {
+    expect(() => assertInstanceConfigPathExists(defaultInstanceConfigPath())).not.toThrow();
+  });
+
+  it("passes with no --config given", () => {
+    expect(() => assertInstanceConfigPathExists(undefined)).not.toThrow();
+  });
+
+  it("throws for a non-existent non-default config path and never creates it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-config-exists-test-"));
+    const missingPath = join(root, "nested", "missing.yaml");
+
+    expect(() => assertInstanceConfigPathExists(missingPath)).toThrow("does not exist");
+    expect(existsSync(missingPath)).toBe(false);
+    expect(existsSync(join(root, "nested"))).toBe(false);
+  });
+
+  it("resolves SPUR_CONFIG identically to an explicit --config path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-config-exists-test-"));
+    const missingPath = join(root, "missing.yaml");
+    const previous = process.env["SPUR_CONFIG"];
+    process.env["SPUR_CONFIG"] = missingPath;
+    try {
+      expect(() => assertInstanceConfigPathExists(undefined)).toThrow("does not exist");
+    } finally {
+      if (previous === undefined) {
+        delete process.env["SPUR_CONFIG"];
+      } else {
+        process.env["SPUR_CONFIG"] = previous;
+      }
+    }
+    expect(existsSync(missingPath)).toBe(false);
+  });
+
+  it("passes for a non-default config path that exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-config-exists-test-"));
+    const configPath = join(root, "spur.yaml");
+    await writeFile(configPath, "server:\n  port: 65000\n", "utf8");
+
+    expect(() => assertInstanceConfigPathExists(configPath)).not.toThrow();
   });
 });

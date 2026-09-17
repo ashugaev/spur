@@ -5,7 +5,9 @@ import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
+import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
   deploySwitchStatePath,
@@ -31,8 +33,8 @@ import {
   type UserActionOrigin,
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
-import { startConfiguredSources } from "./event-sources/index.js";
-import { initializeGhPath, setGhEventSink } from "./gh.js";
+import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
+import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
@@ -53,6 +55,8 @@ import {
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
+  WakeDispatchConflictError,
+  WakeTargetMissingError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import { updateLedgerPath } from "./update-ledger.js";
@@ -73,6 +77,9 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type DispatchSessionWakeRequest,
+  type UpdateSessionWakeMessageRequest,
+  type WakeTarget,
   type SendMessageRequest,
   type SourceReplyRequest,
   type StartSidecarRequest,
@@ -98,6 +105,10 @@ interface JsonError {
 interface ServiceLogger {
   info?: (message: string) => void;
   warn?: (message: string) => void;
+}
+
+class InvalidWakeRequestError extends Error {
+  readonly statusCode = 400;
 }
 
 class InvalidJsonBodyError extends Error {
@@ -139,6 +150,39 @@ export async function resolveTodoMutationActor(args: {
   }
   if (origin === "cli" || origin === "ui") return { kind: "human", origin };
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
+}
+
+async function authorizeAutoPingTarget(args: {
+  origin: UserActionOrigin;
+  callerHeader: string | string[] | undefined;
+  targetSessionId: string;
+  lookup: (sessionId: string) => Promise<{ id: string }>;
+}): Promise<void> {
+  try {
+    await args.lookup(args.targetSessionId);
+  } catch {
+    throw new AutoPingError("session_not_found", 404, "Auto-ping target session not found");
+  }
+  if (Array.isArray(args.callerHeader)) {
+    throw new AutoPingError("forbidden", 403, "Caller session header is invalid");
+  }
+  if (args.callerHeader) {
+    if (args.origin !== "cli" || args.callerHeader !== args.targetSessionId) {
+      throw new AutoPingError("forbidden", 403, "Caller session does not match auto-ping owner");
+    }
+    return;
+  }
+  if (args.origin !== "cli" && args.origin !== "ui") {
+    throw new AutoPingError("forbidden", 403, "Auto-ping request origin is invalid");
+  }
+}
+
+function decodeAutoPingPathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new AutoPingError("invalid_request", 400, "Auto-ping route identifier is invalid");
+  }
 }
 
 // ToDo state gates the agent, never the person driving Spur: a CLI or UI
@@ -225,8 +269,14 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
-  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-  response.end(JSON.stringify(payload, null, 2) + "\n");
+  // Compact, not pretty-printed: the listing payloads run to megabytes and the
+  // 2-space indent was ~10% of every one of them, re-serialized on each poll.
+  const body = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(body.byteLength),
+  });
+  response.end(body);
 }
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
@@ -277,9 +327,56 @@ function parseSweepSidecarsRequest(raw: unknown): { reap: boolean } {
   return { reap: raw["reap"] === true };
 }
 
-function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
+function parseWakeTarget(raw: unknown): WakeTarget {
+  if (raw === "scheduled" || raw === "interval" || raw === "daily") {
+    return raw;
+  }
+  throw new InvalidWakeRequestError("target must be scheduled, interval, or daily");
+}
+
+function rejectWakeScheduleFields(raw: Record<string, unknown>): void {
+  for (const field of ["at", "delayMs", "intervalMs", "dailyAt", "stopCondition"] as const) {
+    if (raw[field] !== undefined) {
+      throw new InvalidWakeRequestError(`${field} cannot be combined with target`);
+    }
+  }
+}
+
+function parseUpdateSessionWakeMessageRequest(
+  raw: Record<string, unknown>,
+): UpdateSessionWakeMessageRequest {
+  const target = parseWakeTarget(raw["target"]);
+  const message = raw["message"];
+  if (typeof message !== "string" || message.trim().length === 0) {
+    throw new InvalidWakeRequestError("message must be a non-empty string");
+  }
+  rejectWakeScheduleFields(raw);
+  return { target, message: message.trim() };
+}
+
+function parseDispatchSessionWakeRequest(raw: Record<string, unknown>): DispatchSessionWakeRequest {
+  const target = parseWakeTarget(raw["target"]);
+  if (raw["message"] !== undefined) {
+    throw new InvalidWakeRequestError("message cannot be combined with dispatch");
+  }
+  rejectWakeScheduleFields(raw);
+  return { target, dispatch: true };
+}
+
+type ParsedSessionWakeRequest =
+  | { mode: "schedule"; request: ScheduleSessionWakeRequest }
+  | { mode: "update"; request: UpdateSessionWakeMessageRequest }
+  | { mode: "dispatch"; request: DispatchSessionWakeRequest };
+
+function parseSessionWakeRequest(raw: unknown): ParsedSessionWakeRequest {
   if (!isRecord(raw)) {
-    return {};
+    return { mode: "schedule", request: {} };
+  }
+  if (raw["target"] !== undefined) {
+    if (raw["dispatch"] === true) {
+      return { mode: "dispatch", request: parseDispatchSessionWakeRequest(raw) };
+    }
+    return { mode: "update", request: parseUpdateSessionWakeMessageRequest(raw) };
   }
   const request: ScheduleSessionWakeRequest = {};
   const at = raw["at"];
@@ -309,7 +406,7 @@ function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeReque
   if (typeof message === "string") {
     request.message = message;
   }
-  return request;
+  return { mode: "schedule", request };
 }
 
 export function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
@@ -436,6 +533,17 @@ export function armShutdownBackstop(
   return () => clearTimeout(timer);
 }
 
+// The backstop's `onForceExit` calls `process.exit(0)` directly and never reaches the
+// normal shutdown path's own `flushGhPollCycles()` call in its `finally` — so this
+// is its own flush point. `logBeforeExit` runs the caller's own log write between the
+// flush and the exit; `flushGhPollCycles()` deletes each run as it flushes, so this can
+// never double-emit against a normal-path flush that also ran.
+export function forceShutdownExit(logBeforeExit: () => void): void {
+  flushGhPollCycles();
+  logBeforeExit();
+  process.exit(0);
+}
+
 export interface ReloadApplyHooks {
   // Swap the registry to the reloaded config, then bring automation up against it.
   applyNext: () => void;
@@ -543,6 +651,11 @@ function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRe
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
+  // Test-only (spur#859 B4): overrides the sidecar sweep's process-table
+  // read so a fixture can control it instead of scanning the real host —
+  // never set by a real caller (cli.ts's `daemon start` passes only the
+  // first two args). Kept off the wire: nothing over HTTP can reach this.
+  testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
   if (ghPathState.status === "unavailable") {
@@ -551,7 +664,11 @@ export async function startServer(
     );
   }
   assertConfigMayUseProdSlot(configPath);
-  const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
+  const service = new SessionService(configPath, undefined, {
+    deferBackgroundLoops: true,
+    ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
+  });
+  const autoPing = new AutoPingService(service.config.dataDir);
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
@@ -577,6 +694,8 @@ export async function startServer(
       config: service.config,
       bus,
       sessionService: service,
+      autoPing,
+      memoryHoldEngaged: () => service.memoryHoldEngaged(),
       logger: {
         warn: logger.warn ?? writeStderr,
         ...(logger.info ? { info: logger.info } : {}),
@@ -608,6 +727,7 @@ export async function startServer(
             ...(session.slots?.title ? { title: session.slots.title } : {}),
           };
         },
+        listProjects: async () => spawnableProjects(service.listProjects()),
       });
       const nextBacklogs = startConfiguredBacklogs({
         config: service.config,
@@ -1394,6 +1514,70 @@ export async function startServer(
         return;
       }
 
+      const autoPingListMatch = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions$/);
+      if (method === "GET" && autoPingListMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingListMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        sendJson(response, 200, { records: autoPing.list(targetSessionId) });
+        return;
+      }
+
+      const autoPingUnsubscribeMatch = path.match(
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/unsubscribe$/,
+      );
+      if (method === "POST" && autoPingUnsubscribeMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingUnsubscribeMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        const body = await readJsonBody<unknown>(request).catch(() => {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
+        });
+        if (
+          !isRecord(body) ||
+          (body.scope !== "event" && body.scope !== "thread" && body.scope !== "subscription") ||
+          typeof body.handle !== "string"
+        ) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping unsubscribe body is invalid");
+        }
+        sendJson(
+          response,
+          200,
+          await autoPing.unsubscribe(targetSessionId, body.scope, body.handle),
+        );
+        return;
+      }
+
+      const autoPingResumeMatch = path.match(
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/([^/]+)\/resume$/,
+      );
+      if (method === "POST" && autoPingResumeMatch?.[1] && autoPingResumeMatch[2]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingResumeMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        const suppressionId = decodeAutoPingPathSegment(autoPingResumeMatch[2]);
+        const body = await readJsonBody<unknown>(request).catch(() => {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
+        });
+        if (!isRecord(body) || Object.keys(body).length !== 0) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping resume body must be empty");
+        }
+        sendJson(response, 200, await autoPing.resume(targetSessionId, suppressionId));
+        return;
+      }
+
       const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
         // An invalid percent-encoding in any segment (decodeURIComponent throws URIError)
@@ -1523,8 +1707,14 @@ export async function startServer(
 
       const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
       if (method === "POST" && wakeSessionId) {
-        const body = parseScheduleSessionWakeRequest(await readJsonBody<unknown>(request));
-        sendJson(response, 200, await service.scheduleWake(wakeSessionId, body));
+        const parsed = parseSessionWakeRequest(await readJsonBody<unknown>(request));
+        if (parsed.mode === "update") {
+          sendJson(response, 200, await service.updateWakeMessage(wakeSessionId, parsed.request));
+        } else if (parsed.mode === "dispatch") {
+          sendJson(response, 200, await service.dispatchWake(wakeSessionId, parsed.request));
+        } else {
+          sendJson(response, 200, await service.scheduleWake(wakeSessionId, parsed.request));
+        }
         return;
       }
 
@@ -1751,6 +1941,16 @@ export async function startServer(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errorMessage = message;
+      if (error instanceof AutoPingError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendJson(response, error.status, { error: { code: error.code, message } });
+        return;
+      }
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
@@ -1758,7 +1958,10 @@ export async function startServer(
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
+        error instanceof InvalidWakeRequestError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof WakeTargetMissingError ||
+        error instanceof WakeDispatchConflictError ||
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||
@@ -1919,6 +2122,7 @@ export async function startServer(
       message: `Spur daemon failed during startup: ${message}`,
     });
     service.dispose();
+    autoPing.dispose();
     await closeServer();
     throw error;
   }
@@ -2021,16 +2225,17 @@ export async function startServer(
       // Armed before the first await so a step that wedges inside its own bound still
       // ends the process well under the service manager's stop timeout.
       const disarmBackstop = exitProcess
-        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) => {
-            logEvent("daemon.shutdown.forced_exit", {
-              level: "error",
-              message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
-                activeResources,
-              )}`,
-              details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
-            });
-            process.exit(0);
-          })
+        ? armShutdownBackstop(SHUTDOWN_FORCE_EXIT_MS, (activeResources) =>
+            forceShutdownExit(() =>
+              logEvent("daemon.shutdown.forced_exit", {
+                level: "error",
+                message: `Graceful shutdown did not finish within ${SHUTDOWN_FORCE_EXIT_MS}ms; exiting with active resources: ${JSON.stringify(
+                  activeResources,
+                )}`,
+                details: { timeoutMs: SHUTDOWN_FORCE_EXIT_MS, activeResources },
+              }),
+            ),
+          )
         : null;
       try {
         // dispose() clears every owned interval — attention monitor, 1s scheduled-wake
@@ -2039,6 +2244,7 @@ export async function startServer(
         // It also retires the per-session delivery loops, which park on their own
         // poll sleep and would otherwise keep typing into panes after shutdown.
         service.dispose();
+        autoPing.dispose();
         const closePromise = closeServer();
         const sourceController = sources;
         if (sourceController) {
@@ -2076,6 +2282,20 @@ export async function startServer(
         // awaitBounded and stopTriggersBounded log and continue, because a best-effort
         // teardown must not abandon the steps behind it. Only a synchronous throw
         // (dispose(), the sync stops) escapes, and only programmatic stop() sees it.
+        //
+        // Flushed here, last, rather than before dispose(): dispose() only clears the
+        // owned intervals, it does not cancel or await an already in-flight
+        // runGhPollCycle (e.g. the attention monitor's fire-and-forget call). That
+        // call's own `finally` in gh.ts writes into pollCycleRuns whenever it settles,
+        // which can happen during any of the awaits above (sources.stop,
+        // settleBackgroundSpawns, server.close) or be skipped over entirely by an
+        // uncaught synchronous throw from backlogs?.stop() / runtimeLogs?.stop() —
+        // both unbounded, unlike the awaitBounded steps around them. A flush placed
+        // before dispose() or mid-try misses that write; finally is the one place
+        // guaranteed to run after every one of those paths. ghEventSinkDataDir is a
+        // module-level value set once at startup and never cleared during teardown, so
+        // the sink this flush writes through is still live here.
+        flushGhPollCycles();
         disarmBackstop?.();
         if (exitProcess) {
           process.exit(0);

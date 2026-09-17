@@ -29,6 +29,7 @@ import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
+import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -115,6 +116,8 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarPortConflictCandidate,
+  type SpurSidecarStopResponse,
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
@@ -140,6 +143,21 @@ function displayLinkLabel(label: string, url: string): string {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
   }
   return label;
+}
+
+// Two failing portIds can share an overlapping declared range and both name
+// the same numeric port as a candidate — one <option> per portId would
+// render duplicate values in the busy-port <select>. Keep the first
+// occurrence only.
+function dedupeConflictCandidatesByPort(
+  candidates: SpurSidecarPortConflictCandidate[],
+): SpurSidecarPortConflictCandidate[] {
+  const seen = new Set<number>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.port)) return false;
+    seen.add(candidate.port);
+    return true;
+  });
 }
 
 function splitSessionLinks(
@@ -173,25 +191,6 @@ function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
-function WakeIcon({ recurring }: { recurring: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <circle cx="12" cy="12" r="8" />
-      <path d="M12 8v5l3 2" />
-      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -1746,6 +1745,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     dismissLoadErrorToast();
   }, [dismissLoadErrorToast, sessionId]);
 
+  const applySessionUpdate = useCallback((next: DashboardSession) => {
+    loadRequestIdRef.current += 1;
+    setSession(next);
+  }, []);
+
   const loadSession = useCallback(async () => {
     const requestedSessionId = sessionId;
     const requestId = loadRequestIdRef.current + 1;
@@ -2272,7 +2276,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           const conflict = await readSidecarPortConflict(response.clone());
           if (conflict) {
             setSidecarPortConflict(conflict);
-            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            // Never default onto a clearable:false candidate — it renders
+            // disabled in the dropdown, and submitting it is a silent
+            // repeat 409 (a port already claimed by a sibling portId in the
+            // same attempt never enters the clear path).
+            setSelectedClearPort(
+              conflict.candidates.find((candidate) => candidate.clearable !== false)?.port ?? null,
+            );
             return;
           }
         }
@@ -2280,10 +2290,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
         );
       }
-      const payload = (await response.json()) as SpurSessionView;
+      const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
+      if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        const { survivors, unverifiedPorts = [] } = payload.sidecarStop;
+        showErrorToast(
+          survivors.length === 0 && unverifiedPorts.length > 0
+            ? `Stopped sidecar ${sidecarName}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Run \`spur sidecar sweep\`.`
+            : `Stopped sidecar ${sidecarName}, but ${survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+        );
+      }
     } catch (sidecarError) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
@@ -2671,7 +2689,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [showErrorToast, showSuccessToast],
   );
 
-  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  // Same clearable:false skip as the 409 handler that sets selectedClearPort
+  // (readSidecarPortConflict's caller): if selectedClearPort is null (every
+  // candidate was clearable:false, so the handler set null), this fallback
+  // must not silently re-enable Clear/Retry onto a disabled option.
+  const conflictClearPort =
+    selectedClearPort ??
+    sidecarPortConflict?.candidates.find((candidate) => candidate.clearable !== false)?.port ??
+    null;
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
@@ -2829,33 +2854,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {session.branch}
                   </span>
                 ) : null}
-                {wakeSummary ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                    title={
-                      wakeSummary.kind === "interval"
-                        ? "Interval wake scheduled"
-                        : wakeSummary.kind === "daily"
-                          ? "Daily wake scheduled"
-                          : "Wake scheduled"
-                    }
-                  >
-                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                    <span>{wakeSummary.label.toLowerCase()}</span>
-                    <span className="font-mono text-[var(--color-text-primary)]">
-                      {wakeCountdown}
-                    </span>
-                    {wakeSummary.intervalMs ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        every {formatIntervalDuration(wakeSummary.intervalMs)}
-                      </span>
-                    ) : null}
-                    {wakeSummary.dailyAt ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        daily {wakeSummary.dailyAt.join(", ")}
-                      </span>
-                    ) : null}
-                  </span>
+                {session && getWakeSummary(session) ? (
+                  <WakeControls
+                    onRefresh={loadSession}
+                    onSessionUpdated={applySessionUpdate}
+                    session={session}
+                    showErrorToast={showErrorToast}
+                    showSuccessToast={showSuccessToast}
+                  />
                 ) : null}
                 {surfacedLinks.map((link) => (
                   <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
@@ -3572,7 +3578,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
-                            {sc.alive && canAttach ? (
+                            {(sc.alive || sc.deadPane) && canAttach ? (
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
@@ -3682,6 +3688,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {recoverPayload ? (
             <RecoverActionDialog
               busy={busyAction !== null}
+              canForceKill={!isTerminalSession(session)}
               onCancel={() => setRecoverPayload(null)}
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
@@ -3772,15 +3779,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }
                       value={conflictClearPort ?? ""}
                     >
-                      {sidecarPortConflict.candidates.map((candidate) => (
-                        <option
-                          key={`${candidate.portId}:${candidate.port}`}
-                          value={candidate.port}
-                        >
-                          {candidate.portId}:{candidate.port}
-                          {candidate.owner ? ` — ${candidate.owner}` : ""}
-                        </option>
-                      ))}
+                      {dedupeConflictCandidatesByPort(sidecarPortConflict.candidates).map(
+                        (candidate) => {
+                          const label = candidate.reservedBy
+                            ? `reserved by ${candidate.reservedBy}`
+                            : candidate.holder
+                              ? `pid ${candidate.holder.pid}${candidate.holder.cwd ? ` (${candidate.holder.cwd})` : ""}`
+                              : candidate.owner && candidate.owner !== "external"
+                                ? candidate.owner
+                                : "holder unknown";
+                          return (
+                            <option
+                              key={`${candidate.portId}:${candidate.port}`}
+                              disabled={candidate.clearable === false}
+                              value={candidate.port}
+                            >
+                              {candidate.portId}:{candidate.port} — {label}
+                            </option>
+                          );
+                        },
+                      )}
                     </select>
                   </label>
                   <div className="flex justify-end gap-2">
