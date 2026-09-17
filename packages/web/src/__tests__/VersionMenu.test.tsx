@@ -1231,7 +1231,6 @@ describe("live version from the heartbeat", () => {
     const initialLabel = trigger.querySelector("span");
     expect(initialLabel).not.toBeNull();
     expect(initialLabel).toHaveClass(
-      "inline-block",
       "min-w-[13ch]",
       "text-center",
       "motion-safe:animate-pulse",

@@ -113,6 +113,7 @@ test.describe("Version menu Auto checkbox", () => {
     await expect(trigger).toContainText("9.9.9-alpha");
     await expect(trigger).toHaveAttribute("data-version-animation-starts", "1");
     await expect(label).toHaveCSS("animation-duration", "0.8s");
+    await expect(label).toHaveCSS("animation-iteration-count", "1");
 
     const [changedLabelBox, changedClusterBox] = await Promise.all([
       label.boundingBox(),
@@ -125,6 +126,15 @@ test.describe("Version menu Auto checkbox", () => {
     expect(Math.abs(changedLabelBox.x - initialLabelBox.x)).toBeLessThanOrEqual(1);
     expect(Math.abs(changedClusterBox.width - initialClusterBox.width)).toBeLessThanOrEqual(1);
     expect(Math.abs(changedClusterBox.x - initialClusterBox.x)).toBeLessThanOrEqual(1);
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    versions.current = "9.9.9-beta";
+    const reducedMotionFetches = infoFetches;
+    await page.clock.fastForward(5_100);
+    await expect.poll(() => infoFetches).toBeGreaterThan(reducedMotionFetches);
+    await expect(trigger).toContainText("9.9.9-beta");
+    await expect(trigger).toHaveAttribute("data-version-animation-starts", "1");
+    await expect(label).toHaveCSS("animation-name", "none");
   });
 
   test("header keeps name+version and Auto on one row at 320px, no wrap", async ({ page }) => {

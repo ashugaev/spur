@@ -366,7 +366,7 @@ export function VersionMenu() {
       >
         <span
           key={triggerLabel}
-          className={`inline-block min-w-[13ch] text-center motion-safe:animate-pulse motion-safe:[animation-duration:800ms] motion-safe:[animation-iteration-count:1] ${
+          className={`min-w-[13ch] text-center motion-safe:animate-pulse motion-safe:[animation-duration:800ms] motion-safe:[animation-iteration-count:1] ${
             updateFailure
               ? "font-bold text-[var(--color-status-error)]"
               : severity === "none"
