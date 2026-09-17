@@ -183,6 +183,10 @@ export function VersionMenu() {
   const { phase: switchPhase, startSwitch, dismiss: dismissVersionSwitch } = useVersionSwitch();
   const { version: heartbeatVersion } = useBackendConnection();
   const [pending, setPending] = useState<string | null>(null);
+  const [heartbeatPulse, setHeartbeatPulse] = useState<{
+    version: string | null;
+    key: number;
+  }>({ version: null, key: 0 });
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const queryClient = useQueryClient();
 
@@ -307,6 +311,17 @@ export function VersionMenu() {
   // "none", and that is exactly the state that must not stay invisible.
   const updateFailure = versionsQuery.data?.updateFailure ?? null;
 
+  useEffect(() => {
+    if (!heartbeatVersion) return;
+    setHeartbeatPulse((current) => {
+      if (current.version === heartbeatVersion) return current;
+      return {
+        version: heartbeatVersion,
+        key: current.version === null ? current.key : current.key + 1,
+      };
+    });
+  }, [heartbeatVersion]);
+
   const { dismiss } = popover;
   useEffect(() => {
     if (!popover.open) return;
@@ -365,8 +380,12 @@ export function VersionMenu() {
         onClick={popover.toggle}
       >
         <span
-          key={triggerLabel}
-          className={`min-w-[13ch] text-center motion-safe:animate-pulse motion-safe:[animation-duration:800ms] motion-safe:[animation-iteration-count:1] ${
+          key={heartbeatPulse.key}
+          className={`w-[21ch] truncate text-center ${
+            heartbeatPulse.key === 0
+              ? ""
+              : "motion-safe:animate-pulse motion-safe:[animation-duration:800ms] motion-safe:[animation-iteration-count:1]"
+          } ${
             updateFailure
               ? "font-bold text-[var(--color-status-error)]"
               : severity === "none"
@@ -374,6 +393,7 @@ export function VersionMenu() {
                 : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`
           }`}
           data-severity={severity}
+          title={triggerLabel}
         >
           {triggerLabel}
         </span>

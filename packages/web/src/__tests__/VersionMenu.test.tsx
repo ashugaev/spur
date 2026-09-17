@@ -1230,9 +1230,9 @@ describe("live version from the heartbeat", () => {
     await waitFor(() => expect(trigger).toHaveTextContent("1.4.0"));
     const initialLabel = trigger.querySelector("span");
     expect(initialLabel).not.toBeNull();
-    expect(initialLabel).toHaveClass(
-      "min-w-[13ch]",
-      "text-center",
+    expect(initialLabel).toHaveClass("w-[21ch]", "truncate", "text-center");
+    expect(initialLabel).toHaveAttribute("title", "1.4.0");
+    expect(initialLabel).not.toHaveClass(
       "motion-safe:animate-pulse",
       "motion-safe:[animation-duration:800ms]",
       "motion-safe:[animation-iteration-count:1]",
@@ -1249,15 +1249,28 @@ describe("live version from the heartbeat", () => {
       await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     });
     await waitFor(() => expect(trigger).toHaveTextContent("9.9.9-alpha"));
-    expect(trigger.querySelector("span")).not.toBe(initialLabel);
+    const changedLabel = trigger.querySelector("span");
+    expect(changedLabel).not.toBe(initialLabel);
+    expect(changedLabel).toHaveAttribute("title", "9.9.9-alpha");
+    expect(changedLabel).toHaveClass(
+      "motion-safe:animate-pulse",
+      "motion-safe:[animation-duration:800ms]",
+      "motion-safe:[animation-iteration-count:1]",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    await waitFor(() => expect(trigger).toHaveTextContent("9.9.9-alpha"));
+    expect(trigger.querySelector("span")).toBe(changedLabel);
 
     expect(window.location.reload).not.toHaveBeenCalled();
-    // The 60s versions poll never fired inside two 5s heartbeats, so the new
+    // The 60s versions poll never fired inside three 5s heartbeats, so the new
     // label can only have come from the heartbeat.
     expect(versionsFetches).toBe(1);
-    // infoQuery mount + provider mount probe + exactly two heartbeats: pins
+    // infoQuery mount + provider mount probe + exactly three heartbeats: pins
     // "no second poller" on the info endpoint.
-    expect(infoFetches).toBe(4);
+    expect(infoFetches).toBe(5);
   });
 
   it("keeps the popover header, the severity glyph and the current row on the heartbeat version", async () => {
