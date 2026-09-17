@@ -2421,6 +2421,56 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  // Regression fence, NOT mutation-checked: this file injects a stub
+  // sessionService ({ get, deliver } as never at :1188), so deliver() here
+  // is a bare vi.fn() that never runs sendDeferredSensitiveInitialMessage
+  // (session-service.ts). It cannot prove the fix — see
+  // deferred-controls-ack.test.ts for that. It only pins triggers.ts's own
+  // contract: once deliver() resolves (which is what a live-agent controls
+  // ack timeout now does, instead of throwing), the batch is treated as
+  // delivered — no drop event, no retry — matching the success path at
+  // triggers.ts:1034-1037.
+  it("treats a resolved deliver() as delivered with no retry (controls-ack-timeout success shape)", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      const dropped = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .find((entry) => entry.event === "trigger.send.dropped");
+      expect(dropped).toBeUndefined();
+
+      // No backoff opened on success: an hour of further ticks re-attempts nothing.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("clears delivery-failure backoff once a later attempt succeeds", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",

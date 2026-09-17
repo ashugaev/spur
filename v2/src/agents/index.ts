@@ -96,6 +96,10 @@ const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
 const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CURSOR_SUBMIT_MAX_RESENDS = 12;
+// Deferred sensitive-controls ack scan window, all agents. The scan runs
+// inside withPaneWriteLock, so a long window starves every other send to
+// that pane; bounded short so the lock releases quickly regardless of agent.
+export const DEFERRED_CONTROLS_ACK_WINDOW_MS = 5_000;
 // Launch-send pacing for claude. A claude TUI still rendering the pasted launch
 // message swallows the submit Enter, and nothing is submitted until another one
 // arrives, so the launch send scans in short windows instead of the mid-session
