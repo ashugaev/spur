@@ -554,10 +554,7 @@ describe("scanTmuxRateLimit", () => {
   });
 
   it("matches a line-leading team usage-limit banner without ■", () => {
-    const pane = [
-      "  Reached its usage limit",
-      "  Your team quota is exhausted.",
-    ].join("\n");
+    const pane = ["  Reached its usage limit", "  Your team quota is exhausted."].join("\n");
     expect(scanTmuxRateLimit(pane)).toEqual({
       limited: true,
       reason: "tmux reached its usage limit",

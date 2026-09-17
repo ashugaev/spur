@@ -27,7 +27,7 @@ export const RATE_LIMIT_MARKERS: readonly string[] = [
   "resource_exhausted",
   "reached its usage limit",
   "spendlimithit: true",
-  "\"spendlimithit\":true",
+  '"spendlimithit":true',
 ];
 
 // Rendered human banner phrases (lowercase) that appear as ■-prefixed banners
