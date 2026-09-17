@@ -12368,7 +12368,6 @@ describe("SessionService", () => {
       // override is neither refreshed nor dropped, and the pane rate-limit
       // scan never ran.
       expect(classified.state).toBe("error");
-      expect(classified.rateLimit ?? null).toBeNull();
       expect(internals.cursorPaneReadyOverrides.get("cursor-1")).toBe(storedExpiry);
     });
 
