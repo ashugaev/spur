@@ -6,8 +6,14 @@ import { createIsolatedWebTestTarget } from "./tests/harness/daemon-target.js";
 // hand, or an isolated-ui sidecar inside a Spur session. Anything else starts
 // Next here, against the isolated unbound daemon target — so baseURL and the
 // child's -p come from the same allocation, in the same process.
+//
+// CI answers only to PLAYWRIGHT_BASE_URL: a runner that happens to carry
+// SPUR_SESSION (self-hosted, shared with a Spur fleet) has no isolated-ui
+// sidecar, and the external branch would throw from resolvePlaywrightBaseUrl at
+// config load. The CI job owns its own server either way.
 const externalTarget = Boolean(
-  process.env.PLAYWRIGHT_BASE_URL || process.env.SPUR_SESSION || process.env.SPUR_SESSION_TOOL_DIR,
+  process.env.PLAYWRIGHT_BASE_URL ||
+  (!process.env.CI && (process.env.SPUR_SESSION || process.env.SPUR_SESSION_TOOL_DIR)),
 );
 const target = externalTarget ? null : createIsolatedWebTestTarget();
 const baseURL = target ? `http://127.0.0.1:${target.uiPort}` : resolvePlaywrightBaseUrl();

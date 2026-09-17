@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
@@ -35,10 +35,27 @@ afterAll(() => {
 });
 
 describe("daemonBaseUrl isolation guard", () => {
-  it("throws before any request when resolution lands on a production default", async () => {
+  // Two guards, two distinct messages: matching only /Test isolation/ would let
+  // the URL guard absorb a deleted config-path guard and pass either way.
+  it("throws on the production config path before any request", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1" });
-    await expect(spurRequest("/info")).rejects.toThrow(/Test isolation/);
+    await expect(spurRequest("/info")).rejects.toThrow(
+      /SPUR_CONFIG fell back to the production default/,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("throws on a non-production config that still resolves the production URL", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    // Config exists but carries no server block, so resolution reaches
+    // DEFAULT_SPUR_DAEMON_URL past the config-path guard.
+    const configPath = join(SCRATCH_TMPDIR, "no-server.yaml");
+    writeFileSync(configPath, "ui:\n  port: 41999\n", "utf8");
+    stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1", SPUR_CONFIG: configPath });
+    await expect(spurRequest("/info")).rejects.toThrow(
+      /daemon URL fell back to the production default/,
+    );
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

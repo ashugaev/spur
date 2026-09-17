@@ -487,8 +487,8 @@ export const test = base.extend<{ unmockedApiRequests: string[] }>({
         await route.abort("failed");
       });
       for (const { pattern, status, body } of APP_SHELL_ROUTES) {
-        await page.route(pattern, (route) => {
-          void route.fulfill({
+        await page.route(pattern, async (route) => {
+          await route.fulfill({
             status: status ?? 200,
             contentType: "application/json",
             body: JSON.stringify(body),

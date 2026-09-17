@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
@@ -129,9 +129,26 @@ describe("createIsolatedWebTestTarget", () => {
 });
 
 describe("readSpurInstanceRuntimeConfig isolation guard", () => {
-  it("throws when isolation is on and resolution falls back to the production default", () => {
+  // Two guards, two distinct messages: matching only /Test isolation/ would let
+  // the port guard absorb a deleted config-path guard and pass either way.
+  it("throws on the production config path before reading it", () => {
     stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1" });
-    expect(() => readSpurInstanceRuntimeConfig()).toThrow(/Test isolation/);
+    expect(() => readSpurInstanceRuntimeConfig()).toThrow(
+      /Spur instance config fell back to the production default/,
+    );
+  });
+
+  it("throws on a config that parses but names a production port", () => {
+    const configPath = join(SCRATCH_TMPDIR, "production-port.yaml");
+    writeFileSync(
+      configPath,
+      ["server:", "  host: 127.0.0.1", "  port: 4310", "ui:", "  port: 41999", ""].join("\n"),
+      "utf8",
+    );
+    stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1", SPUR_CONFIG: configPath });
+    expect(() => readSpurInstanceRuntimeConfig()).toThrow(
+      /resolved to a production port \(daemon 4310/,
+    );
   });
 
   it("stays silent with the harness env applied", () => {
