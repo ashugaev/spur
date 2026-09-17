@@ -165,8 +165,9 @@ describe("runtime-tmux", () => {
 
   // AC2: a capture-pane killed by its own timeout must never surface as a
   // thrown error out of captureTmuxPane — the sweep continues to the next
-  // session on a plain "".
-  it('AC2: captureTmuxPane resolves "" when capture-pane is killed by its own timeout', async () => {
+  // session on `null`, "could not look", kept distinct from "" so no caller
+  // reads a failed fork as an observation of a blank pane.
+  it("AC2: captureTmuxPane resolves null when capture-pane is killed by its own timeout", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args[0] === "capture-pane") {
         throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
@@ -174,9 +175,11 @@ describe("runtime-tmux", () => {
       return { stdout: "", stderr: "" };
     });
 
-    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+    const { captureTmuxPane, captureTmuxPaneOrEmpty } = await import("../../src/runtime-tmux.js");
 
-    await expect(captureTmuxPane("api-1")).resolves.toBe("");
+    await expect(captureTmuxPane("api-1")).resolves.toBeNull();
+    // Display-only callers keep the old collapsed value.
+    await expect(captureTmuxPaneOrEmpty("api-2")).resolves.toBe("");
   });
 
   it("starts tmux sessions with the Spur-specific config", async () => {
