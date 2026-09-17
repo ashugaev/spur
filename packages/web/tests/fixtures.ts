@@ -1,5 +1,5 @@
 import { test as base } from "playwright/test";
-import type { Page } from "@playwright/test";
+import type { BrowserContext, Page } from "@playwright/test";
 import type {
   AvailableBacklogItem,
   ProjectInfo,
@@ -435,6 +435,14 @@ export type { Browser, Locator, Page } from "playwright/test";
  * still wins. The throw lives after `use()` because a throw inside a route
  * handler is swallowed.
  */
+const NEUTRAL_PR_STATUS = {
+  state: null,
+  ciStatus: null,
+  canMerge: false,
+  totalThreads: 0,
+  unresolvedThreads: 0,
+};
+
 // Routes every page fetches on load, independent of what a spec exercises.
 // Registered after the catch-all (so they win over it) and before the spec body
 // (so a spec's own route wins over them).
@@ -449,7 +457,8 @@ const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unkno
   { pattern: "**/api/tags", body: { tags: [] } },
   { pattern: "**/api/github-status", body: DEFAULT_GITHUB_STATUS },
   { pattern: "**/api/gitlab-status", body: DEFAULT_GITLAB_STATUS },
-  { pattern: /\/api\/pr-status(\/batch)?(\?.*)?$/, body: { statuses: {} } },
+  { pattern: /\/api\/pr-status\/batch$/, body: { results: {} } },
+  { pattern: /\/api\/pr-status\?/, body: NEUTRAL_PR_STATUS },
   { pattern: /\/api\/models(\?.*)?$/, body: { models: [] } },
   {
     pattern: /\/api\/projects\/[^/]+\/spawn-defaults(\?.*)?$/,
@@ -478,23 +487,33 @@ const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unkno
   { pattern: /\/api\/sessions\/[^/]+\/artifacts\//, status: 404, body: { error: "Not found" } },
 ];
 
+type ApiRouteTarget = Page | BrowserContext;
+
+async function installApiRouteGuards(target: ApiRouteTarget, seen: string[]): Promise<void> {
+  await target.route("**/api/**", async (route) => {
+    seen.push(route.request().url());
+    await route.abort("failed");
+  });
+  for (const { pattern, status, body } of APP_SHELL_ROUTES) {
+    await target.route(pattern, async (route) => {
+      await route.fulfill({
+        status: status ?? 200,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    });
+  }
+}
+
+export async function installApiRouteGuardsOnContext(context: BrowserContext): Promise<void> {
+  await installApiRouteGuards(context, []);
+}
+
 export const test = base.extend<{ unmockedApiRequests: string[] }>({
   unmockedApiRequests: [
     async ({ page }, use) => {
       const seen: string[] = [];
-      await page.route("**/api/**", async (route) => {
-        seen.push(route.request().url());
-        await route.abort("failed");
-      });
-      for (const { pattern, status, body } of APP_SHELL_ROUTES) {
-        await page.route(pattern, async (route) => {
-          await route.fulfill({
-            status: status ?? 200,
-            contentType: "application/json",
-            body: JSON.stringify(body),
-          });
-        });
-      }
+      await installApiRouteGuards(page, seen);
       await use(seen);
       if (seen.length > 0) {
         throw new Error(`Unmocked /api request(s): ${seen.join(", ")}`);

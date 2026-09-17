@@ -7,6 +7,7 @@ import {
   type Page,
   makeWorkingSession,
   mockSessions,
+  installApiRouteGuardsOnContext,
 } from "./fixtures.js";
 
 const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
@@ -64,6 +65,7 @@ async function captureScenario({
     reducedMotion,
     viewport,
   });
+  await installApiRouteGuardsOnContext(context);
   const page = await context.newPage();
   await prepare(page);
   await page.waitForTimeout(1_000);

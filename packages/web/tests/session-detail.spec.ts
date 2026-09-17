@@ -13,6 +13,7 @@ import {
   makeStoppedSession,
   mockAgentModels,
   mockSpawnDefaults,
+  installApiRouteGuardsOnContext,
 } from "./fixtures.js";
 
 type ElementBox = {
@@ -2284,6 +2285,7 @@ test.describe("S3 mobile voice", () => {
     browser,
   }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
     const page = await context.newPage();
     const session = makeWorkingSession({ id: "detail-s3-mobile-voice-1", runtimeAlive: true });
     let transcribeCalls = 0;
@@ -3008,6 +3010,7 @@ test.describe("S4b: Artifacts section", () => {
 
   test("mobile text lightbox scrolls on first open without a pinch", async ({ browser }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
     const page = await context.newPage();
     const session = makeWorkingSession({
       id: "detail-s4b-mobile-text-scroll",
@@ -3069,6 +3072,7 @@ test.describe("S4b: Artifacts section", () => {
 
   test("mobile pinch zooms the image lightbox preview", async ({ browser }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
     const page = await context.newPage();
     const session = makeWorkingSession({
       id: "detail-s4b-pinch",
@@ -3122,6 +3126,7 @@ test.describe("S4b: Artifacts section", () => {
     browser,
   }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
     const page = await context.newPage();
     const session = makeWorkingSession({
       id: "detail-s4b-touch-swipe",
@@ -3218,6 +3223,7 @@ test.describe("S4b: Artifacts section", () => {
     browser,
   }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
     const page = await context.newPage();
     const session = makeWorkingSession({
       id: "detail-s4b-mobile-text-controls",
