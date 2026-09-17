@@ -17590,22 +17590,31 @@ export class SessionService {
         }
       } else if (scanPane && strategy === "cursor_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        if (!rateLimit?.limited) {
-          const tmuxHit = scanTmuxRateLimit(paneText);
-          if (tmuxHit?.limited) {
-            rateLimit = tmuxHit;
+        // A failed fork takes no observation: neither the rate-limit scan nor
+        // the ready-prompt check runs, so a null capture can't promote to
+        // rate_limited, can't flip to "waiting", and can't drop a live
+        // cursorPaneReadyOverrides entry a real capture wrote.
+        if (paneText !== null) {
+          if (!rateLimit?.limited) {
+            const tmuxHit = scanTmuxRateLimit(paneText);
+            if (tmuxHit?.limited) {
+              rateLimit = tmuxHit;
+            }
           }
-        }
-        if (
-          state === "error" &&
-          cursorShowsReadyPrompt(paneText) &&
-          !rateLimitActive(rateLimit, nowMs)
-        ) {
-          state = "waiting";
-          this.cursorPaneReadyOverrides.set(session.id, nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS);
-          classifiedDetail = "State: waiting (cursor pane ready override)";
-        } else {
-          this.cursorPaneReadyOverrides.delete(session.id);
+          if (
+            state === "error" &&
+            cursorShowsReadyPrompt(paneText) &&
+            !rateLimitActive(rateLimit, nowMs)
+          ) {
+            state = "waiting";
+            this.cursorPaneReadyOverrides.set(
+              session.id,
+              nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS,
+            );
+            classifiedDetail = "State: waiting (cursor pane ready override)";
+          } else {
+            this.cursorPaneReadyOverrides.delete(session.id);
+          }
         }
       } else if (!scanPane && strategy === "cursor_jsonl") {
         const expiresAt = this.cursorPaneReadyOverrides.get(session.id);

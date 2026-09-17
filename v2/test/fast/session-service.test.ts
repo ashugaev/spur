@@ -12353,6 +12353,25 @@ describe("SessionService", () => {
       );
     });
 
+    it("takes no observation from a failed cursor pane capture: no ready override, no delete, no rate-limit promotion", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor" });
+      mockCursorJsonlState("error");
+      const storedExpiry = Date.now() + 10_000;
+      internals.cursorPaneReadyOverrides.set("cursor-1", storedExpiry);
+      captureTmuxPaneMock.mockResolvedValue(null);
+
+      const classified = await internals.classifySessionRecord(cursorSession, { scanPane: true });
+
+      // A failed fork is no observation: the JSONL state stands, the stored
+      // override is neither refreshed nor dropped, and the pane rate-limit
+      // scan never ran.
+      expect(classified.state).toBe("error");
+      expect(classified.rateLimit ?? null).toBeNull();
+      expect(internals.cursorPaneReadyOverrides.get("cursor-1")).toBe(storedExpiry);
+    });
+
     it("applies a 60-second grace window to minMtimeMs for unpinned cursor sessions", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
