@@ -12279,6 +12279,10 @@ export class SessionService {
             controlCount: (message.match(/ap1_/g) ?? []).length,
           },
         });
+        // Deliberately not "submitted": writeAgentMessage's cursor-live branch
+        // returns "submitted" for an ordinary recovered send, but spawn/trigger
+        // telemetry needs to tell that apart from an unconfirmed deferred-controls
+        // ack. Don't "fix" this to match writeAgentMessage.
         return "submit_unconfirmed" as const;
       }
       throw new SubmitAckTimeoutError({
