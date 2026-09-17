@@ -17591,13 +17591,14 @@ export class SessionService {
       } else if (scanPane && strategy === "cursor_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         if (!rateLimit?.limited) {
-          const tmuxHit = scanTmuxRateLimit(paneText);
+          const tmuxHit = paneText === null ? null : scanTmuxRateLimit(paneText);
           if (tmuxHit?.limited) {
             rateLimit = tmuxHit;
           }
         }
         if (
           state === "error" &&
+          paneText !== null &&
           cursorShowsReadyPrompt(paneText) &&
           !rateLimitActive(rateLimit, nowMs)
         ) {
