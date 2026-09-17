@@ -242,6 +242,61 @@ describe("runtime-tmux shared probe cache", () => {
     expect(captureCalls).toBe(SESSION_COUNT + 1);
   });
 
+  it("resolves a rejected capture-pane fork to null, distinct from a genuinely blank pane", async () => {
+    let captureCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        captureCalls += 1;
+        throw new Error("capture-pane failed");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { captureTmuxPane, captureTmuxPaneOrEmpty } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-0")).resolves.toBeNull();
+    expect(captureCalls).toBe(1);
+
+    // The rejected fork is evicted (memoizedProbe's evict-on-reject), so a
+    // second call within the same TTL window re-forks rather than serving a
+    // stale rejection.
+    await expect(captureTmuxPane("api-0")).resolves.toBeNull();
+    expect(captureCalls).toBe(2);
+
+    // captureTmuxPaneOrEmpty collapses the same rejection into "", never
+    // null, for display-only callers.
+    await expect(captureTmuxPaneOrEmpty("api-0")).resolves.toBe("");
+    expect(captureCalls).toBe(3);
+  });
+
+  it("still shares a resolved capture-pane result within the TTL after a prior rejection", async () => {
+    let shouldFail = true;
+    let captureCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        captureCalls += 1;
+        if (shouldFail) throw new Error("capture-pane failed");
+        return { stdout: "pane text", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-1")).resolves.toBeNull();
+    expect(captureCalls).toBe(1);
+
+    shouldFail = false;
+    await expect(captureTmuxPane("api-1")).resolves.toBe("pane text");
+    expect(captureCalls).toBe(2);
+
+    // A second read within the TTL shares the resolved capture — no
+    // additional fork, even though the very first read for this session had
+    // rejected.
+    await expect(captureTmuxPane("api-1")).resolves.toBe("pane text");
+    expect(captureCalls).toBe(2);
+  });
+
   it("prunes expired capture-pane cache entries instead of accumulating them forever", async () => {
     vi.useFakeTimers();
     try {
