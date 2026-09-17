@@ -249,8 +249,14 @@ describe("detectCursorRateLimit", () => {
     });
     expect(detectCursorRateLimit("spendLimitHit: true")).toEqual({
       limited: true,
-      reason: "cursor spendlimithit",
+      reason: "cursor spendlimithit: true",
     });
+    expect(detectCursorRateLimit('{"spendLimitHit":true}')).toEqual({
+      limited: true,
+      reason: 'cursor "spendlimithit":true',
+    });
+    expect(detectCursorRateLimit("spendLimitHit: false")).toBeNull();
+    expect(detectCursorRateLimit('{"spendLimitHit":false}')).toBeNull();
   });
 
   it("is not limited for benign assistant text", () => {
@@ -544,6 +550,17 @@ describe("scanTmuxRateLimit", () => {
     expect(scanTmuxRateLimit(pane)).toEqual({
       limited: true,
       reason: "tmux usage limit reached",
+    });
+  });
+
+  it("matches a line-leading team usage-limit banner without ■", () => {
+    const pane = [
+      "  Reached its usage limit",
+      "  Your team quota is exhausted.",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux reached its usage limit",
     });
   });
 
