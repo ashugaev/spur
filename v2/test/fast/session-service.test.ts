@@ -136,7 +136,8 @@ const listServiceInstancesForSessionMock = vi.fn();
 const readServiceInstanceMock = vi.fn();
 const writeServiceInstanceMock = vi.fn();
 const serviceRecords = new Map<string, ServiceInstanceRecord>();
-const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
+const captureTmuxPaneMock = vi.fn((): Promise<string | null> => Promise.resolve(""));
+const captureTmuxPaneOrEmptyMock = vi.fn(() => Promise.resolve(""));
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
@@ -146,6 +147,9 @@ const resolvePlaywrightSidecarCommandMock = vi.fn<() => string | undefined>();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const readFreeKbMock = vi.fn<(path: string, timeoutMs?: number) => Promise<number | undefined>>();
+const readDiskBudgetReportMock = vi.fn();
+const measureDiskBudgetMock = vi.fn();
+const realDuMock = vi.fn();
 // Default "none": most tests declare no sidecar ports at all, and this must
 // never silently default to "unknown" (which would mask a real assertion
 // that a probe failure keeps rather than reaps) or "established" (which
@@ -670,6 +674,18 @@ vi.mock("../../src/disk-space.js", () => ({
   DISK_PROBE_TIMEOUT_MS: 2_000,
 }));
 
+// The daemon never runs `du` (see cache-retention.ts's call-site comment) —
+// runDiskBudgetSweep only reads the CLI-written disk-budget.json, so only
+// that read is mocked here.
+vi.mock("../../src/disk-budget.js", () => ({
+  readDiskBudgetReport: readDiskBudgetReportMock,
+  // Stubbed (never real) so a call to either is provably visible in a test
+  // (S10): the sweep's own contract is "read the file, never measure
+  // anything", and a mock the test never sees called pins nothing.
+  measureDiskBudget: measureDiskBudgetMock,
+  realDu: realDuMock,
+}));
+
 // Only snapshotProcesses is mocked (a real `ps` fork, the thing the fast
 // tier must never do) — every other export (confirmReaps, reapSidecarPane,
 // signalSidecarPane, reapRecordedIdentity, sweepSidecars, ...) stays the
@@ -685,6 +701,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
   return {
     PromptReadyTimeoutError: actual.PromptReadyTimeoutError,
     captureTmuxPane: captureTmuxPaneMock,
+    captureTmuxPaneOrEmpty: captureTmuxPaneOrEmptyMock,
     createTmuxSession: createTmuxSessionMock,
     createTmuxCommandSession: createTmuxCommandSessionMock,
     createTmuxSidecarSession: createTmuxSidecarSessionMock,
@@ -863,6 +880,14 @@ function baseConfig() {
       enabled: true,
       idleTtlMinutes: 120,
       maxAgeWarnMinutes: 360,
+    },
+    diskBudget: {
+      enabled: false,
+      intervalMinutes: 360,
+      warnAttributableGb: 60,
+      npmCacheMaxGb: 20,
+      buildCacheOlderThanDays: 14,
+      maxWorktreesPerSweep: 20,
     },
     admission: {
       enabled: true,
@@ -1522,6 +1547,7 @@ describe("SessionService", () => {
       .mockImplementation((id: string, name: string) => `${id}--${name}`);
     listTmuxSessionNamesMock.mockReset().mockResolvedValue(new Set());
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
+    captureTmuxPaneOrEmptyMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
@@ -1581,6 +1607,11 @@ describe("SessionService", () => {
     // test explicitly opts in, so the huge pre-existing spawn-event-sequence
     // fixture stays unaffected.
     readFreeKbMock.mockReset().mockResolvedValue(undefined);
+    // Same "no test-visible signal unless a test opts in" default as
+    // readFreeKb above — absent measurement emits nothing.
+    readDiskBudgetReportMock.mockReset().mockResolvedValue(undefined);
+    measureDiskBudgetMock.mockReset();
+    realDuMock.mockReset();
     flushEventLogCollapseMock.mockReset();
     tryRotateMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
@@ -10428,6 +10459,76 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
+  it("reapplies a live codexMcpDialogOverrides entry on a failed capture instead of splitting the live/dashboard tick, and lets it expire under sustained failure", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      hookEvent: "PostToolUse",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({ rollout: null, rateLimit: null });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "  Field 1/1",
+        '  Allow the playwright MCP server to run tool "browser_navigate"?',
+        "",
+        "  › 1. Allow                   Run the tool and continue.",
+        "    2. Allow for this session  Run the tool and remember this choice for this session.",
+        "    3. Always allow            Run the tool and remember this choice for future tool calls.",
+        "    4. Cancel                  Cancel this tool call",
+        "  enter to submit | esc to cancel",
+      ].join("\n"),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+      runDashboardCacheTick: () => Promise<void>;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    const live = await service.get("api-1");
+    expect(live.state).toBe("needs_input");
+
+    // A failed fork (null): the live tick reapplies the stored entry rather
+    // than falling through to whatever the hook state says, avoiding the
+    // live/dashboard split the override exists to prevent. Past
+    // STATE_HOLD_MS so this reflects the classifier's true output, not
+    // stabilizeState's anti-flicker hold on the prior needs_input.
+    captureTmuxPaneMock.mockResolvedValue(null);
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterFailedCapture = await service.get("api-1");
+    expect(afterFailedCapture.state).toBe("needs_input");
+
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+    expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "needs_input" });
+
+    // Sustained failure past CODEX_MCP_DIALOG_OVERRIDE_TTL_MS (15s): the
+    // entry dies and classification falls back to the hook state (working).
+    await vi.advanceTimersByTimeAsync(15_001);
+    const afterExpiry = await service.get("api-1");
+    expect(afterExpiry.state).toBe("working");
+    service.dispose();
+  });
+
   it("keeps rate_limited for codex when a hard rate-limit banner co-occurs with the MCP permission dialog", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -11002,6 +11103,60 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("reapplies a live claudeCompactingOverrides entry on a failed capture instead of splitting the live/dashboard tick, and lets it expire under sustained failure", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue("✳ Compacting conversation… (18s)");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+      runDashboardCacheTick: () => Promise<void>;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    // A live tick detects the spinner and records the override.
+    await service.get("api-1");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const live = await service.get("api-1");
+    expect(live.state).toBe("working");
+
+    // A failed fork (null): the live tick reapplies the stored entry rather
+    // than reporting the structured source's "waiting" — otherwise the live
+    // tick would show waiting while the very next scanPane:false dashboard
+    // tick (reading the still-live map entry) shows working, the exact
+    // two-tick split this override exists to prevent.
+    captureTmuxPaneMock.mockResolvedValue(null);
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterFailedCapture = await service.get("api-1");
+    expect(afterFailedCapture.state).toBe("working");
+
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+    expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "working" });
+
+    // Sustained failure past CLAUDE_COMPACTING_OVERRIDE_TTL_MS (15s) since the
+    // last REAL observation: reapplying never refreshed the expiry, so the
+    // entry dies and classification falls back to the structured source.
+    await vi.advanceTimersByTimeAsync(15_001);
+    const afterExpiry = await service.get("api-1");
+    expect(afterExpiry.state).toBe("waiting");
+    service.dispose();
+  });
+
   it("classifies waiting once the parsed rate-limit reset has passed", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
@@ -11382,13 +11537,14 @@ describe("SessionService", () => {
     const live = await service.get("api-1");
     expect(live.state).toBe("rate_limited");
 
-    // captureTmuxPane collapses a failed capture-pane fork into "" (its own
-    // comment notes the distinction is discarded at the return). An empty
-    // capture is not an observation in either direction: this live tick must
-    // reuse the stored override rather than recomputing paneReconfirmedLimit
-    // fresh off a null menuHit, which would otherwise flip this exact tick
-    // to "waiting" — reopening the delivery-suppression window stateHistory
-    // feeds isLiveStateRateLimited, even if only for one tick.
+    // A genuinely blank ("") capture is not an observation in either
+    // direction for this override (distinct from a failed fork, which
+    // returns `null` — see the sibling `null` test below): this live tick
+    // must reuse the stored override rather than recomputing
+    // paneReconfirmedLimit fresh off a null menuHit, which would otherwise
+    // flip this exact tick to "waiting" — reopening the delivery-suppression
+    // window stateHistory feeds isLiveStateRateLimited, even if only for one
+    // tick.
     captureTmuxPaneMock.mockResolvedValue("");
     await vi.advanceTimersByTimeAsync(4_001);
     const afterFailedCapture = await service.get("api-1");
@@ -11416,6 +11572,74 @@ describe("SessionService", () => {
     expect(captureTmuxPaneMock).not.toHaveBeenCalled();
     const dashboardAfterRealClear = await service.list({ view: "dashboard" });
     expect(dashboardAfterRealClear[0]).toMatchObject({ id: "api-1", state: "waiting" });
+
+    service.dispose();
+  });
+
+  it("survives a failed pane capture (null) without mutating the reconfirm override, and skips the menu Enter-confirm", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+      runDashboardCacheTick: () => Promise<void>;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    // A live (scanPane:true) classify sees the menu, auto-confirms it
+    // (option 1 is pre-selected), and re-confirms the override.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+    sendSubmitKeyToTmuxMock.mockClear();
+
+    // A failed fork (null) never mutates the override — no add, no delete —
+    // and AC-11: the menu Enter-confirm path is skipped entirely (no detector
+    // ever sees `null`).
+    captureTmuxPaneMock.mockResolvedValue(null);
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterFailedCapture = await service.get("api-1");
+    expect(afterFailedCapture.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+
+    // The scanPane:false dashboard tick never captures its own pane, so it
+    // only sees "rate_limited" here if the override survived the failed
+    // capture above.
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+    expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
 
     service.dispose();
   });
@@ -17379,7 +17603,7 @@ describe("SessionService", () => {
     });
     seedClaudeAttentionSession();
     mockClaudeJsonlState("waiting");
-    captureTmuxPaneMock.mockResolvedValue("Please confirm before I proceed.");
+    captureTmuxPaneOrEmptyMock.mockResolvedValue("Please confirm before I proceed.");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -24797,6 +25021,115 @@ describe("SessionService", () => {
     // sessionId (that would recreate the dir appendEventLog writes into).
     expect(completed?.[1].sessionId).toBeUndefined();
     service.dispose();
+  });
+
+  describe("disk budget sweep", () => {
+    it("the budget sweep runs no du and emits nothing on a stale or absent measurement", async () => {
+      createSessionStore();
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        diskBudget: { ...baseConfig().diskBudget, enabled: true, warnAttributableGb: 1 },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        runDiskBudgetSweep(): Promise<void>;
+        lastDiskBudgetSweepAt: number;
+        dispose(): void;
+      };
+      service.lastDiskBudgetSweepAt = 0;
+
+      // Absent measurement.
+      readDiskBudgetReportMock.mockResolvedValueOnce(undefined);
+      await service.runDiskBudgetSweep();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "host.disk.budget_exceeded",
+        ),
+      ).toBe(false);
+
+      // Stale measurement (older than 2 * intervalMinutes).
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: "2020-01-01T00:00:00.000Z",
+        roots: [],
+        totals: { attributableBytes: 999_999_999_999 },
+      });
+      await service.runDiskBudgetSweep();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "host.disk.budget_exceeded",
+        ),
+      ).toBe(false);
+      // S10: the title's claim ("runs no du") must be an assertion, not just
+      // a comment — measureDiskBudget/realDu are the only exports that would
+      // ever spawn `du`, and the sweep must never call either.
+      expect(measureDiskBudgetMock).not.toHaveBeenCalled();
+      expect(realDuMock).not.toHaveBeenCalled();
+      expect(readDiskBudgetReportMock).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("emits host.disk.budget_exceeded every sweep while over budget, and nothing below the ceiling", async () => {
+      createSessionStore();
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        diskBudget: { ...baseConfig().diskBudget, enabled: true, warnAttributableGb: 1 },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        runDiskBudgetSweep(): Promise<void>;
+        lastDiskBudgetSweepAt: number;
+        dispose(): void;
+      };
+
+      // Below the 1GB ceiling — no event.
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        roots: [],
+        totals: { attributableBytes: 500 * 1024 * 1024 },
+      });
+      await service.runDiskBudgetSweep();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "host.disk.budget_exceeded",
+        ),
+      ).toBe(false);
+
+      // Above the ceiling — exactly one warn event.
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        roots: [{ id: "npm-cacache", sizeBytes: 2 * 1024 * 1024 * 1024 }],
+        totals: { attributableBytes: 2 * 1024 * 1024 * 1024 },
+      });
+      await service.runDiskBudgetSweep();
+      const exceeded = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "host.disk.budget_exceeded",
+      );
+      expect(exceeded).toHaveLength(1);
+      expect(exceeded[0]?.[1].level).toBe("warn");
+
+      // No latch: a second sweep still over budget emits again.
+      service.lastDiskBudgetSweepAt = 0;
+      readDiskBudgetReportMock.mockResolvedValueOnce({
+        generatedAt: new Date().toISOString(),
+        roots: [{ id: "npm-cacache", sizeBytes: 2 * 1024 * 1024 * 1024 }],
+        totals: { attributableBytes: 2 * 1024 * 1024 * 1024 },
+      });
+      await service.runDiskBudgetSweep();
+      const exceededAfterSecondSweep = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "host.disk.budget_exceeded",
+      );
+      expect(exceededAfterSecondSweep).toHaveLength(2);
+      service.dispose();
+    });
   });
 
   it("does not collect a shared workspace while a stopped member is restoring", async () => {
@@ -33919,7 +34252,7 @@ describe("SessionService", () => {
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
       mockClaudeJsonlState("waiting");
-      captureTmuxPaneMock.mockResolvedValueOnce("last agent output\n");
+      captureTmuxPaneOrEmptyMock.mockResolvedValueOnce("last agent output\n");
       const sessions = createSessionStore();
       sessions.set(
         "api-1",
@@ -39436,6 +39769,157 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("does not type the reactivation prompt and keeps rateLimitedAt when the pane capture fails", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      captureTmuxPaneMock.mockResolvedValue(null);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(reactivationQueued(sessions)).toBe(false);
+      expect(reactivationEventCount()).toBe(0);
+      const skipped = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+      );
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]?.[1].details).toMatchObject({ reason: "pane_unavailable" });
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+      service.dispose();
+    });
+
+    it("dedupes the pane-unavailable skip log across ten consecutive failed-capture ticks in the same episode", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      captureTmuxPaneMock.mockResolvedValue(null);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      // afterHours=0.001h (3.6s) elapses after the first tick; ten more
+      // one-second wake ticks each find the pane unavailable, still within
+      // the give-up bound (60 ticks).
+      await advanceSeconds(10);
+
+      const skipped = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+      );
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]?.[1].details).toMatchObject({ reason: "pane_unavailable" });
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+      service.dispose();
+    });
+
+    it("gives up and clears rateLimitedAt after 60 consecutive pane-unavailable ticks", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      captureTmuxPaneMock.mockResolvedValue(null);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      // The threshold (3.6s) crosses within the first few ticks; advance well
+      // past 60 more qualifying ticks so the give-up bound is exercised
+      // regardless of exactly which tick first crosses the threshold.
+      await advanceSeconds(75);
+
+      expect(reactivationQueued(sessions)).toBe(false);
+      const skipped = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+      );
+      expect(skipped).toHaveLength(2);
+      expect(skipped[0]?.[1].details).toMatchObject({ reason: "pane_unavailable" });
+      expect(skipped[1]?.[1].details).toMatchObject({ reason: "pane_unavailable_giving_up" });
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("resets the pane-unavailable counter once a real capture arrives mid-episode, so a later episode can log again", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      captureTmuxPaneMock.mockResolvedValue(null);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(5);
+
+      // First episode: pane never available, ends only via give-up — instead
+      // recover it here with a real capture (no menu) so the episode ends via
+      // the normal send+clear path well before the give-up bound.
+      captureTmuxPaneMock.mockResolvedValue("agent output, no menu here");
+      await advanceSeconds(1);
+
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      expect(reactivationEventCount()).toBe(1);
+
+      // A new episode starts (rateLimitedAt already well past the threshold,
+      // so the very next tick qualifies); its own pane-unavailable ticks must
+      // log again (the counter/dedupe key reset with the ended episode).
+      logSpurEventMock.mockClear();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+      captureTmuxPaneMock.mockResolvedValue(null);
+      await advanceSeconds(2);
+
+      const skipped = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+      );
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]?.[1].details).toMatchObject({
+        reason: "pane_unavailable",
+        rateLimitedAt: "2026-03-18T09:00:00.000Z",
+      });
+      service.dispose();
+    });
+
+    it("still types the reactivation prompt and clears rateLimitedAt on a genuinely blank ('') pane, unlike a failed capture", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      captureTmuxPaneMock.mockResolvedValue("");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(5);
+
+      // A blank ("") capture is a real observation here (not a failed fork),
+      // so no menu is detected: the typed nudge sends and the episode ends —
+      // distinct from the null (failed-fork) case above, which never sends.
+      expect(reactivationQueued(sessions)).toBe(true);
+      expect(reactivationEventCount()).toBe(1);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
     it("does not send when the live state is no longer rate_limited but clears the residual", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
@@ -39610,6 +40094,72 @@ describe("SessionService", () => {
       expect(events).toHaveLength(1);
       expect(events[0]?.details?.entryPoint).toBe("send");
       expect(events[0]?.details?.messageLength).toBe("hello".length);
+      service.dispose();
+    });
+
+    it("still suppresses delivery on a genuinely blank ('') pane tick that reuses the reconfirm override", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        rateLimit: {
+          limited: true,
+          reason: "claude rate_limit",
+          resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+        },
+      });
+      captureTmuxPaneMock.mockResolvedValue(
+        [
+          "What do you want to do?",
+          "",
+          "  1. Stop and wait for limit to reset",
+          "> 2. Ask your admin for more usage",
+          "",
+          "Enter to confirm · Esc to cancel",
+        ].join("\n"),
+      );
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Freeze the background dashboard/attention loops so this test is
+      // driven only by the explicit calls below — an ambient tick's own
+      // captures (also resolving "") would otherwise re-run the same guard
+      // and mask a mutation to it behind stabilizeState's anti-flicker hold.
+      const internals = service as unknown as {
+        attentionMonitorRunning: boolean;
+        dashboardCacheReady: Promise<void> | null;
+        stopDashboardCacheLoop: () => void;
+      };
+      await internals.dashboardCacheReady;
+      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+        await Promise.resolve();
+      }
+      internals.attentionMonitorRunning = true;
+      internals.stopDashboardCacheLoop();
+
+      // A live (scanPane:true) classify sees the menu and re-confirms.
+      const live = await service.get("api-1");
+      expect(live.state).toBe("rate_limited");
+
+      // Next live tick: a genuinely blank pane reuses the stored override
+      // rather than recomputing paneReconfirmedLimit off nothing — the flip
+      // hazard this override exists to prevent. sendLocked must still see
+      // rate_limited and suppress a message typed on this exact tick.
+      captureTmuxPaneMock.mockResolvedValue("");
+      await vi.advanceTimersByTimeAsync(4_001);
+      const afterBlankCapture = await service.get("api-1");
+      expect(afterBlankCapture.state).toBe("rate_limited");
+
+      sendMessageToTmuxMock.mockClear();
+      await expect(service.deliver("api-1", "hello")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      const events = suppressedEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.details?.entryPoint).toBe("deliver");
       service.dispose();
     });
 
