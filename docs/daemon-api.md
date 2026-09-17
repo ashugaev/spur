@@ -48,4 +48,6 @@ Listing (part of the single-session `SessionView`, field `artifacts` — not on 
 
 ## Project routes
 
-`GET /projects/:id/branches/exists?name=<branch>` — `200 { exists, remote, checkedOutAt }` for the project's repo. A blank or unnormalizable `name` returns `{ exists: false, remote: false, checkedOutAt: null }`. An unknown project id returns `404 { error }`.
+`GET /projects/:id/branches/exists?name=<branch>` — `200 { exists, remote, checkedOutAt }` for the project's repo. A blank or unnormalizable `name` returns `{ exists: false, remote: false, checkedOutAt: null }`.
+
+An unknown project id returns `404 { error }` on every project-scoped route that resolves the project: `GET /projects/:id/branches/exists`, `GET /projects/:id/slash-commands`, and `POST /projects/:id/preflight`.
