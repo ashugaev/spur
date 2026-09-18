@@ -22,6 +22,7 @@ import {
   logSpurEvent,
   setEventLogConfig,
   type SpurLogEntry,
+  type SpurLogLevel,
 } from "./event-log.js";
 import {
   DEFAULT_USER_ACTION_LOG_CONFIG,
@@ -281,6 +282,15 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
   sendJson(response, statusCode, { error: message } satisfies JsonError);
+}
+
+interface FailRequestOptions {
+  // Omitted: 5xx logs "error", anything lower logs "warn".
+  level?: SpurLogLevel;
+  method?: string | undefined;
+  path?: string | undefined;
+  // Present: sent verbatim as the response body instead of the `{ error }` shape.
+  payload?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -689,6 +699,27 @@ export async function startServer(
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
+  // Single owner of a failed request: the status reaches the log line and the
+  // response from one argument, so the two can never drift.
+  const failRequest = (
+    response: ServerResponse,
+    status: number,
+    message: string,
+    options: FailRequestOptions = {},
+  ): void => {
+    logEvent("http.request.failed", {
+      level: options.level ?? (status >= 500 ? "error" : "warn"),
+      ...(options.method ? { method: options.method } : {}),
+      ...(options.path ? { path: options.path } : {}),
+      status,
+      message,
+    });
+    if ("payload" in options) {
+      sendJson(response, status, options.payload);
+      return;
+    }
+    sendError(response, status, message);
+  };
   const startAutomation = async (): Promise<void> => {
     const nextTriggers = startConfiguredTriggers({
       config: service.config,
@@ -841,20 +872,11 @@ export async function startServer(
     let errorMessage: string | undefined;
     try {
       if (!request.method) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          message: "Request method is required",
-        });
-        sendError(response, 400, "Request method is required");
+        failRequest(response, 400, "Request method is required");
         return;
       }
       if (!request.url) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          method: request.method,
-          message: "Request URL is required",
-        });
-        sendError(response, 400, "Request URL is required");
+        failRequest(response, 400, "Request URL is required", { method: request.method });
         return;
       }
 
@@ -1942,13 +1964,11 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       errorMessage = message;
       if (error instanceof AutoPingError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
+        failRequest(response, error.status, message, {
+          method,
+          path,
+          payload: { error: { code: error.code, message } },
         });
-        sendJson(response, error.status, { error: { code: error.code, message } });
         return;
       }
       if (
@@ -1967,14 +1987,7 @@ export async function startServer(
         error instanceof SessionNotReopenableError ||
         error instanceof QueueDeliveryInFlightError
       ) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          status: error.statusCode,
-          message,
-        });
-        sendError(response, error.statusCode, message);
+        failRequest(response, error.statusCode, message, { method, path });
         return;
       }
       if (
@@ -1983,93 +1996,74 @@ export async function startServer(
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError
       ) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: error.payload,
         });
-        sendJson(response, error.statusCode, error.payload);
         return;
       }
       if (error instanceof TodoOpenWorkError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          sessions: error.sessions,
-          error: error.message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessions: error.sessions,
+            error: error.message,
+          },
         });
         return;
       }
       if (error instanceof TodoEmptyLedgerError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          ...(error.sessionIds.length === 1
-            ? { sessionId: error.sessionIds[0] }
-            : { sessionIds: error.sessionIds }),
-          error: error.message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            ...(error.sessionIds.length === 1
+              ? { sessionId: error.sessionIds[0] }
+              : { sessionIds: error.sessionIds }),
+            error: error.message,
+          },
         });
         return;
       }
       if (error instanceof InvalidTodoRequestError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, error: error.message },
         });
-        sendJson(response, error.statusCode, { code: error.code, error: error.message });
         return;
       }
       if (error instanceof TodoTransitionConflictError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          sessionId: error.sessionId,
-          itemId: error.itemId,
-          error: error.message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessionId: error.sessionId,
+            itemId: error.itemId,
+            error: error.message,
+          },
         });
         return;
       }
       if (error instanceof TodoLedgerCorruptError) {
-        logEvent("http.request.failed", {
-          level: "error",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          sessionId: error.sessionId,
-          error: error.message,
-          ...(error.line ? { line: error.line } : {}),
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessionId: error.sessionId,
+            error: error.message,
+            ...(error.line ? { line: error.line } : {}),
+          },
         });
         return;
       }
-      logEvent("http.request.failed", {
-        level: "error",
-        ...(method ? { method } : {}),
-        ...(path ? { path } : {}),
-        status: 500,
-        message,
-      });
-      sendError(response, 500, message);
+      failRequest(response, 500, message, { method, path });
     } finally {
       try {
         if (method && path) {
