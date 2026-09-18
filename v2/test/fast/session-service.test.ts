@@ -1744,7 +1744,14 @@ describe("SessionService", () => {
         : update.title !== undefined && title === update.title
           ? update.source
           : current?.titleSource;
-      const nextTags = update.tags?.length ? update.tags : (current?.tags ?? []);
+      const tagSet = new Set<string>(current?.tags ?? []);
+      for (const tag of update.untags ?? []) {
+        tagSet.delete(tag);
+      }
+      for (const tag of update.tags ?? []) {
+        tagSet.add(tag);
+      }
+      const nextTags = [...tagSet];
       const slots =
         title || links.length > 0 || titleSource !== undefined || nextTags.length > 0
           ? {
@@ -35243,7 +35250,8 @@ describe("SessionService", () => {
         const links = [...(current?.links ?? [])];
         const title = request.title ?? current?.title;
         const tags = request.tags ?? current?.tags;
-        const titleSource = request.title !== undefined ? (request.source ?? "agent") : current?.titleSource;
+        const titleSource =
+          request.title !== undefined ? (request.source ?? "agent") : current?.titleSource;
         return {
           ...(title ? { title } : {}),
           links,
@@ -35261,9 +35269,13 @@ describe("SessionService", () => {
         .map(([, record]) => record as SessionRecord)
         .filter((record) => record.id === "api-1")
         .at(-1)?.slots;
+      // The carry call only adds knownTags ("feature"); it never sends
+      // untags, and production's applyNormalizedSlotsUpdate unions tags
+      // rather than replacing them, so a pre-existing unknown tag on the
+      // workspace ("unknown-tag") survives the handoff untouched.
       expect(carriedSlots).toMatchObject({
         title: "Handoff task",
-        tags: ["feature"],
+        tags: ["feature", "unknown-tag"],
       });
       expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
       expect(result.id).toBe("api-2");

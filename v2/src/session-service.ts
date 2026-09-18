@@ -10502,8 +10502,7 @@ export class SessionService {
     options?: { touchUpdatedAt?: boolean },
   ): SessionRecord | null {
     const workspaceId = workspaceIdOf(member);
-    const nextState: WorkspaceState = { ...state };
-    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
+    writeWorkspaceState(this.config.dataDir, workspaceId, state);
     const owner =
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
     if (!owner) {
@@ -10513,13 +10512,13 @@ export class SessionService {
       ...owner,
       ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
     };
-    if (nextState.slots) {
-      mirrored.slots = nextState.slots;
+    if (state.slots) {
+      mirrored.slots = state.slots;
     } else {
       delete mirrored.slots;
     }
-    if (nextState.pr) {
-      mirrored.pr = nextState.pr;
+    if (state.pr) {
+      mirrored.pr = state.pr;
     } else {
       delete mirrored.pr;
     }
@@ -15553,9 +15552,10 @@ export class SessionService {
         const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
         if (carryTags.length > 0) {
           try {
-            spawned = await this.updateSlots(spawned.id, {
+            const { slotUpdate: _slotUpdate, ...spawnedView } = await this.updateSlots(spawned.id, {
               tags: carryTags,
             });
+            spawned = spawnedView;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logEvent("session.handoff.carry_slots_failed", {
