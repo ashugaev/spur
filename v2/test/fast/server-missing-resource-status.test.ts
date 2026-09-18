@@ -87,7 +87,6 @@ describe("missing session and project ids answer 404 at warn level", () => {
           expect.objectContaining({
             event: "http.request.failed",
             level: "warn",
-            status: 404,
             method: "POST",
             path: "/sessions/list/wake",
           }),
@@ -109,7 +108,6 @@ describe("missing session and project ids answer 404 at warn level", () => {
         expect.objectContaining({
           event: "http.request.failed",
           level: "warn",
-          status: 404,
           method: "POST",
           path: "/sessions/list/wake/cancel",
         }),
@@ -135,7 +133,6 @@ describe("missing session and project ids answer 404 at warn level", () => {
         expect.objectContaining({
           event: "http.request.failed",
           level: "warn",
-          status: 404,
           method: "POST",
           path: "/sessions/background/wake",
         }),
@@ -156,7 +153,6 @@ describe("missing session and project ids answer 404 at warn level", () => {
         expect.objectContaining({
           event: "http.request.failed",
           level: "warn",
-          status: 404,
           method: "GET",
           path: "/projects/my-project/branches/exists",
         }),

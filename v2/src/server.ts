@@ -699,8 +699,8 @@ export async function startServer(
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
-  // Single owner of a failed request: the status reaches the log line and the
-  // response from one argument, so the two can never drift.
+  // Single owner of a failed request: the status sets the response code and the
+  // log level from one argument, so the two can never drift.
   const failRequest = (
     response: ServerResponse,
     status: number,
@@ -711,7 +711,6 @@ export async function startServer(
       level: options.level ?? (status >= 500 ? "error" : "warn"),
       ...(options.method ? { method: options.method } : {}),
       ...(options.path ? { path: options.path } : {}),
-      status,
       message,
     });
     if ("payload" in options) {

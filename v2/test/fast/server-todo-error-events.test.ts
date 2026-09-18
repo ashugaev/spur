@@ -91,7 +91,6 @@ describe("todo error branches log http.request.failed", () => {
             level: "warn",
             method: "POST",
             path: "/sessions/demo-1/complete",
-            status: 409,
             message: expect.any(String),
           }),
         ]),
@@ -128,7 +127,6 @@ describe("todo error branches log http.request.failed", () => {
             level: "warn",
             method: "POST",
             path: "/sessions/demo-1/complete",
-            status: 409,
             message: expect.any(String),
           }),
         ]),
@@ -159,7 +157,6 @@ describe("todo error branches log http.request.failed", () => {
           level: "warn",
           method: "POST",
           path: "/sessions/demo-1/todo",
-          status: 400,
           message: expect.any(String),
         }),
       ]),
@@ -195,7 +192,6 @@ describe("todo error branches log http.request.failed", () => {
             level: "warn",
             method: "POST",
             path: "/sessions/demo-1/todo",
-            status: 409,
             message: expect.any(String),
           }),
         ]),
@@ -234,7 +230,6 @@ describe("todo error branches log http.request.failed", () => {
             level: "error",
             method: "POST",
             path: "/sessions/demo-1/todo",
-            status: 500,
             message: expect.any(String),
           }),
         ]),
@@ -244,7 +239,7 @@ describe("todo error branches log http.request.failed", () => {
     }
   });
 
-  it("logs a warn event with status for an auto-ping failure", async () => {
+  it("logs a warn event for an auto-ping failure", async () => {
     const { configPath, dataDir, port } = await setupConfig();
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     runningServers.push(server);
@@ -269,7 +264,6 @@ describe("todo error branches log http.request.failed", () => {
           level: "warn",
           method: "POST",
           path: "/sessions/demo-1/auto-ping-suppressions/unsubscribe",
-          status: 404,
           message: "Auto-ping target session not found",
         }),
       ]),
