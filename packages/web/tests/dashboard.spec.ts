@@ -359,21 +359,22 @@ test.describe("D1: Header renders correctly", () => {
       { id: "hov-b", name: "Beta", configured: false, prefix: "bet", path: "/repo/beta" },
     ];
 
+    await mockSessions(page, [], projects);
+    await page.goto("/");
+
     for (const theme of ["dark", "light"] as const) {
       if (theme === "light") {
-        await page.evaluate(() => localStorage.setItem("spur:theme", "light"));
-      } else {
-        await page.evaluate(() => localStorage.removeItem("spur:theme"));
+        await page.getByRole("button", { name: "Switch to light theme" }).click();
       }
 
-      await mockSessions(page, [], projects);
-      await page.goto("/");
-
-      const overlayColor = await page.evaluate(() =>
-        getComputedStyle(document.documentElement)
-          .getPropertyValue("--color-hover-overlay")
-          .trim(),
-      );
+      const overlayColor = await page.evaluate(() => {
+        const element = document.createElement("div");
+        element.style.backgroundColor = "var(--color-hover-overlay)";
+        document.body.append(element);
+        const color = getComputedStyle(element).backgroundColor;
+        element.remove();
+        return color;
+      });
       const transparent = "rgba(0, 0, 0, 0)";
       const getBg = (loc: ReturnType<typeof page.locator>) =>
         loc.evaluate((el: Element) => getComputedStyle(el).backgroundColor);
@@ -382,7 +383,7 @@ test.describe("D1: Header renders correctly", () => {
 
       const configuredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Alpha']]");
       await configuredLi.hover();
-      expect(await getBg(configuredLi)).toBe(overlayColor);
+      await expect(configuredLi).toHaveCSS("background-color", overlayColor);
       expect(await getBg(page.getByRole("menuitemradio", { name: "Alpha" }))).toBe(transparent);
       const editAlpha = page.getByRole("menuitem", { name: "Edit Alpha" });
       expect(await getBg(editAlpha)).toBe(transparent);
@@ -392,21 +393,22 @@ test.describe("D1: Header renders correctly", () => {
 
       const unconfiguredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Beta']]");
       await unconfiguredLi.hover();
-      expect(await getBg(unconfiguredLi)).toBe(overlayColor);
-
-      const allProjectsBtn = page.getByRole("menuitemradio", { name: "All Projects" });
-      await allProjectsBtn.hover();
-      expect(await getBg(allProjectsBtn)).toBe(overlayColor);
+      await expect(unconfiguredLi).toHaveCSS("background-color", overlayColor);
 
       await page.getByRole("menuitemradio", { name: "Alpha" }).click();
       await page.getByRole("button", { name: "Project filter: Alpha" }).click();
+
+      const allProjectsBtn = page.getByRole("menuitemradio", { name: "All Projects" });
+      await allProjectsBtn.hover();
+      await expect(allProjectsBtn).toHaveCSS("background-color", overlayColor);
 
       const selectedBtn = page.getByRole("menuitemradio", { name: "Alpha", checked: true });
       const selectedBg = await getBg(selectedBtn);
       const selectedLi = page.locator("xpath=//li[.//button[@aria-checked='true']]");
       await selectedLi.hover();
-      expect(await getBg(selectedLi)).toBe(overlayColor);
+      await expect(selectedLi).toHaveCSS("background-color", overlayColor);
       expect(await getBg(selectedBtn)).toBe(selectedBg);
+      await allProjectsBtn.click();
     }
   });
 
