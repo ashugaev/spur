@@ -1,0 +1,2 @@
+[    4462ms] [ERROR] Failed to load resource: the server responded with a status of 400 (Bad Request) @ http://127.0.0.1:3012/api/pr-status?url=https%3A%2F%2Fopenclaw-dev.tail90e846.ts.net%2Fsessions%2Fdiary-bot-ab26%3Fproject%3Ddiary-bot:0
+[    5055ms] [ERROR] Failed to load resource: the server responded with a status of 400 (Bad Request) @ http://127.0.0.1:3012/api/pr-status?url=https%3A%2F%2Fgithub.com%2Fintelas%2Fintelas-web%2Fpull%2Fplaceholder:0

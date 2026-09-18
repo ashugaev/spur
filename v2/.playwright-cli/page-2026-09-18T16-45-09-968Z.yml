@@ -1,0 +1,23 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img "Spur" [ref=e6]
+      - 'button "Project filter: All Projects" [ref=e10]':
+        - generic [ref=e11]: All Projects
+      - button "Filters" [ref=e13]
+      - textbox "Filter sessions" [ref=e24]:
+        - /placeholder: Filter...
+      - button "Spawn Shepherd" [ref=e25]
+      - button "Spawn Session" [ref=e30]
+  - main [ref=e33]:
+    - status "Loading dashboard" [ref=e34]
+  - contentinfo [ref=e41]:
+    - generic [ref=e42]:
+      - button "Show aggregated system status" [ref=e44]
+      - button "GitHub connection checking" [ref=e49]
+      - button "GitLab connection checking" [ref=e54]
+    - generic [ref=e64]:
+      - button "Switch to light theme" [ref=e65]
+      - button "Manage Claude accounts" [ref=e69]
+      - button "Show Spur version information" [ref=e76]:
+        - generic "…" [ref=e77]

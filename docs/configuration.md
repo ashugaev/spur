@@ -503,7 +503,7 @@ Source support:
 - Cron, Sentry, and GitHub CI send triggers stay unsupported.
 
 - `cron`: `cron:tick`.
-- `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:review_requested`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set. `github:review_requested` fires when the PR lists the authenticated `gh` account as a pending reviewer, and again on each re-request after that reviewer submits a review.
+- `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:review_requested`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set. `github:review_requested` fires when the PR lists the authenticated `gh` account as a pending reviewer, and again on each re-request after that reviewer submits a review. Only a request naming that user counts; a request routed through a team is not matched.
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, `gitlab:merge_conflict`.
 - `jira`: `jira:work_item.new` when `query` is set. With no `query` it is connection only (`baseUrl`, `email`, `token`, all `${VAR}`-resolvable); the source loop skips it — it exists only to back `projects.<id>.backlog`.

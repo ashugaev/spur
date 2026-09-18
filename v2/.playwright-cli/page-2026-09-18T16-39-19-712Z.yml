@@ -1,0 +1,36 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - generic [ref=e6]: 𖤓
+          - heading "All Projects" [level=1] [ref=e7]
+        - combobox "Project filter" [ref=e9] [cursor=pointer]:
+          - option "All Projects" [selected]
+      - button "Project actions" [ref=e11]
+      - 'button "Needs Input: 0" [ref=e15]':
+        - generic [ref=e19]: "Needs Input:"
+        - generic [ref=e20]: "0"
+      - 'button "Working: 0" [ref=e21]':
+        - generic [ref=e25]: "Working:"
+        - generic [ref=e26]: "0"
+      - 'button "Waiting: 0" [ref=e27]':
+        - generic [ref=e32]: "Waiting:"
+        - generic [ref=e33]: "0"
+      - 'button "Stopped: 0" [ref=e34]':
+        - generic [ref=e38]: "Stopped:"
+        - generic [ref=e39]: "0"
+      - 'button "Completed: 0" [ref=e40]':
+        - generic [ref=e44]: "Completed:"
+        - generic [ref=e45]: "0"
+      - textbox "Filter sessions..." [ref=e50]
+      - generic [ref=e51]:
+        - button "Spawn Shepherd" [ref=e52]
+        - button "Spawn Session" [ref=e57]
+    - paragraph [ref=e58]: Loading sessions...
+  - contentinfo [ref=e59]:
+    - generic [ref=e60]:
+      - button "Show aggregated system status" [ref=e62]
+      - button "GitHub connection checking" [ref=e67]
+      - button "GitLab connection checking" [ref=e72]
+    - generic [ref=e82]: v2026.09.18 16:37
