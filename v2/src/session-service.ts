@@ -765,7 +765,6 @@ interface MemoryDenialSample {
 
 interface AgentMemoryBudgetLatchEntry {
   engagedAtMs: number;
-  ceilingBytes: number;
   acted: boolean;
 }
 
@@ -3437,7 +3436,6 @@ export class SessionService {
       if (rss > ceiling) {
         this.agentMemoryBudgetLatch.set(session.id, {
           engagedAtMs: Date.now(),
-          ceilingBytes: ceiling,
           acted: false,
         });
         this.logEvent("session.memory.budget.exceeded", {
@@ -5641,7 +5639,13 @@ export class SessionService {
               rssByTmuxName,
               actionAllowed: !budgetActionTaken,
             });
-            if (stopped) budgetActionTaken = true;
+            if (stopped) {
+              // The stopped session's `view`/`classified` were captured
+              // BEFORE the stop — stale against the record just written.
+              // Never park, notify attention, or nudge off them.
+              budgetActionTaken = true;
+              continue;
+            }
           }
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);

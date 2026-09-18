@@ -20494,7 +20494,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("AC5b: a session in restore warmup at act time is warned, never stopped", async () => {
+    it("AC5b: a session that enters restore warmup between the loop's classify and the act-time recheck is warned, never stopped", async () => {
       loadConfigMock.mockReturnValue(withAgentMemoryBudget("stop", { claude: CEILING }));
       const sessions = createSessionStore();
       sessions.set("api-1", sessionRecord({ id: "api-1" }));
@@ -20513,10 +20513,23 @@ describe("SessionService", () => {
       await service.pollAttentionStates(false);
       expect(exceededEvents()).toHaveLength(1);
 
-      // memoryShedEligibleRecord's own isInRestoreWarmup check (act-time
-      // only — the loop's classify above does not consult this map) fails
-      // closed on a session whose record was deleted / is mid-restore.
-      service.restoreWarmupUntil.set("api-1", Date.now() + 100_000);
+      // classifySessionRecord itself consults isInRestoreWarmup for any
+      // running/spawning session, so setting restoreWarmupUntil BEFORE this
+      // sweep would make the LOOP's own classify report "working" and the
+      // in-loop classified.state gate — not memoryShedEligibleRecord's own
+      // warmup check — would be what blocks the stop (AC4's leg, not this
+      // one). Set it as a side effect of the loop's jsonl read instead, so
+      // the loop's classify still sees no warmup and returns "waiting" (the
+      // in-loop gate passes), and only memoryShedEligibleRecord's fresh,
+      // independent isInRestoreWarmup check — reached after the loop's
+      // classify — sees the session as mid-restore and fails closed.
+      readClaudeJsonlStateMock.mockImplementationOnce(async () => {
+        service.restoreWarmupUntil.set("api-1", Date.now() + 100_000);
+        return {
+          state: "waiting",
+          reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        };
+      });
       await service.pollAttentionStates(false);
 
       expect(exceededEvents()).toHaveLength(1);
@@ -20602,6 +20615,43 @@ describe("SessionService", () => {
 
       await advanceSeconds(5);
       expect(service.agentMemoryBudgetLatch.size).toBe(0);
+
+      service.dispose();
+    });
+
+    it("emits no attention notification for a session the budget stops in the same sweep", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("stop", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      // Sweep 1 arms the latch quietly: "waiting" is stop-eligible but not
+      // an attention state, so no notification is expected here either way.
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as {
+        pollAttentionStates(baseline: boolean): Promise<void>;
+        notifyAttention: (...args: unknown[]) => Promise<void>;
+        dispose(): void;
+      };
+      const notifySpy = vi.spyOn(service, "notifyAttention").mockResolvedValue(undefined);
+
+      await service.pollAttentionStates(false);
+      expect(exceededEvents()).toHaveLength(1);
+      expect(notifySpy).not.toHaveBeenCalled();
+
+      // Sweep 2: the session transitions to "rate_limited" — an attention
+      // state AND stop-eligible, both in the same sweep. Without a
+      // `continue` right after a successful stop, the loop would go on to
+      // compute and emit an attention notification off the pre-stop
+      // `view`/`classified` for a session that this same sweep just stopped.
+      mockClaudeJsonlState("rate_limited");
+      await service.pollAttentionStates(false);
+
+      expect(stoppedEvents()).toHaveLength(1);
+      expect(notifySpy).not.toHaveBeenCalled();
 
       service.dispose();
     });
