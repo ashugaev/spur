@@ -414,7 +414,7 @@ Hold events: `daemon.memory.hold.engaged` (warn) with `availableBytes`, `floorBy
 
 Per-agent memory budget, independent of the guard above: `agentMemoryBudget.perAgentBytes.<agent>` caps one session's RSS. Measured over that session's own agent tmux panes on the 5-second attention-monitor sweep; its sidecar and service panes are separate tmux sessions and are never summed in. With no `perAgentBytes` key set nothing is sampled and nothing is logged.
 
-Crossing the ceiling warns once per breach, in any session state, and re-arms only after RSS falls to or below 90% of the ceiling. `action: stop` additionally pauses the session — the same pause critical shedding performs, never a kill and never a signal to the agent process — and only for a session the shed predicate allows (`rate_limited` or `waiting`); a working or unclassifiable session is warned, never stopped. At most one session is stopped per sweep.
+Crossing the ceiling warns once per breach, in any session state, and re-arms only after RSS falls to or below 90% of the ceiling. `action: stop` additionally stops the session — same teardown as `spur pause` / critical shedding (`applyManualStatusLocked` kills the agent pane, session marked stopped) — and only for a session the shed predicate allows (`rate_limited` or `waiting`); a working or unclassifiable session is warned, never stopped. At most one session is stopped per sweep.
 
 Budget events: `session.memory.budget.exceeded` (warn) with `agent`, `rssBytes`, `ceilingBytes`, `action`, `state`, `tmuxSession`; `session.memory.budget.cleared` (info) with `agent`, `rssBytes`, `ceilingBytes`, `clearBytes`, `durationMs`; `session.memory.budget.stopped` (warn) with `agent`, `rssBytes`, `ceilingBytes`, `state`, `durationMs`.
 
