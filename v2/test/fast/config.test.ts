@@ -3111,7 +3111,7 @@ projects:
 
     expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
     expect(config.projects["sp"]?.triggers["gh-pr-review-spawn"]).toBeUndefined();
-    expect(config.projects["sp"]?.sources["gh-pr-review"]?.type).toBe("github");
+    expect(config.projects["sp"]?.sources["gh-pr-review"]).toBeUndefined();
   });
 
   it("parses the root PR-merged send trigger", async () => {
