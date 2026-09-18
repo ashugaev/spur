@@ -21,6 +21,7 @@ REVIEW FOCUS
   Config docs: flag config or interface changes that skip docs/configuration.md, docs/commands.md, docs/daemon-api.md, or the spur SKILL.md mirrors.
   Hardcoded model versions: flag a pinned model version literal in source. A per-agent default must be a version-free alias in the one per-agent default map; pins live in config.
   Docs drift (docs skill rules): new user-facing functionality shipped undocumented, content duplicated instead of linked, or docs over-explaining what a mid dev or agent already knows.
+  Operator environment leak: flag an IP address, hostname, VM or machine name, OS username, internal URL or port, token, or absolute home path in committed files, PR text, or review comments.
 
 IGNORE
   scripts/ — bash deploy and sidecar helpers, outside the TypeScript codebase.
