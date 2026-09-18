@@ -2792,7 +2792,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             </div>
 
             <div className="group/title relative mt-2 min-w-0">
-              <h1 className="min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
+              <h1 className="min-w-0 pr-7 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
                 {title}
               </h1>
               <button
