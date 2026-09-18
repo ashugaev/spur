@@ -251,12 +251,44 @@ describe("detectCursorRateLimit", () => {
       limited: true,
       reason: "cursor spendlimithit: true",
     });
+    expect(detectCursorRateLimit("spendLimitHit:true")).toEqual({
+      limited: true,
+      reason: "cursor spendlimithit:true",
+    });
+    expect(detectCursorRateLimit('{"spendLimitHit": true}')).toEqual({
+      limited: true,
+      reason: 'cursor "spendlimithit": true',
+    });
     expect(detectCursorRateLimit('{"spendLimitHit":true}')).toEqual({
       limited: true,
       reason: 'cursor "spendlimithit":true',
     });
     expect(detectCursorRateLimit("spendLimitHit: false")).toBeNull();
+    expect(detectCursorRateLimit("spendLimitHit:false")).toBeNull();
+    expect(detectCursorRateLimit('{"spendLimitHit": false}')).toBeNull();
     expect(detectCursorRateLimit('{"spendLimitHit":false}')).toBeNull();
+  });
+
+  it("flags team rate limit errors from captured JSONL fixtures", () => {
+    const CURSOR_FIXTURES_DIR = resolve(__dirname, "../fixtures/agent-history/cursor");
+    const teamUsageContent = readFileSync(
+      join(CURSOR_FIXTURES_DIR, "turn-ended-error-team-usage-limit.jsonl"),
+      "utf8",
+    );
+    expect(detectCursorRateLimit(teamUsageContent)).toEqual({
+      limited: true,
+      reason: "cursor reached its usage limit",
+    });
+
+    const spendLimitContent = readFileSync(
+      join(CURSOR_FIXTURES_DIR, "turn-ended-error-spend-limit-hit.jsonl"),
+      "utf8",
+    );
+    const parsedSpendLimit = JSON.parse(spendLimitContent) as { error: string };
+    expect(detectCursorRateLimit(parsedSpendLimit.error)).toEqual({
+      limited: true,
+      reason: 'cursor "spendlimithit": true',
+    });
   });
 
   it("is not limited for benign assistant text", () => {

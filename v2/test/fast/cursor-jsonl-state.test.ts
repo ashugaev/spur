@@ -362,6 +362,8 @@ describe("Cursor JSONL fixtures", () => {
     ["waiting-final-text.jsonl", "waiting"],
     ["needs-input-ask-user.jsonl", "needs_input"],
     ["turn-ended-error.jsonl", "error"],
+    ["turn-ended-error-team-usage-limit.jsonl", "error"],
+    ["turn-ended-error-spend-limit-hit.jsonl", "error"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CURSOR_FIXTURES_DIR, fixture), "utf8");
     const records = parseFixture(content);
