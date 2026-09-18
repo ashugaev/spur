@@ -17741,12 +17741,11 @@ export class SessionService {
       } else if (scanPane && strategy === "cursor_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
         if (paneText === null) {
-          // A failed fork never mutates cursorPaneReadyOverrides (no live
-          // detect to set, no delete for a stale/mismatched entry) and skips
-          // the rate-limit scan — a failed capture is not evidence of "not
-          // rate limited". Reapply the stored entry if still unexpired,
-          // mirroring the !scanPane reuse branch below, without refreshing
-          // its expiry (only the live "ready prompt detected" branch does).
+          // A failed fork never mutates cursorPaneReadyOverrides (no write,
+          // no delete) — only reapply the stored entry if unexpired, the same
+          // read the scanPane:false branch below does. Reapplying does NOT
+          // refresh the expiry: only the live ready-prompt branch below
+          // writes it.
           const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
           if (
             expiresAt !== undefined &&

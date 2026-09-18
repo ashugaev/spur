@@ -12359,6 +12359,23 @@ describe("SessionService", () => {
       );
     });
 
+    it("reuses an unexpired cursor pane ready override when the capture-pane fork fails", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor" });
+      mockCursorJsonlState("error");
+      const expiresAt = Date.now() + 10_000;
+      internals.cursorPaneReadyOverrides.set("cursor-1", expiresAt);
+      captureTmuxPaneMock.mockResolvedValue(null);
+
+      const classified = await internals.classifySessionRecord(cursorSession, { scanPane: true });
+
+      expect(classified.state).toBe("waiting");
+      // The failed fork took no observation: the stored entry survives and
+      // keeps its original expiry.
+      expect(internals.cursorPaneReadyOverrides.get("cursor-1")).toBe(expiresAt);
+    });
+
     it("reapplies a live cursorPaneReadyOverrides entry on a failed capture instead of splitting the live/dashboard tick, and lets it expire under sustained failure", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ agent: "cursor" }));
