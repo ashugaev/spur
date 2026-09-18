@@ -7,6 +7,21 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
+// Guards against an older daemon replying with a plain SessionView (no
+// slotUpdate) despite the compile-time SpurUpdateSessionSlotsResponse type —
+// mirrors v2/src/cli.ts's slotUpdateMessage narrowing.
+function titleResultOf(session: unknown): string | undefined {
+  if (!session || typeof session !== "object" || !("slotUpdate" in session)) {
+    return undefined;
+  }
+  const slotUpdate = (session as { slotUpdate?: unknown }).slotUpdate;
+  if (!slotUpdate || typeof slotUpdate !== "object" || !("titleResult" in slotUpdate)) {
+    return undefined;
+  }
+  const titleResult = (slotUpdate as { titleResult?: unknown }).titleResult;
+  return typeof titleResult === "string" ? titleResult : undefined;
+}
+
 export async function POST(request: NextRequest, context: RouteContext) {
   const { id } = await context.params;
 
@@ -46,12 +61,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
       `/sessions/${encodeURIComponent(id)}/slots`,
       spurJsonInit("POST", payload),
     );
-    const expected = wantsClear ? "cleared" : "updated";
-    if (result.slotUpdate.titleResult !== expected) {
-      return NextResponse.json(
-        { error: result.slotUpdate.message ?? "Title was not updated" },
-        { status: 409 },
-      );
+    const titleResult = titleResultOf(result);
+    if (titleResult !== undefined) {
+      const expected = wantsClear ? "cleared" : "updated";
+      if (titleResult !== expected) {
+        return NextResponse.json(
+          { error: result.slotUpdate.message ?? "Title was not updated" },
+          { status: 409 },
+        );
+      }
     }
     return NextResponse.json(result);
   } catch (error) {

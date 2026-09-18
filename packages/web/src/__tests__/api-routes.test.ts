@@ -1149,6 +1149,22 @@ describe("Spur web API routes", () => {
     expect(body.error).toBe("title editing unavailable");
   });
 
+  it("POST /api/sessions/:id/title succeeds against an older daemon reply with no slotUpdate", async () => {
+    // A pre-skew daemon returns a plain SessionView (no slotUpdate field);
+    // the write already happened, so this must not 502 or otherwise fail.
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "New title" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+  });
+
   // ── Lifecycle actions ──────────────────────────────────────────────────
 
   it("POST lifecycle actions proxy to Spur daemon", async () => {
