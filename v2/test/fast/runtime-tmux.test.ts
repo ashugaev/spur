@@ -164,7 +164,8 @@ describe("runtime-tmux", () => {
   });
 
   // AC2: a capture-pane killed by its own timeout must never surface as a
-  // thrown error out of captureTmuxPane — callers get null ("could not look").
+  // thrown error out of captureTmuxPane — the sweep continues to the next
+  // session on null ("could not look").
   it("AC2: captureTmuxPane resolves null when capture-pane is killed by its own timeout", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args[0] === "capture-pane") {
