@@ -24,6 +24,8 @@ import {
   buildAgentRestorePlan,
   buildAgentResumePlan,
   createAgentSubmitAckBinding,
+  DEFERRED_CONTROLS_ACK_WINDOW_MS,
+  DEFERRED_CONTROLS_MAX_RESENDS,
   findAgentSessionId,
   parseAgentName,
   readAgentConversation,
@@ -10102,7 +10104,7 @@ export class SessionService {
 
       if (launchPlan.deferredSensitiveInitialMessage) {
         stage = "prompt.sensitive_controls";
-        await this.sendDeferredSensitiveInitialMessage(
+        const controlsOutcome = await this.sendDeferredSensitiveInitialMessage(
           runningRecord,
           launchPlan.deferredSensitiveInitialMessage.text,
         );
@@ -10114,7 +10116,7 @@ export class SessionService {
           details: {
             controlCount: (launchPlan.deferredSensitiveInitialMessage.text.match(/ap1_/g) ?? [])
               .length,
-            outcome: "submitted",
+            outcome: controlsOutcome,
           },
         });
       }
@@ -12372,6 +12374,7 @@ export class SessionService {
     message: string,
   ): Promise<AgentSendOutcome> {
     return this.withPaneWriteLock(session.tmuxSession, async () => {
+      const startedAt = Date.now();
       const binding = agentWaitsForSubmitAck(session.agent)
         ? await createAgentSubmitAckBinding(session.agent, {
             worktreePath: session.worktreePath,
@@ -12385,13 +12388,80 @@ export class SessionService {
         : null;
       await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
       if (!binding) return "submitted" as const;
-      const pacing = agentSubmitAckPacing(session.agent, { freshLaunch: false });
-      for (let attempt = 0; attempt <= pacing.maxResends; attempt += 1) {
-        const result = await this.waitForSubmitAck(binding, message, pacing.windowMs);
+      // Bounded resend loop, short window on every agent: this callback holds
+      // withPaneWriteLock, so a long window (claude/codex/opencode pacing is
+      // 300s) starves every other send to this pane. Worst case is
+      // maxResends+1 scans x DEFERRED_CONTROLS_ACK_WINDOW_MS plus maxResends
+      // bare Enters — 3 x 5s = 15s today. Restores the recovery for a
+      // genuinely dropped Enter (agents/index.ts) without reinstating
+      // cursor's old 65s hold.
+      let result: SubmitAckScanResult = { found: false, lastScannedFile: null };
+      // Set only when a mid-loop probe observes a dead pane; a confirmed-dead
+      // agent does not come back inside one send, so the loop stops resending
+      // into it instead of burning the rest of the budget. Never set on a
+      // live result — see the probe's own fresh:true comment below.
+      let knownDead = false;
+      for (let attempt = 0; attempt <= DEFERRED_CONTROLS_MAX_RESENDS; attempt += 1) {
+        result = await this.waitForSubmitAck(binding, message, DEFERRED_CONTROLS_ACK_WINDOW_MS);
         if (result.found) return "submitted" as const;
-        if (attempt < pacing.maxResends) await sendSubmitKeyToTmux(session.tmuxSession);
+        if (attempt < DEFERRED_CONTROLS_MAX_RESENDS) {
+          // fresh:true — a stale cached hit would report an agent that just
+          // died as alive.
+          const alive = await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: session.launchCommand,
+            },
+            { fresh: true },
+          );
+          if (!alive) {
+            knownDead = true;
+            break;
+          }
+          await sendSubmitKeyToTmux(session.tmuxSession);
+        }
       }
-      throw new Error(`Agent did not acknowledge deferred controls for ${session.id}`);
+      // fresh:true — a cached hit could report an agent that just died as
+      // alive; this value decides throw vs. treat-as-delivered. Skipped when
+      // already confirmed dead mid-loop.
+      const processAlive = knownDead
+        ? false
+        : await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: session.launchCommand,
+            },
+            { fresh: true },
+          );
+      const elapsedMs = Date.now() - startedAt;
+      if (processAlive) {
+        this.logEvent("session.controls.delivery_recovered", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Deferred controls ack timed out for ${session.id} but agent process is live; continuing`,
+          details: {
+            agent: session.agent,
+            lastScannedFile: result.lastScannedFile,
+            elapsedMs,
+            processAlive,
+            controlCount: (message.match(/ap1_/g) ?? []).length,
+          },
+        });
+        // Deliberately not "submitted": writeAgentMessage's cursor-live branch
+        // returns "submitted" for an ordinary recovered send, but spawn/trigger
+        // telemetry needs to tell that apart from an unconfirmed deferred-controls
+        // ack. Don't "fix" this to match writeAgentMessage.
+        return "submit_unconfirmed" as const;
+      }
+      throw new SubmitAckTimeoutError({
+        sessionId: session.id,
+        agent: session.agent,
+        lastScannedFile: result.lastScannedFile,
+        elapsedMs,
+        processAlive: false,
+      });
     });
   }
 
