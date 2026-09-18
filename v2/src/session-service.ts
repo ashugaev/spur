@@ -532,9 +532,9 @@ const MEMORY_SHED_INTERVAL_MS = 1_000;
 const MEMORY_HOLD_CLEAR_TICKS = 10;
 const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
-// Hysteresis for the per-agent-kind memory budget (agentMemoryBudgetLatch):
-// a constant, not a config knob (F3). Growth is sawtooth, not monotonic, so
-// a bare level check would arm and disarm across GC cycles.
+// Hysteresis for the per-agent-kind memory budget (agentMemoryBudgetLatch).
+// Agent RSS grows sawtooth, not monotonically, so a bare level check would
+// arm and disarm across GC cycles.
 const AGENT_MEMORY_BUDGET_CLEAR_FRACTION = 0.9;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
@@ -2696,8 +2696,8 @@ export class SessionService {
   // the other session-scoped maps in pruneSessionScopedState.
   private readonly paneChildFallbackNotified = new Set<string>();
   // Breach-edge latch for the per-agent-kind memory budget, keyed by session
-  // id. engagedAtMs is the elapsed source for session.memory.budget.cleared
-  // and .stopped (M4); acted enforces at most one stop per breach edge.
+  // id. engagedAtMs is the durationMs source for session.memory.budget.cleared
+  // and .stopped; acted enforces at most one stop per breach edge.
   // Swept alongside the other session-scoped maps in pruneSessionScopedState.
   private readonly agentMemoryBudgetLatch = new Map<string, AgentMemoryBudgetLatchEntry>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
@@ -3401,20 +3401,15 @@ export class SessionService {
     }
   }
 
-  private agentMemoryBudgetCeiling(agent: AgentName): number | null {
-    return this.config.admission.agentMemoryBudget.perAgentBytes[agent] ?? null;
-  }
-
   private hasAgentMemoryBudget(): boolean {
     return Object.keys(this.config.admission.agentMemoryBudget.perAgentBytes).length > 0;
   }
 
-  // Warn is never gated on classified.state (F1, decisive) — steps 1-5 run
-  // for EVERY live session with a configured ceiling, working included.
-  // Only step 6, the stop action, consults classified.state and
-  // memoryShedEligibleRecord. Act-time shape copied verbatim from
-  // runMemoryShed: re-check memoryShedEligibleRecord, withWorkspaceLifecycleLocks,
-  // applyManualStatusLocked(id, "stopped", {}, { skipEnrichment: true }).
+  // The warn edge is never gated on classified.state: it fires for EVERY live
+  // session with a configured ceiling, working included. Only the stop step
+  // consults classified.state and memoryShedEligibleRecord. That act-time
+  // shape is runMemoryShed's: re-check memoryShedEligibleRecord, then
+  // withWorkspaceLifecycleLocks + applyManualStatusLocked(id, "stopped").
   private async applyAgentMemoryBudget(input: {
     session: SessionRecord;
     classified: SessionStateResult;
@@ -3422,8 +3417,8 @@ export class SessionService {
     actionAllowed: boolean;
   }): Promise<boolean> {
     const { session, classified, rssByTmuxName, actionAllowed } = input;
-    const ceiling = this.agentMemoryBudgetCeiling(session.agent);
-    if (ceiling === null) {
+    const ceiling = this.config.admission.agentMemoryBudget.perAgentBytes[session.agent];
+    if (ceiling === undefined) {
       this.agentMemoryBudgetLatch.delete(session.id);
       return false;
     }
@@ -5627,8 +5622,7 @@ export class SessionService {
         : undefined;
       // Gated the same way as sidecarProcSnapshot above: real, non-fake-timer
       // fork I/O only enters this sweep when an operator has configured at
-      // least one ceiling — the default empty perAgentBytes map never fetches
-      // (AC6, the no-op invariant).
+      // least one ceiling — the default empty perAgentBytes map never fetches.
       const rssByTmuxName = this.hasAgentMemoryBudget() ? await getFleetAgentPaneRssBytes() : null;
       let budgetActionTaken = false;
       this.prCheckGitSpentMs = 0;
