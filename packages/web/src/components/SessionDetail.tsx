@@ -2443,14 +2443,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         setSession(toDashboardSession(payload));
         setTitleEditing(false);
         setTitleDraft("");
-        setError(null);
       } catch (titleError) {
-        setError(titleError instanceof Error ? titleError.message : "Failed to update title");
+        showErrorToast(errorMessage(titleError, "Failed to update title"));
       } finally {
         setTitleSaving(false);
       }
     },
-    [session, sessionId, titleSaving],
+    [session, sessionId, titleSaving, showErrorToast],
   );
   const displayState = useMemo(() => {
     if (!session) return undefined;
@@ -2766,7 +2765,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {title}
             </h1>
             {session.titleSource === "manual" ? (
-              <p className="mt-1 text-xs uppercase text-[var(--color-text-secondary)]">
+              <p className="mt-1 uppercase text-[var(--color-text-secondary)]">
                 Set manually — agents cannot change it.
               </p>
             ) : null}
@@ -2775,7 +2774,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  void updateManualTitle(titleDraft.trim() || null);
+                  const trimmed = titleDraft.trim();
+                  if (!trimmed) {
+                    showErrorToast("Enter a title, or use Clear to remove it.");
+                    return;
+                  }
+                  void updateManualTitle(trimmed);
                 }}
               >
                 <label className="sr-only" htmlFor="session-title-edit">
@@ -2794,7 +2798,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     disabled={titleSaving}
                     type="submit"
                   >
-                    {titleSaving ? "Saving..." : "Save"}
+                    Save
                   </button>
                   <button
                     className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"

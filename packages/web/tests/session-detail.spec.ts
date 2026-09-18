@@ -534,6 +534,30 @@ test.describe("S1: Session detail header", () => {
     expect(titleRequests).toContainEqual({ title: null });
   });
 
+  test("title save failing with 409 shows a toast and keeps the draft", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-manual-title-409",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/title`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "title editing unavailable" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByLabel("Session title").fill("Manual title");
+    await page.getByRole("button", { name: /^save$/i }).click();
+
+    await expect(page.getByText("title editing unavailable")).toBeVisible();
+    await expect(page.getByLabel("Session title")).toHaveValue("Manual title");
+    await expect(page.locator("h1")).toContainText("Agent title");
+  });
+
   test("edit title opens empty on a derived title", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s1-derived-title",
