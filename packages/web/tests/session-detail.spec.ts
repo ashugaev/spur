@@ -519,19 +519,47 @@ test.describe("S1: Session detail header", () => {
     });
 
     await page.goto(`/sessions/${currentSession.id}`);
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByRole("button", { name: /edit title/i }).click({ force: true });
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
     await page.getByLabel("Session title").fill("Manual title");
     await page.getByRole("button", { name: /^save$/i }).click();
 
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeHidden();
     await expect(page.locator("h1")).toContainText("Manual title");
     expect(titleRequests).toContainEqual({ title: "Manual title" });
-    await expect(page.getByText("Set manually — agents cannot change it.")).toBeVisible();
 
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByRole("button", { name: /edit title/i }).click({ force: true });
     await page.getByRole("button", { name: /^clear$/i }).click();
 
     await expect(page.locator("h1")).toContainText("Implement the feature");
     expect(titleRequests).toContainEqual({ title: null });
+  });
+
+  test("title editor popup closes on cancel, escape, and outside click", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-title-popup-dismiss",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    await mockSessionDetail(page, session);
+
+    await page.goto(`/sessions/${session.id}`);
+    const dialog = page.getByRole("dialog", { name: /edit title/i });
+
+    await page.getByRole("button", { name: /edit title/i }).click({ force: true });
+    await expect(dialog).toBeVisible();
+    await expect(page.getByLabel("Session title")).toBeFocused();
+    await page.getByRole("button", { name: /^cancel$/i }).click();
+    await expect(dialog).toBeHidden();
+
+    await page.getByRole("button", { name: /edit title/i }).click({ force: true });
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    await page.getByRole("button", { name: /edit title/i }).click({ force: true });
+    await expect(dialog).toBeVisible();
+    await page.mouse.click(2, 2);
+    await expect(dialog).toBeHidden();
   });
 
   test("title save failing with 409 shows a toast and keeps the draft", async ({ page }) => {
@@ -549,7 +577,7 @@ test.describe("S1: Session detail header", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByRole("button", { name: /edit title/i }).click({ force: true });
     await page.getByLabel("Session title").fill("Manual title");
     await page.getByRole("button", { name: /^save$/i }).click();
 
@@ -568,7 +596,7 @@ test.describe("S1: Session detail header", () => {
     await page.goto(`/sessions/${session.id}`);
     await expect(page.locator("h1")).toContainText("Implement the derived-title feature");
 
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByRole("button", { name: /edit title/i }).click({ force: true });
     await expect(page.getByLabel("Session title")).toHaveValue("");
   });
 

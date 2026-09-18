@@ -24,6 +24,7 @@ import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
+import { TitleEditDialog } from "@/components/TitleEditDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
@@ -235,6 +236,24 @@ function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
         strokeLinejoin="round"
         strokeWidth="1.5"
       />
+    </svg>
+  );
+}
+
+function EditIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 16 16"
+    >
+      <path d="M8 13.5h5.5" />
+      <path d="M10.5 2.5a1.41 1.41 0 0 1 2 2L5 12l-2.667.667L3 10Z" />
     </svg>
   );
 }
@@ -2426,6 +2445,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setTitleDraft(session.title ?? "");
     setTitleEditing(true);
   }, [session]);
+  const closeTitleEditor = useCallback(() => {
+    setTitleEditing(false);
+  }, []);
   const updateManualTitle = useCallback(
     async (nextTitle: string | null) => {
       if (!session || titleSaving) return;
@@ -2451,6 +2473,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     },
     [session, sessionId, titleSaving, showErrorToast],
   );
+  const saveTitleDraft = useCallback(() => {
+    const trimmed = titleDraft.trim();
+    if (!trimmed) {
+      showErrorToast("Enter a title, or use Clear to remove it.");
+      return;
+    }
+    void updateManualTitle(trimmed);
+  }, [titleDraft, showErrorToast, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2761,75 +2791,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               ) : null}
             </div>
 
-            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
-              {title}
-            </h1>
-            {session.titleSource === "manual" ? (
-              <p className="mt-1 uppercase text-[var(--color-text-secondary)]">
-                Set manually — agents cannot change it.
-              </p>
-            ) : null}
+            <div className="group/title relative mt-2 min-w-0">
+              <h1 className="min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
+                {title}
+              </h1>
+              <div className="pointer-events-none absolute inset-0 flex items-start justify-end bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover/title:pointer-events-auto group-hover/title:opacity-100 group-focus-within/title:pointer-events-auto group-focus-within/title:opacity-100">
+                <button
+                  aria-haspopup="dialog"
+                  aria-label="Edit title"
+                  className="m-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] p-1 text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  onClick={openTitleEditor}
+                  type="button"
+                >
+                  <EditIcon />
+                </button>
+              </div>
+            </div>
             {titleEditing ? (
-              <form
-                className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const trimmed = titleDraft.trim();
-                  if (!trimmed) {
-                    showErrorToast("Enter a title, or use Clear to remove it.");
-                    return;
-                  }
-                  void updateManualTitle(trimmed);
-                }}
-              >
-                <label className="sr-only" htmlFor="session-title-edit">
-                  Session title
-                </label>
-                <input
-                  id="session-title-edit"
-                  className={`min-w-0 flex-1 font-bold uppercase ${INPUT_CLASS}`}
-                  disabled={titleSaving}
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  value={titleDraft}
-                />
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                    disabled={titleSaving}
-                    type="submit"
-                  >
-                    Save
-                  </button>
-                  <button
-                    className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-                    disabled={titleSaving}
-                    onClick={() => void updateManualTitle(null)}
-                    type="button"
-                  >
-                    Clear
-                  </button>
-                  <button
-                    className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:opacity-50"
-                    disabled={titleSaving}
-                    onClick={() => {
-                      setTitleEditing(false);
-                      setTitleDraft("");
-                    }}
-                    type="button"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <button
-                className="mt-2 w-fit border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                onClick={openTitleEditor}
-                type="button"
-              >
-                Edit title
-              </button>
-            )}
+              <TitleEditDialog
+                draft={titleDraft}
+                saving={titleSaving}
+                onDraftChange={setTitleDraft}
+                onSave={saveTitleDraft}
+                onClear={() => void updateManualTitle(null)}
+                onCancel={closeTitleEditor}
+              />
+            ) : null}
             {promptView &&
             (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
               <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
