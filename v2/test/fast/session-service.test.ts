@@ -1734,16 +1734,34 @@ describe("SessionService", () => {
           links[index] = link;
         }
       }
-      const title = update.clearTitle
-        ? undefined
-        : update.setTitleIfAbsent && current?.title?.trim()
-          ? current.title
-          : (update.title ?? current?.title);
-      const titleSource = update.clearTitle
-        ? update.source
-        : update.title !== undefined && title === update.title
-          ? update.source
-          : current?.titleSource;
+      // Mirrors the real applyNormalizedSlotsUpdate (session-slots.ts):
+      // a manual lock (titleSource === "manual") blocks any non-manual title
+      // edit, and the once-only initializer check treats a title as already
+      // present once titleSource is set at all, not only when literal title
+      // text is non-empty.
+      let title = current?.title;
+      let titleSource = current?.titleSource;
+      let titleResult: "unchanged" | "updated" | "cleared" | "blocked" = "unchanged";
+      let message: string | undefined;
+      const titleEditRequested = update.clearTitle || update.title !== undefined;
+      const blockedTitleEdit = current?.titleSource === "manual" && update.source !== "manual";
+      if (blockedTitleEdit && titleEditRequested) {
+        titleResult = "blocked";
+        message =
+          "title editing unavailable because title was set manually; do not attempt title edits again.";
+      } else if (update.clearTitle) {
+        title = undefined;
+        titleSource = update.source;
+        titleResult = "cleared";
+      } else if (update.title !== undefined) {
+        const hasExistingTitle =
+          Boolean(current?.title?.trim()) || current?.titleSource !== undefined;
+        if (!update.setTitleIfAbsent || !hasExistingTitle) {
+          title = update.title;
+          titleSource = update.source;
+          titleResult = "updated";
+        }
+      }
       const tagSet = new Set<string>(current?.tags ?? []);
       for (const tag of update.untags ?? []) {
         tagSet.delete(tag);
@@ -1764,7 +1782,8 @@ describe("SessionService", () => {
       return {
         ...(slots ? { slots } : {}),
         result: {
-          titleResult: update.clearTitle ? "cleared" : update.title ? "updated" : "unchanged",
+          titleResult,
+          ...(message ? { message } : {}),
         },
       };
     });
@@ -26699,7 +26718,11 @@ describe("SessionService", () => {
     );
   });
 
-  it("gates a conditional title write out of the update sent to session-slots once titleSource is set", async () => {
+  it("always forwards a conditional title write to session-slots, even once titleSource is set", async () => {
+    // The block/no-op decision for an already-initialized title lives ONLY
+    // inside applyNormalizedSlotsUpdate (session-slots.ts); updateSlots must
+    // not re-derive it and drop the title before that call. See
+    // session-slots.test.ts for the semantic (blocked vs. unchanged) cases.
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -26727,8 +26750,57 @@ describe("SessionService", () => {
 
     expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(
       { titleSource: "agent", links: [] },
-      expect.not.objectContaining({ title: expect.anything() }),
+      expect.objectContaining({ title: "Second attempt", setTitleIfAbsent: true }),
     );
+  });
+
+  it("surfaces a blocked titleResult from an agent title-if-absent against a manually locked title", async () => {
+    const lockedSlots = {
+      title: "Manual title",
+      titleSource: "manual" as const,
+      links: [],
+    };
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: lockedSlots,
+    });
+    applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
+      slots: lockedSlots,
+      result: {
+        titleResult: "blocked",
+        message:
+          "title editing unavailable because title was set manually; do not attempt title edits again.",
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      title: "Agent title",
+      setTitleIfAbsent: true,
+    });
+
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(
+      lockedSlots,
+      expect.objectContaining({ title: "Agent title", setTitleIfAbsent: true }),
+    );
+    expect(result.slotUpdate).toEqual({
+      titleResult: "blocked",
+      message:
+        "title editing unavailable because title was set manually; do not attempt title edits again.",
+    });
   });
 
   it("rejects updateSlots on an unknown session with SessionResourceNotFoundError", async () => {

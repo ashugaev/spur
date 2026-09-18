@@ -12750,10 +12750,15 @@ export class SessionService {
       (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
     );
     const genericUnlinks = normalized.unlinkLabels;
-    const conditionalTitleBlocked =
-      normalized.setTitleIfAbsent === true && current.slots?.titleSource !== undefined;
+    // Whether a title write is a no-op once-only initializer (agent
+    // `--title-if-absent` against an already-set title) or a blocked manual
+    // lock (`titleSource === "manual"`) is decided in ONE place:
+    // `applyNormalizedSlotsUpdate`'s `blockedTitleEdit`/`hasExistingTitle`
+    // logic. Always pass the title through so that function sees it and can
+    // return "blocked" with `MANUAL_TITLE_LOCK_MESSAGE`; do not re-derive the
+    // block decision here.
     const hasGenericChanges =
-      (normalized.title !== undefined && !conditionalTitleBlocked) ||
+      normalized.title !== undefined ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       genericUnlinks.length > 0 ||
@@ -12761,7 +12766,7 @@ export class SessionService {
       normalized.untags.length > 0;
     const applied: AppliedSlotsUpdate = hasGenericChanges
       ? applyNormalizedSlotsUpdate(current.slots, {
-          ...(normalized.title !== undefined && !conditionalTitleBlocked
+          ...(normalized.title !== undefined
             ? {
                 title: normalized.title,
                 ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
