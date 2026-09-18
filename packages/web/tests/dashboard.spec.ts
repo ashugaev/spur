@@ -351,6 +351,65 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: "Project filter: Shepherd" })).toBeVisible();
   });
 
+  test("project menu row hover applies only overlay fill without stacked backgrounds", async ({
+    page,
+  }) => {
+    const projects: ProjectInfo[] = [
+      { id: "hov-a", name: "Alpha", prefix: "alp", path: "/repo/alpha" },
+      { id: "hov-b", name: "Beta", configured: false, prefix: "bet", path: "/repo/beta" },
+    ];
+
+    for (const theme of ["dark", "light"] as const) {
+      if (theme === "light") {
+        await page.evaluate(() => localStorage.setItem("spur:theme", "light"));
+      } else {
+        await page.evaluate(() => localStorage.removeItem("spur:theme"));
+      }
+
+      await mockSessions(page, [], projects);
+      await page.goto("/");
+
+      const overlayColor = await page.evaluate(() =>
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--color-hover-overlay")
+          .trim(),
+      );
+      const transparent = "rgba(0, 0, 0, 0)";
+      const getBg = (loc: ReturnType<typeof page.locator>) =>
+        loc.evaluate((el: Element) => getComputedStyle(el).backgroundColor);
+
+      await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+
+      const configuredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Alpha']]");
+      await configuredLi.hover();
+      expect(await getBg(configuredLi)).toBe(overlayColor);
+      expect(await getBg(page.getByRole("menuitemradio", { name: "Alpha" }))).toBe(transparent);
+      const editAlpha = page.getByRole("menuitem", { name: "Edit Alpha" });
+      expect(await getBg(editAlpha)).toBe(transparent);
+
+      await editAlpha.hover();
+      expect(await getBg(editAlpha)).toBe(transparent);
+
+      const unconfiguredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Beta']]");
+      await unconfiguredLi.hover();
+      expect(await getBg(unconfiguredLi)).toBe(overlayColor);
+
+      const allProjectsBtn = page.getByRole("menuitemradio", { name: "All Projects" });
+      await allProjectsBtn.hover();
+      expect(await getBg(allProjectsBtn)).toBe(overlayColor);
+
+      await page.getByRole("menuitemradio", { name: "Alpha" }).click();
+      await page.getByRole("button", { name: "Project filter: Alpha" }).click();
+
+      const selectedBtn = page.getByRole("menuitemradio", { name: "Alpha", checked: true });
+      const selectedBg = await getBg(selectedBtn);
+      const selectedLi = page.locator("xpath=//li[.//button[@aria-checked='true']]");
+      await selectedLi.hover();
+      expect(await getBg(selectedLi)).toBe(overlayColor);
+      expect(await getBg(selectedBtn)).toBe(selectedBg);
+    }
+  });
+
   test("project edit modal uses in-app delete confirmation", async ({ page }) => {
     let deleted = false;
     let nativeDialogOpened = false;
