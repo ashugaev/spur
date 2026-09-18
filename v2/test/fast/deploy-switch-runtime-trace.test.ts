@@ -165,28 +165,12 @@ async function closeHttpServer(server: HttpServer): Promise<void> {
   });
 }
 
-function isAddrInUse(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "EADDRINUSE"
-  );
-}
-
 async function bindTraceWsServer(
   trace: DeploySwitchRuntimeTrace,
   preferredPort?: number,
 ): Promise<{ server: StoppableServer; port: number }> {
-  for (let attempt = 0; ; attempt += 1) {
-    const port = preferredPort ?? (await findFreePort());
-    preferredPort = undefined;
-    try {
-      return { server: await startTraceWsServer(port, trace), port };
-    } catch (error) {
-      if (attempt >= 2 || !isAddrInUse(error)) throw error;
-    }
-  }
+  const port = preferredPort ?? (await findFreePort());
+  return { server: await startTraceWsServer(port, trace), port };
 }
 
 function startTraceWsClient(port: number, trace: DeploySwitchRuntimeTrace): { stop(): void } {

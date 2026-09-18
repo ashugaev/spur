@@ -139,7 +139,7 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isAddrInUse(error: unknown): boolean {
+export function isAddrInUse(error: unknown): boolean {
   return (
     typeof error === "object" &&
     error !== null &&
