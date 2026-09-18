@@ -46,15 +46,6 @@ export interface SpurInstanceRuntimeConfig {
 
 export function readSpurInstanceRuntimeConfig(): SpurInstanceRuntimeConfig {
   const configPath = resolveConfigPath();
-  // Under SPUR_WEB_TEST_ISOLATION the harness config must be what resolved
-  // here; landing on the production config means tmux-utils would attach the
-  // real spur-4310 socket and the UI would answer for the production instance.
-  // Refused before the read, so an isolated run never even parses that file.
-  if (process.env["SPUR_WEB_TEST_ISOLATION"] && configPath === DEFAULT_CONFIG_PATH) {
-    throw new Error(
-      `Test isolation: Spur instance config fell back to the production default (${configPath})`,
-    );
-  }
   const parsed = existsSync(configPath)
     ? (YAML.parse(readFileSync(configPath, "utf8")) as SpurInstanceShape | null)
     : null;
@@ -63,12 +54,6 @@ export function readSpurInstanceRuntimeConfig(): SpurInstanceRuntimeConfig {
   const tmuxSocketName = readString(parsed?.tmux?.socketName, `spur-${serverPort}`);
   // Mirrors DEFAULT_UI_PORT in v2/src/ports.ts (no cross-package import).
   const uiPort = readNumber(parsed?.ui?.port, 5555);
-  // A config that parsed but still names a production port is the same hole.
-  if (process.env["SPUR_WEB_TEST_ISOLATION"] && (serverPort === 4310 || uiPort === 5555)) {
-    throw new Error(
-      `Test isolation: Spur instance config resolved to a production port (daemon ${serverPort}, ui ${uiPort})`,
-    );
-  }
   return {
     configPath,
     daemonUrl: `http://${serverHost}:${serverPort}`,

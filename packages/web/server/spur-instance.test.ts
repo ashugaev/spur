@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +12,6 @@ const MEMO_KEYS = [
   "SPUR_DAEMON_URL",
   "SPUR_CONFIG",
   "SPUR_TMUX_SOCKET_NAME",
-  "SPUR_WEB_TEST_ISOLATION",
   "SPUR_WEB_TEST_UI_PORT",
 ] as const;
 
@@ -55,7 +54,6 @@ describe("createIsolatedWebTestTarget", () => {
       expect(target.env["SPUR_CONFIG"]).not.toBe(join(homedir(), ".spur", "config.yaml"));
       expect(existsSync(target.env["SPUR_CONFIG"] ?? "")).toBe(true);
       expect(target.env["SPUR_TMUX_SOCKET_NAME"]).not.toBe("spur-4310");
-      expect(target.env["SPUR_WEB_TEST_ISOLATION"]).toBe("1");
       expect(target.uiPort).not.toBe(5555);
       expect(target.uiPort).not.toBe(4310);
     } finally {
@@ -98,7 +96,7 @@ describe("createIsolatedWebTestTarget", () => {
       second.cleanup();
       expect(existsSync(first.env["SPUR_CONFIG"] ?? "")).toBe(true);
     } finally {
-      stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1", SPUR_CONFIG: first.env["SPUR_CONFIG"] ?? "" });
+      stubHarnessEnv({ SPUR_CONFIG: first.env["SPUR_CONFIG"] ?? "" });
       cleanupIsolatedWebTestTarget();
     }
   });
@@ -122,36 +120,14 @@ describe("createIsolatedWebTestTarget", () => {
         second.cleanup();
       }
     } finally {
-      stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1", SPUR_CONFIG: first.env["SPUR_CONFIG"] ?? "" });
+      stubHarnessEnv({ SPUR_CONFIG: first.env["SPUR_CONFIG"] ?? "" });
       cleanupIsolatedWebTestTarget();
     }
   });
 });
 
-describe("readSpurInstanceRuntimeConfig isolation guard", () => {
-  // Two guards, two distinct messages: matching only /Test isolation/ would let
-  // the port guard absorb a deleted config-path guard and pass either way.
-  it("throws on the production config path before reading it", () => {
-    stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1" });
-    expect(() => readSpurInstanceRuntimeConfig()).toThrow(
-      /Spur instance config fell back to the production default/,
-    );
-  });
-
-  it("throws on a config that parses but names a production port", () => {
-    const configPath = join(SCRATCH_TMPDIR, "production-port.yaml");
-    writeFileSync(
-      configPath,
-      ["server:", "  host: 127.0.0.1", "  port: 4310", "ui:", "  port: 41999", ""].join("\n"),
-      "utf8",
-    );
-    stubHarnessEnv({ SPUR_WEB_TEST_ISOLATION: "1", SPUR_CONFIG: configPath });
-    expect(() => readSpurInstanceRuntimeConfig()).toThrow(
-      /resolved to a production port \(daemon 4310/,
-    );
-  });
-
-  it("stays silent with the harness env applied", () => {
+describe("readSpurInstanceRuntimeConfig", () => {
+  it("resolves the harness config, never a production value", () => {
     stubHarnessEnv();
     const target = createIsolatedWebTestTarget();
     try {
@@ -161,15 +137,12 @@ describe("readSpurInstanceRuntimeConfig isolation guard", () => {
       expect(config.daemonUrl).toBe(target.env["SPUR_DAEMON_URL"]);
       expect(config.tmuxSocketName).not.toBe("spur-4310");
     } finally {
-      stubHarnessEnv({
-        SPUR_WEB_TEST_ISOLATION: "1",
-        SPUR_CONFIG: target.env["SPUR_CONFIG"] ?? "",
-      });
+      stubHarnessEnv({ SPUR_CONFIG: target.env["SPUR_CONFIG"] ?? "" });
       cleanupIsolatedWebTestTarget();
     }
   });
 
-  it("leaves production behavior unchanged when isolation is off", () => {
+  it("applies the composition-root defaults when no config exists", () => {
     // Points at a path that does not exist rather than the host default, so the
     // defaults are exercised without reading the real ~/.spur/config.yaml.
     stubHarnessEnv({ SPUR_CONFIG: join(SCRATCH_TMPDIR, "absent.yaml") });

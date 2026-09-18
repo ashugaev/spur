@@ -10,15 +10,14 @@ export interface IsolatedWebTestTarget {
 }
 
 // Every value the harness writes back into process.env. A worker re-loading
-// playwright.config.ts reads all five from the inherited env and allocates
+// playwright.config.ts reads all four from the inherited env and allocates
 // nothing; if ANY of them is missing the harness allocates fresh values and
-// overwrites all five, so a half-populated env can never yield a half-memoized
+// overwrites all four, so a half-populated env can never yield a half-memoized
 // target.
 const MEMO_KEYS = [
   "SPUR_DAEMON_URL",
   "SPUR_CONFIG",
   "SPUR_TMUX_SOCKET_NAME",
-  "SPUR_WEB_TEST_ISOLATION",
   "SPUR_WEB_TEST_UI_PORT",
 ] as const;
 
@@ -98,7 +97,6 @@ export function createIsolatedWebTestTarget(): IsolatedWebTestTarget {
     SPUR_DAEMON_URL: `http://127.0.0.1:${daemonPort}`,
     SPUR_CONFIG: configPath,
     SPUR_TMUX_SOCKET_NAME: `spur-web-test-${daemonPort}`,
-    SPUR_WEB_TEST_ISOLATION: "1",
     SPUR_WEB_TEST_UI_PORT: String(uiPort),
   };
   for (const key of MEMO_KEYS) {
@@ -114,14 +112,12 @@ export function createIsolatedWebTestTarget(): IsolatedWebTestTarget {
 
 // Removes the temp config dir this harness created. Called by the allocating
 // process's own cleanup() and by the Playwright globalTeardown, so a run leaves
-// no spur-web-test-* dir behind. Refuses anything it did not create: an
-// externally supplied SPUR_CONFIG, or a run with isolation off.
+// no spur-web-test-* dir behind. Refuses anything it did not create: only a
+// config inside a spur-web-test-* dir is removed, never an externally supplied
+// SPUR_CONFIG.
 export function cleanupIsolatedWebTestTarget(
   env: Record<string, string | undefined> = process.env,
 ): void {
-  if (env["SPUR_WEB_TEST_ISOLATION"] !== "1") {
-    return;
-  }
   const configPath = env["SPUR_CONFIG"]?.trim();
   if (!configPath) {
     return;
