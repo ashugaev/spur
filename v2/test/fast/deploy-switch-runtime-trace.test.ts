@@ -165,6 +165,30 @@ async function closeHttpServer(server: HttpServer): Promise<void> {
   });
 }
 
+function isAddrInUse(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "EADDRINUSE"
+  );
+}
+
+async function bindTraceWsServer(
+  trace: DeploySwitchRuntimeTrace,
+  preferredPort?: number,
+): Promise<{ server: StoppableServer; port: number }> {
+  for (let attempt = 0; ; attempt += 1) {
+    const port = preferredPort ?? (await findFreePort());
+    preferredPort = undefined;
+    try {
+      return { server: await startTraceWsServer(port, trace), port };
+    } catch (error) {
+      if (attempt >= 2 || !isAddrInUse(error)) throw error;
+    }
+  }
+}
+
 function startTraceWsClient(port: number, trace: DeploySwitchRuntimeTrace): { stop(): void } {
   let mounted = true;
   let socket: WebSocket | null = null;
@@ -240,7 +264,7 @@ async function runTrace(mode: DeploySwitchRuntimeTrace["mode"]): Promise<DeployS
   const { startServer } = await import("../../src/server.js");
   const originalFetch = globalThis.fetch;
   const targetVersion = mode === "restart" ? "0.1.0" : CURRENT_VERSION;
-  const wsPort = await findFreePort();
+  let wsPort = 0;
   let configPath = "";
   let daemonPort = 0;
   let daemon: StoppableServer | null = null;
@@ -269,19 +293,18 @@ async function runTrace(mode: DeploySwitchRuntimeTrace["mode"]): Promise<DeployS
       return originalFetch(input, init);
     }) as typeof fetch;
 
-    const started = await startOnFreePort(
-      async (port, cfg) => {
-        daemonPort = port;
-        configPath = cfg;
-        return await startServer(cfg, { info: () => undefined, warn: () => undefined });
-      },
-      setupConfig,
-    );
+    const started = await startOnFreePort(async (port, cfg) => {
+      daemonPort = port;
+      configPath = cfg;
+      return await startServer(cfg, { info: () => undefined, warn: () => undefined });
+    }, setupConfig);
     daemon = started.server;
     daemonPort = started.port;
     const baseUrl = `http://127.0.0.1:${daemonPort}`;
     traceEvent(trace, { kind: "daemon.up" });
-    wsServer = await startTraceWsServer(wsPort, trace);
+    const wsStarted = await bindTraceWsServer(trace);
+    wsServer = wsStarted.server;
+    wsPort = wsStarted.port;
     const wsClient = startTraceWsClient(wsPort, trace);
     await waitFor(() => trace.ws.opens === 1, 1_000);
 
@@ -296,7 +319,7 @@ async function runTrace(mode: DeploySwitchRuntimeTrace["mode"]): Promise<DeployS
         await delay(HELPER_OUTAGE_MS);
         daemon = await startServer(configPath, { info: () => undefined, warn: () => undefined });
         traceEvent(trace, { kind: "daemon.up" });
-        wsServer = await startTraceWsServer(wsPort, trace);
+        wsServer = (await bindTraceWsServer(trace, wsPort)).server;
         traceEvent(trace, { kind: "helper.done", version });
       })();
     };
