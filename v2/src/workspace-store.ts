@@ -72,8 +72,13 @@ function readWorkspaceStateFile(path: string): WorkspaceState | null {
   // Read-path upgrade for records written before `ac484aa0f` (the standalone
   // `manualTitleOverride` marker) was folded into `slots.titleSource`. A live
   // workspace file may still carry the legacy marker with no `titleSource`.
+  // `manualTitleOverride` was set ONLY by manual-sourced writes (plain
+  // `--title`/`--clear-title`, never agent `--title-if-absent`; see
+  // ac484aa0f's `!normalized.setTitleIfAbsent` gate) so it always encoded a
+  // real manual lock. Map it to "manual", not "agent" — mapping to "agent"
+  // would silently drop a legacy workspace's manual lock.
   if (parsed["manualTitleOverride"] === true && !slots?.titleSource) {
-    slots = { ...(slots ?? { links: [] }), titleSource: "agent" };
+    slots = { ...(slots ?? { links: [] }), titleSource: "manual" };
   }
   return {
     ...(slots ? { slots } : {}),

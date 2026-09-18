@@ -108,14 +108,19 @@ describe("readWorkspaceState", () => {
     });
   });
 
-  it("upgrades a legacy manualTitleOverride marker to slots.titleSource agent", async () => {
+  // manualTitleOverride (ac484aa0f) was set ONLY by manual-sourced writes
+  // (plain --title/--clear-title; agent --title-if-absent never set it, gated
+  // by `!normalized.setTitleIfAbsent`). The legacy marker always encoded a
+  // real manual lock, so the upgrade must map it to "manual", not "agent" —
+  // do not "fix" this back to "agent".
+  it("upgrades a legacy manualTitleOverride marker to slots.titleSource manual", async () => {
     const dataDir = await newDataDir();
     const path = join(dataDir, "workspaces", "api-1.json");
     mkdirSync(join(dataDir, "workspaces"), { recursive: true });
 
     writeFileSync(path, JSON.stringify({ manualTitleOverride: true }), "utf-8");
     expect(readWorkspaceState(dataDir, "api-1")).toEqual({
-      slots: { links: [], titleSource: "agent" },
+      slots: { links: [], titleSource: "manual" },
     });
 
     writeFileSync(
@@ -127,7 +132,7 @@ describe("readWorkspaceState", () => {
       "utf-8",
     );
     expect(readWorkspaceState(dataDir, "api-1")).toEqual({
-      slots: { title: "t", links: [{ label: "pr", url: "https://x" }], titleSource: "agent" },
+      slots: { title: "t", links: [{ label: "pr", url: "https://x" }], titleSource: "manual" },
     });
   });
 
