@@ -10,7 +10,7 @@ import type * as ChildProcess from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { __resetReleasesCacheForTest } from "../../src/releases-cache.js";
-import { findFreePort } from "../helpers/common.js";
+import { findFreePort, listenOnHostPort } from "../helpers/common.js";
 
 const CURRENT_VERSION = "0.2.0";
 const RECONNECT_DELAY_MS = 1_000;
@@ -146,14 +146,8 @@ async function startTraceWsServer(
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
-      server.off("error", reject);
-      traceEvent(trace, { kind: "ws.server.up" });
-      resolve();
-    });
-  });
+  await listenOnHostPort(server, port, "127.0.0.1");
+  traceEvent(trace, { kind: "ws.server.up" });
   return {
     stop: async () => {
       for (const socket of sockets) socket.destroy();
@@ -165,6 +159,7 @@ async function startTraceWsServer(
 }
 
 async function closeHttpServer(server: HttpServer): Promise<void> {
+  server.closeAllConnections();
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });

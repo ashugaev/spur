@@ -167,6 +167,28 @@ export async function startOnFreePort<T>(
   }
 }
 
+export async function listenOnHostPort(
+  server: ReturnType<typeof createServer>,
+  port: number,
+  host = "127.0.0.1",
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, host, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      return;
+    } catch (error) {
+      if (attempt >= 4 || !isAddrInUse(error)) throw error;
+      await sleep(25 * (attempt + 1));
+    }
+  }
+}
+
 export async function processExists(pid: number): Promise<boolean> {
   try {
     process.kill(pid, 0);

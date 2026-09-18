@@ -376,6 +376,14 @@ test.describe("D1: Header renders correctly", () => {
         element.remove();
         return color;
       });
+      const accentBorderColor = await page.evaluate(() => {
+        const element = document.createElement("div");
+        element.style.borderColor = "var(--color-accent)";
+        document.body.append(element);
+        const color = getComputedStyle(element).borderColor;
+        element.remove();
+        return color;
+      });
       const transparent = "rgba(0, 0, 0, 0)";
       const getBg = (loc: ReturnType<typeof page.locator>) =>
         loc.evaluate((el: Element) => getComputedStyle(el).backgroundColor);
@@ -392,7 +400,10 @@ test.describe("D1: Header renders correctly", () => {
       const configuredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Alpha']]");
       await configuredLi.hover();
       await expect(configuredLi).toHaveCSS("background-color", overlayColor);
-      expect(await getBg(page.getByRole("menuitemradio", { name: "Alpha" }))).toBe(transparent);
+      const alphaOption = page.getByRole("menuitemradio", { name: "Alpha" });
+      await alphaOption.hover();
+      await expect(alphaOption).toHaveCSS("border-color", accentBorderColor);
+      expect(await getBg(alphaOption)).toBe(transparent);
       const editAlpha = page.getByRole("menuitem", { name: "Edit Alpha" });
       expect(await getBg(editAlpha)).toBe(transparent);
 
