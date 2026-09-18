@@ -268,6 +268,7 @@ type GitHubPrStatusSummary = GitHubPrSummary & {
   statusCheckRollupState: string;
   draft: boolean;
   state: string;
+  headSha: string;
 };
 
 type ReviewEntry = {
@@ -357,6 +358,7 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
     statusCheckRollupState: readRollupState(value.statusCheckRollup),
     draft: value.isDraft === true,
     state: readString(value.state) ?? "",
+    headSha: readString(value.headRefOid) ?? "",
   };
 }
 
@@ -419,7 +421,7 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergeable mergeStateStatus isDraft state headRefOid
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
@@ -562,7 +564,7 @@ export async function resolvePrSummary(
     "--state",
     "all",
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft,headRefOid",
   );
   const parsed = parseJson(raw);
   const prs = Array.isArray(parsed)
@@ -611,6 +613,7 @@ export async function resolvePrSummary(
     statusCheckRollupState: pr.statusCheckRollupState,
     draft: pr.draft,
     state: pr.state,
+    headSha: pr.headSha,
   };
 }
 
@@ -624,7 +627,7 @@ export async function resolveBoundPrSummary(
     "view",
     String(pr.number),
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft,headRefOid",
   );
   const summary = readPrStatusSummary(parseJson(raw));
   if (!summary) {
@@ -642,6 +645,7 @@ export async function resolveBoundPrSummary(
     statusCheckRollupState: summary.statusCheckRollupState,
     draft: summary.draft,
     state: summary.state,
+    headSha: summary.headSha,
   };
 }
 
@@ -757,10 +761,17 @@ function collectSignalsFromNode(
       : summarizeFailingCi(checks);
   const snapshot = new Map<string, ReviewSignal>();
   if (pr.reviewDecision === "changes_requested") {
+    // The head SHA rides in the dedup-bearing text, not the key: a push under a
+    // still-`changes_requested` decision is a snapshot diff, so the signal fires
+    // again. Without it the key/text pair is constant for the PR's whole review
+    // life and the source emits exactly once, leaving a single-desk reviewer
+    // (one desk until APPROVE or merge) with no wake for the new commits.
+    // Empty SHA (a provider response without headRefOid) keeps the old constant.
+    const head = pr.headSha ? ` (head ${pr.headSha.slice(0, 7)})` : "";
     snapshot.set("changes_requested", {
       key: "changes_requested",
       kind: "changes_requested",
-      text: "Changes requested in review.",
+      text: `Changes requested in review${head}.`,
     });
   }
   if (ciText) {

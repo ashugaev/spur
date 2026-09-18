@@ -980,6 +980,21 @@ describe("github source", () => {
     ghMock.mockReset();
   });
 
+  // Interval ticks never fire under vitest fake timers here (node:timers), so a
+  // second poll is driven explicitly through runOnStart().
+  async function startRepollable(emit: (name: string, data?: unknown) => void) {
+    return githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+  }
+
   async function startLifecycle(emit: (name: string, data?: unknown) => void) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
@@ -1021,6 +1036,130 @@ describe("github source", () => {
     expect(emit).not.toHaveBeenCalledWith("github:ready_for_review", expect.anything());
     const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
     expect(snapshot.signals.has("ready_for_review")).toBe(false);
+    handle.stop();
+  });
+
+  it("emits github:changes_requested on the first changes-requested observation", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ reviewDecision: "CHANGES_REQUESTED", headRefOid: "aaaaaaa1111111111111" }),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:changes_requested",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "changes_requested",
+            text: "Changes requested in review (head aaaaaaa).",
+          }),
+        ],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("does not re-emit github:changes_requested while the head SHA is unchanged", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    const view = prView({
+      reviewDecision: "CHANGES_REQUESTED",
+      headRefOid: "aaaaaaa1111111111111",
+    });
+    mockLifecyclePoll(view);
+    mockLifecyclePoll(view);
+    const emit = vi.fn();
+
+    const handle = await startRepollable(emit);
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(emit).toHaveBeenCalledWith("github:changes_requested", expect.anything());
+    emit.mockClear();
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalledTimes(10);
+    expect(emit).not.toHaveBeenCalledWith("github:changes_requested", expect.anything());
+    handle.stop();
+  });
+
+  it("re-emits github:changes_requested when the head SHA moves and the decision holds", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ reviewDecision: "CHANGES_REQUESTED", headRefOid: "aaaaaaa1111111111111" }),
+    );
+    mockLifecyclePoll(
+      prView({ reviewDecision: "CHANGES_REQUESTED", headRefOid: "bbbbbbb2222222222222" }),
+    );
+    const emit = vi.fn();
+
+    const handle = await startRepollable(emit);
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    emit.mockClear();
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:changes_requested",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "changes_requested",
+            text: "Changes requested in review (head bbbbbbb).",
+          }),
+        ],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("emits no github:changes_requested when the decision is approved or none", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ reviewDecision: "APPROVED", headRefOid: "aaaaaaa1111111111111" }));
+    // A push under a non-CR decision must stay silent too: the head SHA alone
+    // never carries the signal.
+    mockLifecyclePoll(prView({ reviewDecision: null, headRefOid: "bbbbbbb2222222222222" }));
+    const emit = vi.fn();
+
+    const handle = await startRepollable(emit);
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(emit).not.toHaveBeenCalledWith("github:changes_requested", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(false);
+    handle.stop();
+  });
+
+  it("polls a bound worktree:false session and emits its changes_requested signal", async () => {
+    // int-review desks run worktree:false against a real checkout path. Poll
+    // eligibility keys off worktreePath existing, never the worktree flag.
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession({ worktree: false })]);
+    mockLifecyclePoll(
+      prView({ reviewDecision: "CHANGES_REQUESTED", headRefOid: "aaaaaaa1111111111111" }),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:changes_requested",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "changes_requested" })],
+      }),
+    );
     handle.stop();
   });
 
