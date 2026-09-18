@@ -156,6 +156,12 @@ export const REVIEW_SIGNAL_KINDS = [
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
+// GitHub-only signal kinds that report an occurrence, not a lifecycle state:
+// they are never baseline-suppressed, because each new occurrence is news even
+// on a session's first poll.
+export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
+export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
+
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
   "approved",
@@ -476,7 +482,7 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
 }
