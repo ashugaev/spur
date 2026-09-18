@@ -337,6 +337,7 @@ describe("resolveBoundPrSummary", () => {
         statusCheckRollup: { state: "FAILURE" },
         state: "OPEN",
         isDraft: true,
+        headRefOid: "aaaaaaa1111111111111",
       }),
     );
 
@@ -356,6 +357,7 @@ describe("resolveBoundPrSummary", () => {
       statusCheckRollupState: "FAILURE",
       draft: true,
       state: "OPEN",
+      headSha: "aaaaaaa1111111111111",
     });
     expect(ghMock).toHaveBeenCalledWith(
       "/wt",
@@ -363,7 +365,7 @@ describe("resolveBoundPrSummary", () => {
       "view",
       "212",
       "--json",
-      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft,headRefOid",
     );
   });
 
