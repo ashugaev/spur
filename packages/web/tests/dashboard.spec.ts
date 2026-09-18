@@ -365,6 +365,7 @@ test.describe("D1: Header renders correctly", () => {
     for (const theme of ["dark", "light"] as const) {
       if (theme === "light") {
         await page.getByRole("button", { name: "Switch to light theme" }).click();
+        await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
       }
 
       const overlayColor = await page.evaluate(() => {
@@ -380,6 +381,13 @@ test.describe("D1: Header renders correctly", () => {
         loc.evaluate((el: Element) => getComputedStyle(el).backgroundColor);
 
       await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+
+      const allProjectsBtn = page.getByRole("menuitemradio", { name: "All Projects" });
+      const allProjectsRow = allProjectsBtn.locator("xpath=..");
+      const selectedAllBg = await getBg(allProjectsBtn);
+      await allProjectsRow.hover();
+      await expect(allProjectsRow).toHaveCSS("background-color", overlayColor);
+      expect(await getBg(allProjectsBtn)).toBe(selectedAllBg);
 
       const configuredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Alpha']]");
       await configuredLi.hover();
@@ -398,9 +406,9 @@ test.describe("D1: Header renders correctly", () => {
       await page.getByRole("menuitemradio", { name: "Alpha" }).click();
       await page.getByRole("button", { name: "Project filter: Alpha" }).click();
 
-      const allProjectsBtn = page.getByRole("menuitemradio", { name: "All Projects" });
-      await allProjectsBtn.hover();
-      await expect(allProjectsBtn).toHaveCSS("background-color", overlayColor);
+      await allProjectsRow.hover();
+      await expect(allProjectsRow).toHaveCSS("background-color", overlayColor);
+      expect(await getBg(allProjectsBtn)).toBe(transparent);
 
       const selectedBtn = page.getByRole("menuitemradio", { name: "Alpha", checked: true });
       const selectedBg = await getBg(selectedBtn);
@@ -408,7 +416,7 @@ test.describe("D1: Header renders correctly", () => {
       await selectedLi.hover();
       await expect(selectedLi).toHaveCSS("background-color", overlayColor);
       expect(await getBg(selectedBtn)).toBe(selectedBg);
-      await allProjectsBtn.click();
+      await page.getByRole("menuitemradio", { name: "All Projects" }).click();
     }
   });
 

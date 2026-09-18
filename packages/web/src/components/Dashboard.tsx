@@ -607,21 +607,23 @@ function ProjectMenu({
           className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           role="menu"
         >
-          <button
-            aria-checked={selectedProjectId === ""}
-            className={`mb-1 flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)]"}`}
-            onClick={() => {
-              popover.dismiss();
-              onSelectProject("");
-            }}
-            role="menuitemradio"
-            type="button"
-          >
-            <span aria-hidden="true" className="w-3 text-center">
-              {selectedProjectId === "" ? "✓" : ""}
-            </span>
-            <span>All Projects</span>
-          </button>
+          <div className="mb-1 transition hover:bg-[var(--color-hover-overlay)]">
+            <button
+              aria-checked={selectedProjectId === ""}
+              className={`flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
+              onClick={() => {
+                popover.dismiss();
+                onSelectProject("");
+              }}
+              role="menuitemradio"
+              type="button"
+            >
+              <span aria-hidden="true" className="w-3 text-center">
+                {selectedProjectId === "" ? "✓" : ""}
+              </span>
+              <span>All Projects</span>
+            </button>
+          </div>
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
