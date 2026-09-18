@@ -266,7 +266,6 @@ async function runTrace(mode: DeploySwitchRuntimeTrace["mode"]): Promise<DeployS
   const targetVersion = mode === "restart" ? "0.1.0" : CURRENT_VERSION;
   let wsPort = 0;
   let configPath = "";
-  let daemonPort: number;
   let daemon: StoppableServer | null = null;
   let wsServer: StoppableServer | null = null;
   let pollStopped = false;
@@ -298,8 +297,7 @@ async function runTrace(mode: DeploySwitchRuntimeTrace["mode"]): Promise<DeployS
       return await startServer(cfg, { info: () => undefined, warn: () => undefined });
     }, setupConfig);
     daemon = started.server;
-    daemonPort = started.port;
-    const baseUrl = `http://127.0.0.1:${daemonPort}`;
+    const baseUrl = `http://127.0.0.1:${started.port}`;
     traceEvent(trace, { kind: "daemon.up" });
     const wsStarted = await bindTraceWsServer(trace);
     wsServer = wsStarted.server;
