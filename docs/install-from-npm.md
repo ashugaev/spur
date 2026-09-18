@@ -6,7 +6,12 @@ Run Spur on a fresh Linux server. This is the required path for coding-agent ins
 
 Package ships the web UI prebuilt — no on-box build.
 
-Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Node version: range in [`package.json`](../package.json) `engines.node` (Ubuntu's apt build is too old — use nodesource or nvm).
+Verified on Ubuntu 24.04 LTS, down to a ~1GB-RAM box (no swap). Node version: range in [`package.json`](../package.json) `engines.node`. Node must sit at `/usr/bin/node` — the units hardcode that path (see gotchas). Ubuntu's apt build is too old; nodesource lands there:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
+/usr/bin/node -v                    # required — a node reachable only on PATH is not enough
+```
 
 ## Requirements
 
@@ -24,14 +29,16 @@ npm install -g @shugaev/spur@latest
 command -v claude   >/dev/null || npm install -g --prefix ~/.local @anthropic-ai/claude-code
 command -v codex    >/dev/null || npm install -g --prefix ~/.local @openai/codex
 command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
-mkdir -p ~/.claude/skills ~/.codex/skills
+mkdir -p ~/.claude/skills ~/.codex/skills   # Spur links its skills here, never creates the dirs
 
 spur init                           # installs + starts the systemd user units, links host skills
 ```
 
-Two non-obvious points:
+Four non-obvious points:
 
-- Prefix must be `~/.local` — a system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path (`status=203/EXEC`). Put `~/.local/bin` on PATH, persisted for new logins. The `npm config set prefix ~/.local` above writes into `~/.npmrc`, needed once to land the very first `npm install -g @shugaev/spur` before Spur exists to pin anything. After the daemon's first boot (`spur init`/`update`/`reinit`, a reboot, or `systemctl restart`), the pin moves to Spur's own `~/.spur/npmrc` as npm's `--globalconfig` — never `~/.npmrc`, which `nvm` refuses to load once it carries a `prefix=`/`globalconfig=` line. `spur init`/`update`/`reinit` strip that line back out of `~/.npmrc` only on hosts with nvm installed — on a host without nvm the line stays, since it's what makes a bare `npm install -g` (outside any agent session) land in `~/.local` at all, and nothing there conflicts with it. A plain daemon boot leaves `~/.npmrc` alone either way. `spur doctor`'s `npmrc-nvm-conflict` check applies the same nvm gate and gives the one-liner to remove a leftover line (system-unit hosts, see below, can't run `spur reinit`).
+- Node must live at `/usr/bin/node`. Both units ship `ExecStart=/usr/bin/node ...`; nothing rewrites that path. A node under `nvm`, `fnm`, or `~/.local` crash-loops both units on `status=203/EXEC` with a correct npm prefix. Only the npm prefix moves to `~/.local` — the runtime stays system-wide. nvm host: `sudo ln -s "$(command -v node)" /usr/bin/node`.
+
+- Prefix must be `~/.local` — a system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path. Put `~/.local/bin` on PATH, persisted for new logins. The `npm config set prefix ~/.local` above writes into `~/.npmrc`, needed once to land the very first `npm install -g @shugaev/spur` before Spur exists to pin anything. After the daemon's first boot (`spur init`/`update`/`reinit`, a reboot, or `systemctl restart`), the pin moves to Spur's own `~/.spur/npmrc` as npm's `--globalconfig` — never `~/.npmrc`, which `nvm` refuses to load once it carries a `prefix=`/`globalconfig=` line. `spur init`/`update`/`reinit` strip that line back out of `~/.npmrc` only on hosts with nvm installed — on a host without nvm the line stays, since it's what makes a bare `npm install -g` (outside any agent session) land in `~/.local` at all, and nothing there conflicts with it. A plain daemon boot leaves `~/.npmrc` alone either way. `spur doctor`'s `npmrc-nvm-conflict` check applies the same nvm gate and gives the one-liner to remove a leftover line (system-unit hosts, see below, can't run `spur reinit`).
 - `npm install` only unpacks — it starts nothing and won't survive reboot. `spur init` installs the units, starts them, and enables linger. `spur init` also links the packaged Spur agent skills into `~/.claude/skills` and `~/.codex/skills` when that `skills` directory already exists — never creating an absent one — replacing its own links (including a dangling one under any `.../skills/<name>` path) on every release, and leaving a real file, directory, or foreign symlink untouched. An absent dir is skipped with a warning naming the path and the fix (`mkdir -p <path> && spur reinit`). See [Doctor](commands.md#doctor)'s `skills-symlinks` check.
 - Every agent session carries `NPM_CONFIG_GLOBALCONFIG=~/.spur/npmrc` (both env casings) in its env, so `claude`/`codex` self-update (`npm install -g ...`) resolves `~/.local` even mid-session. That only holds as long as `~/.npmrc` carries no `prefix=` line pointing anywhere other than `~/.local` — a Spur-authored `prefix=~/.local` line left there (non-nvm hosts, see above) is harmless since it resolves to the same value; an operator-set line to any other value outranks this pin and self-update would follow that instead. Sidecars, project services, and the Claude OAuth login pane do NOT inherit this pin — Spur strips it (along with `NPM_CONFIG_PREFIX`/`PREFIX`) so those panes can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards; a bare `npm install -g` in one of those panes falls back to npm's system prefix. A bare `npm install -g` in a plain login shell (not an agent session) needs an explicit `--prefix ~/.local`, or use `spur update` (below), which derives it automatically.
 
@@ -133,15 +140,16 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 
 ## Troubleshooting
 
-| Symptom                                                | Fix                                                                                                           |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `status=203/EXEC` or `EACCES .../usr/lib/node_modules` | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
-| units die after SSH logout                             | linger off: `loginctl enable-linger $USER`                                                                    |
-| web terminal `/ws` won't connect                       | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
-| `/ws` closes immediately                               | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
-| web unreachable over Tailscale                         | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
-| mic button dead on the tailnet URL                     | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
-| first spawn: `OAuth error: Invalid code`               | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
+| Symptom                                  | Fix                                                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `status=203/EXEC`                        | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
+| `EACCES .../usr/lib/node_modules`        | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
+| units die after SSH logout               | linger off: `loginctl enable-linger $USER`                                                                    |
+| web terminal `/ws` won't connect         | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
+| `/ws` closes immediately                 | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
+| web unreachable over Tailscale           | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
+| mic button dead on the tailnet URL       | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
+| first spawn: `OAuth error: Invalid code` | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
 
 ## System-wide units (advanced)
 
