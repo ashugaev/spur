@@ -17590,11 +17590,23 @@ export class SessionService {
         }
       } else if (scanPane && strategy === "cursor_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        // A failed fork takes no observation: neither the rate-limit scan nor
-        // the ready-prompt check runs, so a null capture can't promote to
-        // rate_limited, can't flip to "waiting", and can't drop a live
-        // cursorPaneReadyOverrides entry a real capture wrote.
-        if (paneText !== null) {
+        if (paneText === null) {
+          // A failed fork never mutates cursorPaneReadyOverrides (no write,
+          // no delete) — only reapply the stored entry if unexpired, the same
+          // read the scanPane:false branch below does. Reapplying does NOT
+          // refresh the expiry: only the live ready-prompt branch below
+          // writes it.
+          const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
+          if (
+            expiresAt !== undefined &&
+            expiresAt > nowMs &&
+            state === "error" &&
+            !rateLimitActive(rateLimit, nowMs)
+          ) {
+            state = "waiting";
+            classifiedDetail = "State: waiting (cursor pane ready override)";
+          }
+        } else {
           if (!rateLimit?.limited) {
             const tmuxHit = scanTmuxRateLimit(paneText);
             if (tmuxHit?.limited) {

@@ -55,6 +55,110 @@ async function mockVersionMenu(
 }
 
 test.describe("Version menu Auto checkbox", () => {
+  test("live version chip keeps its width and acknowledges only changed heartbeats", async ({
+    page,
+  }) => {
+    const versions: VersionsFixture = {
+      current: "1.4.0",
+      autoUpdate: false,
+      available: [],
+    };
+    let infoFetches = 0;
+    await mockSessions(page, [], DEFAULT_PROJECTS);
+    await mockVersionMenu(page, versions);
+    await page.route("**/api/runtime/info", async (route) => {
+      infoFetches += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ version: versions.current }),
+      });
+    });
+    await page.setViewportSize({ width: 520, height: 500 });
+    await page.clock.install();
+
+    await page.goto("/");
+    const trigger = page.getByRole("button", { name: /Show Spur version information/ });
+    await expect(trigger).toContainText("1.4.0");
+    const label = trigger.locator("span").first();
+    const rightCluster = page.getByTestId("status-bar-right-cluster");
+    await trigger.evaluate((element) => {
+      element.dataset.versionAnimationStarts = "0";
+      element.addEventListener("animationstart", (event) => {
+        if (event.target instanceof HTMLSpanElement) {
+          const count = Number(element.dataset.versionAnimationStarts ?? "0");
+          element.dataset.versionAnimationStarts = String(count + 1);
+        }
+      });
+    });
+
+    const [initialLabelBox, initialClusterBox] = await Promise.all([
+      label.boundingBox(),
+      rightCluster.boundingBox(),
+    ]);
+    expect(initialLabelBox).not.toBeNull();
+    expect(initialClusterBox).not.toBeNull();
+    if (!initialLabelBox || !initialClusterBox) throw new Error("unreachable");
+
+    const unchangedFetches = infoFetches;
+    await page.clock.fastForward(5_100);
+    await expect.poll(() => infoFetches).toBeGreaterThan(unchangedFetches);
+    await expect(trigger).toHaveAttribute("data-version-animation-starts", "0");
+
+    versions.current = "1.8.0-9-gbb3363fed";
+    const changedFetches = infoFetches;
+    await page.clock.fastForward(5_100);
+    await expect.poll(() => infoFetches).toBeGreaterThan(changedFetches);
+    await expect(trigger).toContainText("1.8.0-9-gbb3363fed");
+    await expect(trigger).toHaveAttribute("data-version-animation-starts", "1");
+    await expect(label).toHaveCSS("animation-duration", "0.8s");
+    await expect(label).toHaveCSS("animation-iteration-count", "1");
+
+    const [changedLabelBox, changedClusterBox] = await Promise.all([
+      label.boundingBox(),
+      rightCluster.boundingBox(),
+    ]);
+    expect(changedLabelBox).not.toBeNull();
+    expect(changedClusterBox).not.toBeNull();
+    if (!changedLabelBox || !changedClusterBox) throw new Error("unreachable");
+    expect(Math.abs(changedLabelBox.width - initialLabelBox.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(changedLabelBox.x - initialLabelBox.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(changedClusterBox.width - initialClusterBox.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(changedClusterBox.x - initialClusterBox.x)).toBeLessThanOrEqual(1);
+    expect(await label.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
+      changedLabelBox.width + 1,
+    );
+
+    versions.current = "10.10.10-beta.1-build-20260917";
+    const overflowFetches = infoFetches;
+    await page.clock.fastForward(5_100);
+    await expect.poll(() => infoFetches).toBeGreaterThan(overflowFetches);
+    await expect(trigger).toContainText("10.10.10-beta.1-build-20260917");
+    await expect(label).toHaveAttribute("title", "10.10.10-beta.1-build-20260917");
+    await expect(trigger).toHaveAttribute("data-version-animation-starts", "2");
+    const [overflowLabelBox, overflowClusterBox] = await Promise.all([
+      label.boundingBox(),
+      rightCluster.boundingBox(),
+    ]);
+    expect(overflowLabelBox).not.toBeNull();
+    expect(overflowClusterBox).not.toBeNull();
+    if (!overflowLabelBox || !overflowClusterBox) throw new Error("unreachable");
+    expect(Math.abs(overflowLabelBox.width - initialLabelBox.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overflowClusterBox.width - initialClusterBox.width)).toBeLessThanOrEqual(1);
+    expect(await label.evaluate((element) => element.scrollWidth)).toBeGreaterThan(
+      overflowLabelBox.width,
+    );
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    versions.current = "9.9.9-beta";
+    const reducedMotionFetches = infoFetches;
+    await page.clock.fastForward(5_100);
+    await expect.poll(() => infoFetches).toBeGreaterThan(reducedMotionFetches);
+    await expect(trigger).toContainText("9.9.9-beta");
+    await expect(trigger).toHaveAttribute("data-version-animation-starts", "2");
+    await expect(label).toHaveCSS("animation-name", "none");
+  });
+
   test("header keeps name+version and Auto on one row at 320px, no wrap", async ({ page }) => {
     await mockSessions(page, [], DEFAULT_PROJECTS);
     await mockVersionMenu(page, {
