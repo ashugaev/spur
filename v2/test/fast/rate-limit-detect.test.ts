@@ -242,6 +242,55 @@ describe("detectCursorRateLimit", () => {
     });
   });
 
+  it("flags team rate limit errors", () => {
+    expect(detectCursorRateLimit("Error: Your team has reached its usage limit")).toEqual({
+      limited: true,
+      reason: "cursor reached its usage limit",
+    });
+    expect(detectCursorRateLimit("spendLimitHit: true")).toEqual({
+      limited: true,
+      reason: "cursor spendlimithit: true",
+    });
+    expect(detectCursorRateLimit("spendLimitHit:true")).toEqual({
+      limited: true,
+      reason: "cursor spendlimithit:true",
+    });
+    expect(detectCursorRateLimit('{"spendLimitHit": true}')).toEqual({
+      limited: true,
+      reason: 'cursor "spendlimithit": true',
+    });
+    expect(detectCursorRateLimit('{"spendLimitHit":true}')).toEqual({
+      limited: true,
+      reason: 'cursor "spendlimithit":true',
+    });
+    expect(detectCursorRateLimit("spendLimitHit: false")).toBeNull();
+    expect(detectCursorRateLimit("spendLimitHit:false")).toBeNull();
+    expect(detectCursorRateLimit('{"spendLimitHit": false}')).toBeNull();
+    expect(detectCursorRateLimit('{"spendLimitHit":false}')).toBeNull();
+  });
+
+  it("flags team rate limit errors from captured JSONL fixtures", () => {
+    const CURSOR_FIXTURES_DIR = resolve(__dirname, "../fixtures/agent-history/cursor");
+    const teamUsageContent = readFileSync(
+      join(CURSOR_FIXTURES_DIR, "turn-ended-error-team-usage-limit.jsonl"),
+      "utf8",
+    );
+    expect(detectCursorRateLimit(teamUsageContent)).toEqual({
+      limited: true,
+      reason: "cursor reached its usage limit",
+    });
+
+    const spendLimitContent = readFileSync(
+      join(CURSOR_FIXTURES_DIR, "turn-ended-error-spend-limit-hit.jsonl"),
+      "utf8",
+    );
+    const parsedSpendLimit = JSON.parse(spendLimitContent) as { error: string };
+    expect(detectCursorRateLimit(parsedSpendLimit.error)).toEqual({
+      limited: true,
+      reason: 'cursor "spendlimithit": true',
+    });
+  });
+
   it("is not limited for benign assistant text", () => {
     expect(detectCursorRateLimit("Patched the rate limiter middleware.")).toBeNull();
   });
@@ -625,6 +674,14 @@ describe("scanTmuxRateLimit", () => {
     expect(scanTmuxRateLimit(pane)).toEqual({
       limited: true,
       reason: "tmux usage limit reached",
+    });
+  });
+
+  it("matches a line-leading team usage-limit banner without ■", () => {
+    const pane = ["  Reached its usage limit", "  Your team quota is exhausted."].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux reached its usage limit",
     });
   });
 
