@@ -75,7 +75,7 @@ Run twice per cycle, once per agent, with a full reset (step 2) between the two 
 
 The prompt is the Install block of the repo README verbatim — that block is the artifact under test, not a prompt the runner writes. It tells the agent to fetch `raw.githubusercontent.com/<owner>/spur/<ref>/docs/install-from-npm.md`, never a `github.com/.../blob/...` URL — that form returns an empty document under cursor's webFetch. `<ref>` is `main` by default; point it at the PR branch to test an unmerged doc fix. No docs are staged on the VM — the agent fetches this one file over HTTPS; do not tar the repo docs onto the box, the prompt never reads them.
 
-Write the prompt to a file on the box first, one ssh call, no nested quoting to get wrong — the same file backs both agents' launches:
+Write the prompt to a file on the box AFTER each reset, one ssh call, no nested quoting to get wrong — the same file backs both agents' launches. `reset-vm.sh` deletes `/tmp/prompt.txt` as a run artifact, and `$(cat)` on the missing file launches the agent with an empty prompt:
 
   ssh ... "cat > /tmp/prompt.txt" <<'EOP'
   <the README Install block, verbatim>
