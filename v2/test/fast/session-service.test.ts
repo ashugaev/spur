@@ -12359,6 +12359,61 @@ describe("SessionService", () => {
       );
     });
 
+    it("reapplies a live cursorPaneReadyOverrides entry on a failed capture instead of splitting the live/dashboard tick, and lets it expire under sustained failure", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agent: "cursor" }));
+      mockCursorJsonlState("error");
+      captureTmuxPaneMock.mockResolvedValue("previous output\n→ Add a follow-up\n");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const internals = service as unknown as {
+        attentionMonitorRunning: boolean;
+        dashboardCacheReady: Promise<void> | null;
+        stopDashboardCacheLoop: () => void;
+        runDashboardCacheTick: () => Promise<void>;
+      };
+      await internals.dashboardCacheReady;
+      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+        await Promise.resolve();
+      }
+      internals.attentionMonitorRunning = true;
+      internals.stopDashboardCacheLoop();
+
+      // A live tick detects the ready prompt and records the override.
+      await service.get("api-1");
+      await vi.advanceTimersByTimeAsync(4_001);
+      const live = await service.get("api-1");
+      expect(live.state).toBe("waiting");
+
+      // A failed fork (null): the live tick reapplies the stored entry rather
+      // than reporting the structured source's "error", and the rate-limit
+      // scan is skipped entirely — otherwise the live tick would show error
+      // (or a spurious rate_limited) while the very next scanPane:false
+      // dashboard tick (reading the still-live map entry) shows waiting, the
+      // exact two-tick split this override exists to prevent.
+      captureTmuxPaneMock.mockResolvedValue(null);
+      await vi.advanceTimersByTimeAsync(4_001);
+      const afterFailedCapture = await service.get("api-1");
+      expect(afterFailedCapture.state).toBe("waiting");
+
+      captureTmuxPaneMock.mockClear();
+      await internals.runDashboardCacheTick();
+      expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+      const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+      expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "waiting" });
+
+      // Sustained failure past CURSOR_PANE_READY_OVERRIDE_TTL_MS (15s) since
+      // the last REAL observation: reapplying never refreshed the expiry, so
+      // the entry dies and classification falls back to the structured
+      // source ("error").
+      await vi.advanceTimersByTimeAsync(15_001);
+      const afterExpiry = await service.get("api-1");
+      expect(afterExpiry.state).toBe("error");
+      service.dispose();
+    });
+
     it("applies a 60-second grace window to minMtimeMs for unpinned cursor sessions", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);

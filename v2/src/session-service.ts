@@ -17732,22 +17732,44 @@ export class SessionService {
         }
       } else if (scanPane && strategy === "cursor_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        if (!rateLimit?.limited) {
-          const tmuxHit = scanTmuxRateLimit(paneText);
-          if (tmuxHit?.limited) {
-            rateLimit = tmuxHit;
+        if (paneText === null) {
+          // A failed fork never mutates cursorPaneReadyOverrides (no live
+          // detect to set, no delete for a stale/mismatched entry) and skips
+          // the rate-limit scan — a failed capture is not evidence of "not
+          // rate limited". Reapply the stored entry if still unexpired,
+          // mirroring the !scanPane reuse branch below, without refreshing
+          // its expiry (only the live "ready prompt detected" branch does).
+          const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
+          if (
+            expiresAt !== undefined &&
+            expiresAt > nowMs &&
+            state === "error" &&
+            !rateLimitActive(rateLimit, nowMs)
+          ) {
+            state = "waiting";
+            classifiedDetail = "State: waiting (cursor pane ready override)";
           }
-        }
-        if (
-          state === "error" &&
-          cursorShowsReadyPrompt(paneText) &&
-          !rateLimitActive(rateLimit, nowMs)
-        ) {
-          state = "waiting";
-          this.cursorPaneReadyOverrides.set(session.id, nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS);
-          classifiedDetail = "State: waiting (cursor pane ready override)";
         } else {
-          this.cursorPaneReadyOverrides.delete(session.id);
+          if (!rateLimit?.limited) {
+            const tmuxHit = scanTmuxRateLimit(paneText);
+            if (tmuxHit?.limited) {
+              rateLimit = tmuxHit;
+            }
+          }
+          if (
+            state === "error" &&
+            cursorShowsReadyPrompt(paneText) &&
+            !rateLimitActive(rateLimit, nowMs)
+          ) {
+            state = "waiting";
+            this.cursorPaneReadyOverrides.set(
+              session.id,
+              nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS,
+            );
+            classifiedDetail = "State: waiting (cursor pane ready override)";
+          } else {
+            this.cursorPaneReadyOverrides.delete(session.id);
+          }
         }
       } else if (!scanPane && strategy === "cursor_jsonl") {
         const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
