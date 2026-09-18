@@ -418,6 +418,8 @@ Crossing the ceiling warns once per breach, in any session state, and re-arms on
 
 Budget events: `session.memory.budget.exceeded` (warn) with `agent`, `rssBytes`, `ceilingBytes`, `action`, `state`, `tmuxSession`; `session.memory.budget.cleared` (info) with `agent`, `rssBytes`, `ceilingBytes`, `clearBytes`, `durationMs`; `session.memory.budget.stopped` (warn) with `agent`, `rssBytes`, `ceilingBytes`, `state`, `durationMs`.
 
+A sweep whose RSS sample is unavailable (the fleet-wide `ps` fork failed or timed out) is a no-op for every session that sweep: no breach, no clear, no stop, no event, and an engaged latch is left untouched until a later sweep samples successfully.
+
 ## Artifact retention
 
 `artifactRetention` prunes `agent-history-*.jsonl` session artifacts. Never touches worktrees or session records — that is [`spur gc`](commands.md#gc).

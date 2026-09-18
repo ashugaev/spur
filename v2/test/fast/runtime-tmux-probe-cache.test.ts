@@ -235,9 +235,10 @@ describe("runtime-tmux shared probe cache", () => {
       await import("../../src/runtime-tmux.js");
 
     const bareRss = await getFleetAgentPaneRssBytes();
-    expect(bareRss.get("api-1")).toBe(20_480 * 1024);
-    expect(bareRss.get("api-1--ui")).toBe(30_720 * 1024);
-    expect(bareRss.get("api-1--svc--db")).toBe(40_960 * 1024);
+    expect(bareRss).not.toBeNull();
+    expect(bareRss?.get("api-1")).toBe(20_480 * 1024);
+    expect(bareRss?.get("api-1--ui")).toBe(30_720 * 1024);
+    expect(bareRss?.get("api-1--svc--db")).toBe(40_960 * 1024);
 
     // Same fixture, same TTL window: getFleetSessionRssBytes still folds the
     // "--" keys and rolls everything up under the bare id, proving the two
@@ -281,7 +282,27 @@ describe("runtime-tmux shared probe cache", () => {
     const { getFleetAgentPaneRssBytes } = await import("../../src/runtime-tmux.js");
     const rssBySessionName = await getFleetAgentPaneRssBytes();
 
-    expect(rssBySessionName.get("api-1")).toBe(20_480 * 1024);
+    expect(rssBySessionName?.get("api-1")).toBe(20_480 * 1024);
+  });
+
+  it("signals sample-unavailable, not an all-zero map, when ps yields no rows even though panes exist", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "api-1 1 1 0 1001 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        // A fork failure/timeout: getPsSnapshot's catch returns [], which on
+        // a live host never happens from a genuinely successful `ps -eo`
+        // (it always lists at least its own process).
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getFleetAgentPaneRssBytes } = await import("../../src/runtime-tmux.js");
+    const rssBySessionName = await getFleetAgentPaneRssBytes();
+
+    expect(rssBySessionName).toBeNull();
   });
 
   it("caches capture-pane per (session, lines) so a repeat scan within the TTL forks nothing extra", async () => {

@@ -187,7 +187,7 @@ const getFleetSessionRssBytesMock = vi
   .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
   .mockResolvedValue(new Map());
 const getFleetAgentPaneRssBytesMock = vi
-  .fn<() => Promise<Map<string, number>>>()
+  .fn<() => Promise<Map<string, number> | null>>()
   .mockResolvedValue(new Map());
 const readHostMemoryMock = vi.fn<
   () => {
@@ -20707,6 +20707,50 @@ describe("SessionService", () => {
 
       expect(stoppedEvents()).toHaveLength(1);
       expect(notifySpy).not.toHaveBeenCalled();
+
+      service.dispose();
+    });
+
+    it("AC9: a sweep with an unavailable RSS sample is a no-op for an engaged latch, and the latch still survives to clear normally later", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("warn", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as {
+        pollAttentionStates(baseline: boolean): Promise<void>;
+        agentMemoryBudgetLatch: Map<string, unknown>;
+        dispose(): void;
+      };
+
+      // Sweep 1 arms the latch on a genuine breach.
+      await service.pollAttentionStates(false);
+      expect(exceededEvents()).toHaveLength(1);
+      expect(service.agentMemoryBudgetLatch.size).toBe(1);
+
+      // Sweep 2: `ps` failed fleet-wide this tick — getFleetAgentPaneRssBytes
+      // signals sample-unavailable (null), never an all-zero map. No breach,
+      // no clear, no stop, no event at all, and the latch is untouched.
+      getFleetAgentPaneRssBytesMock.mockResolvedValueOnce(null);
+      await service.pollAttentionStates(false);
+
+      expect(exceededEvents()).toHaveLength(1);
+      expect(clearedEvents()).toHaveLength(0);
+      expect(stoppedEvents()).toHaveLength(0);
+      expect(service.agentMemoryBudgetLatch.size).toBe(1);
+
+      // Sweep 3: sampling recovers and the breach is still real — the latch
+      // survived, so this reads as the SAME ongoing breach, not a fresh one:
+      // no second exceeded.
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+      await service.pollAttentionStates(false);
+
+      expect(exceededEvents()).toHaveLength(1);
+      expect(clearedEvents()).toHaveLength(0);
 
       service.dispose();
     });

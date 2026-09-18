@@ -789,8 +789,24 @@ export async function getFleetSessionRssBytes(
 // getFleetSessionRssBytes does is wrong for this caller: sessionPrefix is a
 // free-form config string that can itself contain "--", so splitting on the
 // first "--" would misattribute a configured session's own agent RSS.
-export async function getFleetAgentPaneRssBytes(): Promise<Map<string, number>> {
+//
+// Returns null — sample-unavailable — when `psRows` comes back empty. On a
+// live host `ps -eo ...` always lists at least its own process, so an empty
+// result means the fork failed, timed out, or hit getPsSnapshot's catch, NOT
+// that every pane genuinely uses zero memory. getPsSnapshot's TTL cache also
+// memoizes that empty array for the full window, so every caller in that
+// window would otherwise see the same false zeros. Callers on the admission
+// path (applyAgentMemoryBudget via getFleetAgentPaneRssBytes's null check at
+// the sweep site) must treat null as "skip this sweep, latch untouched", the
+// same way `rss === undefined` (pane absent) is already treated — a fork
+// failure must never read as a measured zero. Do not "fix" this into
+// returning an all-zero map: that reintroduces the false
+// session.memory.budget.cleared this guards against.
+export async function getFleetAgentPaneRssBytes(): Promise<Map<string, number> | null> {
   const [{ panes }, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
+  if (psRows.length === 0) {
+    return null;
+  }
   const rssKbByTty = new Map<string, number>();
   for (const row of psRows) {
     if (!row.tty) continue;
