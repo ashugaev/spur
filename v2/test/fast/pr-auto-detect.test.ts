@@ -299,6 +299,7 @@ function baseConfig(): AppConfig {
         pressureSomeAvg10Refuse: 20,
         shedSwapUsedFraction: 0.9,
       },
+      agentMemoryBudget: { action: "warn", perAgentBytes: {} },
     },
     staleAfterMinutes: 60,
     autoUpdate: false,

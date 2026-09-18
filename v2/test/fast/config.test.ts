@@ -4559,6 +4559,7 @@ projects:
         pressureSomeAvg10Refuse: 20,
         shedSwapUsedFraction: 0.9,
       },
+      agentMemoryBudget: { action: "warn", perAgentBytes: {} },
     });
   });
 
@@ -4618,6 +4619,126 @@ projects:
 
     expect(config.admission.memoryGuard.minAvailableBytes).toBe(0);
     expect(config.admission.memoryGuard.minFreeSwapBytes).toBe(0);
+  });
+
+  it("parses admission.agentMemoryBudget for every agent kind in instance mode", async () => {
+    const configPath = await writeConfig(`
+admission:
+  agentMemoryBudget:
+    action: stop
+    perAgentBytes:
+      claude: 1000000000
+      codex: 2000000000
+      cursor: 3000000000
+      opencode: 4000000000
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission.agentMemoryBudget).toEqual({
+      action: "stop",
+      perAgentBytes: {
+        claude: 1_000_000_000,
+        codex: 2_000_000_000,
+        cursor: 3_000_000_000,
+        opencode: 4_000_000_000,
+      },
+    });
+  });
+
+  it("defaults admission.agentMemoryBudget to warn with no ceilings when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.admission.agentMemoryBudget).toEqual({ action: "warn", perAgentBytes: {} });
+  });
+
+  it("ignores admission.agentMemoryBudget in project mode, same as the rest of admission", async () => {
+    const configPath = await writeConfig(`
+admission:
+  agentMemoryBudget:
+    action: stop
+    perAgentBytes:
+      opencode: 6442450944
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.admission.agentMemoryBudget).toEqual({ action: "warn", perAgentBytes: {} });
+  });
+
+  it("rejects an unknown agent key in admission.agentMemoryBudget.perAgentBytes", async () => {
+    const configPath = await writeConfig(`
+admission:
+  agentMemoryBudget:
+    perAgentBytes:
+      gemini: 1000000000
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'admission.agentMemoryBudget.perAgentBytes has unknown agent "gemini"',
+    );
+  });
+
+  it('rejects admission.agentMemoryBudget.action "restart"', async () => {
+    const configPath = await writeConfig(`
+admission:
+  agentMemoryBudget:
+    action: restart
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'admission.agentMemoryBudget.action must be "warn" or "stop"',
+    );
+  });
+
+  it("rejects a negative admission.agentMemoryBudget.perAgentBytes value", async () => {
+    const configPath = await writeConfig(`
+admission:
+  agentMemoryBudget:
+    perAgentBytes:
+      opencode: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.agentMemoryBudget.perAgentBytes.opencode must be a positive number",
+    );
+  });
+
+  it("rejects an admission.agentMemoryBudget.perAgentBytes value of 0", async () => {
+    const configPath = await writeConfig(`
+admission:
+  agentMemoryBudget:
+    perAgentBytes:
+      opencode: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "admission.agentMemoryBudget.perAgentBytes.opencode must be a positive number",
+    );
   });
 
   it("rejects a negative admission.memoryGuard.minFreeSwapBytes", async () => {

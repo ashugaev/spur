@@ -708,6 +708,13 @@ export type AgentReasoningEffortConfig = Partial<
 
 export type AdmissionCapSource = "default" | "config" | "derived";
 
+// Instance-only (parseAgentMemoryBudget). Absent perAgentBytes key = no
+// ceiling for that agent kind, mirroring defaultModels' Partial map.
+export interface AgentMemoryBudgetConfig {
+  action: "warn" | "stop";
+  perAgentBytes: Partial<Record<AgentName, number>>;
+}
+
 // Instance-only (see config.ts's parseConfigFile): a project spur.yaml's
 // `admission` block is ignored before semantic parsing, same footgun as
 // rateLimitReactivation/authRotation/tags. All fields are resolved
@@ -731,6 +738,7 @@ export interface AdmissionConfig {
     pressureSomeAvg10Refuse: number;
     shedSwapUsedFraction: number;
   };
+  agentMemoryBudget: AgentMemoryBudgetConfig;
 }
 
 export interface HeadroomReport {

@@ -781,6 +781,37 @@ export async function getFleetSessionRssBytes(
   return rssBytesBySessionId;
 }
 
+// Per-agent-pane RSS, keyed by the EXACT tmux session name — no "--" fold,
+// no liveSessionByWorkspaceId remap. A caller wanting one session's own
+// agent-pane RSS looks up SessionRecord.tmuxSession directly: a sidecar key
+// (`${id}--${name}`) and a service key (`${id}--svc--${serviceId}`) are
+// distinct keys here and are never summed into the agent's own key. This is
+// the M1 adaptation: sessionPrefix is a free-form config string that can
+// itself contain "--", so folding on the first "--" would misattribute a
+// configured session's own agent RSS.
+export async function getFleetAgentPaneRssBytes(): Promise<Map<string, number>> {
+  const [{ panes }, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
+  const rssKbByTty = new Map<string, number>();
+  for (const row of psRows) {
+    if (!row.tty) continue;
+    // Drop the daemon's own row and its DIRECT children only — see the
+    // header this exports beside for why a ppid-only guard is not enough
+    // under a pane-hosted dev daemon, and why a grandchild or reparented
+    // orphan is deliberately NOT dropped (M4, dev-daemon-only residual).
+    if (row.pid === process.pid || row.ppid === process.pid) continue;
+    rssKbByTty.set(row.tty, (rssKbByTty.get(row.tty) ?? 0) + row.rssKb);
+  }
+  const rssBytesBySessionName = new Map<string, number>();
+  for (const [sessionName, entry] of panes) {
+    let rssKb = 0;
+    for (const tty of entry.allTtys) {
+      rssKb += rssKbByTty.get(tty.replace(/^\/dev\//, "")) ?? 0;
+    }
+    rssBytesBySessionName.set(sessionName, rssKb * 1024);
+  }
+  return rssBytesBySessionName;
+}
+
 // Typed result of a single pane/ps fetch, so a caller that needs to know
 // WHICH pass answered ALIVE (session-service's probeAgentProcess, issue #871
 // P2) can read it off one snapshot instead of issuing a second, separately

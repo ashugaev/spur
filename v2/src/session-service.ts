@@ -238,6 +238,7 @@ import {
   sidecarTmuxAlive,
   sidecarTmuxSession,
   getFleetSessionRssBytes,
+  getFleetAgentPaneRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
   getTmuxPanePresence,
@@ -531,6 +532,10 @@ const MEMORY_SHED_INTERVAL_MS = 1_000;
 const MEMORY_HOLD_CLEAR_TICKS = 10;
 const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
+// Hysteresis for the per-agent-kind memory budget (agentMemoryBudgetLatch):
+// a constant, not a config knob (F3). Growth is sawtooth, not monotonic, so
+// a bare level check would arm and disarm across GC cycles.
+const AGENT_MEMORY_BUDGET_CLEAR_FRACTION = 0.9;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 // classifySessionRecord (called from inside both waitForQueuedMessage and
@@ -756,6 +761,12 @@ interface MemoryDenialSample {
   floorCause?: MemoryDenialCause | undefined;
   availableBytes: number;
   someAvg10: number | null;
+}
+
+interface AgentMemoryBudgetLatchEntry {
+  engagedAtMs: number;
+  ceilingBytes: number;
+  acted: boolean;
 }
 
 interface MemoryShedEpisode {
@@ -2684,6 +2695,11 @@ export class SessionService {
   // `via: "pane_child"`. In-memory only, no persisted field. Swept alongside
   // the other session-scoped maps in pruneSessionScopedState.
   private readonly paneChildFallbackNotified = new Set<string>();
+  // Breach-edge latch for the per-agent-kind memory budget, keyed by session
+  // id. engagedAtMs is the elapsed source for session.memory.budget.cleared
+  // and .stopped (M4); acted enforces at most one stop per breach edge.
+  // Swept alongside the other session-scoped maps in pruneSessionScopedState.
+  private readonly agentMemoryBudgetLatch = new Map<string, AgentMemoryBudgetLatchEntry>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Ticks the re-entrancy guard dropped while the CURRENTLY running sweep was
@@ -3383,6 +3399,116 @@ export class SessionService {
     } catch {
       return null;
     }
+  }
+
+  private agentMemoryBudgetCeiling(agent: AgentName): number | null {
+    return this.config.admission.agentMemoryBudget.perAgentBytes[agent] ?? null;
+  }
+
+  private hasAgentMemoryBudget(): boolean {
+    return Object.keys(this.config.admission.agentMemoryBudget.perAgentBytes).length > 0;
+  }
+
+  // Warn is never gated on classified.state (F1, decisive) — steps 1-5 run
+  // for EVERY live session with a configured ceiling, working included.
+  // Only step 6, the stop action, consults classified.state and
+  // memoryShedEligibleRecord. Act-time shape copied verbatim from
+  // runMemoryShed: re-check memoryShedEligibleRecord, withWorkspaceLifecycleLocks,
+  // applyManualStatusLocked(id, "stopped", {}, { skipEnrichment: true }).
+  private async applyAgentMemoryBudget(input: {
+    session: SessionRecord;
+    classified: SessionStateResult;
+    rssByTmuxName: Map<string, number>;
+    actionAllowed: boolean;
+  }): Promise<boolean> {
+    const { session, classified, rssByTmuxName, actionAllowed } = input;
+    const ceiling = this.agentMemoryBudgetCeiling(session.agent);
+    if (ceiling === null) {
+      this.agentMemoryBudgetLatch.delete(session.id);
+      return false;
+    }
+    const rss = rssByTmuxName.get(session.tmuxSession);
+    if (rss === undefined) {
+      // Unmeasurable is not a breach: a dead/missing pane leaves the latch,
+      // if any, untouched until pruneSessionScopedState reclaims it on the
+      // session's terminal transition.
+      return false;
+    }
+    const action = this.config.admission.agentMemoryBudget.action;
+    const latch = this.agentMemoryBudgetLatch.get(session.id);
+    const clearBytes = ceiling * AGENT_MEMORY_BUDGET_CLEAR_FRACTION;
+
+    if (!latch) {
+      if (rss > ceiling) {
+        this.agentMemoryBudgetLatch.set(session.id, {
+          engagedAtMs: Date.now(),
+          ceilingBytes: ceiling,
+          acted: false,
+        });
+        this.logEvent("session.memory.budget.exceeded", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `${session.agent} session RSS ${rss} exceeds the ${ceiling} budget`,
+          details: {
+            agent: session.agent,
+            rssBytes: rss,
+            ceilingBytes: ceiling,
+            action,
+            state: classified.state,
+            tmuxSession: session.tmuxSession,
+          },
+        });
+      }
+      return false;
+    }
+
+    if (rss <= clearBytes) {
+      this.logEvent("session.memory.budget.cleared", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `${session.agent} session RSS recovered below the budget`,
+        details: {
+          agent: session.agent,
+          rssBytes: rss,
+          ceilingBytes: ceiling,
+          clearBytes,
+          durationMs: Date.now() - latch.engagedAtMs,
+        },
+      });
+      this.agentMemoryBudgetLatch.delete(session.id);
+      return false;
+    }
+
+    if (
+      action === "stop" &&
+      actionAllowed &&
+      !latch.acted &&
+      (classified.state === "rate_limited" || classified.state === "waiting")
+    ) {
+      if (!(await this.memoryShedEligibleRecord(session.id))) return false;
+      latch.acted = true;
+      await this.withWorkspaceLifecycleLocks(session.id, () =>
+        this.applyManualStatusLocked(session.id, "stopped", {}, { skipEnrichment: true }),
+      );
+      this.logEvent("session.memory.budget.stopped", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Stopped ${session.agent} session over its ${ceiling} memory budget`,
+        details: {
+          agent: session.agent,
+          rssBytes: rss,
+          ceilingBytes: ceiling,
+          state: classified.state,
+          durationMs: Date.now() - latch.engagedAtMs,
+        },
+      });
+      return true;
+    }
+
+    return false;
   }
 
   private async memoryShedSidecarTarget(
@@ -5499,6 +5625,12 @@ export class SessionService {
       )
         ? await snapshotProcesses()
         : undefined;
+      // Gated the same way as sidecarProcSnapshot above: real, non-fake-timer
+      // fork I/O only enters this sweep when an operator has configured at
+      // least one ceiling — the default empty perAgentBytes map never fetches
+      // (AC6, the no-op invariant).
+      const rssByTmuxName = this.hasAgentMemoryBudget() ? await getFleetAgentPaneRssBytes() : null;
+      let budgetActionTaken = false;
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
@@ -5508,6 +5640,15 @@ export class SessionService {
             allSessions,
             sidecarProcSnapshot,
           );
+          if (rssByTmuxName) {
+            const stopped = await this.applyAgentMemoryBudget({
+              session,
+              classified,
+              rssByTmuxName,
+              actionAllowed: !budgetActionTaken,
+            });
+            if (stopped) budgetActionTaken = true;
+          }
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
@@ -5670,6 +5811,9 @@ export class SessionService {
       if (!liveIds.has(sessionId)) {
         this.paneChildFallbackNotified.delete(sessionId);
       }
+    }
+    for (const sessionId of this.agentMemoryBudgetLatch.keys()) {
+      if (!liveIds.has(sessionId)) this.agentMemoryBudgetLatch.delete(sessionId);
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
       if (!liveIds.has(sessionId)) {
