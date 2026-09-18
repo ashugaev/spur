@@ -100,6 +100,12 @@ const CURSOR_SUBMIT_MAX_RESENDS = 12;
 // inside withPaneWriteLock, so a long window starves every other send to
 // that pane; bounded short so the lock releases quickly regardless of agent.
 export const DEFERRED_CONTROLS_ACK_WINDOW_MS = 5_000;
+// Resend budget for the deferred controls leg, all agents. Cursor's old
+// pacing here was 12 resends x 5s = a 65s pane-lock hold; forensics found it
+// never rescued anything in the measured failures. 2 matches every other
+// agent's DEFAULT_SUBMIT_MAX_RESENDS and restores just enough recovery for a
+// genuinely dropped Enter without reintroducing that hold.
+export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // Launch-send pacing for claude. A claude TUI still rendering the pasted launch
 // message swallows the submit Enter, and nothing is submitted until another one
 // arrives, so the launch send scans in short windows instead of the mid-session

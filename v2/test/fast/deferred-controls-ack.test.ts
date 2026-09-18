@@ -1663,26 +1663,80 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("AC5: no bare-Enter resend on the deferred path, live and dead", async () => {
+    it("AC5: exactly DEFERRED_CONTROLS_MAX_RESENDS bare-Enter resends and 3 scans when the ack never lands", async () => {
       primeLiveNonAckingBinding();
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
       mockTimerPromisesSleepWithFakeTimers();
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const waitSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
 
-      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
-      await deferredInternals(service).sendDeferredSensitiveInitialMessage(
-        runningSession(),
-        controlsMessage(),
-      );
-      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
-
-      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(false);
       await expect(
         deferredInternals(service).sendDeferredSensitiveInitialMessage(
           runningSession(),
           controlsMessage(),
         ),
-      ).rejects.toThrow();
+      ).resolves.toBe(SUBMIT_UNCONFIRMED);
+
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+      expect(waitSpy).toHaveBeenCalledTimes(3);
+      service.dispose();
+    });
+
+    it("resend rescue: an ack that lands on the second scan resolves submitted, exactly 1 resend, no delivery_recovered event", async () => {
+      // The first window's scan never finds it (acked stays false for the
+      // whole first waitForSubmitAck call); the resend's own Enter is what
+      // flips `acked`, so the SECOND window's very first scan finds it.
+      let acked = false;
+      const scan = vi.fn().mockImplementation(async () => ({
+        found: acked,
+        lastScannedFile: acked ? "/some/claude.jsonl" : null,
+      }));
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan });
+      sendSubmitKeyToTmuxMock.mockReset().mockImplementation(async () => {
+        acked = true;
+      });
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const waitSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
+
+      await expect(
+        deferredInternals(service).sendDeferredSensitiveInitialMessage(
+          runningSession(),
+          controlsMessage(),
+        ),
+      ).resolves.toBe("submitted");
+
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(waitSpy).toHaveBeenCalledTimes(2);
+      const recoveredEvents = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.controls.delivery_recovered");
+      expect(recoveredEvents).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("dead agent: the loop stops resending into a dead pane after the first blind scan", async () => {
+      primeLiveNonAckingBinding();
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(false);
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const waitSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
+
+      await expect(
+        deferredInternals(service).sendDeferredSensitiveInitialMessage(
+          runningSession(),
+          controlsMessage(),
+        ),
+      ).rejects.toMatchObject({ name: "SubmitAckTimeoutError", processAlive: false });
+
+      // A dead process does not come back inside one send: the first
+      // unacked scan's mid-loop liveness probe sees it dead and breaks
+      // before spending a resend on it. Exactly 1 scan, 0 resends.
+      expect(waitSpy).toHaveBeenCalledTimes(1);
       expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
       service.dispose();
     });
@@ -1704,6 +1758,13 @@ describe("SessionService", () => {
       );
 
       expect(waitSpy).toHaveBeenCalledWith(expect.anything(), expect.any(String), 5_000);
+      // The resend cap must also come from the real exported constant
+      // (agents/index.ts), not a test literal — this module is
+      // partial-mocked via importOriginal (P2), so the real value flows
+      // through unmocked.
+      const agentsIndex = await import("../../src/agents/index.js");
+      expect(agentsIndex.DEFERRED_CONTROLS_MAX_RESENDS).toBe(2);
+      expect(waitSpy).toHaveBeenCalledTimes(3);
       service.dispose();
     });
   });
