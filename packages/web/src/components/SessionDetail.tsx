@@ -1696,6 +1696,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // means "follow the live tail" (the default, no `from` query param).
   const [fromIndex, setFromIndex] = useState<number | null>(null);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  // Monotonic id of the newest conversation request. A tail poll issued before
+  // a load-older can resolve after it; without this its stale payload lands in
+  // `conversation` and the [conversation] effect below clears the older-page
+  // spinner while the older page is still in flight.
+  const conversationRequestRef = useRef(0);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
@@ -1862,18 +1867,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       return;
     }
     const query = fromIndex !== null ? `?from=${fromIndex}` : "";
+    const requestId = conversationRequestRef.current + 1;
+    conversationRequestRef.current = requestId;
+    const isNewest = () => conversationRequestRef.current === requestId;
     try {
       const res = await fetch(
         `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
         { cache: "no-store" },
       );
-      if (res.ok) {
-        setConversation((await res.json()) as ConversationResponse);
-      } else {
-        setConversation(null);
+      if (!res.ok) {
+        if (isNewest()) setConversation(null);
+        return;
       }
+      const payload = (await res.json()) as ConversationResponse;
+      if (isNewest()) setConversation(payload);
     } catch {
-      setConversation(null);
+      if (isNewest()) setConversation(null);
     }
   }, [session?.agent, sessionId, fromIndex]);
 
