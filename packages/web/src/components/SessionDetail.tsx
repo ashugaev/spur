@@ -2462,7 +2462,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           throw new Error(await readApiErrorMessage(response, "Failed to update title"));
         }
         const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
-        setSession(toDashboardSession(payload));
+        applySessionUpdate(toDashboardSession(payload));
         setTitleEditing(false);
         setTitleDraft("");
       } catch (titleError) {
@@ -2471,7 +2471,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         setTitleSaving(false);
       }
     },
-    [session, sessionId, titleSaving, showErrorToast],
+    [session, sessionId, titleSaving, showErrorToast, applySessionUpdate],
   );
   const saveTitleDraft = useCallback(() => {
     const trimmed = titleDraft.trim();

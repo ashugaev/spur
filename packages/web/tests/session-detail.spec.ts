@@ -537,6 +537,74 @@ test.describe("S1: Session detail header", () => {
     expect(titleRequests).toContainEqual({ title: null });
   });
 
+  test("Clear survives a stale session poll landing after it", async ({ page }) => {
+    // Regression for a real bug: SessionDetail polls GET /api/sessions/:id on
+    // a fixed interval, independent of any in-flight title mutation. Clear
+    // used to call the bare `setSession` setter, which carries no defense
+    // against a GET that was already in flight before Clear started and
+    // resolves with pre-clear data after Clear's response lands — the poll's
+    // stale title silently overwrites the just-cleared title. `Save` and
+    // every other session mutator route through `applySessionUpdate`, which
+    // bumps `loadRequestIdRef` so `loadSession` discards a response that
+    // arrives for a superseded request; Clear alone skipped that guard.
+    const initialSession = makeWorkingSession({
+      id: "detail-s1-clear-race",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+
+    let getCallCount = 0;
+    let releaseStalePoll: () => void = () => {};
+    const stalePollGate = new Promise<void>((resolve) => {
+      releaseStalePoll = resolve;
+    });
+
+    await page.route(`**/api/sessions/${initialSession.id}`, async (route) => {
+      getCallCount += 1;
+      if (getCallCount === 2) {
+        // This is the interval poll fired below via the fake clock: hold its
+        // response until the test explicitly releases it, simulating a slow
+        // response that was already in flight before Clear resolved.
+        await stalePollGate;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(initialSession),
+      });
+    });
+    await page.route(`**/api/sessions/${initialSession.id}/title`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...initialSession,
+          slots: { titleSource: "manual", links: [] },
+        }),
+      });
+    });
+
+    await page.clock.install();
+    await page.goto(`/sessions/${initialSession.id}`);
+    await expect(page.locator("h1")).toContainText("Agent title");
+
+    // Fires SessionDetail's 4s poll interval; that GET is now in flight and
+    // held open by stalePollGate above.
+    await page.clock.fastForward(4_000);
+    await expect.poll(() => getCallCount).toBe(2);
+
+    await page.locator("h1").hover();
+    await page.getByRole("button", { name: /edit title/i }).click();
+    await page.getByRole("button", { name: /^clear$/i }).click();
+    await expect(page.locator("h1")).toContainText("Implement the feature");
+
+    // Release the stale poll now that Clear has already landed. A correct
+    // implementation discards this response as superseded; the buggy one
+    // clobbers the cleared title back to "Agent title".
+    releaseStalePoll();
+    await page.waitForTimeout(200);
+    await expect(page.locator("h1")).toContainText("Implement the feature");
+  });
+
   test("title editor popup closes on cancel, escape, and outside click", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s1-title-popup-dismiss",
