@@ -389,6 +389,8 @@ An `http.request.failed` takes its `level` from the HTTP status sent for that re
 - `admission.memoryGuard.shedCriticalFloorBytes`: optional non-negative number. Default `max(536870912, floor(MemTotal / 16))`; must be lower than `admissionFloorBytes`.
 - `admission.memoryGuard.pressureSomeAvg10Refuse`: optional percentage from `0` through `100`, default `20`. Refuses admission when cgroup v2 memory PSI `some avg10` exceeds it.
 - `admission.memoryGuard.shedSwapUsedFraction`: optional number in `(0, 1]`, default `0.9`. Starts critical shedding when host swap use reaches this fraction.
+- `admission.agentMemoryBudget.perAgentBytes.<agent>`: optional positive number, one key per agent kind (`claude`, `codex`, `cursor`, `opencode`); any other key is a config error. Per-session RSS ceiling for that kind. Absent key: no ceiling, nothing sampled. See [per-agent memory budget](#admission-control).
+- `admission.agentMemoryBudget.action`: optional `warn` or `stop`, default `warn`. `stop` also pauses a breaching session that the shed predicate allows.
 
 ## Admission control
 
@@ -411,6 +413,14 @@ Pressure closes at the admission floor (RAM), below the cgroup-high threshold by
 While the guard would deny a wake, a host-wide memory hold engages on the same 1-second tick: due scheduled/interval/daily wakes, queued-message delivery, and pending trigger sends stay in place instead of being attempted. While held, a trigger batch for a `stopped` session is deferred, not dropped. The hold clears after ten consecutive non-denying ticks — sampling at or above the restore floor plus `perSessionBytes`, an unreadable `/proc/meminfo` sample, or a mix of the two — since an unreadable sample also fails open in the admission check the hold mirrors; `admission.enabled: false` force-releases an engaged one.
 
 Hold events: `daemon.memory.hold.engaged` (warn) with `availableBytes`, `floorBytes`, `someAvg10`, `cause` (`legacy_available`, `legacy_swap`, `context_floor`, `pressure`); `daemon.memory.hold.cleared` (info) with `reason` (`recovered`, `admission_disabled`, or `sample_unavailable`), `availableBytes`, `floorBytes`, `marginBytes`, `durationMs`, `engagedCause` — `admission_disabled` and `sample_unavailable` report `availableBytes` and `marginBytes` as `null`; `daemon.memory.hold.failed` (warn) with `message`. A held trigger delivery logs `trigger.send.suppressed_memory_guard` (info) with `interrupt`, `attempt` in place of `trigger.send.failed`.
+
+Per-agent memory budget, independent of the guard above: `agentMemoryBudget.perAgentBytes.<agent>` caps one session's RSS. Measured over that session's own agent tmux panes on the 5-second attention-monitor sweep; its sidecar and service panes are separate tmux sessions and are never summed in. With no `perAgentBytes` key set nothing is sampled and nothing is logged.
+
+Crossing the ceiling warns once per breach, in any session state, and re-arms only after RSS falls to or below 90% of the ceiling. `action: stop` additionally stops the session — same teardown as `spur pause` / critical shedding (`applyManualStatusLocked` kills the agent pane, session marked stopped) — and only for a session the shed predicate allows (`rate_limited` or `waiting`); a working or unclassifiable session is warned, never stopped. At most one session is stopped per sweep.
+
+Budget events: `session.memory.budget.exceeded` (warn) with `agent`, `rssBytes`, `ceilingBytes`, `action`, `state`, `tmuxSession`; `session.memory.budget.cleared` (info) with `agent`, `rssBytes`, `ceilingBytes`, `clearBytes`, `durationMs`; `session.memory.budget.stopped` (warn) with `agent`, `rssBytes`, `ceilingBytes`, `state`, `durationMs`.
+
+A sweep whose RSS sample is unavailable (the fleet-wide `ps` fork failed or timed out) is a no-op for every session that sweep: no breach, no clear, no stop, no event, and an engaged latch is left untouched until a later sweep samples successfully.
 
 ## Artifact retention
 

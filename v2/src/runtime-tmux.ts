@@ -781,6 +781,53 @@ export async function getFleetSessionRssBytes(
   return rssBytesBySessionId;
 }
 
+// Per-agent-pane RSS, keyed by the EXACT tmux session name — no "--" fold,
+// no liveSessionByWorkspaceId remap. A caller wanting one session's own
+// agent-pane RSS looks up SessionRecord.tmuxSession directly: a sidecar key
+// (`${id}--${name}`) and a service key (`${id}--svc--${serviceId}`) are
+// distinct keys here and are never summed into the agent's own key. The fold
+// getFleetSessionRssBytes does is wrong for this caller: sessionPrefix is a
+// free-form config string that can itself contain "--", so splitting on the
+// first "--" would misattribute a configured session's own agent RSS.
+//
+// Returns null — sample-unavailable — when `psRows` comes back empty. On a
+// live host `ps -eo ...` always lists at least its own process, so an empty
+// result means the fork failed, timed out, or hit getPsSnapshot's catch, NOT
+// that every pane genuinely uses zero memory. getPsSnapshot's TTL cache also
+// memoizes that empty array for the full window, so every caller in that
+// window would otherwise see the same false zeros. Callers on the admission
+// path (applyAgentMemoryBudget via getFleetAgentPaneRssBytes's null check at
+// the sweep site) must treat null as "skip this sweep, latch untouched", the
+// same way `rss === undefined` (pane absent) is already treated — a fork
+// failure must never read as a measured zero. Do not "fix" this into
+// returning an all-zero map: that reintroduces the false
+// session.memory.budget.cleared this guards against.
+export async function getFleetAgentPaneRssBytes(): Promise<Map<string, number> | null> {
+  const [{ panes }, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
+  if (psRows.length === 0) {
+    return null;
+  }
+  const rssKbByTty = new Map<string, number>();
+  for (const row of psRows) {
+    if (!row.tty) continue;
+    // Drop the daemon's own row and its DIRECT children only. A dev daemon
+    // run inside a pane shares that pane's tty, so a ppid-only guard would
+    // leave its own row in the agent's total; a grandchild or reparented
+    // orphan stays counted, a residual that only a pane-hosted daemon has.
+    if (row.pid === process.pid || row.ppid === process.pid) continue;
+    rssKbByTty.set(row.tty, (rssKbByTty.get(row.tty) ?? 0) + row.rssKb);
+  }
+  const rssBytesBySessionName = new Map<string, number>();
+  for (const [sessionName, entry] of panes) {
+    let rssKb = 0;
+    for (const tty of entry.allTtys) {
+      rssKb += rssKbByTty.get(tty.replace(/^\/dev\//, "")) ?? 0;
+    }
+    rssBytesBySessionName.set(sessionName, rssKb * 1024);
+  }
+  return rssBytesBySessionName;
+}
+
 // Typed result of a single pane/ps fetch, so a caller that needs to know
 // WHICH pass answered ALIVE (session-service's probeAgentProcess, issue #871
 // P2) can read it off one snapshot instead of issuing a second, separately

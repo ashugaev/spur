@@ -186,6 +186,9 @@ const lookupTmuxPanePidMock = vi.fn(() =>
 const getFleetSessionRssBytesMock = vi
   .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
   .mockResolvedValue(new Map());
+const getFleetAgentPaneRssBytesMock = vi
+  .fn<() => Promise<Map<string, number> | null>>()
+  .mockResolvedValue(new Map());
 const readHostMemoryMock = vi.fn<
   () => {
     totalBytes: number;
@@ -715,6 +718,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     getTmuxPanePresence: getTmuxPanePresenceMock,
     lookupTmuxPanePid: lookupTmuxPanePidMock,
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
+    getFleetAgentPaneRssBytes: getFleetAgentPaneRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
     probeTmuxProcessMatch: probeTmuxProcessMatchMock,
     killTmuxSession: killTmuxSessionMock,
@@ -907,6 +911,7 @@ function baseConfig() {
         pressureSomeAvg10Refuse: 20,
         shedSwapUsedFraction: 0.9,
       },
+      agentMemoryBudget: { action: "warn", perAgentBytes: {} },
     },
     projects: {
       api: {
@@ -1552,6 +1557,7 @@ describe("SessionService", () => {
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
+    getFleetAgentPaneRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
     readCgroupPressureMock.mockReset().mockReturnValue(null);
     readCgroupMemorySnapshotMock.mockReset().mockReturnValue(null);
@@ -12370,6 +12376,61 @@ describe("SessionService", () => {
       expect(internals.cursorPaneReadyOverrides.get("cursor-1")).toBe(expiresAt);
     });
 
+    it("reapplies a live cursorPaneReadyOverrides entry on a failed capture instead of splitting the live/dashboard tick, and lets it expire under sustained failure", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agent: "cursor" }));
+      mockCursorJsonlState("error");
+      captureTmuxPaneMock.mockResolvedValue("previous output\n→ Add a follow-up\n");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const internals = service as unknown as {
+        attentionMonitorRunning: boolean;
+        dashboardCacheReady: Promise<void> | null;
+        stopDashboardCacheLoop: () => void;
+        runDashboardCacheTick: () => Promise<void>;
+      };
+      await internals.dashboardCacheReady;
+      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+        await Promise.resolve();
+      }
+      internals.attentionMonitorRunning = true;
+      internals.stopDashboardCacheLoop();
+
+      // A live tick detects the ready prompt and records the override.
+      await service.get("api-1");
+      await vi.advanceTimersByTimeAsync(4_001);
+      const live = await service.get("api-1");
+      expect(live.state).toBe("waiting");
+
+      // A failed fork (null): the live tick reapplies the stored entry rather
+      // than reporting the structured source's "error", and the rate-limit
+      // scan is skipped entirely — otherwise the live tick would show error
+      // (or a spurious rate_limited) while the very next scanPane:false
+      // dashboard tick (reading the still-live map entry) shows waiting, the
+      // exact two-tick split this override exists to prevent.
+      captureTmuxPaneMock.mockResolvedValue(null);
+      await vi.advanceTimersByTimeAsync(4_001);
+      const afterFailedCapture = await service.get("api-1");
+      expect(afterFailedCapture.state).toBe("waiting");
+
+      captureTmuxPaneMock.mockClear();
+      await internals.runDashboardCacheTick();
+      expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+      const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+      expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "waiting" });
+
+      // Sustained failure past CURSOR_PANE_READY_OVERRIDE_TTL_MS (15s) since
+      // the last REAL observation: reapplying never refreshed the expiry, so
+      // the entry dies and classification falls back to the structured
+      // source ("error").
+      await vi.advanceTimersByTimeAsync(15_001);
+      const afterExpiry = await service.get("api-1");
+      expect(afterExpiry.state).toBe("error");
+      service.dispose();
+    });
+
     it("applies a 60-second grace window to minMtimeMs for unpinned cursor sessions", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
@@ -20307,6 +20368,409 @@ describe("SessionService", () => {
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
     expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+  });
+
+  describe("agent memory budget", () => {
+    const CEILING = 4_000_000_000;
+
+    function withAgentMemoryBudget(
+      action: "warn" | "stop",
+      perAgentBytes: Partial<Record<AgentName, number>>,
+    ) {
+      const config = baseConfig();
+      return {
+        ...config,
+        admission: {
+          ...config.admission,
+          agentMemoryBudget: { action, perAgentBytes },
+        },
+      };
+    }
+
+    function exceededEvents() {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.memory.budget.exceeded");
+    }
+
+    function clearedEvents() {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.memory.budget.cleared");
+    }
+
+    function stoppedEvents() {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === "session.memory.budget.stopped");
+    }
+
+    it("AC1: emits exactly one session.memory.budget.exceeded across many probes of one continuous breach", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("warn", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      getFleetAgentPaneRssBytesMock.mockClear();
+
+      await advanceSeconds(25);
+
+      expect(getFleetAgentPaneRssBytesMock).toHaveBeenCalledTimes(5);
+      expect(exceededEvents()).toHaveLength(1);
+
+      service.dispose();
+    });
+
+    it("AC2: clears only past the 0.9 hysteresis and re-arms on a second breach", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("warn", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      getFleetAgentPaneRssBytesMock.mockClear();
+
+      await advanceSeconds(5);
+      expect(exceededEvents()).toHaveLength(1);
+
+      // Inside the hysteresis band (> 0.9 * ceiling): stays latched, no clear.
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 0.95]]));
+      await advanceSeconds(10);
+      expect(clearedEvents()).toHaveLength(0);
+
+      // Below the hysteresis threshold: clears exactly once.
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 0.8]]));
+      await advanceSeconds(5);
+      const cleared = clearedEvents();
+      expect(cleared).toHaveLength(1);
+      expect(cleared[0]?.details).toMatchObject({
+        clearBytes: CEILING * 0.9,
+      });
+      expect(typeof cleared[0]?.details.durationMs).toBe("number");
+      expect(cleared[0]?.details.durationMs).toBeGreaterThanOrEqual(0);
+
+      // Re-breach: the latch re-arms, proving it was actually deleted.
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+      await advanceSeconds(5);
+      expect(exceededEvents()).toHaveLength(2);
+
+      service.dispose();
+    });
+
+    it("AC3: does not flap while RSS oscillates inside the hysteresis band", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("warn", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", 0]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      getFleetAgentPaneRssBytesMock.mockClear();
+
+      // 1.05 on the first COUNTED sweep (after mockClear), alternating with
+      // 0.95 — both sides sit inside the [0.9, 1.0] band once latched, so
+      // only the very first tick should ever engage the latch.
+      getFleetAgentPaneRssBytesMock.mockImplementation(async () => {
+        const calls = getFleetAgentPaneRssBytesMock.mock.calls.length;
+        const factor = calls % 2 === 1 ? 1.05 : 0.95;
+        return new Map([["api-1", CEILING * factor]]);
+      });
+
+      await advanceSeconds(40);
+
+      expect(getFleetAgentPaneRssBytesMock).toHaveBeenCalledTimes(8);
+      expect(exceededEvents()).toHaveLength(1);
+      expect(clearedEvents()).toHaveLength(0);
+
+      service.dispose();
+    });
+
+    it("AC4: warns a working, over-ceiling session and takes no action", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("stop", { claude: CEILING }));
+      const sessions = createSessionStore();
+      const session = sessionRecord({ id: "api-1" });
+      sessions.set("api-1", session);
+      mockClaudeJsonlState("working");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      // Isolate the in-loop classified.state gate from
+      // memoryShedEligibleRecord's own independent re-check: force the
+      // act-time recheck to always say eligible, so a stop here can only be
+      // blocked by the gate this AC actually pins.
+      const serviceInternal = service as unknown as {
+        memoryShedEligibleRecord(id: string): Promise<SessionRecord | null>;
+      };
+      const eligibleSpy = vi
+        .spyOn(serviceInternal, "memoryShedEligibleRecord")
+        .mockResolvedValue(session);
+
+      // The breach latch arms (and returns) on the first sweep that observes
+      // it — the constructor's baseline pass. The stop step is only ever
+      // reached on a LATER sweep with the latch already set.
+      await advanceSeconds(5);
+
+      const exceeded = exceededEvents();
+      expect(exceeded).toHaveLength(1);
+      expect(exceeded[0]?.details.state).toBe("working");
+      expect(stoppedEvents()).toHaveLength(0);
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(eligibleSpy).not.toHaveBeenCalled();
+
+      service.dispose();
+    });
+
+    it("AC5: an unclassifiable session at act time is warned, never stopped", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("stop", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as {
+        pollAttentionStates(baseline: boolean): Promise<void>;
+        dispose(): void;
+      };
+
+      // Sweep 1 arms the latch (a breach can only ever be acted on a LATER
+      // sweep with the latch already set).
+      await service.pollAttentionStates(false);
+      expect(exceededEvents()).toHaveLength(1);
+
+      // Sweep 2: the loop's own classify still succeeds "waiting", so the
+      // in-loop gate proceeds to step 6; the SECOND classify call this
+      // sweep — memoryShedEligibleRecord's independent act-time recheck —
+      // rejects, so the stop's fail-closed catch returns null.
+      readClaudeJsonlStateMock
+        .mockResolvedValueOnce({
+          state: "waiting",
+          reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        })
+        .mockRejectedValueOnce(new Error("classify boom"));
+      await service.pollAttentionStates(false);
+
+      expect(exceededEvents()).toHaveLength(1);
+      expect(stoppedEvents()).toHaveLength(0);
+      expect(sessions.get("api-1")?.status).toBe("running");
+
+      service.dispose();
+    });
+
+    it("AC5b: a session that enters restore warmup between the loop's classify and the act-time recheck is warned, never stopped", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("stop", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as {
+        pollAttentionStates(baseline: boolean): Promise<void>;
+        restoreWarmupUntil: Map<string, number>;
+        dispose(): void;
+      };
+
+      await service.pollAttentionStates(false);
+      expect(exceededEvents()).toHaveLength(1);
+
+      // classifySessionRecord itself consults isInRestoreWarmup for any
+      // running/spawning session, so setting restoreWarmupUntil BEFORE this
+      // sweep would make the LOOP's own classify report "working" and the
+      // in-loop classified.state gate — not memoryShedEligibleRecord's own
+      // warmup check — would be what blocks the stop (AC4's leg, not this
+      // one). Set it as a side effect of the loop's jsonl read instead, so
+      // the loop's classify still sees no warmup and returns "waiting" (the
+      // in-loop gate passes), and only memoryShedEligibleRecord's fresh,
+      // independent isInRestoreWarmup check — reached after the loop's
+      // classify — sees the session as mid-restore and fails closed.
+      readClaudeJsonlStateMock.mockImplementationOnce(async () => {
+        service.restoreWarmupUntil.set("api-1", Date.now() + 100_000);
+        return {
+          state: "waiting",
+          reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+        };
+      });
+      await service.pollAttentionStates(false);
+
+      expect(exceededEvents()).toHaveLength(1);
+      expect(stoppedEvents()).toHaveLength(0);
+      expect(sessions.get("api-1")?.status).toBe("running");
+
+      service.dispose();
+    });
+
+    it("AC6: the default config is a total no-op", async () => {
+      loadConfigMock.mockReturnValue(baseConfig());
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", 999_999_999_999]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      getFleetAgentPaneRssBytesMock.mockClear();
+
+      await advanceSeconds(10);
+
+      expect(getFleetAgentPaneRssBytesMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(([, entry]) =>
+          entry.event.startsWith("session.memory.budget"),
+        ),
+      ).toBe(false);
+
+      service.dispose();
+    });
+
+    it("AC7: stops at most one of three eligible, over-ceiling sessions per sweep", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("stop", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1", tmuxSession: "api-1" }));
+      sessions.set("api-2", sessionRecord({ id: "api-2", tmuxSession: "api-2" }));
+      sessions.set("api-3", sessionRecord({ id: "api-3", tmuxSession: "api-3" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(
+        new Map([
+          ["api-1", CEILING * 2],
+          ["api-2", CEILING * 2],
+          ["api-3", CEILING * 2],
+        ]),
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      getFleetAgentPaneRssBytesMock.mockClear();
+
+      await advanceSeconds(5);
+
+      expect(exceededEvents()).toHaveLength(3);
+      expect(stoppedEvents()).toHaveLength(1);
+
+      service.dispose();
+    });
+
+    it("AC8: sweeps the latch when its session leaves liveSessions", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("warn", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        agentMemoryBudgetLatch: Map<string, unknown>;
+        dispose(): void;
+      };
+      getFleetAgentPaneRssBytesMock.mockClear();
+
+      await advanceSeconds(5);
+      expect(service.agentMemoryBudgetLatch.size).toBe(1);
+
+      const record = sessions.get("api-1");
+      if (!record) throw new Error("expected api-1 to be seeded");
+      sessions.set("api-1", { ...record, status: "completed" });
+
+      await advanceSeconds(5);
+      expect(service.agentMemoryBudgetLatch.size).toBe(0);
+
+      service.dispose();
+    });
+
+    it("emits no attention notification for a session the budget stops in the same sweep", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("stop", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      // Sweep 1 arms the latch quietly: "waiting" is stop-eligible but not
+      // an attention state, so no notification is expected here either way.
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as {
+        pollAttentionStates(baseline: boolean): Promise<void>;
+        notifyAttention: (...args: unknown[]) => Promise<void>;
+        dispose(): void;
+      };
+      const notifySpy = vi.spyOn(service, "notifyAttention").mockResolvedValue(undefined);
+
+      await service.pollAttentionStates(false);
+      expect(exceededEvents()).toHaveLength(1);
+      expect(notifySpy).not.toHaveBeenCalled();
+
+      // Sweep 2: the session transitions to "rate_limited" — an attention
+      // state AND stop-eligible, both in the same sweep. Without a
+      // `continue` right after a successful stop, the loop would go on to
+      // compute and emit an attention notification off the pre-stop
+      // `view`/`classified` for a session that this same sweep just stopped.
+      mockClaudeJsonlState("rate_limited");
+      await service.pollAttentionStates(false);
+
+      expect(stoppedEvents()).toHaveLength(1);
+      expect(notifySpy).not.toHaveBeenCalled();
+
+      service.dispose();
+    });
+
+    it("AC9: a sweep with an unavailable RSS sample is a no-op for an engaged latch, and the latch still survives to clear normally later", async () => {
+      loadConfigMock.mockReturnValue(withAgentMemoryBudget("warn", { claude: CEILING }));
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as {
+        pollAttentionStates(baseline: boolean): Promise<void>;
+        agentMemoryBudgetLatch: Map<string, unknown>;
+        dispose(): void;
+      };
+
+      // Sweep 1 arms the latch on a genuine breach.
+      await service.pollAttentionStates(false);
+      expect(exceededEvents()).toHaveLength(1);
+      expect(service.agentMemoryBudgetLatch.size).toBe(1);
+
+      // Sweep 2: `ps` failed fleet-wide this tick — getFleetAgentPaneRssBytes
+      // signals sample-unavailable (null), never an all-zero map. No breach,
+      // no clear, no stop, no event at all, and the latch is untouched.
+      getFleetAgentPaneRssBytesMock.mockResolvedValueOnce(null);
+      await service.pollAttentionStates(false);
+
+      expect(exceededEvents()).toHaveLength(1);
+      expect(clearedEvents()).toHaveLength(0);
+      expect(stoppedEvents()).toHaveLength(0);
+      expect(service.agentMemoryBudgetLatch.size).toBe(1);
+
+      // Sweep 3: sampling recovers and the breach is still real — the latch
+      // survived, so this reads as the SAME ongoing breach, not a fresh one:
+      // no second exceeded.
+      getFleetAgentPaneRssBytesMock.mockResolvedValue(new Map([["api-1", CEILING * 2]]));
+      await service.pollAttentionStates(false);
+
+      expect(exceededEvents()).toHaveLength(1);
+      expect(clearedEvents()).toHaveLength(0);
+
+      service.dispose();
+    });
   });
 
   describe("M2: desk-shared project sidecars", () => {

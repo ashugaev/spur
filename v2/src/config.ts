@@ -12,6 +12,7 @@ import {
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AdmissionCapSource,
   type AdmissionConfig,
+  type AgentMemoryBudgetConfig,
   type AgentReasoningEffortConfig,
   type AgentName,
   type AppConfig,
@@ -1891,6 +1892,36 @@ export function deriveShedCriticalFloorBytes(totalBytes: number): number {
   return Math.max(SHED_CRITICAL_FLOOR_MIN_BYTES, Math.floor(totalBytes / 16));
 }
 
+// Instance-only, same footgun as the rest of parseAdmission's block. Absent
+// key -> { action: "warn", perAgentBytes: {} }, a true no-op: hasAgentMemoryBudget
+// (session-service.ts) samples nothing when perAgentBytes is empty.
+function parseAgentMemoryBudget(value: unknown, label: string): AgentMemoryBudgetConfig {
+  if (value === undefined) {
+    return { action: "warn", perAgentBytes: {} };
+  }
+  const root = asObject(value, label);
+  const action = root["action"];
+  if (action !== undefined && action !== "warn" && action !== "stop") {
+    throw new Error(`${label}.action must be "warn" or "stop"`);
+  }
+  const perAgentBytesRaw =
+    root["perAgentBytes"] === undefined
+      ? {}
+      : asObject(root["perAgentBytes"], `${label}.perAgentBytes`);
+  const perAgentBytes: Partial<Record<AgentName, number>> = {};
+  for (const [key, entry] of Object.entries(perAgentBytesRaw)) {
+    if (key !== "claude" && key !== "codex" && key !== "cursor" && key !== "opencode") {
+      throw new Error(`${label}.perAgentBytes has unknown agent "${key}"`);
+    }
+    const bytes = asOptionalNumber(entry, `${label}.perAgentBytes.${key}`);
+    if (bytes === undefined) {
+      throw new Error(`${label}.perAgentBytes.${key} must be a positive number`);
+    }
+    perAgentBytes[key] = bytes;
+  }
+  return { action: action ?? "warn", perAgentBytes };
+}
+
 // Instance-only, same footgun as rateLimitReactivation/authRotation/tags: a
 // per-project `admission` block is ignored before semantic parsing. Only
 // projects.<id>.maxLiveSessions works per-project.
@@ -1919,6 +1950,7 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
         pressureSomeAvg10Refuse: DEFAULT_ADMISSION_PRESSURE_SOME_AVG10_REFUSE,
         shedSwapUsedFraction: DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
       },
+      agentMemoryBudget: { action: "warn", perAgentBytes: {} },
     };
   }
   const root = asObject(value, "admission");
@@ -1996,6 +2028,10 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
           "admission.memoryGuard.shedSwapUsedFraction",
         ) ?? DEFAULT_ADMISSION_SHED_SWAP_USED_FRACTION,
     },
+    agentMemoryBudget: parseAgentMemoryBudget(
+      root["agentMemoryBudget"],
+      "admission.agentMemoryBudget",
+    ),
   };
 }
 

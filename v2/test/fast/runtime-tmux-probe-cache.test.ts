@@ -206,6 +206,105 @@ describe("runtime-tmux shared probe cache", () => {
     expect(rssBySessionId.has("api-1")).toBe(false);
   });
 
+  it("keys the bare-agent-pane RSS export by the exact tmux session name, never folding sidecar or service panes into it", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return {
+          stdout: [
+            "api-1 1 1 0 1001 /dev/pts/1",
+            "api-1--ui 1 1 0 1002 /dev/pts/2",
+            "api-1--svc--db 1 1 0 1003 /dev/pts/3",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "1001 1 1001 1001 pts/1 20480 node agent",
+            "1002 1 1002 1002 pts/2 30720 node ui",
+            "1003 1 1003 1003 pts/3 40960 node db",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getFleetAgentPaneRssBytes, getFleetSessionRssBytes } =
+      await import("../../src/runtime-tmux.js");
+
+    const bareRss = await getFleetAgentPaneRssBytes();
+    expect(bareRss).not.toBeNull();
+    expect(bareRss?.get("api-1")).toBe(20_480 * 1024);
+    expect(bareRss?.get("api-1--ui")).toBe(30_720 * 1024);
+    expect(bareRss?.get("api-1--svc--db")).toBe(40_960 * 1024);
+
+    // Same fixture, same TTL window: getFleetSessionRssBytes still folds the
+    // "--" keys and rolls everything up under the bare id, proving the two
+    // exports diverge as intended, not because of a fixture difference.
+    const rolledUpRss = await getFleetSessionRssBytes();
+    expect(rolledUpRss.get("api-1")).toBe((20_480 + 30_720 + 40_960) * 1024);
+
+    expect(callsFor((file) => file === "ps")).toBe(1);
+    expect(
+      callsFor(
+        (file, args) => file === "tmux" && args.includes("list-panes") && args.includes("-a"),
+      ),
+    ).toBe(1);
+  });
+
+  it("ignores the daemon and its direct children on a pane tty", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "api-1 1 1 0 2001 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The agent itself, on the pane tty.
+            "2001 1 2001 2001 pts/1 20480 node agent",
+            // (a) No pane tty at all — unreachable through the tty join
+            // regardless of the pid/ppid guard.
+            "3001 1 3001 3001 ? 1053604 opencode export",
+            // (b) The pane-hosted dev daemon's own row, tty == the pane tty,
+            // pid == process.pid.
+            `${process.pid} 1 ${process.pid} ${process.pid} pts/1 4144000 node daemon`,
+            // (c) A direct daemon child on the pane tty, ppid == process.pid.
+            `4001 ${process.pid} 4001 4001 pts/1 2000000 node export-child`,
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getFleetAgentPaneRssBytes } = await import("../../src/runtime-tmux.js");
+    const rssBySessionName = await getFleetAgentPaneRssBytes();
+
+    expect(rssBySessionName?.get("api-1")).toBe(20_480 * 1024);
+  });
+
+  it("signals sample-unavailable, not an all-zero map, when ps yields no rows even though panes exist", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "api-1 1 1 0 1001 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        // A fork failure/timeout: getPsSnapshot's catch returns [], which on
+        // a live host never happens from a genuinely successful `ps -eo`
+        // (it always lists at least its own process).
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getFleetAgentPaneRssBytes } = await import("../../src/runtime-tmux.js");
+    const rssBySessionName = await getFleetAgentPaneRssBytes();
+
+    expect(rssBySessionName).toBeNull();
+  });
+
   it("caches capture-pane per (session, lines) so a repeat scan within the TTL forks nothing extra", async () => {
     let captureCalls = 0;
     execFileAsyncMock.mockImplementation(async (file, args) => {
