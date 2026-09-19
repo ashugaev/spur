@@ -686,7 +686,6 @@ export interface DashboardSession {
   agent: AgentName;
   model?: string;
   title: string | null;
-  titleSource: SpurSessionTitleSource | null;
   prompt: string;
   originalTaskPrompt: string | null;
   startupAttachmentIds: string[];
@@ -773,7 +772,6 @@ export function toDashboardSession(
     agent: session.agent,
     ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
-    titleSource: session.slots?.titleSource ?? null,
     prompt: session.prompt,
     originalTaskPrompt: session.originalTaskPrompt?.trim() || null,
     startupAttachmentIds: session.startupAttachmentIds ?? [],

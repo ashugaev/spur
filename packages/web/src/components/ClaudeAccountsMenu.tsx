@@ -77,7 +77,6 @@ function buildLoginSession(account: ClaudeAccountSummary, tmuxSession: string): 
     projectName: "Claude login",
     agent: "claude",
     title: accountName(account),
-    titleSource: null,
     prompt: "",
     originalTaskPrompt: null,
     startupAttachmentIds: [],
