@@ -190,6 +190,12 @@ On each live session's `PATH`. Updates the tmux status-line title and named link
 
 `--title-if-absent` sets the title once; later conditional writes no-op. `--title`/`--clear-title` are unrestricted manual controls; either blocks future conditional writes for that workspace.
 
+## source
+
+`spur source poll-enable --session <id>` re-enables GitHub signal polling for a session a not-found PR permanently disabled (see [source.poll.disabled](configuration.md#events)). `--session` defaults to `SPUR_SESSION`. `--json` prints raw JSON.
+
+Clears the disable in every `github`-type source of the session's project. No-op, `cleared: []`, when nothing was disabled for that session — never an error. Polling resumes on the next poll tick.
+
 ## service
 
 Each live session gets a `spur` wrapper on `PATH`, bound to that session's config, for session-bound sidecars: `spur service run web --port 3000 -- <command>`, `spur service logs`, `spur service status <id>`.
