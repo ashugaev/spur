@@ -3534,6 +3534,37 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("prunes a dead session's entry unconditionally at handle start, before any cycle runs", async () => {
+      // I4: the start-time prune bounds the one genuinely unbounded leak path
+      // (standing authDisabled, where the per-cycle sweep never runs again for the
+      // life of the handle) — it must fire on handle construction, independent of
+      // whether a poll cycle ever executes.
+      pollDisabledStore.set("api/pr-watch", new Map([["api-gone", 42]]));
+      listSessionsMock.mockReturnValue([]);
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      expect(writeGitHubPollDisabledMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        new Map(),
+      );
+      expect(pollDisabledStore.has("api/pr-watch")).toBe(false);
+      expect(ghTransportMock).not.toHaveBeenCalled();
+
+      handle.stop();
+    });
+
     it("prunes the registry only when the session is gone from disk", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map());
       listSessionsMock.mockReturnValue([makeSession()]);
@@ -3633,6 +3664,47 @@ describe("github source", () => {
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining("failed to persist poll-disabled state"),
       );
+
+      handle.stop();
+    });
+
+    it("a persistently failing registry write still emits only once across repeated cycles", async () => {
+      // M1: refreshPollDisabled re-reads the WHOLE registry from disk every tick.
+      // Without pendingPollDisabledOverrides, a persistent write failure means the
+      // disabled entry never lands on disk, so every refresh wipes it from the cache
+      // and the very next cycle re-disables and re-emits — reproducing the measured
+      // defect (repeat source.poll.disabled every tick) via an IO error instead of a
+      // handle restart. This must stay bounded to exactly one event, one gh call.
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValue(notFoundEnvelope(42, { withPath: true }));
+      recordGitHubPollDisabledSessionMock.mockImplementation(() => {
+        throw new Error("disk full");
+      });
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      handle.runOnStart?.();
+      await flushPollCycle();
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(disabledEvents()).toHaveLength(1);
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      // The disk itself never got the write (every record* call threw) — the bound
+      // comes entirely from the in-memory override surviving each tick's refresh.
+      expect(pollDisabledStore.has("api/pr-watch")).toBe(false);
 
       handle.stop();
     });
