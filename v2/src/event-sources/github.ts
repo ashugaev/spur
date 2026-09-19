@@ -892,9 +892,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
-  const pollCycle = async (emitInitial: boolean): Promise<void> => {
+  const pollCycle = async (emitInitial: boolean, pollDisabledRefreshed = false): Promise<void> => {
     if (pollingCycle) return;
     pollingCycle = true;
+    if (!pollDisabledRefreshed) {
+      refreshPollDisabled();
+    }
     // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
     // already active going into this cycle, no real polling happened, so the
     // adaptive deadline must not move — otherwise it silently consumes the
@@ -923,7 +926,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
   const timer = startInterval(() => {
     if (!shouldPollThisTick()) return;
-    void pollCycle(false);
+    void pollCycle(false, true);
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
