@@ -11759,8 +11759,8 @@ export class SessionService {
 
   // Explicit re-enable for a session permanently disabled by a not-found PR (see
   // event-sources/github.ts permanentPrNotFound / metadata.ts's poll-disabled
-  // registry). Always resolves 200-shaped: a session with nothing disabled, or an
-  // unconfigured/unknown project, returns cleared: [] rather than throwing.
+  // registry). Missing session throws SessionResourceNotFoundError (404). Otherwise
+  // 200-shaped: nothing disabled, or a project with no github sources, yields cleared: [].
   async enableSourcePoll(sessionId: string): Promise<SourcePollEnableResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
