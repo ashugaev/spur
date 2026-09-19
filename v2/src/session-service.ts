@@ -477,6 +477,7 @@ import {
   TodoEmptyLedgerError,
   TodoLedgerCorruptError,
   TodoOpenWorkError,
+  TodoTransitionConflictError,
   todoLedgerBlock,
   unfinishedTodo,
 } from "./todo.js";
@@ -989,6 +990,58 @@ type BackgroundSpawnAttemptResult = "completed" | "retry";
  */
 export type AgentSendOutcome = "submitted" | "submit_unconfirmed";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
+
+type PaneGeneration = {
+  tmuxSession: string;
+  panePid: number;
+  processStarttime: number;
+};
+
+type DeliveryIntent =
+  | { kind: "direct" }
+  | { kind: "queued-drain"; message: string }
+  | { kind: "queued-flush"; message: string };
+
+type PreparedDelivery = {
+  session: SessionRecord;
+  lifecycleIds: string[];
+  generation: PaneGeneration;
+  status: SessionRecord["status"];
+  stopReason: SessionRecord["stopReason"];
+  intent: DeliveryIntent;
+};
+
+type ForegroundSpawnReceipt = {
+  sessionId: string;
+  workspaceId: string;
+  generation: PaneGeneration;
+};
+
+type HandoffSourceStamp = Pick<
+  SessionRecord,
+  "id" | "workspaceId" | "status" | "stopReason" | "updatedAt" | "tmuxSession"
+>;
+
+type PreparedHandoff = {
+  token: symbol;
+  lifecycleIds: string[];
+  sourceStamp: HandoffSourceStamp;
+  sourceProject: string;
+  sourcePr: SessionRecord["pr"];
+  originalTask: string;
+  carryTags: string[];
+  admissionReservation: symbol;
+  receiptToken: symbol;
+  spawnRequest: SpawnSessionRequest;
+  spawnOptions: {
+    replacingSessionId: string;
+    admissionReservation: symbol;
+    modeResolution: "carried";
+    closeoutOwnerTransfer: boolean;
+    validatedExplicitModel?: string;
+    receiptToken: symbol;
+  };
+};
 
 export class SpawnPreflightError extends Error {
   constructor(
@@ -2778,6 +2831,11 @@ export class SessionService {
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
   private readonly admissionReservations = new Map<symbol, string>();
+  private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
+  private readonly handoffsInFlight = new Map<
+    string,
+    { token: symbol; lifecycleIds: string[]; sourceStamp: HandoffSourceStamp }
+  >();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
   // racing into restore() for the same tmux session and worktree.
@@ -4075,7 +4133,9 @@ export class SessionService {
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
         if (scheduledWake && !this.memoryHold.engaged && Date.parse(scheduledWake.dueAt) <= now) {
-          await this.withWorkspaceLifecycleLocks(session.id, async () => {
+          const scheduledWakeClaimed = await this.withWorkspaceLifecycleLocks(
+            session.id,
+            async () => {
             // Claim the due occurrence BEFORE sending: clear scheduledWake and
             // persist it first. A slow or failing send must not leave the wake
             // due, or the `<= now` guard stays true and it re-fires every tick
@@ -4089,8 +4149,13 @@ export class SessionService {
               const { scheduledWake: _scheduledWake, ...base } = current;
               const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
               writeSession(this.config.dataDir, cleared);
-              try {
-                await this.sendLocked(session.id, { message: scheduledWake.message });
+              return true;
+            }
+            return false;
+          });
+          if (scheduledWakeClaimed) {
+            try {
+                await this.send(session.id, { message: scheduledWake.message });
                 this.logEvent("session.wake.sent", {
                   level: "info",
                   sessionId: session.id,
@@ -4100,7 +4165,7 @@ export class SessionService {
                     dueAt: scheduledWake.dueAt,
                   },
                 });
-              } catch (error) {
+            } catch (error) {
                 if (error instanceof SessionAdmissionDeniedError) {
                   // Admission refused this stale-parked wake, not a delivery
                   // failure — the occurrence above was already claimed
@@ -4109,14 +4174,16 @@ export class SessionService {
                   // Re-arm the exact same occurrence (CAS: only if nothing
                   // else re-armed/cancelled it in the meantime) so the next
                   // poll tick retries once the fleet has headroom again.
-                  const afterDenial = readSession(this.config.dataDir, session.id);
-                  if (afterDenial && !afterDenial.scheduledWake) {
-                    writeSession(this.config.dataDir, {
-                      ...afterDenial,
-                      scheduledWake,
-                      updatedAt: nowIso(),
-                    });
-                  }
+                  await this.withWorkspaceLifecycleLocks(session.id, async () => {
+                    const afterDenial = readSession(this.config.dataDir, session.id);
+                    if (afterDenial && !afterDenial.scheduledWake) {
+                      writeSession(this.config.dataDir, {
+                        ...afterDenial,
+                        scheduledWake,
+                        updatedAt: nowIso(),
+                      });
+                    }
+                  });
                   this.logEvent("session.wake.deferred", {
                     level: "warn",
                     sessionId: session.id,
@@ -4138,9 +4205,8 @@ export class SessionService {
                     },
                   });
                 }
-              }
             }
-          });
+          }
         }
 
         // A killed session is never revived (reopenLocked()'s status guard
@@ -4201,7 +4267,9 @@ export class SessionService {
           Date.parse(intervalWake.nextDueAt) <= now &&
           (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
-          await this.withWorkspaceLifecycleLocks(session.id, async () => {
+          const claimedNextDueAt = await this.withWorkspaceLifecycleLocks(
+            session.id,
+            async (): Promise<string | null> => {
             // Claim the due tick BEFORE sending: advance nextDueAt to the next
             // future interval (catching up past any missed intervals) and persist
             // it first. A slow or failing send must not leave the wake due, or the
@@ -4219,7 +4287,7 @@ export class SessionService {
             // precondition is isRestorableStatus, and re-checking it here closes
             // the gap between the outer evaluateWakeDeliverability snapshot and
             // the lock actually being acquired.
-            if (current === null || !isRestorableStatus(current.status)) return;
+            if (current === null || !isRestorableStatus(current.status)) return null;
             // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
             const claimed =
               current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
@@ -4236,8 +4304,14 @@ export class SessionService {
                 updatedAt: nowIso(),
               };
               writeSession(this.config.dataDir, updated);
-              try {
-                await this.sendLocked(session.id, {
+              return nextDueAt;
+            }
+            return null;
+          });
+          if (claimedNextDueAt !== null) {
+            const nextDueAt = claimedNextDueAt;
+            try {
+                await this.send(session.id, {
                   message: this.formatIntervalWakeMessage(
                     session.id,
                     intervalWake.message,
@@ -4254,7 +4328,7 @@ export class SessionService {
                     intervalMs: intervalWake.intervalMs,
                   },
                 });
-              } catch (error) {
+            } catch (error) {
                 if (error instanceof SessionAdmissionDeniedError) {
                   // Same reasoning as the scheduled-wake branch above: this
                   // occurrence was already claimed (nextDueAt advanced and
@@ -4262,17 +4336,19 @@ export class SessionService {
                   // the occurrence that was just refused (CAS: only if nothing
                   // else re-armed it meanwhile) so the next poll tick retries
                   // it promptly instead of waiting a full interval.
-                  const afterDenial = readSession(this.config.dataDir, session.id);
-                  if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
-                    writeSession(this.config.dataDir, {
-                      ...afterDenial,
-                      intervalWake: {
-                        ...afterDenial.intervalWake,
-                        nextDueAt: intervalWake.nextDueAt,
-                      },
-                      updatedAt: nowIso(),
-                    });
-                  }
+                  await this.withWorkspaceLifecycleLocks(session.id, async () => {
+                    const afterDenial = readSession(this.config.dataDir, session.id);
+                    if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+                      writeSession(this.config.dataDir, {
+                        ...afterDenial,
+                        intervalWake: {
+                          ...afterDenial.intervalWake,
+                          nextDueAt: intervalWake.nextDueAt,
+                        },
+                        updatedAt: nowIso(),
+                      });
+                    }
+                  });
                   this.logEvent("session.wake.interval_deferred", {
                     level: "warn",
                     sessionId: session.id,
@@ -4296,9 +4372,8 @@ export class SessionService {
                     },
                   });
                 }
-              }
             }
-          });
+          }
         }
 
         const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
@@ -4469,7 +4544,7 @@ export class SessionService {
         if (!this.memoryHold.engaged && session.serverErrorAt) {
           const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
           if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
-            await this.withWorkspaceLifecycleLocks(session.id, async () => {
+            const claimed = await this.withWorkspaceLifecycleLocks(session.id, async () => {
               const current = readSession(this.config.dataDir, session.id);
               if (
                 !current?.serverErrorAt ||
@@ -4478,7 +4553,7 @@ export class SessionService {
                 now - Date.parse(current.serverErrorAt) < CLAUDE_SERVER_ERROR_REACTIVATION_MS ||
                 (current.serverErrorReactivationAttempts ?? 0) >= AUTOMATIC_REMINDER_MAX_ATTEMPTS
               )
-                return;
+                return false;
               const attempts = (current.serverErrorReactivationAttempts ?? 0) + 1;
               writeSession(this.config.dataDir, {
                 ...current,
@@ -4494,8 +4569,11 @@ export class SessionService {
                   message: `Server-error reminder budget exhausted for ${session.id}`,
                 });
               }
+              return true;
+            });
+            if (claimed) {
               try {
-                await this.sendLocked(session.id, {
+                await this.send(session.id, {
                   message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
                   queue: false,
                 });
@@ -4520,7 +4598,7 @@ export class SessionService {
                   },
                 });
               }
-            });
+            }
           }
         }
 
@@ -4533,7 +4611,9 @@ export class SessionService {
         ) {
           continue;
         }
-        await this.withWorkspaceLifecycleLocks(session.id, async () => {
+        const claimedDailyNextDueAt = await this.withWorkspaceLifecycleLocks(
+          session.id,
+          async (): Promise<string | null> => {
           // Claim the due occurrence BEFORE sending: advance nextDueAt to the
           // next future scheduled time and persist it first. A slow or failing
           // send must not leave the wake due, or the `<= now` guard stays true
@@ -4550,7 +4630,7 @@ export class SessionService {
             currentDailyWakeSession === null ||
             !isRestorableStatus(currentDailyWakeSession.status)
           ) {
-            return;
+            return null;
           }
           // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
           const dailyWakeClaimed =
@@ -4595,7 +4675,7 @@ export class SessionService {
                   dailyAt: dailyWake.dailyAt,
                 },
               });
-              return;
+              return null;
             }
             const updated: SessionRecord = {
               ...currentDailyWakeSession,
@@ -4606,8 +4686,13 @@ export class SessionService {
               updatedAt: nowIso(),
             };
             writeSession(this.config.dataDir, updated);
-            try {
-              await this.sendLocked(session.id, {
+            return nextDueAt.toISOString();
+          }
+          return null;
+        });
+        if (claimedDailyNextDueAt !== null) {
+          try {
+              await this.send(session.id, {
                 message: this.formatDailyWakeMessage(
                   session.id,
                   dailyWake.message,
@@ -4624,7 +4709,7 @@ export class SessionService {
                   dailyAt: dailyWake.dailyAt,
                 },
               });
-            } catch (error) {
+          } catch (error) {
               if (error instanceof SessionAdmissionDeniedError) {
                 // Same reasoning as the scheduled/interval branches above:
                 // this occurrence was already claimed (nextDueAt advanced and
@@ -4632,14 +4717,16 @@ export class SessionService {
                 // the occurrence that was just refused (CAS: only if nothing
                 // else re-armed it meanwhile) so the next poll tick retries it
                 // promptly instead of waiting until tomorrow.
-                const afterDenial = readSession(this.config.dataDir, session.id);
-                if (afterDenial && afterDenial.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
-                  writeSession(this.config.dataDir, {
-                    ...afterDenial,
-                    dailyWake: { ...dailyWake },
-                    updatedAt: nowIso(),
-                  });
-                }
+                await this.withWorkspaceLifecycleLocks(session.id, async () => {
+                  const afterDenial = readSession(this.config.dataDir, session.id);
+                  if (afterDenial?.dailyWake?.nextDueAt === claimedDailyNextDueAt) {
+                    writeSession(this.config.dataDir, {
+                      ...afterDenial,
+                      dailyWake: { ...dailyWake },
+                      updatedAt: nowIso(),
+                    });
+                  }
+                });
                 this.logEvent("session.wake.daily_deferred", {
                   level: "warn",
                   sessionId: session.id,
@@ -4663,9 +4750,8 @@ export class SessionService {
                   },
                 });
               }
-            }
           }
-        });
+        }
       }
     } finally {
       this.scheduledWakeMonitorRunning = false;
@@ -5243,7 +5329,38 @@ export class SessionService {
     );
   }
 
+  private lifecycleIdsFor(session: SessionRecord): string[] {
+    return [...new Set([session.id, workspaceIdOf(session)])].sort();
+  }
+
+  private async capturePaneGeneration(session: SessionRecord): Promise<PaneGeneration> {
+    const pane = await this.lookupPanePidQuietly(session.tmuxSession);
+    if (pane.status !== "ok" || pane.panePid === null) {
+      throw new Error(`Session ${session.id} pane generation is unavailable`);
+    }
+    const processStarttime = await readProcessStarttime(pane.panePid);
+    if (processStarttime === null) {
+      throw new Error(`Session ${session.id} pane process generation is unreadable`);
+    }
+    return { tmuxSession: session.tmuxSession, panePid: pane.panePid, processStarttime };
+  }
+
+  private async paneGenerationMatches(
+    session: SessionRecord,
+    expected: PaneGeneration,
+  ): Promise<boolean> {
+    if (session.tmuxSession !== expected.tmuxSession) return false;
+    const pane = await this.lookupPanePidQuietly(session.tmuxSession);
+    if (pane.status !== "ok" || pane.panePid !== expected.panePid) return false;
+    return (await readProcessStarttime(pane.panePid)) === expected.processStarttime;
+  }
+
   private scheduleDeliveryRunner(sessionId: string): void {
+    const active = this.deliveryRuns.get(sessionId);
+    if (active) {
+      void active.finally(() => this.ensureDeliveryRunner(sessionId));
+      return;
+    }
     this.ensureDeliveryRunner(sessionId);
   }
 
@@ -6680,10 +6797,17 @@ export class SessionService {
   }
 
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
-    return this.withWorkspaceLifecycleLocks(session.id, () => this.maybeNudgeTodoLocked(session));
+    return this.withPaneWriteLock(session.tmuxSession, () =>
+      this.withWorkspaceLifecycleLocks(session.id, () =>
+        this.maybeNudgeTodoLocked(session, { paneAlreadyOwned: true }),
+      ),
+    );
   }
 
-  private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
+  private async maybeNudgeTodoLocked(
+    session: SessionRecord,
+    options?: { paneAlreadyOwned?: boolean },
+  ): Promise<void> {
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
@@ -6696,7 +6820,7 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
-      await this.withPaneWriteLock(session.tmuxSession, async () => {
+      const run = async (): Promise<void> => {
         const current = readSession(this.config.dataDir, session.id);
         if (
           !current ||
@@ -6798,7 +6922,9 @@ export class SessionService {
         await this.writeAgentMessage(session, message, { interrupt: false });
         this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
         this.todoNudgeBackoff.delete(session.id);
-      });
+      };
+      if (options?.paneAlreadyOwned) await run();
+      else await this.withPaneWriteLock(session.tmuxSession, run);
     } catch (error) {
       if (
         (error instanceof TodoLedgerCorruptError && !error.transient) ||
@@ -9607,6 +9733,7 @@ export class SessionService {
       validatedExplicitModel?: string;
       closeoutOwnerTransfer?: boolean;
       sensitivePromptSuffix?: string;
+      receiptToken?: symbol;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -10062,11 +10189,21 @@ export class SessionService {
       }
 
       let firstStepSubmitted = false;
+      let initialGeneration: PaneGeneration | undefined;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
-        const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
-          freshLaunch: true,
-        });
+        const sent = options?.receiptToken
+          ? await this.sendAgentMessageWithGeneration(runningRecord, launchPlan.initialMessage, {
+              freshLaunch: true,
+            })
+          : {
+              outcome: await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
+                freshLaunch: true,
+              }),
+              generation: undefined,
+            };
+        const sendOutcome = sent.outcome;
+        initialGeneration = sent.generation;
         firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -10086,6 +10223,11 @@ export class SessionService {
           throw new Error("OpenCode did not persist the launch prompt");
         }
         firstStepSubmitted = true;
+        if (options?.receiptToken) {
+          initialGeneration = await this.withPaneWriteLock(runningRecord.tmuxSession, () =>
+            this.capturePaneGeneration(runningRecord),
+          );
+        }
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -10097,6 +10239,11 @@ export class SessionService {
             messageLength: spawnInitialMessage.length,
           },
         });
+      }
+      if (options?.receiptToken && !initialGeneration) {
+        initialGeneration = await this.withPaneWriteLock(runningRecord.tmuxSession, () =>
+          this.capturePaneGeneration(runningRecord),
+        );
       }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
@@ -10152,8 +10299,19 @@ export class SessionService {
         this.scheduleDeliveryRunner(updatedRecord.id);
       }
 
+      if (options?.receiptToken && initialGeneration) {
+        this.foregroundSpawnReceipts.set(options.receiptToken, {
+          sessionId: updatedRecord.id,
+          workspaceId: workspaceIdOf(updatedRecord),
+          generation: initialGeneration,
+        });
+      }
+
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (options?.receiptToken) {
+        this.foregroundSpawnReceipts.delete(options.receiptToken);
+      }
       if (sessionId && project && placeholderWritten && agent) {
         // This catch wraps every stage from tmux.create through record.write,
         // so the pane can already hold a real launched agent by the time we
@@ -11378,19 +11536,18 @@ export class SessionService {
       }
       const { scheduledWake: _scheduledWake, ...base } = current;
       writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
-      try {
-        await this.sendLocked(session.id, { message: scheduledWake.message, queue: false });
-        this.logEvent("session.wake.sent", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `Dispatched scheduled wake to ${session.id}`,
-          details: {
-            dueAt: scheduledWake.dueAt,
-            manual: true,
-          },
-        });
-      } catch (error) {
+    });
+    try {
+      await this.send(session.id, { message: scheduledWake.message, queue: false });
+      this.logEvent("session.wake.sent", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Dispatched scheduled wake to ${session.id}`,
+        details: { dueAt: scheduledWake.dueAt, manual: true },
+      });
+    } catch (error) {
+      await this.withWorkspaceLifecycleLocks(session.id, async () => {
         const afterFailure = readSession(this.config.dataDir, session.id);
         if (afterFailure && !afterFailure.scheduledWake) {
           writeSession(this.config.dataDir, {
@@ -11399,9 +11556,9 @@ export class SessionService {
             updatedAt: nowIso(),
           });
         }
-        throw error;
-      }
-    });
+      });
+      throw error;
+    }
   }
 
   private async dispatchIntervalWakeNow(session: SessionRecord): Promise<void> {
@@ -11414,9 +11571,8 @@ export class SessionService {
         `Cannot dispatch interval wake for ${session.id}: session not deliverable`,
       );
     }
+    const nextDueAt = new Date(Date.now() + intervalWake.intervalMs).toISOString();
     await this.withWorkspaceLifecycleLocks(session.id, async () => {
-      const now = Date.now();
-      const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
       const current = readSession(this.config.dataDir, session.id);
       if (current === null || !isRestorableStatus(current.status)) {
         throw new WakeDispatchConflictError(`Wake target "interval" unavailable for ${session.id}`);
@@ -11434,28 +11590,26 @@ export class SessionService {
         intervalWake: { ...intervalWake, nextDueAt },
         updatedAt: nowIso(),
       });
-      try {
-        await this.sendLocked(session.id, {
-          message: this.formatIntervalWakeMessage(
-            session.id,
-            intervalWake.message,
-            intervalWake.stopCondition,
-          ),
-          queue: false,
-        });
-        this.logEvent("session.wake.interval_sent", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `Dispatched interval wake to ${session.id}`,
-          details: {
-            nextDueAt,
-            intervalMs: intervalWake.intervalMs,
-            manual: true,
-          },
-        });
-      } catch (error) {
-        if (error instanceof SessionAdmissionDeniedError) {
+    });
+    try {
+      await this.send(session.id, {
+        message: this.formatIntervalWakeMessage(
+          session.id,
+          intervalWake.message,
+          intervalWake.stopCondition,
+        ),
+        queue: false,
+      });
+      this.logEvent("session.wake.interval_sent", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Dispatched interval wake to ${session.id}`,
+        details: { nextDueAt, intervalMs: intervalWake.intervalMs, manual: true },
+      });
+    } catch (error) {
+      if (error instanceof SessionAdmissionDeniedError) {
+        await this.withWorkspaceLifecycleLocks(session.id, async () => {
           const afterDenial = readSession(this.config.dataDir, session.id);
           if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
             writeSession(this.config.dataDir, {
@@ -11467,10 +11621,10 @@ export class SessionService {
               updatedAt: nowIso(),
             });
           }
-        }
-        throw error;
+        });
       }
-    });
+      throw error;
+    }
   }
 
   private async dispatchDailyWakeNow(session: SessionRecord): Promise<void> {
@@ -11483,8 +11637,8 @@ export class SessionService {
         `Cannot dispatch daily wake for ${session.id}: session not deliverable`,
       );
     }
+    let claimedNextDueAt = "";
     await this.withWorkspaceLifecycleLocks(session.id, async () => {
-      const now = Date.now();
       const current = readSession(this.config.dataDir, session.id);
       if (current === null || !isRestorableStatus(current.status)) {
         throw new WakeDispatchConflictError(`Wake target "daily" unavailable for ${session.id}`);
@@ -11499,7 +11653,7 @@ export class SessionService {
       }
       let nextDueAt: Date;
       try {
-        nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+        nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date());
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`Failed to resolve next daily wake time for ${session.id}: ${message}`, {
@@ -11511,40 +11665,39 @@ export class SessionService {
         dailyWake: { ...dailyWake, nextDueAt: nextDueAt.toISOString() },
         updatedAt: nowIso(),
       });
-      try {
-        await this.sendLocked(session.id, {
-          message: this.formatDailyWakeMessage(
-            session.id,
-            dailyWake.message,
-            dailyWake.stopCondition,
-          ),
-          queue: false,
-        });
-        this.logEvent("session.wake.daily_sent", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `Dispatched daily wake to ${session.id}`,
-          details: {
-            nextDueAt: dailyWake.nextDueAt,
-            dailyAt: dailyWake.dailyAt,
-            manual: true,
-          },
-        });
-      } catch (error) {
-        if (error instanceof SessionAdmissionDeniedError) {
+      claimedNextDueAt = nextDueAt.toISOString();
+    });
+    try {
+      await this.send(session.id, {
+        message: this.formatDailyWakeMessage(
+          session.id,
+          dailyWake.message,
+          dailyWake.stopCondition,
+        ),
+        queue: false,
+      });
+      this.logEvent("session.wake.daily_sent", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Dispatched daily wake to ${session.id}`,
+        details: { nextDueAt: dailyWake.nextDueAt, dailyAt: dailyWake.dailyAt, manual: true },
+      });
+    } catch (error) {
+      if (error instanceof SessionAdmissionDeniedError) {
+        await this.withWorkspaceLifecycleLocks(session.id, async () => {
           const afterDenial = readSession(this.config.dataDir, session.id);
-          if (afterDenial?.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
+          if (afterDenial?.dailyWake?.nextDueAt === claimedNextDueAt) {
             writeSession(this.config.dataDir, {
               ...afterDenial,
               dailyWake: { ...dailyWake },
               updatedAt: nowIso(),
             });
           }
-        }
-        throw error;
+        });
       }
-    });
+      throw error;
+    }
   }
 
   private async scheduleWakeLocked(
@@ -11756,7 +11909,70 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () => this.sendLocked(sessionId, request));
+    const prepared = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      if (!hasMessageContent(request)) throw new Error("message or attachments required");
+      if (!isRestorableStatus(session.status)) {
+        throw new Error(`Session is not running: ${sessionId}`);
+      }
+      const message = this.prepareSendMessage(session, request);
+      if (request.queue === false) {
+        return { kind: "direct" as const, message };
+      }
+
+      const readySession = await this.ensureSessionReadyForSend(session);
+      const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
+        ? await this.classifySessionState(readySession)
+        : "waiting";
+      const latestQueued = queuedMessages(
+        readSession(this.config.dataDir, sessionId) ?? readySession,
+      );
+      let activeRecord: SessionRecord;
+      if (latestQueued.includes(message)) {
+        this.logEvent("session.message.duplicate_ignored", {
+          level: "info",
+          sessionId,
+          projectId: readySession.project,
+          message: `Ignored duplicate queued message for ${sessionId}`,
+          details: { queuedCount: latestQueued.length, messageLength: message.length },
+        });
+        activeRecord = readySession;
+      } else {
+        activeRecord = withQueuedMessages(
+          { ...readySession, status: "running", updatedAt: nowIso() },
+          [...latestQueued, message],
+          readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
+        );
+        writeSession(this.config.dataDir, activeRecord);
+        this.logEvent("session.message.queued", {
+          level: "info",
+          sessionId,
+          projectId: activeRecord.project,
+          message: `Queued message for ${sessionId}`,
+          details: {
+            queuedCount: queuedMessages(activeRecord).length,
+            messageLength: message.length,
+          },
+        });
+      }
+      return {
+        kind: "queued" as const,
+        activeRecord,
+        deliverNow: activeRecord.queuedMessages?.awaitingPrompt !== true,
+      };
+    });
+
+    if (prepared.kind === "direct") {
+      return this.deliverPrepared(sessionId, prepared.message, {
+        interrupt: request.interrupt === true,
+        entryPoint: "send",
+        hasAttachments: (request.attachments?.length ?? 0) > 0,
+      });
+    }
+    if (prepared.deliverNow) await this.tryDeliverQueuedMessage(sessionId);
+    this.scheduleDeliveryRunner(sessionId);
+    return this.enrich(readSession(this.config.dataDir, sessionId) ?? prepared.activeRecord);
   }
 
   private async sendLocked(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
@@ -11950,12 +12166,47 @@ export class SessionService {
   // for flush.
   async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
+    const queuedAtStart = queuedMessages(session);
     if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
       throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
     }
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.flushQueuedMessageLocked(sessionId, message),
-    );
+    this.queueDeliveryInFlight.add(sessionId);
+    let persisted: SessionRecord;
+    try {
+      const result = await this.runDeliveryTransaction(
+        sessionId,
+        message,
+        { kind: "queued-flush", message },
+        { recoverOnLiveAckTimeout: true },
+      );
+      const resultRecord = result.record ?? readSession(this.config.dataDir, sessionId);
+      if (!resultRecord) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      persisted = resultRecord;
+      if (result.recovered) {
+        this.logEvent("session.message.delivery_recovered", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Recovered a delivered message to ${sessionId} after a submit ack timeout`,
+          details: {
+            agent: result.recovered.agent,
+            lastScannedFile: result.recovered.lastScannedFile,
+            elapsedMs: result.recovered.elapsedMs,
+            processAlive: result.recovered.processAlive,
+            messageLength: message.length,
+            entryPoint: "flush",
+          },
+        });
+      }
+    } finally {
+      this.queueDeliveryInFlight.delete(sessionId);
+    }
+    const queuedAfterFlush = queuedMessages(readSession(this.config.dataDir, sessionId) ?? session);
+    if (queuedAfterFlush.some((queued) => !queuedAtStart.includes(queued))) {
+      await this.tryDeliverQueuedMessage(sessionId);
+    }
+    this.scheduleDeliveryRunner(sessionId);
+    return this.enrich(persisted);
   }
 
   private async flushQueuedMessageLocked(sessionId: string, message: string): Promise<SessionView> {
@@ -11993,31 +12244,131 @@ export class SessionService {
     }
   }
 
-  // Single commit path for `deliverPrepared`'s success and recovered-ack-
-  // timeout branches only. `deliverQueuedMessage` keeps its own two-write
-  // commit (see the comment there) and must never be folded into this.
-  // The queue field is taken from a read AFTER the pane write, never from
-  // `readySession` (taken before it): that read can be arbitrarily stale by
-  // the time the send resolves, and blind-writing it would erase a
-  // concurrent append or resurrect an already-drained message.
-  private async commitDeliveredSend(
+  private async prepareDeliveryLocked(
     sessionId: string,
-    readySession: SessionRecord,
-  ): Promise<SessionRecord> {
-    this.stateCache.delete(sessionId);
-    const latest = readSession(this.config.dataDir, sessionId) ?? readySession;
-    const updated = withQueuedMessages(
-      {
-        ...readySession,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      queuedMessages(latest),
-      latest.queuedMessages?.awaitingPrompt ?? false,
-    );
-    const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
-    writeSession(this.config.dataDir, persisted);
-    return persisted;
+    paneKey: string,
+    intent: DeliveryIntent,
+  ): Promise<PreparedDelivery | null> {
+    const current = readSession(this.config.dataDir, sessionId);
+    if (!current) {
+      if (intent.kind === "direct") {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      return null;
+    }
+    if (current.tmuxSession !== paneKey || !isRestorableStatus(current.status))
+      return null;
+    if (this.isLiveStateRateLimited(current)) {
+      if (intent.kind !== "queued-drain") {
+        throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+      }
+      return null;
+    }
+    if (intent.kind !== "direct" && !queuedMessages(current).includes(intent.message)) {
+      return null;
+    }
+    const ready = await this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+    if (ready.tmuxSession !== paneKey) return null;
+    if (intent.kind === "queued-drain") {
+      const classified = await this.classifySessionRecord(ready);
+      if (classified.state !== "waiting" && !classified.serverError) return null;
+      if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())) {
+        return null;
+      }
+      const latest = readSession(this.config.dataDir, sessionId);
+      if (
+        !this.shouldRunDelivery(latest) ||
+        queuedMessages(latest)[0] !== intent.message ||
+        latest.tmuxSession !== paneKey
+      ) {
+        return null;
+      }
+    }
+    const generation = await this.capturePaneGeneration(ready);
+    return {
+      session: ready,
+      lifecycleIds: this.lifecycleIdsFor(ready),
+      generation,
+      status: ready.status,
+      stopReason: ready.stopReason,
+      intent,
+    };
+  }
+
+  private async commitPreparedDelivery(prepared: PreparedDelivery): Promise<SessionRecord | null> {
+    return this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+      const latest = readSession(this.config.dataDir, prepared.session.id);
+      if (!latest || workspaceIdOf(latest) !== workspaceIdOf(prepared.session)) return null;
+      const generationMatches = await this.paneGenerationMatches(latest, prepared.generation);
+      const lifecycleMatches =
+        latest.status === prepared.status && latest.stopReason === prepared.stopReason;
+      if (prepared.intent.kind === "direct" && (!generationMatches || !lifecycleMatches)) {
+        return latest;
+      }
+
+      const remaining =
+        prepared.intent.kind === "direct"
+          ? queuedMessages(latest)
+          : removeFirstOccurrence(queuedMessages(latest), prepared.intent.message);
+      const awaitingPrompt =
+        prepared.intent.kind === "queued-drain" && generationMatches && lifecycleMatches
+          ? true
+          : (latest.queuedMessages?.awaitingPrompt ?? false);
+      const base =
+        generationMatches && lifecycleMatches
+          ? { ...latest, status: "running" as const, updatedAt: nowIso() }
+          : { ...latest, updatedAt: nowIso() };
+      const updated = withQueuedMessages(base, remaining, awaitingPrompt);
+      writeSession(this.config.dataDir, updated);
+      this.stateCache.delete(prepared.session.id);
+      return updated;
+    });
+  }
+
+  private async runDeliveryTransaction(
+    sessionId: string,
+    message: string,
+    intent: DeliveryIntent,
+    options?: { interrupt?: boolean; recoverOnLiveAckTimeout?: boolean },
+  ): Promise<{ record: SessionRecord | null; recovered: SubmitAckTimeoutError | null }> {
+    const hint = readSession(this.config.dataDir, sessionId);
+    if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    const result = await this.withPaneWriteLock(hint.tmuxSession, async () => {
+      const lifecycleIds = this.lifecycleIdsFor(hint);
+      const prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
+        this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent),
+      );
+      if (!prepared) return { record: null, recovered: null };
+
+      let interrupt = options?.interrupt === true;
+      if (interrupt) {
+        interrupt =
+          (await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+            const current = readSession(this.config.dataDir, sessionId);
+            if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
+              return false;
+            }
+            return (await this.classifySessionState(current)) !== "waiting";
+          })) === true;
+      }
+
+      let recovered: SubmitAckTimeoutError | null = null;
+      try {
+        await this.writeAgentMessage(prepared.session, message, { interrupt });
+      } catch (error) {
+        if (options?.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
+          throw error;
+        }
+        recovered = error;
+      }
+      const record = await this.commitPreparedDelivery(prepared);
+      return { record, recovered };
+    });
+    if (result.record) {
+      await this.captureAgentSessionId(result.record, AGENT_SESSION_ID_REFRESH_WAIT_MS);
+      result.record = readSession(this.config.dataDir, sessionId) ?? result.record;
+    }
+    return result;
   }
 
   private async deliverPrepared(
@@ -12034,26 +12385,9 @@ export class SessionService {
       recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.deliverPreparedLocked(sessionId, message, options),
-    );
-  }
-
-  private async deliverPreparedLocked(
-    sessionId: string,
-    message: string,
-    options: {
-      interrupt?: boolean;
-      entryPoint: "send" | "deliver" | "flush";
-      hasAttachments?: boolean;
-      recoverOnLiveAckTimeout?: boolean;
-    },
-  ): Promise<SessionView> {
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
-      if (!initialSession) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
+      if (!initialSession) throw new Error(`Session not found: ${sessionId}`);
       if (this.isLiveStateRateLimited(initialSession)) {
         this.logEvent("session.message.suppressed_rate_limited", {
           level: "info",
@@ -12069,33 +12403,30 @@ export class SessionService {
         });
         throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
       }
-      const readySession = await this.ensureSessionReadyForSend(initialSession);
-      let interrupt = options.interrupt === true;
-      if (interrupt) {
-        const sendState = await this.classifySessionState(readySession);
-        interrupt = sendState !== "waiting";
-      }
-      let recovered: SubmitAckTimeoutError | null = null;
-      try {
-        await this.sendAgentMessage(readySession, message, { interrupt });
-      } catch (error) {
-        if (options.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
-          throw error;
-        }
-        recovered = error;
-      }
-      const persisted = await this.commitDeliveredSend(sessionId, readySession);
-      if (recovered) {
+      const result = await this.runDeliveryTransaction(
+        sessionId,
+        message,
+        { kind: "direct" },
+        {
+          ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+          ...(options.recoverOnLiveAckTimeout !== undefined
+            ? { recoverOnLiveAckTimeout: options.recoverOnLiveAckTimeout }
+            : {}),
+        },
+      );
+      const persisted = result.record ?? readSession(this.config.dataDir, sessionId);
+      if (!persisted) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (result.recovered) {
         this.logEvent("session.message.delivery_recovered", {
           level: "warn",
           sessionId,
           projectId: initialSession.project,
           message: `Recovered a delivered message to ${sessionId} after a submit ack timeout`,
           details: {
-            agent: recovered.agent,
-            lastScannedFile: recovered.lastScannedFile,
-            elapsedMs: recovered.elapsedMs,
-            processAlive: recovered.processAlive,
+            agent: result.recovered.agent,
+            lastScannedFile: result.recovered.lastScannedFile,
+            elapsedMs: result.recovered.elapsedMs,
+            processAlive: result.recovered.processAlive,
             messageLength: message.length,
             entryPoint: options.entryPoint,
           },
@@ -12107,7 +12438,7 @@ export class SessionService {
           projectId: initialSession.project,
           message: `Delivered message to ${sessionId}`,
           details: {
-            interrupt,
+            interrupt: options.interrupt === true,
             messageLength: message.length,
             agentSessionId: persisted.agentSessionId ?? null,
           },
@@ -12128,12 +12459,23 @@ export class SessionService {
         sessionId,
         ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
-        details: {
-          interrupt: options.interrupt === true,
-        },
+        details: { interrupt: options.interrupt === true },
       });
       throw error;
     }
+  }
+
+  private async deliverPreparedLocked(
+    sessionId: string,
+    message: string,
+    options: {
+      interrupt?: boolean;
+      entryPoint: "send" | "deliver" | "flush";
+      hasAttachments?: boolean;
+      recoverOnLiveAckTimeout?: boolean;
+    },
+  ): Promise<SessionView> {
+    return this.deliverPrepared(sessionId, message, options);
   }
 
   private partitionStartupAttachments(
@@ -12364,6 +12706,23 @@ export class SessionService {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
     );
+  }
+
+  private async sendAgentMessageWithGeneration(
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
+    message: string,
+    options?: { interrupt?: boolean; freshLaunch?: boolean },
+  ): Promise<{ outcome: AgentSendOutcome; generation: PaneGeneration }> {
+    return this.withPaneWriteLock(session.tmuxSession, async () => {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      const generation = await this.capturePaneGeneration(current);
+      const outcome = await this.writeAgentMessage(session, message, options);
+      return { outcome, generation };
+    });
   }
 
   private async sendDeferredSensitiveInitialMessage(
@@ -12706,6 +13065,13 @@ export class SessionService {
     return this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new TodoTransitionConflictError(
+          sessionId,
+          "itemId" in request ? request.itemId : "",
+          "Session handoff is already in progress",
+        );
+      }
       return applyTodoMutation(this.config.dataDir, session, request, actor);
     });
   }
@@ -14070,7 +14436,7 @@ export class SessionService {
   // stays ambiguous and defaults to refusing recovery.
   private async ensureSessionReadyForSend(
     session: SessionRecord,
-    options?: { paneAlreadyConfirmedGone?: boolean },
+    options?: { paneAlreadyConfirmedGone?: boolean; paneAlreadyOwned?: boolean },
   ): Promise<SessionRecord> {
     // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
     // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
@@ -14145,7 +14511,9 @@ export class SessionService {
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
     let recovered: SessionRecord;
     try {
-      recovered = await this.relaunchSessionInPlace(session, project);
+      recovered = await this.relaunchSessionInPlace(session, project, {
+        paneAlreadyOwned: options?.paneAlreadyOwned === true,
+      });
     } finally {
       this.restoreWarmupUntil.delete(session.id);
     }
@@ -14176,6 +14544,7 @@ export class SessionService {
   private async relaunchSessionInPlace(
     session: SessionRecord,
     project: ProjectConfig,
+    options?: { paneAlreadyOwned?: boolean },
   ): Promise<SessionRecord> {
     this.clearTargetGoneNudgeGate(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
@@ -14426,11 +14795,13 @@ export class SessionService {
         // pacing of their own (claude) — lets an ack that never confirms on a
         // live pane resolve as "submit_unconfirmed" instead of throwing and
         // tearing down an otherwise-healthy relaunch.
-        const contextSendOutcome = await this.sendAgentMessage(
-          recoveryPaneTarget,
-          recoveryContextMessage,
-          { freshLaunch: true },
-        );
+        const contextSendOutcome = options?.paneAlreadyOwned
+          ? await this.writeAgentMessage(recoveryPaneTarget, recoveryContextMessage, {
+              freshLaunch: true,
+            })
+          : await this.sendAgentMessage(recoveryPaneTarget, recoveryContextMessage, {
+              freshLaunch: true,
+            });
         if (contextSendOutcome === "submit_unconfirmed") {
           // The pane write itself landed (send already spent its Enter
           // resends) but the ack scan never confirmed the agent consumed it.
@@ -15463,16 +15834,79 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.handoffLocked(sessionId, request, options),
+    const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
+      this.prepareHandoffLocked(sessionId, request, options),
     );
+    try {
+      const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
+      const receipt = this.foregroundSpawnReceipts.get(prepared.receiptToken);
+      if (!receipt || receipt.sessionId !== spawned.id) {
+        throw new Error(`Handoff successor receipt unavailable for ${spawned.id}`);
+      }
+      if (prepared.carryTags.length > 0) {
+        await this.updateSlots(spawned.id, { tags: prepared.carryTags });
+      }
+      const finalized = await this.withPaneWriteLock(receipt.generation.tmuxSession, () =>
+        this.withSessionLifecycleLocks(
+          [...prepared.lifecycleIds, spawned.id],
+          async (): Promise<SessionRecord> => {
+            const claim = this.handoffsInFlight.get(sessionId);
+            const source = readSession(this.config.dataDir, sessionId);
+            const successor = readSession(this.config.dataDir, spawned.id);
+            const sourceMatches =
+              source !== null &&
+              source.id === prepared.sourceStamp.id &&
+              workspaceIdOf(source) === prepared.sourceStamp.workspaceId &&
+              source.status === prepared.sourceStamp.status &&
+              source.stopReason === prepared.sourceStamp.stopReason &&
+              source.updatedAt === prepared.sourceStamp.updatedAt &&
+              source.tmuxSession === prepared.sourceStamp.tmuxSession;
+            const successorMatches =
+              successor !== null &&
+              successor.id === receipt.sessionId &&
+              workspaceIdOf(successor) === receipt.workspaceId &&
+              successor.tmuxSession === receipt.generation.tmuxSession &&
+              (await this.paneGenerationMatches(successor, receipt.generation));
+            if (claim?.token !== prepared.token || !sourceMatches || !successorMatches) {
+              throw new Error(`Handoff state changed before finalization for ${sessionId}`);
+            }
+
+            writeSession(this.config.dataDir, {
+              ...successor,
+              ...(prepared.sourcePr ? { pr: prepared.sourcePr } : {}),
+              originalTaskPrompt: prepared.originalTask,
+              updatedAt: nowIso(),
+            });
+            this.clearCloseoutOwner(sessionId);
+            await this.applyManualStatusLocked(
+              sessionId,
+              "completed",
+              { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+              { retainInList: true, eventAction: "handoff" },
+            );
+            const latest = readSession(this.config.dataDir, spawned.id);
+            if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${spawned.id}`);
+            return latest;
+          },
+        ),
+      );
+      return await this.enrich(finalized);
+    } finally {
+      this.foregroundSpawnReceipts.delete(prepared.receiptToken);
+      await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+        if (this.handoffsInFlight.get(sessionId)?.token === prepared.token) {
+          this.handoffsInFlight.delete(sessionId);
+        }
+      });
+      this.admissionReservations.delete(prepared.admissionReservation);
+    }
   }
 
-  private async handoffLocked(
+  private async prepareHandoffLocked(
     sessionId: string,
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<SessionView> {
+  ): Promise<PreparedHandoff> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -15510,6 +15944,9 @@ export class SessionService {
     });
 
     try {
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
       const agent = parseAgentName(request.agent);
       const validatedExplicitModel =
         agent === "opencode" && request.model !== undefined
@@ -15585,8 +16022,33 @@ export class SessionService {
         },
       });
 
-      let spawned = await this.spawn(
-        resolveHandoffSpawnRequest(sourceForSpawn, {
+      const token = Symbol(`handoff:${sessionId}`);
+      const receiptToken = Symbol(`handoff-receipt:${sessionId}`);
+      const lifecycleIds = this.lifecycleIdsFor(sourceForSpawn);
+      const sourceStamp: HandoffSourceStamp = {
+        id: sourceForSpawn.id,
+        workspaceId: workspaceIdOf(sourceForSpawn),
+        status: sourceForSpawn.status,
+        ...(sourceForSpawn.stopReason !== undefined
+          ? { stopReason: sourceForSpawn.stopReason }
+          : {}),
+        updatedAt: sourceForSpawn.updatedAt,
+        tmuxSession: sourceForSpawn.tmuxSession,
+      };
+      this.handoffsInFlight.set(sessionId, { token, lifecycleIds, sourceStamp });
+      const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+      const carryTags = (session.slots?.tags ?? []).filter((tag) => knownTags.has(tag));
+      return {
+        token,
+        lifecycleIds,
+        sourceStamp,
+        sourceProject: session.project,
+        sourcePr: session.pr,
+        originalTask,
+        carryTags,
+        admissionReservation,
+        receiptToken,
+        spawnRequest: resolveHandoffSpawnRequest(sourceForSpawn, {
           prompt,
           agent,
           ...(model !== undefined ? { model } : {}),
@@ -15594,56 +16056,18 @@ export class SessionService {
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
         }),
-        {
+        spawnOptions: {
           replacingSessionId: session.id,
           admissionReservation,
           modeResolution: "carried",
           closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
           ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
+          receiptToken,
         },
-      );
-      this.clearCloseoutOwner(session.id);
-
-      const spawnedRecord = readSession(this.config.dataDir, spawned.id);
-      if (spawnedRecord) {
-        writeSession(this.config.dataDir, {
-          ...spawnedRecord,
-          ...(session.pr ? { pr: session.pr } : {}),
-          originalTaskPrompt: originalTask,
-          updatedAt: nowIso(),
-        });
-      }
-
-      if (session.slots?.tags?.length) {
-        const knownTags = new Set(this.config.tags.map((tag) => tag.name));
-        const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
-        if (carryTags.length > 0) {
-          try {
-            spawned = await this.updateSlots(spawned.id, {
-              tags: carryTags,
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.handoff.carry_slots_failed", {
-              level: "warn",
-              sessionId,
-              projectId: session.project,
-              message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
-            });
-          }
-        }
-      }
-
-      await this.applyManualStatusLocked(
-        session.id,
-        "completed",
-        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true, eventAction: "handoff" },
-      );
-
-      return spawned;
-    } finally {
+      };
+    } catch (error) {
       this.admissionReservations.delete(admissionReservation);
+      throw error;
     }
   }
 
@@ -15681,9 +16105,62 @@ export class SessionService {
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.tryDeliverQueuedMessageLocked(sessionId),
-    );
+    if (this.queueDeliveryInFlight.has(sessionId) || this.memoryHold.engaged) return false;
+    this.queueDeliveryInFlight.add(sessionId);
+    let nextMessage: string | undefined;
+    try {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) return false;
+      nextMessage = queuedMessages(session)[0];
+      if (!nextMessage) return false;
+      const result = await this.runDeliveryTransaction(
+        sessionId,
+        nextMessage,
+        { kind: "queued-drain", message: nextMessage },
+        { recoverOnLiveAckTimeout: true },
+      );
+      if (!result.record) return false;
+      this.queuedMessageDeliveryLastFailure.delete(sessionId);
+      if (result.recovered) {
+        this.logEvent("session.message.delivery_recovered", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Recovered a delivered queued message to ${sessionId} after a submit ack timeout`,
+          details: {
+            agent: result.recovered.agent,
+            lastScannedFile: result.recovered.lastScannedFile,
+            elapsedMs: result.recovered.elapsedMs,
+            processAlive: result.recovered.processAlive,
+            messageLength: nextMessage.length,
+          },
+        });
+      } else {
+        this.logEvent("session.message.sent", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message: `Delivered queued message to ${sessionId}`,
+          details: { messageLength: nextMessage.length },
+        });
+      }
+      return true;
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      const lastFailure = this.queuedMessageDeliveryLastFailure.get(sessionId);
+      if (lastFailure !== failure) {
+        this.queuedMessageDeliveryLastFailure.set(sessionId, failure);
+        this.logEvent("session.message.delivery_failed", {
+          level: "error",
+          sessionId,
+          message: `Failed to deliver queued message to ${sessionId}: ${failure}`,
+          details: { ...(nextMessage ? { messageLength: nextMessage.length } : {}) },
+        });
+      }
+      return true;
+    } finally {
+      this.queueDeliveryInFlight.delete(sessionId);
+    }
   }
 
   private async tryDeliverQueuedMessageLocked(sessionId: string): Promise<boolean> {
