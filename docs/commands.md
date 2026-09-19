@@ -160,6 +160,8 @@ Send controls belong to the recipient. Spawn controls belong to the first succes
 `--thread` suppresses one supported provider thread for this trigger route and destination.
 `--subscription` suppresses one source/event/trigger/action route and destination.
 
+Pick the scope by lifetime. An event suppression is bound to one emitted occurrence: every event handle in a delivery carries that same occurrence, so they collapse onto one suppression and `list` shows a single row. A later poll that re-emits the same provider comment is a new occurrence and is not covered. A thread suppression is bound to the provider thread id, which outlives any one occurrence — reach for `--thread` when a thread keeps coming back.
+
 Inside a session, `SPUR_SESSION` supplies the target session. Passing a different `--session` fails. Outside a session, pass `--session`.
 
 Trigger prompts print the session-bound wrapper form, for example:
