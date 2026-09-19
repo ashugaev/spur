@@ -177,11 +177,12 @@ const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${nam
 const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolvedValue(new Set());
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
-const lookupTmuxPanePidMock = vi.fn(() =>
-  Promise.resolve<{ status: "ok"; panePid: number | null } | { status: "unavailable" }>({
-    status: "ok",
-    panePid: null,
-  }),
+const lookupTmuxPanePidMock = vi.fn(
+  (_sessionName?: string, _options?: { fresh?: boolean }) =>
+    Promise.resolve<{ status: "ok"; panePid: number | null } | { status: "unavailable" }>({
+      status: "ok",
+      panePid: null,
+    }),
 );
 const getFleetSessionRssBytesMock = vi
   .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
@@ -1574,7 +1575,9 @@ describe("SessionService", () => {
     captureTmuxPaneOrEmptyMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
-    lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
+    lookupTmuxPanePidMock.mockReset().mockImplementation(async (_name, options) =>
+      options?.fresh ? { status: "unavailable" } : { status: "ok", panePid: null },
+    );
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
     readCgroupPressureMock.mockReset().mockReturnValue(null);
@@ -27957,6 +27960,7 @@ describe("SessionService", () => {
     });
     tmuxSessionExistsMock.mockImplementation(async () => !runtimeKilled || restoredTmuxCreated);
     tmuxPaneDeadMock.mockImplementation(async () => runtimeKilled && !restoredTmuxCreated);
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
     isProcessRunningInTmuxMock.mockImplementation(
       async () => !runtimeKilled || restoredTmuxCreated,
     );
@@ -27970,6 +27974,51 @@ describe("SessionService", () => {
 
     expect(restored).toMatchObject({ id: "api-1", status: "running" });
     expect(createTmuxSessionMock).toHaveBeenCalledOnce();
+  });
+
+  it("restores when structured working state outlives an externally removed pane", async () => {
+    const sessions = createSessionStore();
+    let runtimeAbsenceObserved = false;
+    let restoredTmuxCreated = false;
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "working",
+      reader: {
+        filePath: "test.jsonl",
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      },
+    });
+    lookupTmuxPanePidMock.mockImplementation(async (_name, options?: { fresh?: boolean }) => {
+      if (options?.fresh) runtimeAbsenceObserved = true;
+      return {
+        status: "ok",
+        panePid: restoredTmuxCreated ? process.pid : null,
+      };
+    });
+    tmuxSessionExistsMock.mockImplementation(
+      async () => !runtimeAbsenceObserved || restoredTmuxCreated,
+    );
+    tmuxPaneDeadMock.mockImplementation(
+      async () => runtimeAbsenceObserved && !restoredTmuxCreated,
+    );
+    createTmuxSessionMock.mockImplementation(async () => {
+      restoredTmuxCreated = true;
+    });
+    // Generic status probes stay stale/alive, matching the smoke failure:
+    // only the fresh expected-pane lookup observes the external tmux kill.
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const service = await createDisposedSessionService();
+    sessions.set("api-1", runningSession());
+    const restored = await service.restore("api-1");
+
+    expect(restored).toMatchObject({ id: "api-1", status: "running" });
+    expect(createTmuxSessionMock).toHaveBeenCalledOnce();
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ id: "api-1", status: "stopped" }),
+    );
   });
 
   it("waits for native resume state to appear before restoring", async () => {
@@ -42072,7 +42121,11 @@ describe("SessionService", () => {
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
       readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
-      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      // Leave restore admission inconclusive; this test owns the later
+      // duplicate-agent scan and supplies its authoritative no-pane result.
+      lookupTmuxPanePidMock
+        .mockResolvedValueOnce({ status: "unavailable" })
+        .mockResolvedValue({ status: "ok", panePid: null });
       findForeignAgentProcessesForSessionMock.mockResolvedValue({ status: "ok", pids: [777] });
 
       const service = await createDisposedSessionService();

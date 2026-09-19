@@ -14151,9 +14151,14 @@ export class SessionService {
   // probe failure must not replace the error that actually matters (a spawn
   // failure, for one). A thrown lookup reads as "unavailable", the same
   // fail-safe answer a failed `list-panes` produces.
-  private async lookupPanePidQuietly(tmuxSession: string): Promise<TmuxPanePidLookup> {
+  private async lookupPanePidQuietly(
+    tmuxSession: string,
+    options?: { fresh?: boolean },
+  ): Promise<TmuxPanePidLookup> {
     try {
-      return await lookupTmuxPanePid(tmuxSession);
+      return options
+        ? await lookupTmuxPanePid(tmuxSession, options)
+        : await lookupTmuxPanePid(tmuxSession);
     } catch {
       return { status: "unavailable" };
     }
@@ -15196,12 +15201,55 @@ export class SessionService {
     request: RestoreSessionRequest,
     claim: SessionLifecycleStamp,
   ): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
+    let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
     if (!this.lifecycleStateMatches(session, claim)) {
       throw new Error(`Session ${sessionId} changed before restore`);
+    }
+    if (session.status === "running" || session.status === "spawning") {
+      const pane = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
+      if (pane.status === "ok" && pane.panePid === null) {
+        const previousStatus = session.status;
+        session = await this.withSessionLifecycleLocks(
+          this.lifecycleIdsFor(session),
+          async () => {
+            const latest = readSession(this.config.dataDir, sessionId);
+            if (!latest || !this.lifecycleStampMatches(latest, claim)) {
+              throw new Error(`Session ${sessionId} changed before restore reconciliation`);
+            }
+            const latestNoPorts = this.sessionWithReleasedSidecarPorts(latest);
+            const {
+              error: _ignoredError,
+              stopReason: _ignoredStopReason,
+              ...stoppedBase
+            } = latestNoPorts;
+            const stopped: SessionRecord = {
+              ...stoppedBase,
+              status: "stopped",
+              updatedAt: nowIso(),
+            };
+            writeSession(this.config.dataDir, stopped);
+            this.stateCache.delete(sessionId);
+            claim = this.lifecycleStamp(stopped);
+            return stopped;
+          },
+        );
+        await this.teardownSessionSidecars(session).catch(() => {});
+        this.logEvent("session.runtime.stopped", {
+          level: "warn",
+          sessionId,
+          projectId: session.project,
+          message: `Marked ${sessionId} stopped before restore because its expected tmux pane is absent`,
+          details: {
+            previousStatus,
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            reason: "restore",
+          },
+        });
+      }
     }
     this.clearTargetGoneNudgeGate(sessionId);
     // A restore can replay every sidecar afresh (directly, or via
