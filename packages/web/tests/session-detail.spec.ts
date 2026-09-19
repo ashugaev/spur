@@ -658,7 +658,7 @@ test.describe("S1: Session detail header", () => {
     await expect(page.locator("h1")).toContainText("Agent title");
   });
 
-  test("edit title opens empty on a derived title", async ({ page }) => {
+  test("edit title always prefills with the currently displayed title", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s1-derived-title",
       prompt: "Implement the derived-title feature end to end",
@@ -668,8 +668,12 @@ test.describe("S1: Session detail header", () => {
     await page.goto(`/sessions/${session.id}`);
     await expect(page.locator("h1")).toContainText("Implement the derived-title feature");
 
+    // No stored slot title: the dialog still prefills from the derived
+    // string shown in the <h1>, never an empty input.
     await openTitleMenu(page);
-    await expect(page.getByLabel("Session title")).toHaveValue("");
+    await expect(page.getByLabel("Session title")).toHaveValue(
+      "Implement the derived-title feature end to end",
+    );
   });
 
   test("kebab menu opens Change title on a touch device with no prior hover", async ({

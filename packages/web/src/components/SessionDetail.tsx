@@ -2436,9 +2436,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
   const openTitleEditor = useCallback(() => {
     if (!session) return;
-    setTitleDraft(session.title ?? "");
+    // Always prefill with the title currently shown in the <h1> — the
+    // derived/fallback string when the session has no stored title, not an
+    // empty input.
+    setTitleDraft(title);
     setTitleEditing(true);
-  }, [session]);
+  }, [session, title]);
   const closeTitleEditor = useCallback(() => {
     setTitleEditing(false);
   }, []);
@@ -3097,7 +3100,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               Logs
             </button>
-            <div className="relative ml-auto" ref={sessionMenu.containerRef}>
+            <div className="relative" ref={sessionMenu.containerRef}>
               <button
                 aria-expanded={sessionMenuOpen}
                 aria-haspopup="menu"
