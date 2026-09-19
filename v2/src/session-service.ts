@@ -274,11 +274,13 @@ import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  type AppliedSlotsUpdate,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -310,7 +312,6 @@ import {
 import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
-  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -466,6 +467,7 @@ import {
   type TagDefinition,
   type TranscriptEntry,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type TodoActor,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
@@ -10502,14 +10504,7 @@ export class SessionService {
     options?: { touchUpdatedAt?: boolean },
   ): SessionRecord | null {
     const workspaceId = workspaceIdOf(member);
-    const stored = readWorkspaceState(this.config.dataDir, workspaceId);
-    const nextState: WorkspaceState = {
-      ...state,
-      ...(state.manualTitleOverride || stored?.manualTitleOverride
-        ? { manualTitleOverride: true }
-        : {}),
-    };
-    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
+    writeWorkspaceState(this.config.dataDir, workspaceId, state);
     const owner =
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
     if (!owner) {
@@ -10519,13 +10514,13 @@ export class SessionService {
       ...owner,
       ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
     };
-    if (nextState.slots) {
-      mirrored.slots = nextState.slots;
+    if (state.slots) {
+      mirrored.slots = state.slots;
     } else {
       delete mirrored.slots;
     }
-    if (nextState.pr) {
-      mirrored.pr = nextState.pr;
+    if (state.pr) {
+      mirrored.pr = state.pr;
     } else {
       delete mirrored.pr;
     }
@@ -12796,10 +12791,13 @@ export class SessionService {
     );
   }
 
-  async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
+  async updateSlots(
+    sessionId: string,
+    request: UpdateSessionSlotsRequest,
+  ): Promise<UpdateSessionSlotsResponse> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     // Slots (title/links/tags/pr) are workspace-owned: mutations always land
     // on the workspace's own state, so every member sees the same slots.
@@ -12822,39 +12820,44 @@ export class SessionService {
       (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
     );
     const genericUnlinks = normalized.unlinkLabels;
-    const conditionalTitleBlocked =
-      normalized.setTitleIfAbsent === true && current.manualTitleOverride === true;
+    // Whether a title write is a no-op once-only initializer (agent
+    // `--title-if-absent` against an already-set title) or a blocked manual
+    // lock (`titleSource === "manual"`) is decided in ONE place:
+    // `applyNormalizedSlotsUpdate`'s `blockedTitleEdit`/`hasExistingTitle`
+    // logic. Always pass the title through so that function sees it and can
+    // return "blocked" with `MANUAL_TITLE_LOCK_MESSAGE`; do not re-derive the
+    // block decision here.
     const hasGenericChanges =
-      (normalized.title !== undefined && !conditionalTitleBlocked) ||
+      normalized.title !== undefined ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       genericUnlinks.length > 0 ||
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
-    const slots = hasGenericChanges
-      ? applySlotsUpdate(current.slots, {
-          ...(normalized.title !== undefined && !conditionalTitleBlocked
+    const applied: AppliedSlotsUpdate = hasGenericChanges
+      ? applyNormalizedSlotsUpdate(current.slots, {
+          ...(normalized.title !== undefined
             ? {
                 title: normalized.title,
                 ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
               }
             : {}),
-          ...(normalized.clearTitle ? { clearTitle: true } : {}),
-          ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
-          ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
-          ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
-          ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
+          clearTitle: normalized.clearTitle,
+          source: normalized.source,
+          links: genericLinks,
+          unlinkLabels: genericUnlinks,
+          tags: normalized.tags,
+          untags: normalized.untags,
         })
-      : current.slots;
+      : {
+          ...(current.slots ? { slots: current.slots } : {}),
+          result: { titleResult: "unchanged" },
+        };
+    const slots = applied.slots;
     const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
     const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
-      ...(current.manualTitleOverride ||
-      normalized.clearTitle ||
-      (normalized.title !== undefined && !normalized.setTitleIfAbsent)
-        ? { manualTitleOverride: true }
-        : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
     const displaySlots = deriveSessionSlots(nextState);
@@ -12866,6 +12869,8 @@ export class SessionService {
       details: {
         title: displaySlots?.title ?? null,
         linkCount: displaySlots?.links.length ?? 0,
+        titleResult: applied.result.titleResult,
+        ...(applied.result.message ? { message: applied.result.message } : {}),
       },
     });
     // The API response is always the CALLER's view, never the workspace
@@ -12875,7 +12880,10 @@ export class SessionService {
       owner?.id === sessionId
         ? owner
         : (readSession(this.config.dataDir, sessionId) ?? currentSession);
-    return this.enrich(callerRecord);
+    return {
+      ...(await this.enrich(callerRecord)),
+      slotUpdate: applied.result,
+    };
   }
 
   async startSidecar(
@@ -15619,9 +15627,10 @@ export class SessionService {
         const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
         if (carryTags.length > 0) {
           try {
-            spawned = await this.updateSlots(spawned.id, {
+            const { slotUpdate: _slotUpdate, ...spawnedView } = await this.updateSlots(spawned.id, {
               tags: carryTags,
             });
+            spawned = spawnedView;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logEvent("session.handoff.carry_slots_failed", {

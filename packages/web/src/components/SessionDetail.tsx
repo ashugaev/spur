@@ -24,6 +24,7 @@ import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
+import { TitleEditDialog } from "@/components/TitleEditDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
@@ -32,6 +33,7 @@ import { TagEditor } from "@/components/TagEditor";
 import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -119,6 +121,7 @@ import {
   type SpurSidecarPortConflictCandidate,
   type SpurSidecarStopResponse,
   type SpurSessionView,
+  type SpurUpdateSessionSlotsResponse,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
@@ -234,6 +237,16 @@ function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
         strokeLinejoin="round"
         strokeWidth="1.5"
       />
+    </svg>
+  );
+}
+
+function KebabIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
+      <circle cx="8" cy="2.5" r="1.5" />
+      <circle cx="8" cy="8" r="1.5" />
+      <circle cx="8" cy="13.5" r="1.5" />
     </svg>
   );
 }
@@ -1606,6 +1619,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
   const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -2417,7 +2434,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [error, session, title]);
 
   const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
-
+  const openTitleEditor = useCallback(() => {
+    if (!session) return;
+    // Always prefill with the title currently shown in the <h1> — the
+    // derived/fallback string when the session has no stored title, not an
+    // empty input.
+    setTitleDraft(title);
+    setTitleEditing(true);
+  }, [session, title]);
+  const closeTitleEditor = useCallback(() => {
+    setTitleEditing(false);
+  }, []);
+  const sessionMenu = useAnchoredMenu({
+    open: sessionMenuOpen,
+    onClose: () => setSessionMenuOpen(false),
+    contentDeps: [],
+    preferredSide: "below",
+    align: "end",
+  });
+  const updateManualTitle = useCallback(
+    async (nextTitle: string | null) => {
+      if (!session || titleSaving) return;
+      setTitleSaving(true);
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: nextTitle }),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to update title"));
+        }
+        const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
+        applySessionUpdate(toDashboardSession(payload));
+        setTitleEditing(false);
+        setTitleDraft("");
+      } catch (titleError) {
+        showErrorToast(errorMessage(titleError, "Failed to update title"));
+      } finally {
+        setTitleSaving(false);
+      }
+    },
+    [session, sessionId, titleSaving, showErrorToast, applySessionUpdate],
+  );
+  const saveTitleDraft = useCallback(() => {
+    const trimmed = titleDraft.trim();
+    void updateManualTitle(trimmed.length > 0 ? trimmed : null);
+  }, [titleDraft, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2731,6 +2794,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
+            {titleEditing ? (
+              <TitleEditDialog
+                draft={titleDraft}
+                saving={titleSaving}
+                onDraftChange={setTitleDraft}
+                onSave={saveTitleDraft}
+                onCancel={closeTitleEditor}
+              />
+            ) : null}
             {promptView &&
             (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
               <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
@@ -3025,6 +3097,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               Logs
             </button>
+            <div className="relative" ref={sessionMenu.containerRef}>
+              <button
+                aria-expanded={sessionMenuOpen}
+                aria-haspopup="menu"
+                aria-label="More session actions"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                onClick={() => setSessionMenuOpen((value) => !value)}
+                ref={sessionMenu.buttonRef}
+                type="button"
+              >
+                <KebabIcon />
+              </button>
+              {sessionMenuOpen ? (
+                <div
+                  aria-label="Session actions"
+                  className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  ref={sessionMenu.menuRef}
+                  role="menu"
+                  style={sessionMenu.menuStyle}
+                >
+                  <button
+                    className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                    onClick={() => {
+                      setSessionMenuOpen(false);
+                      openTitleEditor();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Change title
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {/* Content */}
