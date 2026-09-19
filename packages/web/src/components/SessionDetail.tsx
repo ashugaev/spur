@@ -2449,6 +2449,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     open: sessionMenuOpen,
     onClose: () => setSessionMenuOpen(false),
     contentDeps: [],
+    preferredSide: "below",
+    align: "end",
   });
   const updateManualTitle = useCallback(
     async (nextTitle: string | null) => {
