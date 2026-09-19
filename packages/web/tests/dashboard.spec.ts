@@ -353,6 +353,86 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: "Project filter: Shepherd" })).toBeVisible();
   });
 
+  test("project menu row hover applies only overlay fill without stacked backgrounds", async ({
+    page,
+  }) => {
+    const projects: ProjectInfo[] = [
+      { id: "hov-a", name: "Alpha", prefix: "alp", path: "/repo/alpha" },
+      { id: "hov-b", name: "Beta", configured: false, prefix: "bet", path: "/repo/beta" },
+    ];
+
+    await mockSessions(page, [], projects);
+    await page.goto("/");
+
+    for (const theme of ["dark", "light"] as const) {
+      if (theme === "light") {
+        await page.getByRole("button", { name: "Switch to light theme" }).click();
+        await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+      }
+
+      const overlayColor = await page.evaluate(() => {
+        const element = document.createElement("div");
+        element.style.backgroundColor = "var(--color-hover-overlay)";
+        document.body.append(element);
+        const color = getComputedStyle(element).backgroundColor;
+        element.remove();
+        return color;
+      });
+      const accentBorderColor = await page.evaluate(() => {
+        const element = document.createElement("div");
+        element.style.borderColor = "var(--color-accent)";
+        document.body.append(element);
+        const color = getComputedStyle(element).borderColor;
+        element.remove();
+        return color;
+      });
+      const transparent = "rgba(0, 0, 0, 0)";
+      const getBg = (loc: ReturnType<typeof page.locator>) =>
+        loc.evaluate((el: Element) => getComputedStyle(el).backgroundColor);
+
+      await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+
+      const allProjectsBtn = page.getByRole("menuitemradio", { name: "All Projects" });
+      const allProjectsRow = allProjectsBtn.locator("xpath=..");
+      const selectedAllBg = await getBg(allProjectsBtn);
+      await allProjectsRow.hover();
+      await expect(allProjectsRow).toHaveCSS("background-color", overlayColor);
+      expect(await getBg(allProjectsBtn)).toBe(selectedAllBg);
+
+      const configuredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Alpha']]");
+      await configuredLi.hover();
+      await expect(configuredLi).toHaveCSS("background-color", overlayColor);
+      const alphaOption = page.getByRole("menuitemradio", { name: "Alpha" });
+      await alphaOption.hover();
+      await expect(alphaOption).toHaveCSS("border-color", accentBorderColor);
+      expect(await getBg(alphaOption)).toBe(transparent);
+      const editAlpha = page.getByRole("menuitem", { name: "Edit Alpha" });
+      expect(await getBg(editAlpha)).toBe(transparent);
+
+      await editAlpha.hover();
+      expect(await getBg(editAlpha)).toBe(transparent);
+
+      const unconfiguredLi = page.locator("xpath=//li[.//button[@aria-label='Edit Beta']]");
+      await unconfiguredLi.hover();
+      await expect(unconfiguredLi).toHaveCSS("background-color", overlayColor);
+
+      await page.getByRole("menuitemradio", { name: "Alpha" }).click();
+      await page.getByRole("button", { name: "Project filter: Alpha" }).click();
+
+      await allProjectsRow.hover();
+      await expect(allProjectsRow).toHaveCSS("background-color", overlayColor);
+      expect(await getBg(allProjectsBtn)).toBe(transparent);
+
+      const selectedBtn = page.getByRole("menuitemradio", { name: "Alpha", checked: true });
+      const selectedBg = await getBg(selectedBtn);
+      const selectedLi = page.locator("xpath=//li[.//button[@aria-checked='true']]");
+      await selectedLi.hover();
+      await expect(selectedLi).toHaveCSS("background-color", overlayColor);
+      expect(await getBg(selectedBtn)).toBe(selectedBg);
+      await page.getByRole("menuitemradio", { name: "All Projects" }).click();
+    }
+  });
+
   test("project edit modal uses in-app delete confirmation", async ({ page }) => {
     let deleted = false;
     let nativeDialogOpened = false;

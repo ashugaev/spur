@@ -607,21 +607,23 @@ function ProjectMenu({
           className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           role="menu"
         >
-          <button
-            aria-checked={selectedProjectId === ""}
-            className={`mb-1 flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
-            onClick={() => {
-              popover.dismiss();
-              onSelectProject("");
-            }}
-            role="menuitemradio"
-            type="button"
-          >
-            <span aria-hidden="true" className="w-3 text-center">
-              {selectedProjectId === "" ? "✓" : ""}
-            </span>
-            <span>All Projects</span>
-          </button>
+          <div className="mb-1 transition hover:bg-[var(--color-hover-overlay)]">
+            <button
+              aria-checked={selectedProjectId === ""}
+              className={`flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
+              onClick={() => {
+                popover.dismiss();
+                onSelectProject("");
+              }}
+              role="menuitemradio"
+              type="button"
+            >
+              <span aria-hidden="true" className="w-3 text-center">
+                {selectedProjectId === "" ? "✓" : ""}
+              </span>
+              <span>All Projects</span>
+            </button>
+          </div>
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
@@ -630,12 +632,12 @@ function ProjectMenu({
                 <li
                   key={project.id}
                   role="none"
-                  className="group flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5 transition hover:bg-[var(--color-accent)]/10"
+                  className="group flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5 transition hover:bg-[var(--color-hover-overlay)]"
                 >
                   {project.configured ? (
                     <button
                       aria-checked={selectedProjectId === project.id}
-                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
+                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
                       onClick={() => {
                         popover.dismiss();
                         onSelectProject(project.id);
@@ -670,7 +672,7 @@ function ProjectMenu({
                   ) : null}
                   <button
                     aria-label={`Edit ${project.name}`}
-                    className="border border-transparent px-1.5 py-1 text-[var(--color-text-tertiary)] transition group-hover:border-[var(--color-border-subtle)] group-hover:bg-[var(--color-accent)]/15 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)]"
+                    className="border border-transparent px-1.5 py-1 text-[var(--color-text-tertiary)] transition group-hover:border-[var(--color-border-subtle)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-accent)]"
                     onClick={() => {
                       popover.dismiss();
                       onEdit(project);
