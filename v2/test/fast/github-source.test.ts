@@ -19,6 +19,10 @@ const recordCommentSeenMock = vi.fn();
 const readLifecycleBaselinedSessionsMock = vi.fn();
 const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
+const readGitHubPollDisabledMock = vi.fn();
+const writeGitHubPollDisabledMock = vi.fn();
+const recordGitHubPollDisabledSessionMock = vi.fn();
+const clearGitHubPollDisabledSessionMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
 const hasRecentSessionUserActionMock = vi.fn();
@@ -32,18 +36,22 @@ vi.mock("../../src/event-log.js", () => ({
 }));
 vi.mock("../../src/metadata.js", () => ({
   clearGitHubMergeConflictRestoreReplay: clearGitHubMergeConflictRestoreReplayMock,
+  clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
   deleteReviewSourceSnapshot: deleteReviewSourceSnapshotMock,
   hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readGitHubPollDisabled: readGitHubPollDisabledMock,
   readGitHubReviewPagination: readGitHubReviewPaginationMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
   recordCommentSeen: recordCommentSeenMock,
+  recordGitHubPollDisabledSession: recordGitHubPollDisabledSessionMock,
   recordLifecycleBaselinedSession: recordLifecycleBaselinedSessionMock,
   recordWorkItem: recordWorkItemMock,
   removeLifecycleBaselinedSession: removeLifecycleBaselinedSessionMock,
+  writeGitHubPollDisabled: writeGitHubPollDisabledMock,
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
   writeGitHubReviewPagination: writeGitHubReviewPaginationMock,
 }));
@@ -225,6 +233,10 @@ describe("github source", () => {
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
     readGitHubReviewPaginationMock.mockReturnValue(new Map());
+    readGitHubPollDisabledMock.mockReturnValue(new Map());
+    writeGitHubPollDisabledMock.mockReturnValue(undefined);
+    recordGitHubPollDisabledSessionMock.mockReturnValue(undefined);
+    clearGitHubPollDisabledSessionMock.mockReturnValue(null);
     // Default: the session has already established its lifecycle baseline, so
     // lifecycle signals emit on transitions. The first-poll-suppression test
     // overrides this to an empty set.
@@ -2925,6 +2937,56 @@ describe("github source", () => {
   });
 
   describe("permanent PR not found", () => {
+    // SHARED FIXTURE: one in-memory fake store backing all four poll-disabled
+    // metadata mocks, keyed `${projectId}/${sourceId}`, so a mutation made through
+    // record*/clear* (what the source actually calls) is visible to a later
+    // readGitHubPollDisabled call — including one made by a freshly started handle
+    // on the same dataDir (A2, A3's fast-suite sibling).
+    let pollDisabledStore: Map<string, Map<string, number>>;
+
+    beforeEach(() => {
+      pollDisabledStore = new Map();
+      readGitHubPollDisabledMock.mockImplementation(
+        (_dataDir: string, projectId: string, sourceId: string) =>
+          new Map(pollDisabledStore.get(`${projectId}/${sourceId}`) ?? []),
+      );
+      writeGitHubPollDisabledMock.mockImplementation(
+        (_dataDir: string, projectId: string, sourceId: string, entries: Map<string, number>) => {
+          const key = `${projectId}/${sourceId}`;
+          if (entries.size === 0) {
+            pollDisabledStore.delete(key);
+          } else {
+            pollDisabledStore.set(key, new Map(entries));
+          }
+        },
+      );
+      recordGitHubPollDisabledSessionMock.mockImplementation(
+        (
+          _dataDir: string,
+          projectId: string,
+          sourceId: string,
+          sessionId: string,
+          prNumber: number,
+        ) => {
+          const key = `${projectId}/${sourceId}`;
+          const map = pollDisabledStore.get(key) ?? new Map<string, number>();
+          map.set(sessionId, prNumber);
+          pollDisabledStore.set(key, map);
+        },
+      );
+      clearGitHubPollDisabledSessionMock.mockImplementation(
+        (_dataDir: string, projectId: string, sourceId: string, sessionId: string) => {
+          const key = `${projectId}/${sourceId}`;
+          const map = pollDisabledStore.get(key);
+          if (!map || !map.has(sessionId)) return null;
+          const prNumber = map.get(sessionId) ?? null;
+          map.delete(sessionId);
+          if (map.size === 0) pollDisabledStore.delete(key);
+          return prNumber;
+        },
+      );
+    });
+
     function disabledEvents(): { event: string }[] {
       return logSpurEventMock.mock.calls
         .map(([, entry]) => entry as { event?: string })
@@ -2967,7 +3029,7 @@ describe("github source", () => {
       expect(disabledEvents()[0]).toEqual(
         expect.objectContaining({
           event: "source.poll.disabled",
-          level: "error",
+          level: "warn",
           projectId: "api",
           sourceId: "pr-watch",
           sessionId: "api-a1b2",
@@ -2976,6 +3038,13 @@ describe("github source", () => {
       );
       expect(errorEvents()).toHaveLength(0);
       expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(recordGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        "api-a1b2",
+        42,
+      );
 
       handle.stop();
     });
@@ -3086,6 +3155,7 @@ describe("github source", () => {
 
       expect(disabledEvents()).toHaveLength(0);
       expect(errorEvents().filter((entry) => entry.sessionId === "api-a1b2")).toHaveLength(1);
+      expect(recordGitHubPollDisabledSessionMock).not.toHaveBeenCalled();
 
       handle.stop();
     });
@@ -3144,6 +3214,7 @@ describe("github source", () => {
       await flushPollCycle();
       expect(ghTransportMock).toHaveBeenCalledTimes(3);
       expect(errorEvents()).toHaveLength(3);
+      expect(recordGitHubPollDisabledSessionMock).not.toHaveBeenCalled();
 
       handle.stop();
     });
@@ -3233,6 +3304,12 @@ describe("github source", () => {
 
       expect(ghTransportMock).toHaveBeenCalledTimes(2);
       expect(disabledEvents()).toHaveLength(1);
+      expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        "api-a1b2",
+      );
 
       handle.stop();
     });
@@ -3274,6 +3351,12 @@ describe("github source", () => {
 
       expect(ghTransportMock).toHaveBeenCalledTimes(3);
       expect(disabledEvents()).toHaveLength(1);
+      expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        "api-a1b2",
+      );
 
       handle.stop();
     });
@@ -3370,6 +3453,275 @@ describe("github source", () => {
         expect.anything(),
       );
       expect(disabledEvents()).toHaveLength(1);
+
+      handle.stop();
+    });
+
+    it("keeps the disable across a source handle restart on the same dataDir", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValue(notFoundEnvelope(42, { withPath: true }));
+
+      const handleA = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+      handleA.runOnStart?.();
+      await flushPollCycle();
+      expect(disabledEvents()).toHaveLength(1);
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      handleA.stop();
+
+      // Simulates reloadAutomation recreating the handle: a brand new closure, same
+      // dataDir/projectId/sourceId. Its start-time seed must see handle A's
+      // record*-mutated store, not an empty in-process Map.
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      const handleB = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+      handleB.runOnStart?.();
+      await flushPollCycle();
+
+      expect(disabledEvents()).toHaveLength(1);
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      handleB.stop();
+    });
+
+    it("polls again after the registry entry is cleared", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValue(notFoundEnvelope(42, { withPath: true }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(disabledEvents()).toHaveLength(1);
+
+      // What enableSourcePoll does in-process: delete the key directly from the
+      // backing store, then the handle's per-tick refresh picks it up.
+      pollDisabledStore.get("api/pr-watch")?.delete("api-a1b2");
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+      expect(disabledEvents()).toHaveLength(2);
+
+      handle.stop();
+    });
+
+    it("prunes the registry only when the session is gone from disk", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(notFoundEnvelope(42, { withPath: true }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      // 1. Disable the session.
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(pollDisabledStore.get("api/pr-watch")?.get("api-a1b2")).toBe(42);
+
+      // 2. Same session, made ineligible (stopped). A cycle must NOT prune it.
+      listSessionsMock.mockReturnValue([makeSession({ status: "stopped" })]);
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(pollDisabledStore.get("api/pr-watch")?.get("api-a1b2")).toBe(42);
+
+      // 3. Session eligible again: still gated, still zero extra gh calls.
+      listSessionsMock.mockReturnValue([makeSession()]);
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      // 4. Session gone from disk entirely: prune fires, empty map removes the key.
+      listSessionsMock.mockReturnValue([]);
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(pollDisabledStore.has("api/pr-watch")).toBe(false);
+      expect(writeGitHubPollDisabledMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        new Map(),
+      );
+
+      handle.stop();
+    });
+
+    it("survives a registry write failure without escaping the poll cycle", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      const sessionA = makeSession();
+      // A different repo than sessionA's so collectGitHubSignalsBatch groups them
+      // into two separate gh() calls (grouping is per-repo) — session order within
+      // the per-session loop below is still A-then-B (listSessions order), which is
+      // what the assertion on "B processed after A in the same loop" depends on.
+      const sessionB = makeSession({
+        id: "api-c3d4",
+        workspaceId: "api-c3d4",
+        pr: { number: 43, repo: "acme/other", url: "https://github.com/acme/other/pull/43" },
+      });
+      listSessionsMock.mockReturnValue([sessionA, sessionB]);
+      recordGitHubPollDisabledSessionMock.mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      // sessionA's call (first): permanent not-found for PR 42.
+      ghTransportMock.mockResolvedValueOnce(notFoundEnvelope(42, { withPath: true }));
+      // sessionB's call (second): a healthy lifecycle poll via the legacyGhAdapter
+      // ghMock chain (pr view, pr checks, review comments, issue comments, reviews).
+      mockLifecyclePoll(prView({ number: 43, url: "https://github.com/acme/other/pull/43" }));
+      const logger = { info: vi.fn(), warn: vi.fn() };
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger,
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(disabledEvents()).toHaveLength(1);
+      expect(disabledEvents()[0]).toEqual(expect.objectContaining({ sessionId: "api-a1b2" }));
+      expect(writeReviewSourceSnapshotMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "github",
+        "api",
+        "pr-watch",
+        "api-c3d4",
+        expect.anything(),
+      );
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("failed to persist poll-disabled state"),
+      );
+
+      handle.stop();
+    });
+
+    it("survives a poll-disabled clear failure during the self-heal rebind", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      // Session rebound to PR 43 while the registry (seeded below) still names the
+      // now-stale disabled PR 42. Reached via :452, not shouldPollThisTick — this
+      // config has runOnStart:true and intervalMs long enough that only
+      // handle.runOnStart() + flushPollCycle ever drives a poll, matching this
+      // file's own note (:99-102) that node:timers ticks never fire here.
+      listSessionsMock.mockReturnValue([
+        makeSession({
+          pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+        }),
+      ]);
+      pollDisabledStore.set("api/pr-watch", new Map([["api-a1b2", 42]]));
+      clearGitHubPollDisabledSessionMock.mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      mockLifecyclePoll(prView({ number: 43, url: "https://github.com/acme/api/pull/43" }));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      handle.stop();
+    });
+
+    it("a mid-cycle clear survives a second session's disable in the same cycle", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      pollDisabledStore.set("api/pr-watch", new Map([["api-a1b2", 42]]));
+      const sessionA = makeSession();
+      const sessionB = makeSession({
+        id: "api-c3d4",
+        workspaceId: "api-c3d4",
+        pr: { number: 43, repo: "acme/api", url: "https://github.com/acme/api/pull/43" },
+      });
+      listSessionsMock.mockReturnValue([sessionA, sessionB]);
+      // Session A is already disabled (seeded above), so isSessionPollGated filters
+      // it out of pollableSessions before collectGitHubSignalsBatch is even called —
+      // the batch this cycle carries only session B's target, one alias (a0). This
+      // mock's own resolution is the real interleave point after :452's gate check
+      // and before the per-session loop reaches session B's :590 write: it mutates
+      // the shared store directly, exactly what a concurrent `poll-enable` request
+      // does in-process, so by the time the loop runs session A's key is already gone.
+      ghTransportMock.mockImplementationOnce(async () => {
+        pollDisabledStore.get("api/pr-watch")?.delete("api-a1b2");
+        return JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null },
+          },
+          errors: [
+            {
+              path: ["a0"],
+              type: "NOT_FOUND",
+              message: "Could not resolve to a PullRequest with the number of 43.",
+            },
+          ],
+        });
+      });
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: false, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      const store = pollDisabledStore.get("api/pr-watch");
+      expect(store?.has("api-a1b2")).toBe(false);
+      expect(store?.get("api-c3d4")).toBe(43);
 
       handle.stop();
     });
