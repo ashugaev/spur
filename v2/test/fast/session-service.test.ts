@@ -7173,6 +7173,31 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
+    it("holds lifecycle authorization through the Enter resend (issue #907 R16)", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agent: "claude" }));
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "waitForSubmitAck")
+        .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+        .mockResolvedValueOnce({ found: true, lastScannedFile: null });
+      const lifecycleLockCounts: number[] = [];
+      sendSubmitKeyToTmuxMock.mockImplementation(async () => {
+        lifecycleLockCounts.push(internals.sessionLifecycleLocks.size);
+      });
+
+      await expect(
+        service.send("api-1", { message: "resend under lifecycle authorization", queue: false }),
+      ).resolves.toMatchObject({ id: "api-1" });
+
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(lifecycleLockCounts).toEqual([1]);
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+      expect(internals.paneWriteLocks.size).toBe(0);
+    });
+
     it("keeps ToDo responsive while fresh-relaunch recovery context awaits acknowledgement", async () => {
       const sessions = createSessionStore();
       sessions.set(

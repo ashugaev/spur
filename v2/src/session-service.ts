@@ -6927,10 +6927,12 @@ export class SessionService {
         });
 
         const outcome = await this.completeAgentMessage(submission, {
-          beforeResend: () =>
-            this.withSessionLifecycleLocks(prepared.lifecycleIds, () =>
-              this.todoNudgeMatches(prepared),
-            ),
+          authorizeResend: (send) =>
+            this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+              if (!(await this.todoNudgeMatches(prepared))) return false;
+              await send();
+              return true;
+            }),
           beforeRecovery: () =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, () =>
               this.todoNudgeMatches(prepared),
@@ -12211,10 +12213,14 @@ export class SessionService {
           },
         );
         const outcome = await this.completeAgentMessage(submission, {
-          beforeResend: () =>
+          authorizeResend: (send) =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
-              return Boolean(current && (await this.paneGenerationMatches(current, generation)));
+              if (!current || !(await this.paneGenerationMatches(current, generation))) {
+                return false;
+              }
+              await send();
+              return true;
             }),
           beforeRecovery: () =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
@@ -12512,12 +12518,17 @@ export class SessionService {
           },
         );
         const recoveryOutcome = await this.completeAgentMessage(recoverySubmission, {
-          beforeResend: () =>
+          authorizeResend: (send) =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
-              return Boolean(
-                current && (await this.paneGenerationMatches(current, prepared.generation)),
-              );
+              if (
+                !current ||
+                !(await this.paneGenerationMatches(current, prepared.generation))
+              ) {
+                return false;
+              }
+              await send();
+              return true;
             }),
           beforeRecovery: () =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
@@ -12573,6 +12584,15 @@ export class SessionService {
             current && (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
+      const authorizeGenerationResend = (send: () => Promise<void>) =>
+        this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
+            return false;
+          }
+          await send();
+          return true;
+        });
       let recovered: SubmitAckTimeoutError | null = null;
       try {
         const submission = await this.beginAgentMessage(prepared.session, message, {
@@ -12592,7 +12612,7 @@ export class SessionService {
             }),
         });
         const outcome = await this.completeAgentMessage(submission, {
-          beforeResend: generationStillMatches,
+          authorizeResend: authorizeGenerationResend,
           beforeRecovery: generationStillMatches,
         });
         if (outcome === "stale") {
@@ -12962,6 +12982,12 @@ export class SessionService {
             (await this.paneGenerationMatches(latest, generation)),
         );
       };
+      const authorizeGenerationResend = (send: () => Promise<void>) =>
+        this.withSessionLifecycleLocks(lifecycleIds, async () => {
+          if (!(await generationStillMatches())) return false;
+          await send();
+          return true;
+        });
       const outcome = await this.completeAgentMessage(
         await this.beginAgentMessage(session, message, {
           ...options,
@@ -12973,8 +12999,9 @@ export class SessionService {
             }),
         }),
         {
-          beforeResend: generationStillMatches,
-          beforeRecovery: generationStillMatches,
+          authorizeResend: authorizeGenerationResend,
+          beforeRecovery: () =>
+            this.withSessionLifecycleLocks(lifecycleIds, generationStillMatches),
         },
       );
       if (outcome === "stale") {
@@ -13150,7 +13177,7 @@ export class SessionService {
   private async completeAgentMessage(
     started: StartedAgentMessage,
     options?: {
-      beforeResend?: () => Promise<boolean>;
+      authorizeResend?: (send: () => Promise<void>) => Promise<boolean>;
       beforeRecovery?: () => Promise<boolean>;
     },
   ): Promise<AgentSendOutcome | "stale"> {
@@ -13190,10 +13217,12 @@ export class SessionService {
             break;
           }
         }
-        if (options?.beforeResend && !(await options.beforeResend())) {
-          return "stale";
+        const resend = () => sendSubmitKeyToTmux(session.tmuxSession);
+        if (options?.authorizeResend) {
+          if (!(await options.authorizeResend(resend))) return "stale";
+        } else {
+          await resend();
         }
-        await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
     // fresh:true — this value decides whether an unacked send throws, and the
@@ -15516,14 +15545,18 @@ export class SessionService {
           },
         );
         const restoreSendOutcome = await this.completeAgentMessage(restoreSubmission, {
-            beforeResend: () =>
+            authorizeResend: (send) =>
               this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
                 const latest = readSession(this.config.dataDir, sessionId);
-                return Boolean(
-                  latest &&
-                  restoreGeneration &&
-                  (await this.paneGenerationMatches(latest, restoreGeneration)),
-                );
+                if (
+                  !latest ||
+                  !restoreGeneration ||
+                  !(await this.paneGenerationMatches(latest, restoreGeneration))
+                ) {
+                  return false;
+                }
+                await send();
+                return true;
               }),
             beforeRecovery: () =>
               this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
@@ -16045,14 +16078,18 @@ export class SessionService {
         },
       );
       const outcome = await this.completeAgentMessage(submission, {
-        beforeResend: () =>
+        authorizeResend: (send) =>
           this.withWorkspaceLifecycleLocks(sessionId, async () => {
             const current = readSession(this.config.dataDir, sessionId);
-            return Boolean(
-              current &&
-              this.lifecycleStampMatches(current, prepared.stamp) &&
-              (await this.paneGenerationMatches(current, generation)),
-            );
+            if (
+              !current ||
+              !this.lifecycleStampMatches(current, prepared.stamp) ||
+              !(await this.paneGenerationMatches(current, generation))
+            ) {
+              return false;
+            }
+            await send();
+            return true;
           }),
         beforeRecovery: () =>
           this.withWorkspaceLifecycleLocks(sessionId, async () => {
