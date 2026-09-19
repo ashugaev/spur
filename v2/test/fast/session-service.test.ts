@@ -27928,6 +27928,50 @@ describe("SessionService", () => {
     ).toBe(true);
   });
 
+  it("uses lifecycle state reconciled while restore classification was in flight", async () => {
+    const sessions = createSessionStore();
+    let runtimeKilled = false;
+    let restoredTmuxCreated = false;
+    let reconciliationPersisted = false;
+    readClaudeJsonlStateMock.mockImplementation(async () => {
+      if (!reconciliationPersisted) {
+        reconciliationPersisted = true;
+        runtimeKilled = true;
+        const stored = sessions.get("api-1") ?? runningSession();
+        const reconciled = {
+          ...stored,
+          status: "stopped" as const,
+          updatedAt: "2026-03-18T10:05:00.000Z",
+        };
+        sessions.set("api-1", reconciled);
+      }
+      return {
+        state: "waiting",
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        },
+      };
+    });
+    tmuxSessionExistsMock.mockImplementation(async () => !runtimeKilled || restoredTmuxCreated);
+    tmuxPaneDeadMock.mockImplementation(async () => runtimeKilled && !restoredTmuxCreated);
+    isProcessRunningInTmuxMock.mockImplementation(
+      async () => !runtimeKilled || restoredTmuxCreated,
+    );
+    createTmuxSessionMock.mockImplementation(async () => {
+      restoredTmuxCreated = true;
+    });
+
+    const service = await createDisposedSessionService();
+    sessions.set("api-1", runningSession());
+    const restored = await service.restore("api-1");
+
+    expect(restored).toMatchObject({ id: "api-1", status: "running" });
+    expect(createTmuxSessionMock).toHaveBeenCalledOnce();
+  });
+
   it("waits for native resume state to appear before restoring", async () => {
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
     buildAgentRestorePlanMock.mockResolvedValueOnce(null).mockResolvedValue({

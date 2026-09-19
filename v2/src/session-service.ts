@@ -15233,11 +15233,14 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    const current = await this.enrich(session);
-    claim = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+    let current = await this.enrich(session);
+    const accepted = await this.withSessionLifecycleLocks<{
+      claim: SessionLifecycleStamp;
+      latest?: SessionRecord;
+    }>(this.lifecycleIdsFor(session), async () => {
       const latest = readSession(this.config.dataDir, sessionId);
       if (!latest) throw new Error(`Session ${sessionId} changed before restore`);
-      if (this.lifecycleStateMatches(latest, claim)) return claim;
+      if (this.lifecycleStateMatches(latest, claim)) return { claim };
       const reconciledDeadRuntime =
         (claim.status === "running" || claim.status === "spawning") &&
         (latest.status === "stopped" || latest.status === "errored") &&
@@ -15245,8 +15248,12 @@ export class SessionService {
       if (!reconciledDeadRuntime) {
         throw new Error(`Session ${sessionId} changed before restore`);
       }
-      return this.lifecycleStamp(latest);
+      return { claim: this.lifecycleStamp(latest), latest };
     });
+    claim = accepted.claim;
+    if (accepted.latest) {
+      current = await this.enrich(accepted.latest);
+    }
     if (!isRestorableSession(current)) {
       this.logEvent("session.restore.unrestorable", {
         level: "warn",
