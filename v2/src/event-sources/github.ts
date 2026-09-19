@@ -371,7 +371,13 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // is not on disk, so the next handle recreation re-arms one more event.
   const safeRecordPollDisabled = (sessionId: string, prNumber: number): void => {
     try {
-      recordGitHubPollDisabledSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId, prNumber);
+      recordGitHubPollDisabledSession(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        sessionId,
+        prNumber,
+      );
     } catch (error) {
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] failed to persist poll-disabled state for ${sessionId}: ${
