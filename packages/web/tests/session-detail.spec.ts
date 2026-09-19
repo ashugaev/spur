@@ -155,6 +155,11 @@ async function getTerminalSocketCount(page: Page): Promise<number> {
   });
 }
 
+async function openTitleMenu(page: Page): Promise<void> {
+  await page.getByRole("button", { name: /more session actions/i }).click();
+  await page.getByRole("menuitem", { name: /change title/i }).click();
+}
+
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
     void route.fulfill({
@@ -519,8 +524,7 @@ test.describe("S1: Session detail header", () => {
     });
 
     await page.goto(`/sessions/${currentSession.id}`);
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
     await page.getByLabel("Session title").fill("Manual title");
     await page.getByRole("button", { name: /^save$/i }).click();
@@ -529,8 +533,7 @@ test.describe("S1: Session detail header", () => {
     await expect(page.locator("h1")).toContainText("Manual title");
     expect(titleRequests).toContainEqual({ title: "Manual title" });
 
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await page.getByRole("button", { name: /^clear$/i }).click();
 
     await expect(page.locator("h1")).toContainText("Implement the feature");
@@ -592,8 +595,7 @@ test.describe("S1: Session detail header", () => {
     await page.clock.fastForward(4_000);
     await expect.poll(() => getCallCount).toBe(2);
 
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await page.getByRole("button", { name: /^clear$/i }).click();
     await expect(page.locator("h1")).toContainText("Implement the feature");
 
@@ -615,21 +617,18 @@ test.describe("S1: Session detail header", () => {
     await page.goto(`/sessions/${session.id}`);
     const dialog = page.getByRole("dialog", { name: /edit title/i });
 
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await expect(dialog).toBeVisible();
     await expect(page.getByLabel("Session title")).toBeFocused();
     await page.getByRole("button", { name: /^cancel$/i }).click();
     await expect(dialog).toBeHidden();
 
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await expect(dialog).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await expect(dialog).toBeVisible();
     await page.mouse.click(2, 2);
     await expect(dialog).toBeHidden();
@@ -650,8 +649,7 @@ test.describe("S1: Session detail header", () => {
     });
 
     await page.goto(`/sessions/${session.id}`);
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await page.getByLabel("Session title").fill("Manual title");
     await page.getByRole("button", { name: /^save$/i }).click();
 
@@ -670,12 +668,11 @@ test.describe("S1: Session detail header", () => {
     await page.goto(`/sessions/${session.id}`);
     await expect(page.locator("h1")).toContainText("Implement the derived-title feature");
 
-    await page.locator("h1").hover();
-    await page.getByRole("button", { name: /edit title/i }).click();
+    await openTitleMenu(page);
     await expect(page.getByLabel("Session title")).toHaveValue("");
   });
 
-  test("edit title icon is tappable on a touch device without a prior hover", async ({
+  test("kebab menu opens Change title on a touch device with no prior hover", async ({
     browser,
   }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
@@ -690,14 +687,32 @@ test.describe("S1: Session detail header", () => {
       await page.goto(`/sessions/${session.id}`);
       await expect(page.locator("h1")).toContainText("Agent title");
 
-      // No hover precedes this tap: a touch device never fires :hover, so the
-      // button must already be reachable (no `force`) via the coarse-pointer
-      // always-visible affordance.
-      await page.getByRole("button", { name: /edit title/i }).tap();
+      // The kebab sits in the normal action row, not a hover-revealed
+      // overlay: a touch device never fires :hover, so both taps below must
+      // land without `force`.
+      await page.getByRole("button", { name: /more session actions/i }).tap();
+      await page.getByRole("menuitem", { name: /change title/i }).tap();
       await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
     } finally {
       await context.close();
     }
+  });
+
+  test("kebab menu is reachable and operable by keyboard", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-keyboard-title",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /more session actions/i }).focus();
+    await page.keyboard.press("Enter");
+    const menuItem = page.getByRole("menuitem", { name: /change title/i });
+    await expect(menuItem).toBeVisible();
+    await menuItem.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
   });
 
   test("activity dot visible", async ({ page }) => {

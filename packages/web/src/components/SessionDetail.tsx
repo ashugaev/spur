@@ -33,6 +33,7 @@ import { TagEditor } from "@/components/TagEditor";
 import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -240,20 +241,12 @@ function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   );
 }
 
-function EditIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+function KebabIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
-    <svg
-      aria-hidden="true"
-      className={className}
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 16 16"
-    >
-      <path d="M8 13.5h5.5" />
-      <path d="M10.5 2.5a1.41 1.41 0 0 1 2 2L5 12l-2.667.667L3 10Z" />
+    <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
+      <circle cx="8" cy="2.5" r="1.5" />
+      <circle cx="8" cy="8" r="1.5" />
+      <circle cx="8" cy="13.5" r="1.5" />
     </svg>
   );
 }
@@ -1629,6 +1622,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [titleEditing, setTitleEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaving, setTitleSaving] = useState(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -2448,6 +2442,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const closeTitleEditor = useCallback(() => {
     setTitleEditing(false);
   }, []);
+  const sessionMenu = useAnchoredMenu({
+    open: sessionMenuOpen,
+    onClose: () => setSessionMenuOpen(false),
+    contentDeps: [],
+  });
   const updateManualTitle = useCallback(
     async (nextTitle: string | null) => {
       if (!session || titleSaving) return;
@@ -2791,20 +2790,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               ) : null}
             </div>
 
-            <div className="group/title relative mt-2 min-w-0">
-              <h1 className="min-w-0 pr-7 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
-                {title}
-              </h1>
-              <button
-                aria-haspopup="dialog"
-                aria-label="Edit title"
-                className="pointer-events-none absolute right-0 top-0 m-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] p-1 text-[var(--color-text-primary)] opacity-0 transition duration-150 hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] group-hover/title:pointer-events-auto group-hover/title:opacity-100 group-focus-within/title:pointer-events-auto group-focus-within/title:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100"
-                onClick={openTitleEditor}
-                type="button"
-              >
-                <EditIcon />
-              </button>
-            </div>
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
+              {title}
+            </h1>
             {titleEditing ? (
               <TitleEditDialog
                 draft={titleDraft}
@@ -3109,6 +3097,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               Logs
             </button>
+            <div className="relative ml-auto" ref={sessionMenu.containerRef}>
+              <button
+                aria-expanded={sessionMenuOpen}
+                aria-haspopup="menu"
+                aria-label="More session actions"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                onClick={() => setSessionMenuOpen((value) => !value)}
+                ref={sessionMenu.buttonRef}
+                type="button"
+              >
+                <KebabIcon />
+              </button>
+              {sessionMenuOpen ? (
+                <div
+                  aria-label="Session actions"
+                  className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  ref={sessionMenu.menuRef}
+                  role="menu"
+                  style={sessionMenu.menuStyle}
+                >
+                  <button
+                    className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                    onClick={() => {
+                      setSessionMenuOpen(false);
+                      openTitleEditor();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Change title
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {/* Content */}
