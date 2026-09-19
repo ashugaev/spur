@@ -124,6 +124,7 @@ const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const requestGitHubMergeConflictRestoreReplayMock = vi.fn();
+const clearGitHubPollDisabledSessionMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
@@ -588,6 +589,7 @@ vi.mock("../../src/ids.js", () => ({
 
 vi.mock("../../src/metadata.js", () => ({
   archiveSessions: archiveSessionsMock,
+  clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
@@ -6196,6 +6198,109 @@ describe("SessionService", () => {
       "No Telegram reply target for api-1",
     );
     expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+  });
+
+  it("enableSourcePoll clears the disable in every github source of the project", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: {
+            "pr-watch": { type: "github" },
+            "pr-watch-2": { type: "github" },
+            agentChat: { type: "telegram", token: "token-123", allowedUsers: [123] },
+          },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    clearGitHubPollDisabledSessionMock.mockImplementation(
+      (_dataDir: string, _projectId: string, sourceId: string) =>
+        sourceId === "pr-watch" ? 42 : null,
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result).toEqual({
+      ok: true,
+      sessionId: "api-1",
+      projectId: "api",
+      cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+    });
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "pr-watch",
+      "api-1",
+    );
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "pr-watch-2",
+      "api-1",
+    );
+    // The telegram source is never queried: only type "github" sources are cleared.
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("enableSourcePoll is a no-op returning an empty cleared list when nothing was disabled", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { "pr-watch": { type: "github" } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    clearGitHubPollDisabledSessionMock.mockReturnValue(null);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result).toEqual({ ok: true, sessionId: "api-1", projectId: "api", cleared: [] });
+  });
+
+  it("enableSourcePoll throws SessionResourceNotFoundError for an unknown session", async () => {
+    loadConfigMock.mockReturnValue(baseConfig());
+    readSessionMock.mockReturnValue(null);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.enableSourcePoll("api-missing")).rejects.toThrow(
+      "Session not found: api-missing",
+    );
   });
 
   it("logs message delivery after updating tmux and metadata", async () => {

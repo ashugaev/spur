@@ -9,7 +9,11 @@ import {
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   listSessions,
+  clearGitHubPollDisabledSession,
   readCommentSeenRegistry,
+  readGitHubPollDisabled,
+  recordGitHubPollDisabledSession,
+  writeGitHubPollDisabled,
   readPendingSendBatches,
   readPendingSendBatch,
   readReviewSourceSnapshot,
@@ -124,6 +128,59 @@ describe("comment-seen registry", () => {
     expect(ids.size).toBe(2);
     expect(ids.has("101")).toBe(true);
     expect(ids.has("102")).toBe(true);
+  });
+});
+
+describe("github poll-disabled registry", () => {
+  it("returns an empty map when the registry file is missing", async () => {
+    const dataDir = await newDataDir();
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.size).toBe(0);
+  });
+
+  it("returns an empty map when the registry file is corrupt", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-poll-disabled", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "pr-watch.json"), "{ not json", "utf8");
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.size).toBe(0);
+  });
+
+  it("drops non-numeric and non-integer values", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-poll-disabled", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "pr-watch.json"),
+      JSON.stringify({ "api-a1b2": 42, "api-c3d4": "42", "api-e5f6": 42.5, "api-g7h8": -1 }),
+      "utf8",
+    );
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.size).toBe(1);
+    expect(entries.get("api-a1b2")).toBe(42);
+  });
+
+  it("round-trips a recorded session", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toBe(42);
+  });
+
+  it("an empty map removes the registry file", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    writeGitHubPollDisabled(dataDir, "api", "pr-watch", new Map());
+    const path = join(dataDir, "source-state", "github-poll-disabled", "api", "pr-watch.json");
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("clear returns the prNumber then null on repeat", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    expect(clearGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2")).toBe(42);
+    expect(clearGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2")).toBeNull();
   });
 });
 

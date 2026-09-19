@@ -23,14 +23,18 @@ import {
 } from "./types.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
+  clearGitHubPollDisabledSession,
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  readGitHubPollDisabled,
   readLifecycleBaselinedSessions,
   readReviewSourceSnapshots,
   readWorkItemRegistry,
+  recordGitHubPollDisabledSession,
   recordLifecycleBaselinedSession,
   removeLifecycleBaselinedSession,
+  writeGitHubPollDisabled,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { hasRecentSessionUserAction } from "../user-action-log.js";
@@ -313,17 +317,152 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // defeating adaptivePoll source-wide. Past the tolerance, that session's failures
   // stop counting toward the hysteresis flag (still logged, just excluded from it).
   const consecutiveSessionPollErrors = new Map<string, number>();
-  // sessionId -> the PR number that was found permanently unresolvable. Cleared when
-  // the session rebinds away from that number or disappears (see the sweep at cycle end).
-  const permanentPrNotFound = new Map<string, number>();
+  // sessionId -> the PR number that was found permanently unresolvable. A cache over
+  // the on-disk registry (metadata.ts readGitHubPollDisabled/writeGitHubPollDisabled):
+  // seeded here at handle start so the disable survives reloadAutomation recreating
+  // this handle and daemon restart, write-through on every mutation (never a whole-map
+  // dump — see safeRecordPollDisabled/safeClearPollDisabled), and refreshed once per
+  // poll tick (refreshPollDisabled) so an in-process `poll-enable` interleaving this
+  // handle's own event loop takes effect within one tick. Cleared when the session
+  // rebinds away from that number or disappears (see the sweep at cycle end).
+  let permanentPrNotFound = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
+  // I4: an unconditional start-time prune, independent of the per-cycle sweep below.
+  // Bounds the one genuinely unbounded leak path — authDisabled (see below) never
+  // resets for the life of a handle, so under standing-bad-credentials the per-cycle
+  // sweep in pollSignals never runs again until the next handle recreation.
+  // Skipped entirely on the overwhelmingly common empty-registry start (the measured
+  // shape is 2 sessions ever hitting this per source) — reloadAutomation recreates
+  // every source handle on each config reload (27+ times in the measured 14.4h
+  // window), so an unconditional listSessions(dataDir) here would cost one full
+  // session-dir scan per source per reload for nothing.
+  if (permanentPrNotFound.size > 0) {
+    const startupSessionIds = new Set(listSessions(deps.dataDir).map((session) => session.id));
+    const deadAtStartIds = [...permanentPrNotFound.keys()].filter(
+      (sessionId) => !startupSessionIds.has(sessionId),
+    );
+    if (deadAtStartIds.length > 0) {
+      // A genuinely independent fresh read, not the just-seeded cache above: feeding
+      // writeGitHubPollDisabled from the cache (even a filtered copy of it) is the one
+      // whole-map-write shape R0b forbids. This read happens with no await since the
+      // seed above, so it is byte-identical to the cache at this point anyway — this
+      // buys textual/structural cleanliness, not a different on-disk result.
+      const startupRegistry = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
+      for (const sessionId of deadAtStartIds) {
+        permanentPrNotFound.delete(sessionId);
+        startupRegistry.delete(sessionId);
+      }
+      try {
+        writeGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId, startupRegistry);
+      } catch (error) {
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] failed to prune poll-disabled registry at start: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
   // sessionId -> transient poll-failure backoff state. Cleared on a clean observation
   // or when the session disappears.
   const transientPollBackoff = new Map<string, { failures: number; nextRetryAtMs: number }>();
+
+  // sessionId -> the prNumber a failed record* write couldn't get onto disk (memory
+  // says disabled, disk doesn't). refreshPollDisabled re-reads the whole registry
+  // from disk every tick, which would otherwise silently undo an in-memory-only
+  // record* mutation on the very next refresh — reproducing the measured defect
+  // (repeat emits every tick) via a persistent write failure instead of a handle
+  // restart. No clear-side entry: a failed clear leaves the stale disk entry, but
+  // the in-memory delete at :455/:461 already happened (isSessionPollGated's
+  // self-heal doesn't gate on the cache being write-clean), and overriding the next
+  // refresh to re-delete it would suppress that refresh's own retry of the clear —
+  // the disk entry would never heal even once writes recover. Cleared once a later
+  // record* for that sessionId succeeds; also dropped by the sweep when the session
+  // disappears.
+  const pendingPollDisabledOverrides = new Map<string, number>();
+
+  // Both wrap a synchronous fs write in try/catch and swallow-and-log, mirroring
+  // logSpurEvent's own `catch {}` (event-log.ts:232-234). Mandatory, not defensive
+  // style: safeRecordPollDisabled runs inside the per-session catch block at :590 —
+  // an unguarded throw there escapes the session loop and lands on `void
+  // pollCycle(false)` with no unhandledRejection handler anywhere in v2/src (see
+  // review-providers/github.ts:1367-1371). safeClearPollDisabled runs from the
+  // self-heal at isSessionPollGated, reached synchronously from the plain
+  // setInterval callback below — an unguarded throw there is an uncaught exception,
+  // not a rejection. A swallowed write failure degrades I1 to best-effort DURING THE
+  // FAILURE WINDOW ONLY: pendingPollDisabledOverrides keeps the in-memory Map correct
+  // across every refresh, so a persistently failing disk never re-arms more than the
+  // one event already emitted before the first failure — it does not reproduce the
+  // measured defect. No record* call is ever retried for that session: once the
+  // override reapplies the entry on refresh, the gate at :461/:734 sees it as already
+  // disabled and never re-enters safeRecordPollDisabled. The override only drops via
+  // a rebind (the self-heal clear path, which does retry its own write every cycle —
+  // see safeClearPollDisabled below), the sweep pruning a disappeared session, or
+  // handle recreation reseeding from whatever the disk last held.
+  const safeRecordPollDisabled = (sessionId: string, prNumber: number): void => {
+    try {
+      recordGitHubPollDisabledSession(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        sessionId,
+        prNumber,
+      );
+      pendingPollDisabledOverrides.delete(sessionId);
+    } catch (error) {
+      pendingPollDisabledOverrides.set(sessionId, prNumber);
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] failed to persist poll-disabled state for ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  };
+
+  const safeClearPollDisabled = (sessionId: string): void => {
+    // No override on failure (see pendingPollDisabledOverrides above): the caller
+    // already deletes sessionId from the in-memory cache regardless of this call's
+    // outcome, and letting the next refresh bring the stale disk entry back is what
+    // makes isSessionPollGated's self-heal retry the clear on the following cycle.
+    pendingPollDisabledOverrides.delete(sessionId);
+    try {
+      clearGitHubPollDisabledSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+    } catch (error) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] failed to clear poll-disabled state for ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  };
+
+  // Refreshes the cache from disk once per tick so an in-process `poll-enable` (which
+  // runs in the same daemon process and can interleave at any await in pollSignals)
+  // takes effect within one tick. On a read failure, keep the current in-memory Map
+  // rather than wiping it — a transient read error must not re-arm suppressed events.
+  // Every pending override (a record* disk couldn't yet absorb) is re-applied on top
+  // of the fresh disk read, so a persistent write failure can't undo its own
+  // in-memory mutation on the very next tick.
+  const refreshPollDisabled = (): void => {
+    try {
+      const fresh = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
+      for (const [sessionId, prNumber] of pendingPollDisabledOverrides) {
+        fresh.set(sessionId, prNumber);
+      }
+      permanentPrNotFound = fresh;
+    } catch (error) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] failed to refresh poll-disabled state: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  };
 
   const isSessionPollGated = (session: SessionRecord, nowMs: number): boolean => {
     const disabledPr = permanentPrNotFound.get(session.id);
     if (disabledPr !== undefined) {
       if (!session.pr || session.pr.number !== disabledPr) {
+        safeClearPollDisabled(session.id);
         permanentPrNotFound.delete(session.id);
       } else {
         return true;
@@ -361,6 +500,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     );
 
   const shouldPollThisTick = (): boolean => {
+    refreshPollDisabled();
     if (!adaptive) return true;
     if (Date.now() >= nextEligiblePollAtMs) return true;
     if (lastCycleCiActive) return true;
@@ -427,7 +567,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (stopped || deps.signal.aborted || polling || shouldSkipGitHubCalls()) return;
     polling = true;
     try {
-      const sessions = listPollableSessions();
+      refreshPollDisabled();
+      const allSessions = listSessions(deps.dataDir);
+      const sessions = allSessions.filter((session) =>
+        isEligibleForSourcePoll(session, deps.projectId),
+      );
+      const existingSessionIds = new Set(allSessions.map((session) => session.id));
       const currentSessionIds = new Set(sessions.map((session) => session.id));
       let cycleCiActive = false;
       let cycleHadPollError = false;
@@ -588,12 +733,13 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           if (session.pr && isGitHubPermanentNotFoundError(message, session.pr.number)) {
             if (permanentPrNotFound.get(session.id) !== session.pr.number) {
               permanentPrNotFound.set(session.id, session.pr.number);
+              safeRecordPollDisabled(session.id, session.pr.number);
               deps.logger.warn?.(
                 `[source:${deps.projectId}/${deps.sourceId}] signal polling disabled for ${session.id}: PR #${session.pr.number} not found`,
               );
               logSpurEvent(deps.dataDir, {
                 event: "source.poll.disabled",
-                level: "error",
+                level: "warn",
                 projectId: deps.projectId,
                 sourceId: deps.sourceId,
                 sessionId: session.id,
@@ -675,8 +821,36 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         if (!currentSessionIds.has(sessionId)) consecutiveSessionPollErrors.delete(sessionId);
       }
 
+      // Prunes on absence from ALL sessions on disk (existingSessionIds), not
+      // eligibility (currentSessionIds) — I5: a stopped or stale-parked session keeps
+      // its entry. This is the one legitimate multi-key registry write: the map it
+      // writes is a FRESH readGitHubPollDisabled minus the dead ids, never the cache
+      // (R0b), and there is no await between that read and the write (I8) so no
+      // concurrent poll-enable can interleave and be clobbered.
       for (const sessionId of [...permanentPrNotFound.keys()]) {
-        if (!currentSessionIds.has(sessionId)) permanentPrNotFound.delete(sessionId);
+        if (!existingSessionIds.has(sessionId)) permanentPrNotFound.delete(sessionId);
+      }
+      for (const sessionId of [...pendingPollDisabledOverrides.keys()]) {
+        if (!existingSessionIds.has(sessionId)) pendingPollDisabledOverrides.delete(sessionId);
+      }
+      const freshPollDisabled = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
+      let prunedPollDisabled = false;
+      for (const sessionId of [...freshPollDisabled.keys()]) {
+        if (!existingSessionIds.has(sessionId)) {
+          freshPollDisabled.delete(sessionId);
+          prunedPollDisabled = true;
+        }
+      }
+      if (prunedPollDisabled) {
+        try {
+          writeGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId, freshPollDisabled);
+        } catch (error) {
+          deps.logger.warn?.(
+            `[source:${deps.projectId}/${deps.sourceId}] failed to prune poll-disabled registry: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
 
       for (const sessionId of [...transientPollBackoff.keys()]) {
@@ -722,6 +896,9 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const pollCycle = async (emitInitial: boolean): Promise<void> => {
     if (pollingCycle) return;
     pollingCycle = true;
+    // No refreshPollDisabled() here: pollSignals (called synchronously below, with no
+    // await in between) does its own refresh at its try-block entry, and the interval
+    // tick path already refreshed in shouldPollThisTick immediately before calling this.
     // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
     // already active going into this cycle, no real polling happened, so the
     // adaptive deadline must not move — otherwise it silently consumes the

@@ -201,6 +201,7 @@ import {
 } from "./telegram-source-state.js";
 import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
+  clearGitHubPollDisabledSession,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -429,6 +430,7 @@ import {
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarProcessIdentity,
+  type SourcePollEnableResponse,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SidecarPortView,
@@ -11753,6 +11755,33 @@ export class SessionService {
         ? { messageThreadId: replyTarget.messageThreadId }
         : {}),
     };
+  }
+
+  // Explicit re-enable for a session permanently disabled by a not-found PR (see
+  // event-sources/github.ts permanentPrNotFound / metadata.ts's poll-disabled
+  // registry). Missing session throws SessionResourceNotFoundError (404). Otherwise
+  // 200-shaped: nothing disabled, or a project with no github sources, yields cleared: [].
+  async enableSourcePoll(sessionId: string): Promise<SourcePollEnableResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const projectId = session.project;
+    const sources = this.config.projects[projectId]?.sources ?? {};
+    const cleared: { sourceId: string; prNumber: number }[] = [];
+    for (const [sourceId, source] of Object.entries(sources)) {
+      if (source.type !== "github") continue;
+      const prNumber = clearGitHubPollDisabledSession(
+        this.config.dataDir,
+        projectId,
+        sourceId,
+        sessionId,
+      );
+      if (prNumber !== null) {
+        cleared.push({ sourceId, prNumber });
+      }
+    }
+    return { ok: true, sessionId, projectId, cleared };
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {

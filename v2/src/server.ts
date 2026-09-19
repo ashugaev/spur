@@ -1705,6 +1705,14 @@ export async function startServer(
         return;
       }
 
+      const sourcePollEnableSessionId = path.match(
+        /^\/sessions\/([^/]+)\/source-poll-enable$/,
+      )?.[1];
+      if (method === "POST" && sourcePollEnableSessionId) {
+        sendJson(response, 200, await service.enableSourcePoll(sourcePollEnableSessionId));
+        return;
+      }
+
       const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
       if (method === "POST" && wakeSessionId) {
         const parsed = parseSessionWakeRequest(await readJsonBody<unknown>(request));
