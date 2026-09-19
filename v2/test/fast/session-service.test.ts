@@ -19220,7 +19220,12 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     sessions.set(
       "api-1",
-      sessionRecord({ id: "api-1", prompt: "Ship the feature", originalTaskPrompt: "Ship it" }),
+      sessionRecord({
+        id: "api-1",
+        prompt: "Ship the feature",
+        originalTaskPrompt: "Ship it",
+        agentLaunchId: "launch-generation-1",
+      }),
     );
     tmuxSessionExistsMock.mockResolvedValue(true);
 
@@ -19240,9 +19245,11 @@ describe("SessionService", () => {
     ]) {
       expect(listed[0]).not.toHaveProperty(field);
     }
+    expect(listed[0]).not.toHaveProperty("agentLaunchId");
     expect(listSessionArtifactsMock).not.toHaveBeenCalled();
 
     const detail = await service.get("api-1");
+    expect(detail).not.toHaveProperty("agentLaunchId");
     expect(detail.artifacts).toEqual([]);
     expect(detail.launchCommand).toBe("claude --dangerously-skip-permissions");
     expect(detail.prompt).toBe("Ship the feature");
@@ -19338,6 +19345,7 @@ describe("SessionService", () => {
           updatedAt: "2026-03-18T10:00:00.000Z",
         },
       ],
+      agentLaunchId: "launch-generation-1",
     });
     sessions.set("api-2", {
       id: "api-2",
@@ -19394,6 +19402,7 @@ describe("SessionService", () => {
     expect(listed[0]).not.toHaveProperty("stateSubscriptions");
     expect(listed[0]).not.toHaveProperty("allowedTriggers");
     expect(listed[0]).not.toHaveProperty("agentSessionId");
+    expect(listed[0]).not.toHaveProperty("agentLaunchId");
     expect(listed[0]).not.toHaveProperty("branchSource");
     // The strip must not overreach into what the listing renders.
     expect(listed[0]).toMatchObject({ project: "api", prompt: "Ship the feature" });
