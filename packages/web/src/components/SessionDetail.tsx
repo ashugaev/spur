@@ -2798,7 +2798,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <button
                 aria-haspopup="dialog"
                 aria-label="Edit title"
-                className="pointer-events-none absolute right-0 top-0 m-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] p-1 text-[var(--color-text-primary)] opacity-0 transition duration-150 hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] group-hover/title:pointer-events-auto group-hover/title:opacity-100 group-focus-within/title:pointer-events-auto group-focus-within/title:opacity-100"
+                className="pointer-events-none absolute right-0 top-0 m-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] p-1 text-[var(--color-text-primary)] opacity-0 transition duration-150 hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] group-hover/title:pointer-events-auto group-hover/title:opacity-100 group-focus-within/title:pointer-events-auto group-focus-within/title:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100"
                 onClick={openTitleEditor}
                 type="button"
               >
