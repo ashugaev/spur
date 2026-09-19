@@ -1016,7 +1016,8 @@ type StartedAgentMessage =
     };
 
 type PreparedTodoNudge = {
-  session: SessionRecord;
+  sessionId: string;
+  workspaceId: string;
   lifecycleIds: string[];
   generation: PaneGeneration;
   fingerprint: string;
@@ -6852,8 +6853,8 @@ export class SessionService {
         if (outcome === "stale") return;
         await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           if (!(await this.todoNudgeMatches(prepared))) return;
-          this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
-          this.todoNudgeBackoff.delete(session.id);
+          this.lastSuccessfulTodoNudgeAt.set(prepared.sessionId, Date.now());
+          this.todoNudgeBackoff.delete(prepared.sessionId);
         });
       });
     } catch (error) {
@@ -6999,16 +7000,24 @@ export class SessionService {
     }
     const generation = await this.capturePaneGeneration(session);
     const submission = await this.beginAgentMessage(session, message, { interrupt: false });
-    return { session, lifecycleIds, generation, fingerprint, attempts, submission };
+    return {
+      sessionId: session.id,
+      workspaceId: workspaceIdOf(session),
+      lifecycleIds,
+      generation,
+      fingerprint,
+      attempts,
+      submission,
+    };
   }
 
   private async todoNudgeMatches(prepared: PreparedTodoNudge): Promise<boolean> {
-    const current = readSession(this.config.dataDir, prepared.session.id);
+    const current = readSession(this.config.dataDir, prepared.sessionId);
     return (
       current !== null &&
       current.status === "running" &&
-      current.tmuxSession === prepared.session.tmuxSession &&
-      workspaceIdOf(current) === workspaceIdOf(prepared.session) &&
+      current.tmuxSession === prepared.generation.tmuxSession &&
+      workspaceIdOf(current) === prepared.workspaceId &&
       !hasQueuedMessages(current) &&
       current.queuedMessages?.awaitingPrompt !== true &&
       current.pipeline?.status !== "running" &&
