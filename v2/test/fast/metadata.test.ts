@@ -732,6 +732,29 @@ describe("agentSessionId", () => {
   });
 });
 
+describe("agentLaunchId", () => {
+  it("keeps agentLaunchId across a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      id: "api-1",
+      tmuxSession: "api-1",
+      agentLaunchId: "launch-generation-1",
+    });
+
+    expect(readSession(dataDir, "api-1")?.agentLaunchId).toBe("launch-generation-1");
+  });
+});
+
 describe("session metadata PR migration", () => {
   it("repairs the session index after a fallback scan", async () => {
     const dataDir = await newDataDir();

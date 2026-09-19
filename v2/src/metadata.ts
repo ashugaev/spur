@@ -802,6 +802,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
+    ...(normalizedSession.agentLaunchId
+      ? { agentLaunchId: normalizedSession.agentLaunchId }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
