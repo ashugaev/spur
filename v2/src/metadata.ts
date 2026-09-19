@@ -96,6 +96,10 @@ function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId:
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
 
+function githubPollDisabledFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-poll-disabled", projectId, `${sourceId}.json`);
+}
+
 // A single shared file, not one file per queueKey: queueKeys contain colons
 // (`projectId:triggerId:sessionId`), which aren't filename-safe.
 function pendingSendBatchesFilePath(dataDir: string): string {
@@ -1348,6 +1352,77 @@ export function writeGitHubReviewPagination(
     path,
     Object.fromEntries([...cursors].sort(([left], [right]) => left.localeCompare(right))),
   );
+}
+
+// sessionId -> the PR number a session was permanently disabled for. Sticky across
+// source-handle recreation (reloadAutomation) and daemon restart; see
+// event-sources/github.ts permanentPrNotFound, the in-memory cache backed by this file.
+export function readGitHubPollDisabled(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, number> {
+  const path = githubPollDisabledFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, number] =>
+          typeof entry[1] === "number" && Number.isInteger(entry[1]) && entry[1] > 0,
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+// The one legitimate multi-key write: the sweep prune in github.ts, built from a fresh
+// readGitHubPollDisabled, never from the in-memory cache. Every other mutation goes
+// through recordGitHubPollDisabledSession / clearGitHubPollDisabledSession below.
+export function writeGitHubPollDisabled(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  entries: ReadonlyMap<string, number>,
+): void {
+  const path = githubPollDisabledFilePath(dataDir, projectId, sourceId);
+  if (entries.size === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  writeJsonFile(
+    path,
+    Object.fromEntries([...entries].sort(([left], [right]) => left.localeCompare(right))),
+  );
+}
+
+export function recordGitHubPollDisabledSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+): void {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  if (entries.get(sessionId) === prNumber) return;
+  entries.set(sessionId, prNumber);
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+}
+
+export function clearGitHubPollDisabledSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): number | null {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  const prNumber = entries.get(sessionId);
+  if (prNumber === undefined) return null;
+  entries.delete(sessionId);
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+  return prNumber;
 }
 
 export function recordCommentSeen(
