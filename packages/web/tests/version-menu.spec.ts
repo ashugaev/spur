@@ -1,5 +1,4 @@
-import { test, expect, type Page } from "playwright/test";
-import { mockSessions, type ProjectInfo } from "./fixtures.js";
+import { test, expect, type Page, mockSessions, type ProjectInfo } from "./fixtures.js";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 
