@@ -1216,6 +1216,7 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 type SessionServiceInternals = {
   captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
   agentSessionIdPersistBackoffUntil: Map<string, number>;
+  lastSuccessfulTodoNudgeAt: Map<string, number>;
   lastHumanHeldNudgeRevisions: Map<string, string>;
   pruneSessionScopedState(liveIds: ReadonlySet<string>): void;
   waitForSubmitAck(
@@ -2017,6 +2018,10 @@ describe("SessionService", () => {
   });
 
   describe("Spur ToDo lifecycle", () => {
+    beforeEach(() => {
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+    });
+
     it("starts the spawn ledger empty and writes no ledger file", async () => {
       createSessionStore();
       await useRealTodoLedger();
@@ -2200,7 +2205,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = sendMessageToTmuxMock;
 
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(1);
@@ -2215,6 +2220,72 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("keeps same-session ToDo responsive while nudge acknowledgement is pending", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let releaseAck: (() => void) | undefined;
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      let signalAckStarted: (() => void) | undefined;
+      const ackStarted = new Promise<void>((resolve) => {
+        signalAckStarted = resolve;
+      });
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+        signalAckStarted?.();
+        await ackGate;
+        return { found: true, lastScannedFile: null };
+      });
+
+      const nudge = internals.maybeNudgeTodo(session);
+      await ackStarted;
+      let readSettled = false;
+      let mutationSettled = false;
+      let pauseSettled = false;
+      const read = service.readTodo(session.id).then((projection) => {
+        readSettled = true;
+        return projection;
+      });
+      const mutation = service
+        .mutateTodo(
+          session.id,
+          { action: "add", text: "Continue issue #907", reason: "Regression coverage" },
+          { kind: "agent", agent: "claude", sessionId: session.id },
+        )
+        .then((projection) => {
+          mutationSettled = true;
+          return projection;
+        });
+      const pause = service.pause(session.id).then((view) => {
+        pauseSettled = true;
+        return view;
+      });
+
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(readSettled).toBe(true);
+        expect(mutationSettled).toBe(true);
+        expect(pauseSettled).toBe(true);
+      } finally {
+        releaseAck?.();
+      }
+
+      expect((await read).counts.total).toBe(0);
+      expect((await mutation).items).toEqual([
+        expect.objectContaining({ text: "Continue issue #907", status: "open" }),
+      ]);
+      expect((await pause).status).toBe("stopped");
+      await nudge;
+      expect(internals.lastSuccessfulTodoNudgeAt.has(session.id)).toBe(false);
+      service.dispose();
+    });
+
     it.each([false, true])(
       "caps unchanged ToDo across 100 concurrent observations and reconstruction (send fails: %s)",
       async (fails) => {
@@ -2223,17 +2294,13 @@ describe("SessionService", () => {
         sessions.set(session.id, session);
         await useRealTodoLedger();
         let service = await createDisposedSessionService();
-        const send = vi.fn().mockImplementation(async () => {
+        const send = sendMessageToTmuxMock.mockImplementation(async () => {
           if (fails) throw new Error("ambiguous submit failure");
-          return SUBMITTED;
+          return undefined;
         });
-        vi.spyOn(sessionServiceInternals(service), "writeAgentMessage").mockImplementation(send);
         for (let index = 0; index < 100; index++) {
           if (index === 50) {
             service = await createDisposedSessionService();
-            vi.spyOn(sessionServiceInternals(service), "writeAgentMessage").mockImplementation(
-              send,
-            );
           }
           vi.setSystemTime(Date.now() + 3_600_000);
           const internals = sessionServiceInternals(service);
@@ -2323,10 +2390,9 @@ describe("SessionService", () => {
       ).items[0]?.id;
       if (!itemId) throw new Error("Expected added ToDo item");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
+      const send = sendMessageToTmuxMock
         .mockRejectedValueOnce(new Error("pane unavailable"))
-        .mockResolvedValue(SUBMITTED);
+        .mockResolvedValue(undefined);
 
       // 10:05:00 — call 1, send rejects. Backoff to 10:07:00.
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -2395,7 +2461,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = sendMessageToTmuxMock;
 
       for (let i = 0; i < 20; i++) {
         await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -2435,7 +2501,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = sendMessageToTmuxMock;
       const t0 = Date.now();
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -2473,8 +2539,6 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
-
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       const disabledEvents = logSpurEventMock.mock.calls
         .map(([, entry]) => entry)
@@ -2493,9 +2557,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
-        .mockRejectedValue(new Error("pane unavailable"));
+      const send = sendMessageToTmuxMock.mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
       // Attempt 1 at t0.
@@ -2546,9 +2608,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
-        .mockRejectedValue(new Error("pane unavailable"));
+      const send = sendMessageToTmuxMock.mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
       // First failure. failures=1, next retry at t0 + BASE.
@@ -2597,10 +2657,9 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
+      const send = sendMessageToTmuxMock
         .mockRejectedValueOnce(new Error("pane unavailable"))
-        .mockResolvedValueOnce(SUBMITTED)
+        .mockResolvedValueOnce(undefined)
         .mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
@@ -2641,9 +2700,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
-        .mockRejectedValue(
+      const send = sendMessageToTmuxMock.mockRejectedValue(
           new Error(
             "Command failed: tmux -L spur send-keys -t =api-1: Enter\ncan't find session: api-1",
           ),
@@ -2673,9 +2730,9 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
-        .mockRejectedValue(new Error("agent replied: can't find session notes"));
+      const send = sendMessageToTmuxMock.mockRejectedValue(
+        new Error("agent replied: can't find session notes"),
+      );
       const t0 = Date.now();
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -2706,9 +2763,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
-        .mockRejectedValue(new Error("pane unavailable"));
+      const send = sendMessageToTmuxMock.mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -2741,9 +2796,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
-        .mockRejectedValue(new Error("pane unavailable"));
+      const send = sendMessageToTmuxMock.mockRejectedValue(new Error("pane unavailable"));
       const t0 = Date.now();
 
       // base = collapseWindowMs * 2 = 2h, above the fixed 30-minute cap. The
@@ -2772,9 +2825,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi
-        .spyOn(internals, "writeAgentMessage")
-        .mockRejectedValueOnce(
+      const send = sendMessageToTmuxMock.mockRejectedValueOnce(
           new Error(
             "Command failed: tmux -L spur send-keys -t =api-1: Enter\ncan't find session: api-1",
           ),
@@ -2785,12 +2836,12 @@ describe("SessionService", () => {
 
       mockClaudeJsonlState("waiting");
       mockExitedThenRestoredProcess();
-      send.mockResolvedValue(SUBMITTED);
+      send.mockResolvedValue(undefined);
       await service.restore(session.id);
 
       expect(internals.todoNudgeDisabled.has(session.id)).toBe(false);
       send.mockClear();
-      send.mockResolvedValue(SUBMITTED);
+      send.mockResolvedValue(undefined);
       vi.setSystemTime(Date.now() + 120_000);
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(send).toHaveBeenCalled();
@@ -2808,14 +2859,14 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = sendMessageToTmuxMock;
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
       expect(internals.todoNudgeDisabled.get(session.id)?.kind).toBe("ledger_corrupt");
 
       mockClaudeJsonlState("waiting");
       mockExitedThenRestoredProcess();
-      send.mockResolvedValue(SUBMITTED);
+      send.mockResolvedValue(undefined);
       await service.restore(session.id);
 
       expect(internals.todoNudgeDisabled.get(session.id)?.kind).toBe("ledger_corrupt");
@@ -2992,7 +3043,7 @@ describe("SessionService", () => {
       sessions.set(session.id, session);
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = sendMessageToTmuxMock;
       await mockTodoLedger(heldProjection("r1", "Choose the release window"));
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -3012,7 +3063,7 @@ describe("SessionService", () => {
       sessions.set(session.id, session);
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = sendMessageToTmuxMock;
       await mockTodoLedger(heldProjection("r1", "Choose the release window"));
 
       await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
@@ -3030,7 +3081,7 @@ describe("SessionService", () => {
       sessions.set(session.id, session);
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const send = sendMessageToTmuxMock;
       const held = heldProjection("r1", "Choose the release window");
       await mockTodoLedger({
         ...held,

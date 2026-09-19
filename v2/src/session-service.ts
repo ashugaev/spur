@@ -997,6 +997,33 @@ type PaneGeneration = {
   processStarttime: number;
 };
 
+type AgentMessageTarget = Pick<
+  SessionRecord,
+  "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+>;
+
+type StartedAgentMessage =
+  | { kind: "complete"; outcome: AgentSendOutcome }
+  | {
+      kind: "pending";
+      session: AgentMessageTarget;
+      message: string;
+      binding: SubmitAckBinding;
+      startedAt: number;
+      ackWindowMs: number;
+      maxResends: number;
+      freshLaunch: boolean;
+    };
+
+type PreparedTodoNudge = {
+  session: SessionRecord;
+  lifecycleIds: string[];
+  generation: PaneGeneration;
+  fingerprint: string;
+  attempts: number;
+  submission: StartedAgentMessage;
+};
+
 type DeliveryIntent =
   | { kind: "direct" }
   | { kind: "queued-drain"; message: string }
@@ -6797,17 +6824,6 @@ export class SessionService {
   }
 
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
-    return this.withPaneWriteLock(session.tmuxSession, () =>
-      this.withWorkspaceLifecycleLocks(session.id, () =>
-        this.maybeNudgeTodoLocked(session, { paneAlreadyOwned: true }),
-      ),
-    );
-  }
-
-  private async maybeNudgeTodoLocked(
-    session: SessionRecord,
-    options?: { paneAlreadyOwned?: boolean },
-  ): Promise<void> {
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
@@ -6820,111 +6836,26 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
-      const run = async (): Promise<void> => {
-        const current = readSession(this.config.dataDir, session.id);
-        if (
-          !current ||
-          current.status !== "running" ||
-          hasQueuedMessages(current) ||
-          current.queuedMessages?.awaitingPrompt ||
-          current.pipeline?.status === "running"
-        )
-          return;
-        if (
-          this.todoNudgeDisabled.has(session.id) ||
-          (this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now() ||
-          Date.now() - (this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0) < 60_000
-        )
-          return;
-        session = current;
-        const projection = ensureTodoLedger(this.config.dataDir, session);
-        const ledgerSession = readSession(this.config.dataDir, session.id);
-        if (!ledgerSession) return;
-        session = ledgerSession;
-        const open = projection.items
-          .filter((item) => item.status === "open")
-          .sort((a, b) => a.id.localeCompare(b.id));
-        const humanHeld = projection.items
-          .filter(
-            (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
-          )
-          .sort((a, b) => a.id.localeCompare(b.id));
-        let message: string | null = null;
-        if (open.length > 0) {
-          message = `Spur ToDo still has open work:\n${open
-            .map((item) => `- ${item.id}: ${item.text}`)
-            .join(
-              "\n",
-            )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
-        } else if (
-          humanHeld.length > 0 &&
-          this.lastHumanHeldNudgeRevisions.get(session.id) !== projection.revision
-        ) {
-          // A human blocker cannot be advanced by the agent, so repeating this
-          // nudge every sweep manufactures work. One per ledger revision: any
-          // append (resume, add, re-hold) re-arms it, a frozen ledger does not.
-          this.lastHumanHeldNudgeRevisions.set(session.id, projection.revision);
-          message = `Spur ToDo needs human input:\n${humanHeld
-            .map((item) => {
-              const blocker = item.latestTransition?.blocker;
-              return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
-            })
-            .join("\n")}\nRequest the required input before continuing.`;
-        } else if (projection.counts.total === 0) {
-          message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
-        }
-        if (!message) {
-          // A clean observation with nothing to send: #836's "cleared on a
-          // clean observation". Not moved above the ensureTodoLedger read —
-          // that read succeeds on every send-failure cycle, so clearing there
-          // would zero `failures` forever and flatten the backoff to the base.
-          this.todoNudgeBackoff.delete(session.id);
-          if (session.todoNudge) {
-            const { todoNudge: _todoNudge, ...base } = session;
-            writeSession(this.config.dataDir, base);
-          }
-          return;
-        }
-        const fingerprint = createHash("sha256")
-          .update(
-            JSON.stringify(
-              open.length
-                ? ["open", open.map((item) => [item.id, item.text])]
-                : humanHeld.length
-                  ? [
-                      "human",
-                      humanHeld.map((item) => [
-                        item.id,
-                        item.latestTransition?.blocker?.kind === "human"
-                          ? item.latestTransition.blocker.requiredAction
-                          : item.text,
-                      ]),
-                    ]
-                  : ["empty"],
+      await this.withPaneWriteLock(session.tmuxSession, async () => {
+        const lifecycleIds = this.lifecycleIdsFor(session);
+        const prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
+          this.maybeNudgeTodoLocked(session, lifecycleIds),
+        );
+        if (!prepared) return;
+
+        const outcome = await this.completeAgentMessage(prepared.submission, {
+          beforeResend: () =>
+            this.withSessionLifecycleLocks(prepared.lifecycleIds, () =>
+              this.todoNudgeMatches(prepared),
             ),
-          )
-          .digest("hex");
-        const attempts =
-          session.todoNudge?.fingerprint === fingerprint ? session.todoNudge.attempts : 0;
-        if (attempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return;
-        writeSession(this.config.dataDir, {
-          ...session,
-          todoNudge: { fingerprint, attempts: attempts + 1 },
         });
-        if (attempts + 1 === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
-          this.logEvent("session.todo.nudge_exhausted", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `Spur ToDo reminder budget exhausted for ${session.id}`,
-          });
-        }
-        await this.writeAgentMessage(session, message, { interrupt: false });
-        this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
-        this.todoNudgeBackoff.delete(session.id);
-      };
-      if (options?.paneAlreadyOwned) await run();
-      else await this.withPaneWriteLock(session.tmuxSession, run);
+        if (outcome === "stale") return;
+        await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+          if (!(await this.todoNudgeMatches(prepared))) return;
+          this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
+          this.todoNudgeBackoff.delete(session.id);
+        });
+      });
     } catch (error) {
       if (
         (error instanceof TodoLedgerCorruptError && !error.transient) ||
@@ -6963,6 +6894,128 @@ export class SessionService {
         nextRetryAtMs: Date.now() + Math.min(base * 2 ** (failures - 1), cap),
       });
     }
+  }
+
+  private async maybeNudgeTodoLocked(
+    session: SessionRecord,
+    lifecycleIds: string[],
+  ): Promise<PreparedTodoNudge | null> {
+    const current = readSession(this.config.dataDir, session.id);
+    if (
+      !current ||
+      current.tmuxSession !== session.tmuxSession ||
+      workspaceIdOf(current) !== workspaceIdOf(session) ||
+      current.status !== "running" ||
+      hasQueuedMessages(current) ||
+      current.queuedMessages?.awaitingPrompt ||
+      current.pipeline?.status === "running"
+    )
+      return null;
+    if (
+      this.todoNudgeDisabled.has(session.id) ||
+      (this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now() ||
+      Date.now() - (this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0) < 60_000
+    )
+      return null;
+    session = current;
+    const projection = ensureTodoLedger(this.config.dataDir, session);
+    const ledgerSession = readSession(this.config.dataDir, session.id);
+    if (!ledgerSession) return null;
+    session = ledgerSession;
+    const open = projection.items
+      .filter((item) => item.status === "open")
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const humanHeld = projection.items
+      .filter((item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human")
+      .sort((a, b) => a.id.localeCompare(b.id));
+    let message: string | null = null;
+    if (open.length > 0) {
+      message = `Spur ToDo still has open work:\n${open
+        .map((item) => `- ${item.id}: ${item.text}`)
+        .join(
+          "\n",
+        )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
+    } else if (
+      humanHeld.length > 0 &&
+      this.lastHumanHeldNudgeRevisions.get(session.id) !== projection.revision
+    ) {
+      // A human blocker cannot be advanced by the agent, so repeating this
+      // nudge every sweep manufactures work. One per ledger revision: any
+      // append (resume, add, re-hold) re-arms it, a frozen ledger does not.
+      this.lastHumanHeldNudgeRevisions.set(session.id, projection.revision);
+      message = `Spur ToDo needs human input:\n${humanHeld
+        .map((item) => {
+          const blocker = item.latestTransition?.blocker;
+          return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
+        })
+        .join("\n")}\nRequest the required input before continuing.`;
+    } else if (projection.counts.total === 0) {
+      message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
+    }
+    if (!message) {
+      // A clean observation with nothing to send: #836's "cleared on a
+      // clean observation". Not moved above the ensureTodoLedger read —
+      // that read succeeds on every send-failure cycle, so clearing there
+      // would zero `failures` forever and flatten the backoff to the base.
+      this.todoNudgeBackoff.delete(session.id);
+      if (session.todoNudge) {
+        const { todoNudge: _todoNudge, ...base } = session;
+        writeSession(this.config.dataDir, base);
+      }
+      return null;
+    }
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify(
+          open.length
+            ? ["open", open.map((item) => [item.id, item.text])]
+            : humanHeld.length
+              ? [
+                  "human",
+                  humanHeld.map((item) => [
+                    item.id,
+                    item.latestTransition?.blocker?.kind === "human"
+                      ? item.latestTransition.blocker.requiredAction
+                      : item.text,
+                  ]),
+                ]
+              : ["empty"],
+        ),
+      )
+      .digest("hex");
+    const priorAttempts =
+      session.todoNudge?.fingerprint === fingerprint ? session.todoNudge.attempts : 0;
+    if (priorAttempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return null;
+    const attempts = priorAttempts + 1;
+    session = { ...session, todoNudge: { fingerprint, attempts } };
+    writeSession(this.config.dataDir, session);
+    if (attempts === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
+      this.logEvent("session.todo.nudge_exhausted", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Spur ToDo reminder budget exhausted for ${session.id}`,
+      });
+    }
+    const generation = await this.capturePaneGeneration(session);
+    const submission = await this.beginAgentMessage(session, message, { interrupt: false });
+    return { session, lifecycleIds, generation, fingerprint, attempts, submission };
+  }
+
+  private async todoNudgeMatches(prepared: PreparedTodoNudge): Promise<boolean> {
+    const current = readSession(this.config.dataDir, prepared.session.id);
+    return (
+      current !== null &&
+      current.status === "running" &&
+      current.tmuxSession === prepared.session.tmuxSession &&
+      workspaceIdOf(current) === workspaceIdOf(prepared.session) &&
+      !hasQueuedMessages(current) &&
+      current.queuedMessages?.awaitingPrompt !== true &&
+      current.pipeline?.status !== "running" &&
+      current.todoNudge?.fingerprint === prepared.fingerprint &&
+      current.todoNudge.attempts === prepared.attempts &&
+      (await this.paneGenerationMatches(current, prepared.generation))
+    );
   }
 
   private getProject(projectId: string): ProjectConfig {
@@ -12699,13 +12752,24 @@ export class SessionService {
   }
 
   private async writeAgentMessage(
-    session: Pick<
-      SessionRecord,
-      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
-    >,
+    session: AgentMessageTarget,
     message: string,
     options?: { interrupt?: boolean; freshLaunch?: boolean },
   ): Promise<AgentSendOutcome> {
+    const outcome = await this.completeAgentMessage(
+      await this.beginAgentMessage(session, message, options),
+    );
+    if (outcome === "stale") {
+      throw new Error(`Session ${session.id} changed during message delivery`);
+    }
+    return outcome;
+  }
+
+  private async beginAgentMessage(
+    session: AgentMessageTarget,
+    message: string,
+    options?: { interrupt?: boolean; freshLaunch?: boolean },
+  ): Promise<StartedAgentMessage> {
     const freshLaunch = options?.freshLaunch === true;
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) &&
@@ -12725,11 +12789,29 @@ export class SessionService {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
     if (!binding) {
-      return "submitted";
+      return { kind: "complete", outcome: "submitted" };
     }
     const { windowMs: ackWindowMs, maxResends } = agentSubmitAckPacing(session.agent, {
       freshLaunch,
     });
+    return {
+      kind: "pending",
+      session,
+      message,
+      binding,
+      startedAt,
+      ackWindowMs,
+      maxResends,
+      freshLaunch,
+    };
+  }
+
+  private async completeAgentMessage(
+    started: StartedAgentMessage,
+    options?: { beforeResend?: () => Promise<boolean> },
+  ): Promise<AgentSendOutcome | "stale"> {
+    if (started.kind === "complete") return started.outcome;
+    const { session, message, binding, startedAt, ackWindowMs, maxResends, freshLaunch } = started;
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     // Set only when the mid-loop probe below observes a dead pane; reused for
     // the post-loop processAlive check so a confirmed-dead agent is not
@@ -12763,6 +12845,9 @@ export class SessionService {
             knownDead = true;
             break;
           }
+        }
+        if (options?.beforeResend && !(await options.beforeResend())) {
+          return "stale";
         }
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
