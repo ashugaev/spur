@@ -1357,6 +1357,8 @@ export function writeGitHubReviewPagination(
 // sessionId -> the PR number a session was permanently disabled for. Sticky across
 // source-handle recreation (reloadAutomation) and daemon restart; see
 // event-sources/github.ts permanentPrNotFound, the in-memory cache backed by this file.
+// Corrupt or partial JSON reads as an empty map; if the session is still bound to that
+// PR, the next successful poll can persist disable again (one extra source.poll.disabled).
 export function readGitHubPollDisabled(
   dataDir: string,
   projectId: string,
