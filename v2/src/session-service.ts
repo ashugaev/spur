@@ -2837,7 +2837,7 @@ export class SessionService {
   // Serializes sendAgentMessage per tmux pane so two trigger batches on one
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
-  private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  private readonly lastSuccessfulTodoNudges = new Map<string, { atMs: number; revision: string }>();
   private readonly todoNudgeDisabled = new Map<
     string,
     { kind: "ledger_corrupt" | "target_gone"; reason: string }
@@ -5516,7 +5516,11 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
-          if (view.status === "running" && view.state === "waiting") {
+          if (
+            view.status === "running" &&
+            view.state === "waiting" &&
+            !this.isInRestoreWarmup(session.id)
+          ) {
             await this.maybeNudgeTodo(session);
           }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
@@ -5609,8 +5613,8 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
-    for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
-      if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
+    for (const sessionId of this.lastSuccessfulTodoNudges.keys()) {
+      if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudges.delete(sessionId);
     }
     for (const sessionId of this.todoNudgeDisabled.keys()) {
       if (!liveIds.has(sessionId)) this.todoNudgeDisabled.delete(sessionId);
@@ -6669,11 +6673,10 @@ export class SessionService {
     return backoffBaseMs(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs);
   }
 
-  // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
-  // target_gone observation: the tmux target that was missing now exists
-  // again under the same name. ledger_corrupt is untouched — a respawn does
-  // not change the ledger bytes.
-  private clearTargetGoneNudgeGate(sessionId: string): void {
+  // Same-id recovery permits a fresh nudge and invalidates target_gone.
+  // Preserve ledger_corrupt and transient retry backoff across recovery.
+  private resetTodoNudgesForRespawn(sessionId: string): void {
+    this.lastSuccessfulTodoNudges.delete(sessionId);
     if (this.todoNudgeDisabled.get(sessionId)?.kind === "target_gone") {
       this.todoNudgeDisabled.delete(sessionId);
     }
@@ -6693,8 +6696,8 @@ export class SessionService {
     }
     if (this.todoNudgeDisabled.has(session.id)) return;
     if ((this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now()) return;
-    const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
-    if (Date.now() - lastSuccessful < 60_000) return;
+    const lastSuccessful = this.lastSuccessfulTodoNudges.get(session.id);
+    if (lastSuccessful && Date.now() - lastSuccessful.atMs < 60_000) return;
     try {
       await this.withPaneWriteLock(session.tmuxSession, async () => {
         const current = readSession(this.config.dataDir, session.id);
@@ -6706,14 +6709,17 @@ export class SessionService {
           current.pipeline?.status === "running"
         )
           return;
+        const lastSuccessfulInside = this.lastSuccessfulTodoNudges.get(session.id);
         if (
           this.todoNudgeDisabled.has(session.id) ||
           (this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now() ||
-          Date.now() - (this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0) < 60_000
+          (lastSuccessfulInside !== undefined && Date.now() - lastSuccessfulInside.atMs < 60_000)
         )
           return;
         session = current;
         const projection = ensureTodoLedger(this.config.dataDir, session);
+        const revision = projection.revision;
+        if (lastSuccessfulInside?.revision === revision) return;
         const ledgerSession = readSession(this.config.dataDir, session.id);
         if (!ledgerSession) return;
         session = ledgerSession;
@@ -6796,7 +6802,10 @@ export class SessionService {
           });
         }
         await this.writeAgentMessage(session, message, { interrupt: false });
-        this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
+        this.lastSuccessfulTodoNudges.set(session.id, {
+          atMs: Date.now(),
+          revision,
+        });
         this.todoNudgeBackoff.delete(session.id);
       });
     } catch (error) {
@@ -14177,7 +14186,7 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
-    this.clearTargetGoneNudgeGate(session.id);
+    this.resetTodoNudgesForRespawn(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
     // before this relaunch must never carry over.
     for (const name of Object.keys(project.sidecars)) {
@@ -14497,7 +14506,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    this.clearTargetGoneNudgeGate(sessionId);
+    this.resetTodoNudgesForRespawn(sessionId);
     // A restore can replay every sidecar afresh (directly, or via
     // relaunchSessionInPlace on the fresh-launch fallback); a cached
     // refusal from before this restore must never carry over.

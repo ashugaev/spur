@@ -497,6 +497,48 @@ async function listenOnAllInterfaces(
   });
 }
 
+function isAddrInUse(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "EADDRINUSE"
+  );
+}
+
+async function bindConsecutiveFreePortRange(): Promise<{
+  occupiedServer: ReturnType<typeof createServer>;
+  freePortGuard: ReturnType<typeof createServer>;
+  range: { start: number; end: number };
+}> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const occupiedServer = createServer((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+    const freePortGuard = createServer();
+    try {
+      await listenOnAllInterfaces(occupiedServer, 0);
+      const address = occupiedServer.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected a bound TCP address for runtime test");
+      }
+      if (address.port === 65_535) {
+        await closeServer(occupiedServer);
+        continue;
+      }
+      const range = { start: address.port, end: address.port + 1 };
+      await listenOnAllInterfaces(freePortGuard, range.end);
+      return { occupiedServer, freePortGuard, range };
+    } catch (error) {
+      await closeServer(occupiedServer);
+      await closeServer(freePortGuard);
+      if (attempt >= 2 || !isAddrInUse(error)) throw error;
+    }
+  }
+  throw new Error("Failed to bind consecutive TCP ports for runtime test");
+}
+
 async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
   if (!server.listening) return;
   await new Promise<void>((resolve, reject) => {
@@ -5735,19 +5777,11 @@ projects:
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
     const port = await findFreePort();
-    const reservedRange = await findConsecutiveFreePorts();
-    const occupiedServer = createServer((_request, response) => {
-      response.writeHead(204);
-      response.end();
-    });
-    const freePortGuard = createServer();
-    await listenOnAllInterfaces(occupiedServer, reservedRange.start);
-    try {
-      await listenOnAllInterfaces(freePortGuard, reservedRange.end);
-    } catch (error) {
-      await closeServer(occupiedServer);
-      throw error;
-    }
+    const {
+      occupiedServer,
+      freePortGuard,
+      range: reservedRange,
+    } = await bindConsecutiveFreePortRange();
 
     try {
       const context = await createRuntimeTestContext(port);
