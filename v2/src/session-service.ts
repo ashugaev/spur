@@ -1024,14 +1024,29 @@ type StartedAgentMessage =
       freshLaunch: boolean;
     };
 
+type AgentMessageOptions = {
+  interrupt?: boolean;
+  freshLaunch?: boolean;
+  skipSubmitAck?: boolean;
+  authorizeInput?: (send: () => Promise<void>) => Promise<boolean>;
+};
+
+type PlannedAgentMessage = {
+  session: AgentMessageTarget;
+  message: string;
+  options: AgentMessageOptions;
+};
+
 type PreparedTodoNudge = {
   sessionId: string;
   workspaceId: string;
   lifecycleIds: string[];
   generation: PaneGeneration;
+  stamp: SessionLifecycleStamp;
   fingerprint: string;
   attempts: number;
-  submission: StartedAgentMessage;
+  session: AgentMessageTarget;
+  message: string;
 };
 
 type DeliveryIntent =
@@ -1043,7 +1058,8 @@ type PreparedDelivery = {
   session: SessionRecord;
   lifecycleIds: string[];
   generation: PaneGeneration;
-  recoverySubmission: StartedAgentMessage | null;
+  stamp: SessionLifecycleStamp;
+  recoveryMessage: PlannedAgentMessage | null;
   status: SessionRecord["status"];
   stopReason: SessionRecord["stopReason"];
   intent: DeliveryIntent;
@@ -1051,7 +1067,7 @@ type PreparedDelivery = {
 
 type ReadySessionForSend = {
   session: SessionRecord;
-  recoverySubmission: StartedAgentMessage | null;
+  recoveryMessage: PlannedAgentMessage | null;
 };
 
 type ForegroundSpawnReceipt = {
@@ -6900,7 +6916,17 @@ export class SessionService {
         );
         if (!prepared) return;
 
-        const outcome = await this.completeAgentMessage(prepared.submission, {
+        const submission = await this.beginAgentMessage(prepared.session, prepared.message, {
+          interrupt: false,
+          authorizeInput: (send) =>
+            this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+              if (!(await this.todoNudgeMatches(prepared))) return false;
+              await send();
+              return true;
+            }),
+        });
+
+        const outcome = await this.completeAgentMessage(submission, {
           beforeResend: () =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, () =>
               this.todoNudgeMatches(prepared),
@@ -7059,15 +7085,16 @@ export class SessionService {
       });
     }
     const generation = await this.capturePaneGeneration(session);
-    const submission = await this.beginAgentMessage(session, message, { interrupt: false });
     return {
       sessionId: session.id,
       workspaceId: workspaceIdOf(session),
       lifecycleIds,
       generation,
+      stamp: this.lifecycleStamp(session),
       fingerprint,
       attempts,
-      submission,
+      session,
+      message,
     };
   }
 
@@ -7083,6 +7110,7 @@ export class SessionService {
       current.pipeline?.status !== "running" &&
       current.todoNudge?.fingerprint === prepared.fingerprint &&
       current.todoNudge.attempts === prepared.attempts &&
+      this.lifecycleStampMatches(current, prepared.stamp) &&
       (await this.paneGenerationMatches(current, prepared.generation))
     );
   }
@@ -12160,8 +12188,29 @@ export class SessionService {
         return this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
       });
       const generation = await this.capturePaneGeneration(ready.session);
-      if (ready.recoverySubmission) {
-        const outcome = await this.completeAgentMessage(ready.recoverySubmission, {
+      const stamp = this.lifecycleStamp(readSession(this.config.dataDir, sessionId) ?? ready.session);
+      if (ready.recoveryMessage) {
+        const submission = await this.beginAgentMessage(
+          ready.recoveryMessage.session,
+          ready.recoveryMessage.message,
+          {
+            ...ready.recoveryMessage.options,
+            authorizeInput: (send) =>
+              this.withSessionLifecycleLocks(lifecycleIds, async () => {
+                const current = readSession(this.config.dataDir, sessionId);
+                if (
+                  !current ||
+                  !this.lifecycleStateMatches(current, stamp) ||
+                  !(await this.paneGenerationMatches(current, generation))
+                ) {
+                  return false;
+                }
+                await send();
+                return true;
+              }),
+          },
+        );
+        const outcome = await this.completeAgentMessage(submission, {
           beforeResend: () =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
@@ -12383,11 +12432,13 @@ export class SessionService {
       }
     }
     const generation = await this.capturePaneGeneration(ready);
+    const inputRecord = readSession(this.config.dataDir, sessionId) ?? ready;
     return {
       session: ready,
       lifecycleIds: this.lifecycleIdsFor(ready),
       generation,
-      recoverySubmission: readyResult.recoverySubmission,
+      stamp: this.lifecycleStamp(inputRecord),
+      recoveryMessage: readyResult.recoveryMessage,
       status: ready.status,
       stopReason: ready.stopReason,
       intent,
@@ -12439,8 +12490,28 @@ export class SessionService {
       );
       if (!prepared) return { record: null, recovered: null };
 
-      if (prepared.recoverySubmission) {
-        const recoveryOutcome = await this.completeAgentMessage(prepared.recoverySubmission, {
+      if (prepared.recoveryMessage) {
+        const recoverySubmission = await this.beginAgentMessage(
+          prepared.recoveryMessage.session,
+          prepared.recoveryMessage.message,
+          {
+            ...prepared.recoveryMessage.options,
+            authorizeInput: (send) =>
+              this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+                const current = readSession(this.config.dataDir, sessionId);
+                if (
+                  !current ||
+                  !this.lifecycleStateMatches(current, prepared.stamp) ||
+                  !(await this.paneGenerationMatches(current, prepared.generation))
+                ) {
+                  return false;
+                }
+                await send();
+                return true;
+              }),
+          },
+        );
+        const recoveryOutcome = await this.completeAgentMessage(recoverySubmission, {
           beforeResend: () =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
@@ -12504,12 +12575,21 @@ export class SessionService {
         });
       let recovered: SubmitAckTimeoutError | null = null;
       try {
-        const submission = await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
-          const current = readSession(this.config.dataDir, sessionId);
-          if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
-            throw new Error(`Session ${sessionId} changed before message delivery`);
-          }
-          return this.beginAgentMessage(prepared.session, message, { interrupt });
+        const submission = await this.beginAgentMessage(prepared.session, message, {
+          interrupt,
+          authorizeInput: (send) =>
+            this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+              const current = readSession(this.config.dataDir, sessionId);
+              if (
+                !current ||
+                !this.lifecycleStateMatches(current, prepared.stamp) ||
+                !(await this.paneGenerationMatches(current, prepared.generation))
+              ) {
+                return false;
+              }
+              await send();
+              return true;
+            }),
         });
         const outcome = await this.completeAgentMessage(submission, {
           beforeResend: generationStillMatches,
@@ -12871,13 +12951,27 @@ export class SessionService {
       const current = readSession(this.config.dataDir, session.id);
       if (!current) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       const generation = await this.capturePaneGeneration(current);
+      const lifecycleIds = this.lifecycleIdsFor(current);
+      const stamp = this.lifecycleStamp(current);
       onGeneration?.(generation);
       const generationStillMatches = async () => {
         const latest = readSession(this.config.dataDir, session.id);
-        return Boolean(latest && (await this.paneGenerationMatches(latest, generation)));
+        return Boolean(
+          latest &&
+            this.lifecycleStampMatches(latest, stamp) &&
+            (await this.paneGenerationMatches(latest, generation)),
+        );
       };
       const outcome = await this.completeAgentMessage(
-        await this.beginAgentMessage(session, message, options),
+        await this.beginAgentMessage(session, message, {
+          ...options,
+          authorizeInput: (send) =>
+            this.withSessionLifecycleLocks(lifecycleIds, async () => {
+              if (!(await generationStillMatches())) return false;
+              await send();
+              return true;
+            }),
+        }),
         {
           beforeResend: generationStillMatches,
           beforeRecovery: generationStillMatches,
@@ -13006,10 +13100,11 @@ export class SessionService {
   private async beginAgentMessage(
     session: AgentMessageTarget,
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: AgentMessageOptions,
   ): Promise<StartedAgentMessage> {
     const freshLaunch = options?.freshLaunch === true;
     const shouldWaitForSubmitAck =
+      options?.skipSubmitAck !== true &&
       agentWaitsForSubmitAck(session.agent) &&
       !(session.agent === "codex" && process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"]);
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
@@ -13022,10 +13117,18 @@ export class SessionService {
         })
       : null;
     const startedAt = Date.now();
-    await sendMessageToTmux(session.tmuxSession, message, {
-      agent: session.agent,
-      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
-    });
+    const send = () =>
+      sendMessageToTmux(session.tmuxSession, message, {
+        agent: session.agent,
+        ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+      });
+    if (options?.authorizeInput) {
+      if (!(await options.authorizeInput(send))) {
+        throw new Error(`Session ${session.id} changed before message delivery`);
+      }
+    } else {
+      await send();
+    }
     if (!binding) {
       return { kind: "complete", outcome: "submitted" };
     }
@@ -14651,7 +14754,7 @@ export class SessionService {
     if (runtime.processAlive) {
       return {
         session: await this.captureAgentSessionId(session, 0),
-        recoverySubmission: null,
+        recoveryMessage: null,
       };
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
@@ -14743,7 +14846,7 @@ export class SessionService {
         tmuxSession: session.tmuxSession,
       },
     });
-    return { session: withSidecars, recoverySubmission: recovered.recoverySubmission };
+    return { session: withSidecars, recoveryMessage: recovered.recoveryMessage };
   }
 
   // Kills the live tmux pane and relaunches the agent in place, preserving its
@@ -14956,7 +15059,7 @@ export class SessionService {
       }
     }
 
-    let recoverySubmission: StartedAgentMessage | null = null;
+    let recoveryMessage: PlannedAgentMessage | null = null;
     if (usedFreshLaunch) {
       // Pane confirmed alive by the checks above; deliver task context before
       // returning so it lands before any caller (send/deliverPrepared/
@@ -14988,32 +15091,22 @@ export class SessionService {
         worktreePath: session.worktreePath,
         ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
       };
-      if (session.agent === "codex") {
-        // codex has no launch-send pacing (agentHasLaunchSubmitAck is false for
-        // it) and its rollout-based ack lags a fresh launch/resume enough that
-        // waiting on it here would reproduce the exact bug f79fb970f fixed for
-        // restore(): a healthy pane torn down because the ack scan, not the
-        // send, timed out. Bypass sendAgentMessage the same way restore() does
-        // for codex. A dead pane still surfaces: send-keys against a gone tmux
-        // session throws.
-        await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
-          agent: session.agent,
-        });
-      } else {
-        // freshLaunch:true mirrors restore()'s equivalent call: it selects the
-        // agent's launch-tuned ack pacing and — for agents with launch-send
-        // pacing of their own (claude) — lets an ack that never confirms on a
-        // live pane resolve as "submit_unconfirmed" instead of throwing and
-        // tearing down an otherwise-healthy relaunch.
-        if (options?.paneAlreadyOwned !== true) {
-          throw new Error(`Recovery context for ${session.id} requires pane ownership`);
-        }
-        recoverySubmission = await this.beginAgentMessage(
-          recoveryPaneTarget,
-          recoveryContextMessage,
-          { freshLaunch: true },
-        );
+      if (options?.paneAlreadyOwned !== true) {
+        throw new Error(`Recovery context for ${session.id} requires pane ownership`);
       }
+      // Binding discovery runs after the relaunch mutation has released its
+      // lifecycle locks. The pane-owning caller revalidates generation under
+      // lifecycle ownership immediately before this input is written.
+      recoveryMessage = {
+        session: recoveryPaneTarget,
+        message: recoveryContextMessage,
+        options: {
+          freshLaunch: true,
+          // Codex launch acknowledgement lags fresh recovery enough that this
+          // path has always treated the pane write itself as the boundary.
+          ...(session.agent === "codex" ? { skipSubmitAck: true } : {}),
+        },
+      };
     }
 
     this.stateCache.delete(session.id);
@@ -15044,7 +15137,7 @@ export class SessionService {
         ),
         project,
       ),
-      recoverySubmission,
+      recoveryMessage,
     };
   }
 
@@ -15396,47 +15489,33 @@ export class SessionService {
           restoreProject?.branchNaming?.regex,
           current.selfDestruct,
         );
-        if (current.agent === "codex") {
-          await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
-            const latest = readSession(this.config.dataDir, sessionId);
-            if (
-              !latest ||
-              !restoreGeneration ||
-              !(await this.paneGenerationMatches(latest, restoreGeneration))
-            ) {
-              throw new Error(`Session ${sessionId} changed during restore`);
-            }
-            await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
-              agent: current.agent,
-            });
-          });
-        } else {
-          // The fallback relaunched the agent instead of resuming it, so this is a
-          // launch send with no transcript behind it, same as a spawn's. A resume
-          // send keeps the mid-session pacing and its own timeout handling below.
-          // launchCommand is overridden to restoreLaunchCommand: an unacked send's
-          // liveness probe (agentProcessAlive) gates on the pane's ACTUAL launch
-          // command, not current's stale recorded one, same as the two fresh
-          // liveness checks above this block.
-          const restoreSubmission = await this.withSessionLifecycleLocks(
-            this.lifecycleIdsFor(session),
-            async () => {
-              const latest = readSession(this.config.dataDir, sessionId);
-              if (
-                !latest ||
-                !restoreGeneration ||
-                !(await this.paneGenerationMatches(latest, restoreGeneration))
-              ) {
-                throw new Error(`Session ${sessionId} changed during restore`);
-              }
-              return this.beginAgentMessage(
-                { ...current, launchCommand: restoreLaunchCommand },
-                restoreInitialMessage,
-                { freshLaunch: freshLaunchFallback },
-              );
-            },
-          );
-          const restoreSendOutcome = await this.completeAgentMessage(restoreSubmission, {
+        // The fallback relaunched the agent instead of resuming it, so this is a
+        // launch send with no transcript behind it, same as a spawn's. Binding
+        // discovery can touch the filesystem and therefore runs without lifecycle
+        // ownership; the exact restored generation is revalidated around input.
+        const restoreSubmission = await this.beginAgentMessage(
+          { ...current, launchCommand: restoreLaunchCommand },
+          restoreInitialMessage,
+          {
+            freshLaunch: freshLaunchFallback,
+            ...(current.agent === "codex" ? { skipSubmitAck: true } : {}),
+            authorizeInput: (send) =>
+              this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+                const latest = readSession(this.config.dataDir, sessionId);
+                if (
+                  !latest ||
+                  !restoreGeneration ||
+                  !this.lifecycleStampMatches(latest, claim) ||
+                  !(await this.paneGenerationMatches(latest, restoreGeneration))
+                ) {
+                  return false;
+                }
+                await send();
+                return true;
+              }),
+          },
+        );
+        const restoreSendOutcome = await this.completeAgentMessage(restoreSubmission, {
             beforeResend: () =>
               this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
                 const latest = readSession(this.config.dataDir, sessionId);
@@ -15455,11 +15534,11 @@ export class SessionService {
                   (await this.paneGenerationMatches(latest, restoreGeneration)),
                 );
               }),
-          });
-          if (restoreSendOutcome === "stale") {
-            throw new Error(`Session ${sessionId} changed during restore`);
-          }
-          if (restoreSendOutcome === "submit_unconfirmed") {
+        });
+        if (restoreSendOutcome === "stale") {
+          throw new Error(`Session ${sessionId} changed during restore`);
+        }
+        if (restoreSendOutcome === "submit_unconfirmed") {
             // Same degraded state the catch below reports for a resume send that
             // timed out on a live pane: the agent is up, its prompt is not
             // confirmed. `processAlive` is true by the outcome's contract, and the
@@ -15476,7 +15555,6 @@ export class SessionService {
                 processAlive: true,
               },
             });
-          }
         }
       }
     } catch (error) {
@@ -15945,8 +16023,28 @@ export class SessionService {
       },
     );
     const { relaunched, generation } = prepared;
-    if (relaunched.recoverySubmission) {
-      const outcome = await this.completeAgentMessage(relaunched.recoverySubmission, {
+    if (relaunched.recoveryMessage) {
+      const submission = await this.beginAgentMessage(
+        relaunched.recoveryMessage.session,
+        relaunched.recoveryMessage.message,
+        {
+          ...relaunched.recoveryMessage.options,
+          authorizeInput: (send) =>
+            this.withWorkspaceLifecycleLocks(sessionId, async () => {
+              const current = readSession(this.config.dataDir, sessionId);
+              if (
+                !current ||
+                !this.lifecycleStampMatches(current, prepared.stamp) ||
+                !(await this.paneGenerationMatches(current, generation))
+              ) {
+                return false;
+              }
+              await send();
+              return true;
+            }),
+        },
+      );
+      const outcome = await this.completeAgentMessage(submission, {
         beforeResend: () =>
           this.withWorkspaceLifecycleLocks(sessionId, async () => {
             const current = readSession(this.config.dataDir, sessionId);

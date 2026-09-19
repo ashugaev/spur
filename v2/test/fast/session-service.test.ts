@@ -1251,6 +1251,8 @@ type SessionServiceInternals = {
   paneWriteLocks: Map<string, Promise<void>>;
   sessionLifecycleLocks: Map<string, Promise<void>>;
   handoffsInFlight: Map<string, unknown>;
+  admissionReservations: Map<symbol, string>;
+  foregroundSpawnReceipts: Map<symbol, unknown>;
   reopensInFlight: Map<string, unknown>;
   deliveryRuns: Map<string, Promise<void>>;
   queueDeliveryInFlight: Set<string>;
@@ -7130,6 +7132,47 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
+    it("rejects a same-status replacement while the submit binding is prepared (issue #907 R2)", async () => {
+      const sessions = createSessionStore();
+      const generationA = runningSession({ agent: "claude" });
+      sessions.set("api-1", generationA);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let replacementActive = false;
+      vi.spyOn(internals, "paneGenerationMatches").mockImplementation(
+        async () => !replacementActive,
+      );
+      createAgentSubmitAckBindingMock.mockImplementationOnce(async () => {
+        const current = sessions.get("api-1");
+        if (!current) throw new Error("Expected generation A");
+        sessions.set("api-1", {
+          ...current,
+          prompt: "same-status generation B",
+          updatedAt: "2026-03-18T10:09:00.000Z",
+        });
+        replacementActive = true;
+        return { scan: vi.fn() };
+      });
+
+      await expect(
+        service.send("api-1", { message: "generation A text", queue: false }),
+      ).rejects.toThrow(/changed before message delivery/);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalledWith(
+        "api-1",
+        "generation A text",
+        expect.anything(),
+      );
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "running",
+        prompt: "same-status generation B",
+      });
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+      expect(internals.paneWriteLocks.size).toBe(0);
+    });
+
     it("keeps ToDo responsive while fresh-relaunch recovery context awaits acknowledgement", async () => {
       const sessions = createSessionStore();
       sessions.set(
@@ -7277,9 +7320,8 @@ describe("SessionService", () => {
       const internals = sessionServiceInternals(service);
       let replacementActive = false;
       let killCallsBeforeReplacement = 0;
-      const originalGenerationMatches = internals.paneGenerationMatches.bind(internals);
-      vi.spyOn(internals, "paneGenerationMatches").mockImplementation(async (session, expected) =>
-        replacementActive ? false : originalGenerationMatches(session, expected),
+      vi.spyOn(internals, "paneGenerationMatches").mockImplementation(
+        async () => !replacementActive,
       );
       vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
         killCallsBeforeReplacement = killTmuxSessionMock.mock.calls.length;
@@ -35147,7 +35189,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("leaves a same-name successor replacement untouched when handoff acknowledgement fails (issue #907 R19)", async () => {
+    it("does not send handoff text to a successor replaced during binding", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       const source = sessionRecord({
@@ -35159,17 +35201,89 @@ describe("SessionService", () => {
       workspaceExistsMock.mockReturnValue(true);
       reserveNextSessionIdMock.mockResolvedValue("api-2");
       agentWaitsForSubmitAckMock.mockImplementation((agent: string) => agent === "cursor");
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      let replacementActive = false;
+      createAgentSubmitAckBindingMock.mockImplementationOnce(async () => {
+        const successor = sessions.get("api-2");
+        if (!successor) throw new Error("Expected successor generation A");
+        sessions.set("api-2", {
+          ...successor,
+          status: "running",
+          prompt: "successor generation B",
+          updatedAt: "2026-03-18T10:09:00.000Z",
+        });
+        replacementActive = true;
+        return { scan: vi.fn() };
+      });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "paneGenerationMatches").mockImplementation(
+        async (session) => !(replacementActive && session.id === "api-2"),
+      );
+
+      await expect(service.handoff(source.id, { agent: "cursor" })).rejects.toThrow(
+        /successor generation changed before cleanup/,
+      );
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalledWith(
+        "api-2",
+        expect.any(String),
+        expect.anything(),
+      );
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-2")).toMatchObject({
+        status: "running",
+        prompt: "successor generation B",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-2");
+      expect(internals.handoffsInFlight.size).toBe(0);
+      expect(internals.paneWriteLocks.size).toBe(0);
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+    });
+
+    it("leaves a same-name successor replacement untouched when handoff acknowledgement fails (issue #907 R19)", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        closeoutOwner: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      agentWaitsForSubmitAckMock.mockImplementation((agent: string) => agent === "cursor");
       createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
       lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const originalGenerationMatches = internals.paneGenerationMatches.bind(internals);
-      let replacementActive = false;
-      vi.spyOn(internals, "paneGenerationMatches").mockImplementation(async (session, expected) =>
-        replacementActive && session.id === "api-2"
-          ? false
-          : originalGenerationMatches(session, expected),
+      const initialId = (
+        await service.mutateTodo(
+          source.id,
+          { action: "add", text: "Initial work", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: source.id },
+        )
+      ).items[0]?.id;
+      if (!initialId) throw new Error("Expected added ToDo item");
+      await service.mutateTodo(
+        source.id,
+        { action: "complete", itemId: initialId, reason: "Ready for handoff" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
       );
+      let replacementActive = false;
+      vi.spyOn(internals, "paneGenerationMatches").mockImplementation(
+        async (session) => !(replacementActive && session.id === "api-2"),
+      );
+      let signalAckStarted: () => void = () => {};
+      const ackStarted = new Promise<void>((resolve) => {
+        signalAckStarted = resolve;
+      });
+      let releaseFailure: () => void = () => {};
+      const failureGate = new Promise<void>((resolve) => {
+        releaseFailure = resolve;
+      });
       vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
         const placeholder = sessions.get("api-2");
         if (!placeholder) throw new Error("Expected successor placeholder");
@@ -35180,16 +35294,36 @@ describe("SessionService", () => {
           updatedAt: "2026-03-18T10:09:00.000Z",
         });
         replacementActive = true;
+        signalAckStarted();
+        await failureGate;
         return { found: false, lastScannedFile: null };
       });
 
-      await expect(service.handoff(source.id, { agent: "cursor" })).rejects.toThrow(
-        /successor generation changed before cleanup/,
+      const handoff = service.handoff(source.id, { agent: "cursor" });
+      const rejection = handoff.then(
+        () => new Error("Expected handoff to reject"),
+        (error: unknown) => error,
       );
+      await ackStarted;
+      await expect(service.readTodo(source.id)).resolves.toMatchObject({ counts: { open: 0 } });
+      await expect(
+        service.mutateTodo(
+          source.id,
+          { action: "add", text: "Too late", reason: "Raced failed handoff" },
+          { kind: "agent", agent: "claude", sessionId: source.id },
+        ),
+      ).rejects.toMatchObject({ code: "todo_transition_conflict" });
+      expect(internals.handoffsInFlight.has(source.id)).toBe(true);
+
+      releaseFailure();
+      await expect(rejection).resolves.toMatchObject({
+        message: expect.stringMatching(/successor generation changed before cleanup/),
+      });
 
       expect(sessions.get(source.id)).toMatchObject({
         status: "stopped",
         stopReason: "manual_pause",
+        closeoutOwner: true,
       });
       expect(sessions.get("api-2")).toMatchObject({
         status: "running",
@@ -35197,6 +35331,8 @@ describe("SessionService", () => {
       });
       expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-2");
       expect(internals.handoffsInFlight.size).toBe(0);
+      expect(internals.admissionReservations.size).toBe(0);
+      expect(internals.foregroundSpawnReceipts.size).toBe(0);
       expect(internals.paneWriteLocks.size).toBe(0);
       expect(internals.sessionLifecycleLocks.size).toBe(0);
     });
