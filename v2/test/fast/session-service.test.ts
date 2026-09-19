@@ -8501,8 +8501,7 @@ describe("SessionService", () => {
   // false "not ready" here falls into relaunchSessionInPlace, which KILLS
   // and relaunches a genuinely live agent (capturePaneAgentProcesses reads
   // `ps`, not tmux, so a tmux-only hang sails past the survivor guard). This
-  // path is reached automatically from the delivery loop
-  // (tryDeliverQueuedMessageLocked), so it must throw a retryable error
+  // path is reached automatically from the delivery loop, so it must throw a retryable error
   // instead of attempting recovery — the message stays queued, exactly like
   // the missing-workspace throw above.
   it("throws (never recovers) when the tmux probe is killed by its own timeout, so the delivery loop retries instead of killing a live agent", async () => {
@@ -40241,8 +40240,8 @@ describe("SessionService", () => {
 
       // Next live tick: a genuinely blank pane reuses the stored override
       // rather than recomputing paneReconfirmedLimit off nothing — the flip
-      // hazard this override exists to prevent. sendLocked must still see
-      // rate_limited and suppress a message typed on this exact tick.
+      // hazard this override exists to prevent. Delivery must still see rate_limited
+      // and suppress a message typed on this exact tick.
       captureTmuxPaneMock.mockResolvedValue("");
       await vi.advanceTimersByTimeAsync(4_001);
       const afterBlankCapture = await service.get("api-1");
