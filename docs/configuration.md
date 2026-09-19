@@ -210,7 +210,7 @@ triggers:
 
 A desk group is any set of sessions sharing one workspace: the children of a `spawnDeskGroup` trigger, and the two sides of a handoff.
 
-Shared per desk: slots (title/links/tags/PR), session artifacts, non-MCP project sidecars (`isolated-daemon`, `isolated-ui`) — one instance, addressable by any member. Per member: transcript, agent process, status, MCP sidecar (`playwright`), session tool dir.
+Shared per desk: slots (title/links/tags/PR), session artifacts, non-MCP project sidecars (`isolated-daemon`, `isolated-ui`, `landing`) — one instance, addressable by any member. Per member: transcript, agent process, status, MCP sidecar (`playwright`), session tool dir.
 
 Worktree and shared artifacts survive while any member can still return, so a `stopped`, `paused` or `errored` member keeps them. The shared sidecar pane survives the same way — kept until [idle TTL](#sidecar-reaping) reaps it, not tied to a running agent. Its ports are released once no member has a running agent; restoring a member starts it again.
 
