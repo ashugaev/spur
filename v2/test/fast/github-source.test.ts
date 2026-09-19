@@ -152,6 +152,10 @@ function graphqlAuthor(user: unknown): { login: unknown } | null {
     : null;
 }
 
+// The account the daemon authenticates as, answered by the batch query's root
+// `viewer` field. Tests that care about review requests set it explicitly.
+let viewerLogin: string | null = "review-bot";
+
 async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> {
   if (args[0] !== "api" || !args.includes("graphql")) {
     return ghMock(cwd, ...args) as Promise<string>;
@@ -200,10 +204,18 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
   const branchQuery = args.some((arg) => arg.includes("pullRequests(headRefName"));
   return JSON.stringify({
     data: {
+      ...(viewerLogin === null ? {} : { viewer: { login: viewerLogin } }),
       rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
       r: { a0: branchQuery ? { nodes: [node] } : node },
     },
   });
+}
+
+// PR-node shape for pending review requests, as `prView` overrides take it.
+function reviewRequests(...logins: string[]): Record<string, unknown> {
+  return {
+    reviewRequests: { nodes: logins.map((login) => ({ requestedReviewer: { login } })) },
+  };
 }
 function trackSeenComments(initial: readonly string[] = []): Set<string> {
   const seen = new Set<string>(initial);
@@ -233,6 +245,7 @@ describe("github source", () => {
     // dead-worktree tests override this per case.
     isGitWorktreeMock.mockResolvedValue(true);
     hasRecentSessionUserActionMock.mockReturnValue(false);
+    viewerLogin = "review-bot";
   });
 
   afterEach(() => {
@@ -980,6 +993,21 @@ describe("github source", () => {
     ghMock.mockReset();
   });
 
+  // Interval ticks never fire under vitest fake timers here (node:timers), so a
+  // second poll is driven explicitly through runOnStart().
+  async function startRepollable(emit: (name: string, data?: unknown) => void) {
+    return githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+  }
+
   async function startLifecycle(emit: (name: string, data?: unknown) => void) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
@@ -1021,6 +1049,143 @@ describe("github source", () => {
     expect(emit).not.toHaveBeenCalledWith("github:ready_for_review", expect.anything());
     const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
     expect(snapshot.signals.has("ready_for_review")).toBe(false);
+    handle.stop();
+  });
+
+  it("emits github:review_requested when the viewer is newly requested", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:review_requested",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "review_requested",
+            kind: "review_requested",
+            text: "Review requested from review-bot on this PR.",
+          }),
+        ],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("re-emits github:review_requested on a re-request after the review was submitted", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // Submitting a review clears the request; the author's re-request adds it back.
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    mockLifecyclePoll(
+      prView(reviewRequests()),
+      JSON.stringify([{ id: 7, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    const emit = vi.fn();
+
+    const handle = await startRepollable(emit);
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(emit).toHaveBeenCalledWith("github:review_requested", expect.anything());
+
+    emit.mockClear();
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalledTimes(15);
+    expect(emit).toHaveBeenCalledWith(
+      "github:review_requested",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "review_requested" })],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("emits no github:review_requested for a submitted REQUEST_CHANGES review or a head push", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // The viewer's own CHANGES_REQUESTED review is outbound, and a later push
+    // moves the head without ever re-requesting a review.
+    mockLifecyclePoll(
+      prView({ ...reviewRequests(), reviewDecision: "CHANGES_REQUESTED" }),
+      JSON.stringify([{ id: 7, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    mockLifecyclePoll(
+      prView({
+        ...reviewRequests(),
+        reviewDecision: "CHANGES_REQUESTED",
+        headRefOid: "bbbbbbb2222222222222",
+      }),
+      JSON.stringify([{ id: 7, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startRepollable(emit);
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalledTimes(10);
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("review_requested")).toBe(false);
+    handle.stop();
+  });
+
+  it("emits no github:review_requested when another account is the requested reviewer", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView(reviewRequests("someone-else")));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+    handle.stop();
+  });
+
+  it("keeps github:merged and drops the review request on a merged PR", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ ...reviewRequests("review-bot"), state: "MERGED" }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:merged",
+      expect.objectContaining({ signals: [expect.objectContaining({ kind: "merged" })] }),
+    );
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+    handle.stop();
+  });
+
+  it("polls a bound worktree:false session and emits its review request", async () => {
+    // int-review desks run worktree:false against a real checkout path. Poll
+    // eligibility keys off worktreePath existing, never the worktree flag.
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession({ worktree: false })]);
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:review_requested",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "review_requested" })],
+      }),
+    );
     handle.stop();
   });
 

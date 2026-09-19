@@ -156,6 +156,14 @@ export const REVIEW_SIGNAL_KINDS = [
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
+// GitHub-only signal kinds that report an occurrence, not a lifecycle state.
+// They are exempt from the lifecycle filter a session's first poll applies, so
+// an occurrence already pending when the session is first baselined still
+// emits. A poll with no prior snapshot at all emits nothing unless the source
+// asks for it (`runOnStart`), same as every other kind.
+export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
+export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
+
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
   "approved",
@@ -476,7 +484,7 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
 }

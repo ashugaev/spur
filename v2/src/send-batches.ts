@@ -298,6 +298,9 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     if (kinds.has("comment")) {
       lines.push(`Read the latest ${provider.requestLabel} comments and act on them.`);
     }
+    if (kinds.has("review_requested")) {
+      lines.push(`Your review was requested on the active ${provider.requestLabel}.`);
+    }
     if (kinds.has("ready_for_review")) {
       lines.push(`The ${provider.requestLabel} is ready for review.`);
     }
