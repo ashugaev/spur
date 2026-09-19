@@ -366,14 +366,19 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // or when the session disappears.
   const transientPollBackoff = new Map<string, { failures: number; nextRetryAtMs: number }>();
 
-  // sessionId -> the state a failed write/clear couldn't get onto disk: a prNumber
-  // when a record failed (memory says disabled, disk doesn't), or null when a clear
-  // failed (memory says cleared, disk still has the stale entry). refreshPollDisabled
-  // re-reads the whole registry from disk every tick, which would otherwise silently
-  // undo an in-memory-only mutation on the very next refresh — reproducing the
-  // measured defect (repeat emits every tick) via a persistent write failure instead
-  // of a handle restart. Cleared once a later write/clear for that sessionId succeeds.
-  const pendingPollDisabledOverrides = new Map<string, number | null>();
+  // sessionId -> the prNumber a failed record* write couldn't get onto disk (memory
+  // says disabled, disk doesn't). refreshPollDisabled re-reads the whole registry
+  // from disk every tick, which would otherwise silently undo an in-memory-only
+  // record* mutation on the very next refresh — reproducing the measured defect
+  // (repeat emits every tick) via a persistent write failure instead of a handle
+  // restart. No clear-side entry: a failed clear leaves the stale disk entry, but
+  // the in-memory delete at :455/:461 already happened (isSessionPollGated's
+  // self-heal doesn't gate on the cache being write-clean), and overriding the next
+  // refresh to re-delete it would suppress that refresh's own retry of the clear —
+  // the disk entry would never heal even once writes recover. Cleared once a later
+  // record* for that sessionId succeeds; also dropped by the sweep when the session
+  // disappears.
+  const pendingPollDisabledOverrides = new Map<string, number>();
 
   // Both wrap a synchronous fs write in try/catch and swallow-and-log, mirroring
   // logSpurEvent's own `catch {}` (event-log.ts:232-234). Mandatory, not defensive
@@ -385,11 +390,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // setInterval callback below — an unguarded throw there is an uncaught exception,
   // not a rejection. A swallowed write failure degrades I1 to best-effort DURING THE
   // FAILURE WINDOW ONLY: pendingPollDisabledOverrides keeps the in-memory Map correct
-  // across every refresh until a write finally lands, so a persistently failing disk
-  // never re-arms more than the one event already emitted before the first failure —
-  // it does not reproduce the measured defect. Once the disk write starts succeeding
-  // again, the next successful record/clear drops the override and disk becomes
-  // authoritative again, same as the handle-restart case.
+  // across every refresh, so a persistently failing disk never re-arms more than the
+  // one event already emitted before the first failure — it does not reproduce the
+  // measured defect. No record* call is ever retried for that session: once the
+  // override reapplies the entry on refresh, the gate at :461/:734 sees it as already
+  // disabled and never re-enters safeRecordPollDisabled. The override only drops via
+  // a rebind (the self-heal clear path, which does retry its own write every cycle —
+  // see safeClearPollDisabled below), the sweep pruning a disappeared session, or
+  // handle recreation reseeding from whatever the disk last held.
   const safeRecordPollDisabled = (sessionId: string, prNumber: number): void => {
     try {
       recordGitHubPollDisabledSession(
@@ -411,11 +419,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   };
 
   const safeClearPollDisabled = (sessionId: string): void => {
+    // No override on failure (see pendingPollDisabledOverrides above): the caller
+    // already deletes sessionId from the in-memory cache regardless of this call's
+    // outcome, and letting the next refresh bring the stale disk entry back is what
+    // makes isSessionPollGated's self-heal retry the clear on the following cycle.
+    pendingPollDisabledOverrides.delete(sessionId);
     try {
       clearGitHubPollDisabledSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
-      pendingPollDisabledOverrides.delete(sessionId);
     } catch (error) {
-      pendingPollDisabledOverrides.set(sessionId, null);
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] failed to clear poll-disabled state for ${sessionId}: ${
           error instanceof Error ? error.message : String(error)
@@ -428,15 +439,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // runs in the same daemon process and can interleave at any await in pollSignals)
   // takes effect within one tick. On a read failure, keep the current in-memory Map
   // rather than wiping it — a transient read error must not re-arm suppressed events.
-  // Every pending override (a write/clear disk couldn't yet absorb) is re-applied on
-  // top of the fresh disk read, so a persistent write failure can't undo its own
+  // Every pending override (a record* disk couldn't yet absorb) is re-applied on top
+  // of the fresh disk read, so a persistent write failure can't undo its own
   // in-memory mutation on the very next tick.
   const refreshPollDisabled = (): void => {
     try {
       const fresh = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
-      for (const [sessionId, override] of pendingPollDisabledOverrides) {
-        if (override === null) fresh.delete(sessionId);
-        else fresh.set(sessionId, override);
+      for (const [sessionId, prNumber] of pendingPollDisabledOverrides) {
+        fresh.set(sessionId, prNumber);
       }
       permanentPrNotFound = fresh;
     } catch (error) {
