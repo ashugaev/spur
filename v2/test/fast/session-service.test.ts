@@ -214,15 +214,21 @@ const probeTmuxProcessMatchMock =
     ) => Promise<{ alive: boolean; matchedByName: boolean }>
   >();
 const killTmuxSessionMock = vi.fn();
+const captureAgentProcessesForLaunchMock = vi.fn(() =>
+  Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
+    status: "ok",
+    processes: [],
+  }),
+);
 const capturePaneAgentProcessesMock = vi.fn(() =>
   Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
     status: "ok",
     processes: [],
   }),
 );
-const terminateAgentProcessesMock = vi.fn(() =>
-  Promise.resolve<AgentTerminationOutcome>({ status: "clear" }),
-);
+const terminateAgentProcessesMock = vi.fn<
+  (processes: readonly AgentProcessRef[]) => Promise<AgentTerminationOutcome>
+>(() => Promise.resolve({ status: "clear" }));
 // "unavailable" is the safe default: it is what a real host without a
 // readable process environment (e.g. macOS, or a CI sandbox without procfs)
 // returns, and matches the P2 guard's own never-blocks-on-what-it-cannot-see
@@ -732,6 +738,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
 });
 
 vi.mock("../../src/agent-processes.js", () => ({
+  captureAgentProcessesForLaunch: captureAgentProcessesForLaunchMock,
   capturePaneAgentProcesses: capturePaneAgentProcessesMock,
   terminateAgentProcesses: terminateAgentProcessesMock,
   findForeignAgentProcessesForSession: findForeignAgentProcessesForSessionMock,
@@ -1591,6 +1598,9 @@ describe("SessionService", () => {
         return { alive, matchedByName: alive };
       });
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
+    captureAgentProcessesForLaunchMock
+      .mockReset()
+      .mockResolvedValue({ status: "ok", processes: [] });
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
     terminateAgentProcessesMock.mockReset().mockResolvedValue({ status: "clear" });
     findForeignAgentProcessesForSessionMock
@@ -1951,6 +1961,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_AGENT_LAUNCH_ID: expect.any(String),
         SPUR_CLOSEOUT_OWNER: "1",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
@@ -5974,6 +5985,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_AGENT_LAUNCH_ID: expect.any(String),
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
@@ -22590,6 +22602,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_AGENT_LAUNCH_ID: expect.any(String),
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
@@ -27424,6 +27437,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_AGENT_LAUNCH_ID: expect.any(String),
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
@@ -27734,6 +27748,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_AGENT_LAUNCH_ID: expect.any(String),
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
@@ -27973,6 +27988,7 @@ describe("SessionService", () => {
     const restored = await service.restore("api-1");
 
     expect(restored).toMatchObject({ id: "api-1", status: "running" });
+    expect(restored).not.toHaveProperty("agentLaunchId");
     expect(createTmuxSessionMock).toHaveBeenCalledOnce();
   });
 
@@ -27980,6 +27996,8 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     let runtimeAbsenceObserved = false;
     let restoredTmuxCreated = false;
+    let ownedOrphanTerminated = false;
+    const ownedOrphan = { pid: 2702084, identity: "launch-a-starttime" };
     readClaudeJsonlStateMock.mockResolvedValue({
       state: "working",
       reader: {
@@ -28008,17 +28026,81 @@ describe("SessionService", () => {
     // Generic status probes stay stale/alive, matching the smoke failure:
     // only the fresh expected-pane lookup observes the external tmux kill.
     isProcessRunningInTmuxMock.mockResolvedValue(true);
+    captureAgentProcessesForLaunchMock.mockResolvedValue({
+      status: "ok",
+      processes: [ownedOrphan],
+    });
+    terminateAgentProcessesMock.mockImplementation(async (processes) => {
+      if (processes[0]?.pid === ownedOrphan.pid) ownedOrphanTerminated = true;
+      return { status: "clear" };
+    });
+    findForeignAgentProcessesForSessionMock.mockImplementation(async () => ({
+      status: "ok",
+      pids: ownedOrphanTerminated ? [] : [ownedOrphan.pid],
+    }));
 
     const service = await createDisposedSessionService();
-    sessions.set("api-1", runningSession());
+    sessions.set("api-1", { ...runningSession(), agentLaunchId: "launch-a" });
     const restored = await service.restore("api-1");
 
     expect(restored).toMatchObject({ id: "api-1", status: "running" });
+    expect(captureAgentProcessesForLaunchMock).toHaveBeenCalledWith({
+      sessionId: "api-1",
+      agentLaunchId: "launch-a",
+      processMatchers: expect.any(Array),
+    });
+    expect(terminateAgentProcessesMock).toHaveBeenCalledWith([ownedOrphan]);
     expect(createTmuxSessionMock).toHaveBeenCalledOnce();
+    const createdEnv = createTmuxSessionMock.mock.calls[0]?.[0].env;
+    expect(createdEnv?.SPUR_AGENT_LAUNCH_ID).toEqual(expect.any(String));
+    expect(createdEnv?.SPUR_AGENT_LAUNCH_ID).not.toBe("launch-a");
+    expect(sessions.get("api-1")?.agentLaunchId).toBe(createdEnv?.SPUR_AGENT_LAUNCH_ID);
     expect(writeSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({ id: "api-1", status: "stopped" }),
     );
+  });
+
+  it("refuses restore when the exact owned orphan survives bounded teardown", async () => {
+    const sessions = createSessionStore();
+    const ownedOrphan = { pid: 2702084, identity: "launch-a-starttime" };
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+    captureAgentProcessesForLaunchMock.mockResolvedValue({
+      status: "ok",
+      processes: [ownedOrphan],
+    });
+    terminateAgentProcessesMock.mockResolvedValue({
+      status: "survivors",
+      pids: [ownedOrphan.pid],
+    });
+
+    const service = await createDisposedSessionService();
+    sessions.set("api-1", { ...runningSession(), agentLaunchId: "launch-a" });
+
+    await expect(service.restore("api-1")).rejects.toThrow(
+      "owned prior agent process(es) 2702084 survived SIGKILL",
+    );
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(findForeignAgentProcessesForSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("never tears down an unproven process before the foreign-process restore guard", async () => {
+    const sessions = createSessionStore();
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    tmuxPaneDeadMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    captureAgentProcessesForLaunchMock.mockResolvedValue({ status: "ok", processes: [] });
+    findForeignAgentProcessesForSessionMock.mockResolvedValue({ status: "ok", pids: [2702084] });
+
+    const service = await createDisposedSessionService();
+    sessions.set("api-1", { ...runningSession(), agentLaunchId: "launch-a" });
+
+    await expect(service.restore("api-1")).rejects.toThrow(
+      "Session api-1 already has a live agent process (pid 2702084) outside its pane",
+    );
+    expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
   it("waits for native resume state to appear before restoring", async () => {
@@ -28796,6 +28878,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "codex",
+        SPUR_AGENT_LAUNCH_ID: expect.any(String),
         SPUR_CLOSEOUT_OWNER: "0",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),

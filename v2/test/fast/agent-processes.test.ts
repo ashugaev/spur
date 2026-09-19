@@ -105,6 +105,7 @@ vi.mock("../../src/registry.js", () => ({
 }));
 
 const {
+  captureAgentProcessesForLaunch,
   capturePaneAgentProcesses,
   checkAgentProcessOwnership,
   findForeignAgentProcessesForSession,
@@ -304,6 +305,58 @@ describe("terminateAgentProcesses", () => {
     });
     expect(outcome).toEqual({ status: "survivors", pids: [13] });
     expect(signalPidMock).toHaveBeenCalledWith(13, "SIGKILL");
+  });
+});
+
+describe("captureAgentProcessesForLaunch", () => {
+  it("captures only the exact session launch and preserves pid identity", async () => {
+    identities.set(30, "start-30");
+    fakeTable = [
+      {
+        pid: 30,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1", SPUR_AGENT_LAUNCH_ID: "launch-a" },
+      },
+      {
+        pid: 31,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "api-1", SPUR_AGENT_LAUNCH_ID: "launch-b" },
+      },
+      {
+        pid: 32,
+        ppid: 1,
+        rssKb: 1,
+        elapsedSeconds: 1,
+        args: "claude",
+        env: { SPUR_SESSION: "other-1", SPUR_AGENT_LAUNCH_ID: "launch-a" },
+      },
+    ];
+
+    await expect(
+      captureAgentProcessesForLaunch({
+        sessionId: "api-1",
+        agentLaunchId: "launch-a",
+        processMatchers: ["claude"],
+      }),
+    ).resolves.toEqual({ status: "ok", processes: [{ pid: 30, identity: "start-30" }] });
+  });
+
+  it("fails closed when the process table is unavailable", async () => {
+    processSnapshotUnavailable = true;
+
+    await expect(
+      captureAgentProcessesForLaunch({
+        sessionId: "api-1",
+        agentLaunchId: "launch-a",
+        processMatchers: ["claude"],
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
   });
 });
 

@@ -224,6 +224,52 @@ export async function capturePaneAgentProcesses(input: {
   return { status: "ok", processes: refs };
 }
 
+// Exact launch-rooted capture for a pane that has already disappeared. Both
+// environment keys are required: SPUR_SESSION alone is shared by every
+// restore/relaunch generation and can collide with another daemon instance.
+// The returned identity tokens make delayed teardown safe against pid reuse.
+export async function captureAgentProcessesForLaunch(input: {
+  sessionId: string;
+  agentLaunchId: string;
+  processMatchers: readonly string[];
+}): Promise<PaneAgentCapture> {
+  if (!(await canReadProcessEnv())) {
+    return { status: "unavailable" };
+  }
+  const matchers = compileMatchers(input.processMatchers);
+  if (matchers.length === 0) {
+    return { status: "ok", processes: [] };
+  }
+  const snapshot = await snapshotProcesses();
+  if (snapshot.status === "unavailable") {
+    return { status: "unavailable" };
+  }
+  const matching: ProcessSnapshotEntry[] = [];
+  for (const proc of snapshot.processes) {
+    if (!matchers.some((matcher) => matcher.test(proc.args))) continue;
+    const sessionEnv = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
+    const launchEnv = await readProcessEnvValue(proc.pid, "SPUR_AGENT_LAUNCH_ID");
+    if (
+      sessionEnv.status === "ok" &&
+      sessionEnv.value === input.sessionId &&
+      launchEnv.status === "ok" &&
+      launchEnv.value === input.agentLaunchId
+    ) {
+      matching.push(proc);
+    }
+  }
+  const pids = collapseToShallowest(
+    matching.map((proc) => proc.pid),
+    snapshot.processes,
+  );
+  return {
+    status: "ok",
+    processes: await Promise.all(
+      pids.map(async (pid) => ({ pid, identity: await readProcessIdentity(pid) })),
+    ),
+  };
+}
+
 export type AgentTerminationOutcome = { status: "clear" } | { status: "survivors"; pids: number[] };
 
 const DEFAULT_GRACE_MS = 2_000;

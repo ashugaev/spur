@@ -998,6 +998,8 @@ export interface SessionRecord {
   worktreePath: string;
   tmuxSession: string;
   launchCommand: string;
+  /** Opaque identity shared only by one agent launch and its process tree. */
+  agentLaunchId?: string;
   status: SessionStatus;
   stopReason?: "manual_pause" | "stale_timeout";
   createdAt: string;
@@ -1099,7 +1101,7 @@ export interface SessionSidecarView {
   deadPane?: boolean;
 }
 
-export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
+export interface SessionView extends Omit<SessionRecord, "queuedMessages" | "agentLaunchId"> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -1133,6 +1135,7 @@ export type DashboardOmittedField =
   | "stateSubscriptions"
   | "allowedTriggers"
   | "agentSessionId"
+  | "agentLaunchId"
   | "branchSource";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {

@@ -6,7 +6,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -43,6 +43,7 @@ import {
 } from "./agents/opencode.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import {
+  captureAgentProcessesForLaunch,
   capturePaneAgentProcesses,
   findForeignAgentProcessesForSession,
   terminateAgentProcesses,
@@ -1968,6 +1969,7 @@ function buildSessionEnv(args: {
   repoPath: string;
   symlinks: string[];
   closeoutOwner?: boolean;
+  agentLaunchId?: string;
   extraEnv?: Record<string, string>;
 }): Record<string, string> {
   const env: Record<string, string> = {
@@ -2017,6 +2019,7 @@ function buildSessionEnv(args: {
   return {
     ...env,
     ...(args.extraEnv ?? {}),
+    SPUR_AGENT_LAUNCH_ID: args.agentLaunchId ?? "",
   };
 }
 
@@ -2025,6 +2028,10 @@ function buildSessionEnv(args: {
 // harness (all other assertions on it go through the SessionService.spawn/
 // restore/send call sites instead, per the rest of this file's tests).
 export const _buildSessionEnvForTests = buildSessionEnv;
+
+function newAgentLaunchId(): string {
+  return randomBytes(16).toString("hex");
+}
 
 function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
@@ -10258,6 +10265,7 @@ export class SessionService {
             status: "running" as const,
           }
         : undefined;
+      const agentLaunchId = newAgentLaunchId();
       let runningRecord: SessionRecord = {
         ...sessionForMcp,
         planMode,
@@ -10265,6 +10273,7 @@ export class SessionService {
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
+        agentLaunchId,
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
         ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         status: "running",
@@ -10289,6 +10298,7 @@ export class SessionService {
         repoPath: project.path,
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
+        agentLaunchId,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
@@ -11354,6 +11364,7 @@ export class SessionService {
             status: "running" as const,
           }
         : undefined;
+      const agentLaunchId = newAgentLaunchId();
       let runningRecord: SessionRecord = {
         ...sessionForMcp,
         planMode,
@@ -11361,6 +11372,7 @@ export class SessionService {
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
+        agentLaunchId,
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
         status: "running",
         updatedAt: nowIso(),
@@ -11382,6 +11394,7 @@ export class SessionService {
         repoPath: project.path,
         symlinks: project.symlinks,
         closeoutOwner: runningRecord.closeoutOwner === true,
+        agentLaunchId,
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -14300,6 +14313,40 @@ export class SessionService {
     throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
+  private async reconcileOwnedOrphanAgent(
+    session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "agentLaunchId">,
+  ): Promise<void> {
+    if (!session.agentLaunchId) {
+      return;
+    }
+    const capture = await captureAgentProcessesForLaunch({
+      sessionId: session.id,
+      agentLaunchId: session.agentLaunchId,
+      processMatchers: sessionProcessMatchers(session),
+    });
+    if (capture.status === "unavailable") {
+      throw new Error(
+        `Session ${session.id}: could not prove whether its prior agent launch exited; refusing to launch a replacement`,
+      );
+    }
+    if (capture.processes.length === 0) {
+      return;
+    }
+    const outcome = await terminateAgentProcesses(capture.processes);
+    if (outcome.status === "clear") {
+      return;
+    }
+    this.logEvent("session.agent_process.survivors", {
+      level: "error",
+      sessionId: session.id,
+      message: `Session ${session.id}: owned prior agent process(es) ${outcome.pids.join(", ")} survived SIGKILL`,
+      details: { pids: outcome.pids, reason: "missing_pane_restore" },
+    });
+    throw new Error(
+      `Session ${session.id}: owned prior agent process(es) ${outcome.pids.join(", ")} survived SIGKILL; refusing to launch a replacement`,
+    );
+  }
+
   // Classifies a manual-status-gate refusal for the failure event. A ToDo
   // cause (empty ledger or unfinished work) demotes to `warn` with
   // `details.kind`, because the gate rejected before any teardown and the
@@ -14982,18 +15029,22 @@ export class SessionService {
         agentSessionId: sessionWithAgentId.agentSessionId ?? null,
       },
     });
-    const env = buildSessionEnv({
-      agent: session.agent,
-      projectId: session.project,
-      sessionId: session.id,
-      artifactsSessionId: workspaceIdOf(session),
-      sessionToolDir,
-      dataDir: this.config.dataDir,
-      repoPath: this.getProject(session.project).path,
-      symlinks: this.getProject(session.project).symlinks,
-      closeoutOwner: session.closeoutOwner === true,
-      ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
-    });
+    const buildLaunchEnv = (agentLaunchId: string): Record<string, string> =>
+      buildSessionEnv({
+        agent: session.agent,
+        projectId: session.project,
+        sessionId: session.id,
+        artifactsSessionId: workspaceIdOf(session),
+        sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: this.getProject(session.project).path,
+        symlinks: this.getProject(session.project).symlinks,
+        closeoutOwner: session.closeoutOwner === true,
+        agentLaunchId,
+        ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
+      });
+    let agentLaunchId = newAgentLaunchId();
+    let env = buildLaunchEnv(agentLaunchId);
 
     // True whenever this relaunch ends up starting a brand-new agent process
     // with no native resume (no agentSessionId to resume from, or the resume
@@ -15071,6 +15122,8 @@ export class SessionService {
       const freshLaunchCommand = freshPlan.launchCommand;
       recoveredAgentSessionId = freshClaudeId;
       persistedLaunchCommand = freshLaunchCommand;
+      agentLaunchId = newAgentLaunchId();
+      env = buildLaunchEnv(agentLaunchId);
       await createTmuxSession({
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
@@ -15170,6 +15223,7 @@ export class SessionService {
             restrictWrites,
             ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
             launchCommand: persistedLaunchCommand,
+            agentLaunchId,
             status: "running",
             updatedAt: nowIso(),
           },
@@ -15211,6 +15265,7 @@ export class SessionService {
     if (session.status === "running" || session.status === "spawning") {
       const pane = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
       if (pane.status === "ok" && pane.panePid === null) {
+        await this.reconcileOwnedOrphanAgent(session);
         const previousStatus = session.status;
         session = await this.withSessionLifecycleLocks(
           this.lifecycleIdsFor(session),
@@ -15348,6 +15403,7 @@ export class SessionService {
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
     let restoreGeneration: PaneGeneration | null = null;
+    let restoreAgentLaunchId: string | null = null;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
@@ -15501,6 +15557,7 @@ export class SessionService {
       const restoreSidecarNames = manualSidecarNames(
         resolveSessionSidecars(current, restoreProject),
       );
+      restoreAgentLaunchId = newAgentLaunchId();
       const env = buildSessionEnv({
         agent: current.agent,
         projectId: current.project,
@@ -15511,6 +15568,7 @@ export class SessionService {
         repoPath: this.getProject(current.project).path,
         symlinks: this.getProject(current.project).symlinks,
         closeoutOwner: current.closeoutOwner === true,
+        agentLaunchId: restoreAgentLaunchId,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
@@ -15677,6 +15735,7 @@ export class SessionService {
               planMode: resolvePlanMode(current),
               restrictWrites: resolveRestrictWrites(current),
               launchCommand: restoredLaunchCommand,
+              ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
               status: "running",
               updatedAt: nowIso(),
             },
@@ -15757,6 +15816,7 @@ export class SessionService {
           planMode: resolvePlanMode(current),
           restrictWrites: resolveRestrictWrites(current),
           launchCommand: restoredLaunchCommand,
+          ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
           status: "running",
           updatedAt: nowIso(),
         },
@@ -18684,6 +18744,7 @@ export class SessionService {
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
       agentSessionId: _agentSessionId,
+      agentLaunchId: _agentLaunchId,
       branchSource: _branchSource,
       ...dashboardSession
     } = session;
@@ -18910,6 +18971,7 @@ export class SessionService {
       launchCommand: _launchCommand,
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
+      agentLaunchId: _agentLaunchId,
       ...sessionWithoutDetailFields
     } = session;
 
