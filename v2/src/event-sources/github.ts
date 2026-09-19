@@ -567,6 +567,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (stopped || deps.signal.aborted || polling || shouldSkipGitHubCalls()) return;
     polling = true;
     try {
+      refreshPollDisabled();
       const allSessions = listSessions(deps.dataDir);
       const sessions = allSessions.filter((session) =>
         isEligibleForSourcePoll(session, deps.projectId),
