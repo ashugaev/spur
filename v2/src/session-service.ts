@@ -1034,9 +1034,15 @@ type PreparedDelivery = {
   session: SessionRecord;
   lifecycleIds: string[];
   generation: PaneGeneration;
+  recoverySubmission: StartedAgentMessage | null;
   status: SessionRecord["status"];
   stopReason: SessionRecord["stopReason"];
   intent: DeliveryIntent;
+};
+
+type ReadySessionForSend = {
+  session: SessionRecord;
+  recoverySubmission: StartedAgentMessage | null;
 };
 
 type ForegroundSpawnReceipt = {
@@ -11971,6 +11977,15 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+    if (request.queue !== false) {
+      const initial = readSession(this.config.dataDir, sessionId);
+      if (!initial) throw new Error(`Session not found: ${sessionId}`);
+      if (!hasMessageContent(request)) throw new Error("message or attachments required");
+      if (!isRestorableStatus(initial.status)) {
+        throw new Error(`Session is not running: ${sessionId}`);
+      }
+      await this.ensureReadyForQueuedSend(sessionId);
+    }
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new Error(`Session not found: ${sessionId}`);
@@ -11983,28 +11998,27 @@ export class SessionService {
         return { kind: "direct" as const, message };
       }
 
-      const readySession = await this.ensureSessionReadyForSend(session);
-      const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
-        ? await this.classifySessionState(readySession)
+      const sendState = agentBusyQueuedSendAwaitsPrompt(session.agent)
+        ? await this.classifySessionState(session)
         : "waiting";
       const latestQueued = queuedMessages(
-        readSession(this.config.dataDir, sessionId) ?? readySession,
+        readSession(this.config.dataDir, sessionId) ?? session,
       );
       let activeRecord: SessionRecord;
       if (latestQueued.includes(message)) {
         this.logEvent("session.message.duplicate_ignored", {
           level: "info",
           sessionId,
-          projectId: readySession.project,
+          projectId: session.project,
           message: `Ignored duplicate queued message for ${sessionId}`,
           details: { queuedCount: latestQueued.length, messageLength: message.length },
         });
-        activeRecord = readySession;
+        activeRecord = session;
       } else {
         activeRecord = withQueuedMessages(
-          { ...readySession, status: "running", updatedAt: nowIso() },
+          { ...session, status: "running", updatedAt: nowIso() },
           [...latestQueued, message],
-          readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
+          session.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
         );
         writeSession(this.config.dataDir, activeRecord);
         this.logEvent("session.message.queued", {
@@ -12035,6 +12049,43 @@ export class SessionService {
     if (prepared.deliverNow) await this.tryDeliverQueuedMessage(sessionId);
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? prepared.activeRecord);
+  }
+
+  private async ensureReadyForQueuedSend(sessionId: string): Promise<void> {
+    const hint = readSession(this.config.dataDir, sessionId);
+    if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    await this.withPaneWriteLock(hint.tmuxSession, async () => {
+      const lifecycleIds = this.lifecycleIdsFor(hint);
+      const ready = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+        if (current.tmuxSession !== hint.tmuxSession) {
+          throw new Error(`Session ${sessionId} changed before queued send`);
+        }
+        return this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+      });
+      const generation = await this.capturePaneGeneration(ready.session);
+      if (ready.recoverySubmission) {
+        const outcome = await this.completeAgentMessage(ready.recoverySubmission, {
+          beforeResend: () =>
+            this.withSessionLifecycleLocks(lifecycleIds, async () => {
+              const current = readSession(this.config.dataDir, sessionId);
+              return Boolean(
+                current && (await this.paneGenerationMatches(current, generation)),
+              );
+            }),
+        });
+        if (outcome === "stale") {
+          throw new Error(`Session ${sessionId} changed during recovery context delivery`);
+        }
+      }
+      await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current || !(await this.paneGenerationMatches(current, generation))) {
+          throw new Error(`Session ${sessionId} changed during queued send recovery`);
+        }
+      });
+    });
   }
 
   async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
@@ -12216,7 +12267,8 @@ export class SessionService {
     if (intent.kind !== "direct" && !queuedMessages(current).includes(intent.message)) {
       return null;
     }
-    const ready = await this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+    const readyResult = await this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+    const ready = readyResult.session;
     if (ready.tmuxSession !== paneKey) return null;
     if (intent.kind === "queued-drain") {
       const classified = await this.classifySessionRecord(ready);
@@ -12238,6 +12290,7 @@ export class SessionService {
       session: ready,
       lifecycleIds: this.lifecycleIdsFor(ready),
       generation,
+      recoverySubmission: readyResult.recoverySubmission,
       status: ready.status,
       stopReason: ready.stopReason,
       intent,
@@ -12288,6 +12341,43 @@ export class SessionService {
         this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent),
       );
       if (!prepared) return { record: null, recovered: null };
+
+      if (prepared.recoverySubmission) {
+        const recoveryOutcome = await this.completeAgentMessage(prepared.recoverySubmission, {
+          beforeResend: () =>
+            this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+              const current = readSession(this.config.dataDir, sessionId);
+              return Boolean(
+                current && (await this.paneGenerationMatches(current, prepared.generation)),
+              );
+            }),
+        });
+        if (recoveryOutcome === "stale") {
+          throw new Error(`Session ${sessionId} changed during recovery context delivery`);
+        }
+        if (recoveryOutcome === "submit_unconfirmed") {
+          this.logEvent("session.recover.context_unconfirmed", {
+            level: "warn",
+            sessionId,
+            projectId: prepared.session.project,
+            message: `${sessionId} relaunched but its resent task context was not confirmed`,
+            details: {
+              agent: prepared.session.agent,
+              agentSessionId: prepared.session.agentSessionId ?? null,
+            },
+          });
+        }
+        const current = await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+          const latest = readSession(this.config.dataDir, sessionId);
+          if (!latest || !(await this.paneGenerationMatches(latest, prepared.generation))) {
+            return null;
+          }
+          return latest;
+        });
+        if (!current) {
+          throw new Error(`Session ${sessionId} changed during recovery context delivery`);
+        }
+      }
 
       let interrupt = options?.interrupt === true;
       if (interrupt) {
@@ -14405,13 +14495,16 @@ export class SessionService {
   private async ensureSessionReadyForSend(
     session: SessionRecord,
     options?: { paneAlreadyConfirmedGone?: boolean; paneAlreadyOwned?: boolean },
-  ): Promise<SessionRecord> {
+  ): Promise<ReadySessionForSend> {
     // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
     // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
     // cannot be mistaken for a dead agent when list-windows still answers.
     const runtime = await this.readRuntimeSnapshot(session);
     if (runtime.processAlive) {
-      return this.captureAgentSessionId(session, 0);
+      return {
+        session: await this.captureAgentSessionId(session, 0),
+        recoverySubmission: null,
+      };
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       throw new Error(
@@ -14477,7 +14570,7 @@ export class SessionService {
     // state right after this returns and must not have that forced to
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
-    let recovered: SessionRecord;
+    let recovered: ReadySessionForSend;
     try {
       recovered = await this.relaunchSessionInPlace(session, project, {
         paneAlreadyOwned: options?.paneAlreadyOwned === true,
@@ -14485,11 +14578,11 @@ export class SessionService {
     } finally {
       this.restoreWarmupUntil.delete(session.id);
     }
-    writeSession(this.config.dataDir, recovered);
+    writeSession(this.config.dataDir, recovered.session);
     // After the running record is on disk: a project sidecar can take tens of
     // seconds to come up, and the reaper's running|spawning filter must cover
     // that whole window without relying on the warmup cleared just above.
-    const withSidecars = await this.startAutoStartSidecars(recovered, project);
+    const withSidecars = await this.startAutoStartSidecars(recovered.session, project);
     await this.refreshDashboardCacheEntry(withSidecars);
     this.logEvent("session.recover.completed", {
       level: "info",
@@ -14502,7 +14595,7 @@ export class SessionService {
         tmuxSession: session.tmuxSession,
       },
     });
-    return withSidecars;
+    return { session: withSidecars, recoverySubmission: recovered.recoverySubmission };
   }
 
   // Kills the live tmux pane and relaunches the agent in place, preserving its
@@ -14513,7 +14606,7 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
     options?: { paneAlreadyOwned?: boolean },
-  ): Promise<SessionRecord> {
+  ): Promise<ReadySessionForSend> {
     this.clearTargetGoneNudgeGate(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
     // before this relaunch must never carry over.
@@ -14715,6 +14808,7 @@ export class SessionService {
       }
     }
 
+    let recoverySubmission: StartedAgentMessage | null = null;
     if (usedFreshLaunch) {
       // Pane confirmed alive by the checks above; deliver task context before
       // returning so it lands before any caller (send/deliverPrepared/
@@ -14763,33 +14857,14 @@ export class SessionService {
         // pacing of their own (claude) — lets an ack that never confirms on a
         // live pane resolve as "submit_unconfirmed" instead of throwing and
         // tearing down an otherwise-healthy relaunch.
-        const contextSendOutcome = options?.paneAlreadyOwned
-          ? await this.writeAgentMessage(recoveryPaneTarget, recoveryContextMessage, {
-              freshLaunch: true,
-            })
-          : await this.sendAgentMessage(recoveryPaneTarget, recoveryContextMessage, {
-              freshLaunch: true,
-            });
-        if (contextSendOutcome === "submit_unconfirmed") {
-          // The pane write itself landed (send already spent its Enter
-          // resends) but the ack scan never confirmed the agent consumed it.
-          // Surface it rather than swallow it, same as restore()'s handling
-          // of the same outcome — an operator can tell this session's context
-          // resend is unproven. Not treated as a failed wake: the write did
-          // reach the pane, and failing the wake here would risk losing a
-          // one-shot scheduled wake, which only re-arms on
-          // SessionAdmissionDeniedError.
-          this.logEvent("session.recover.context_unconfirmed", {
-            level: "warn",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `${session.id} relaunched but its resent task context was not confirmed`,
-            details: {
-              agent: session.agent,
-              agentSessionId: recoveredAgentSessionId ?? sessionWithAgentId.agentSessionId ?? null,
-            },
-          });
+        if (options?.paneAlreadyOwned !== true) {
+          throw new Error(`Recovery context for ${session.id} requires pane ownership`);
         }
+        recoverySubmission = await this.beginAgentMessage(
+          recoveryPaneTarget,
+          recoveryContextMessage,
+          { freshLaunch: true },
+        );
       }
     }
 
@@ -14805,27 +14880,38 @@ export class SessionService {
     // new pane is live, and before any caller (send/deliverPrepared/
     // tryDeliverQueuedMessage/switchAuth, all downstream of
     // ensureSessionReadyForSend) injects a message into it.
-    return this.finishStaleWake(
-      this.applyReservedSidecars(
-        {
-          ...recoveredBase,
-          planMode,
-          restrictWrites,
-          ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-          launchCommand: persistedLaunchCommand,
-          status: "running",
-          updatedAt: nowIso(),
-        },
-        mcpSidecarUpdate,
+    return {
+      session: await this.finishStaleWake(
+        this.applyReservedSidecars(
+          {
+            ...recoveredBase,
+            planMode,
+            restrictWrites,
+            ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+            launchCommand: persistedLaunchCommand,
+            status: "running",
+            updatedAt: nowIso(),
+          },
+          mcpSidecarUpdate,
+        ),
+        project,
       ),
-      project,
-    );
+      recoverySubmission,
+    };
   }
 
   async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.restoreLocked(sessionId, request),
-    );
+    const hint = readSession(this.config.dataDir, sessionId);
+    if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    return this.withPaneWriteLock(hint.tmuxSession, async () => {
+      await this.withSessionLifecycleLocks(this.lifecycleIdsFor(hint), async () => {
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current || current.tmuxSession !== hint.tmuxSession) {
+          throw new Error(`Session ${sessionId} changed before restore`);
+        }
+      });
+      return this.restoreLocked(sessionId, request);
+    });
   }
 
   private async restoreLocked(
@@ -14912,6 +14998,7 @@ export class SessionService {
     this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
+    let restoreGeneration: PaneGeneration | null = null;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
@@ -15120,6 +15207,8 @@ export class SessionService {
       ) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
+      const generationTarget = readSession(this.config.dataDir, sessionId) ?? session;
+      restoreGeneration = await this.capturePaneGeneration(generationTarget);
       if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
@@ -15129,8 +15218,18 @@ export class SessionService {
           current.selfDestruct,
         );
         if (current.agent === "codex") {
-          await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
-            agent: current.agent,
+          await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+            const latest = readSession(this.config.dataDir, sessionId);
+            if (
+              !latest ||
+              !restoreGeneration ||
+              !(await this.paneGenerationMatches(latest, restoreGeneration))
+            ) {
+              throw new Error(`Session ${sessionId} changed during restore`);
+            }
+            await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
+              agent: current.agent,
+            });
           });
         } else {
           // The fallback relaunched the agent instead of resuming it, so this is a
@@ -15140,11 +15239,38 @@ export class SessionService {
           // liveness probe (agentProcessAlive) gates on the pane's ACTUAL launch
           // command, not current's stale recorded one, same as the two fresh
           // liveness checks above this block.
-          const restoreSendOutcome = await this.sendAgentMessage(
-            { ...current, launchCommand: restoreLaunchCommand },
-            restoreInitialMessage,
-            { freshLaunch: freshLaunchFallback },
+          const restoreSubmission = await this.withSessionLifecycleLocks(
+            this.lifecycleIdsFor(session),
+            async () => {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (
+                !latest ||
+                !restoreGeneration ||
+                !(await this.paneGenerationMatches(latest, restoreGeneration))
+              ) {
+                throw new Error(`Session ${sessionId} changed during restore`);
+              }
+              return this.beginAgentMessage(
+                { ...current, launchCommand: restoreLaunchCommand },
+                restoreInitialMessage,
+                { freshLaunch: freshLaunchFallback },
+              );
+            },
           );
+          const restoreSendOutcome = await this.completeAgentMessage(restoreSubmission, {
+            beforeResend: () =>
+              this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+                const latest = readSession(this.config.dataDir, sessionId);
+                return Boolean(
+                  latest &&
+                    restoreGeneration &&
+                    (await this.paneGenerationMatches(latest, restoreGeneration)),
+                );
+              }),
+          });
+          if (restoreSendOutcome === "stale") {
+            throw new Error(`Session ${sessionId} changed during restore`);
+          }
           if (restoreSendOutcome === "submit_unconfirmed") {
             // Same degraded state the catch below reports for a resume send that
             // timed out on a live pane: the agent is up, its prompt is not
@@ -15172,8 +15298,17 @@ export class SessionService {
       // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
       // path after this block intentionally keeps its own warmup.
       this.restoreWarmupUntil.delete(sessionId);
+      const latestAfterFailure = readSession(this.config.dataDir, sessionId);
+      if (restoreGeneration) {
+        if (
+          !latestAfterFailure ||
+          !(await this.paneGenerationMatches(latestAfterFailure, restoreGeneration))
+        ) {
+          throw error;
+        }
+      }
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
-        const { error: _ignoredError, ...recoveredBase } = current;
+        const { error: _ignoredError, ...recoveredBase } = latestAfterFailure ?? current;
         // No finishStaleWake here: this branch is only reachable through the
         // submit-ack wait of restore()'s own message, which a stale-parked
         // session never sends (shouldSendRestoreMessage is false for it).
@@ -15230,7 +15365,14 @@ export class SessionService {
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
 
-    const { error: _ignoredError, ...restoredBase } = current;
+    const latestBeforeCommit = readSession(this.config.dataDir, sessionId);
+    if (
+      !latestBeforeCommit ||
+      !(await this.paneGenerationMatches(latestBeforeCommit, restoreGeneration))
+    ) {
+      throw new Error(`Session ${sessionId} changed during restore`);
+    }
+    const { error: _ignoredError, ...restoredBase } = latestBeforeCommit;
     let restored: SessionRecord = this.applyReservedSidecars(
       {
         ...restoredBase,
@@ -15296,18 +15438,24 @@ export class SessionService {
     }
     this.reopensInFlight.add(sessionId);
     try {
-      return await this.withWorkspaceLifecycleLocks(sessionId, () =>
-        this.reopenLocked(sessionId, request),
+      const source = readSession(this.config.dataDir, sessionId);
+      if (!source) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      await this.withWorkspaceLifecycleLocks(sessionId, () =>
+        this.prepareReopenLocked(sessionId),
       );
+      try {
+        return await this.restore(sessionId, request);
+      } catch (error) {
+        return await this.withWorkspaceLifecycleLocks(sessionId, () =>
+          this.rollbackReopenLocked(source, error),
+        );
+      }
     } finally {
       this.reopensInFlight.delete(sessionId);
     }
   }
 
-  private async reopenLocked(
-    sessionId: string,
-    request: RestoreSessionRequest,
-  ): Promise<SessionView> {
+  private async prepareReopenLocked(sessionId: string): Promise<void> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -15420,65 +15568,67 @@ export class SessionService {
     writeSession(this.config.dataDir, record);
     this.stateCache.delete(sessionId);
     await this.refreshDashboardCacheEntry(record);
+  }
 
-    try {
-      return await this.restoreLocked(sessionId, request);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      // The completed record's Telegram binding, artifacts, and work-item
-      // completion are already destroyed, so leaving the flipped
-      // stopped/manual_pause record in place would make send/kill/sidecars
-      // legal on a gutted session. Roll back to completed instead — but
-      // read fresh, not from the pre-flip `session` snapshot: the record on
-      // disk is restorable (status stopped/manual_pause) the moment we wrote
-      // it above, so a concurrent send()/deliver() can legally queue a
-      // message, or restore() itself can persist status:"running" and then
-      // still throw from its own uncaught tail (most likely
-      // `await this.enrich(persistedRestored)`, its very last statement, but
-      // also captureAgentSessionId/writeSession/refreshDashboardCacheEntry
-      // just before it). Rolling back from the stale snapshot would discard
-      // whatever happened in that window instead of what's actually on disk.
-      const latest = readSession(this.config.dataDir, sessionId) ?? session;
-      if (latest.status === "running") {
-        // restore() got far enough to persist a genuinely live, running
-        // agent (writeSession succeeded) before failing afterward. That
-        // agent is real and working — killing its pane and stamping
-        // "completed" here would destroy a session that isn't actually
-        // broken just because the reopen call that revived it failed a step
-        // after the revival already landed. Leave it running.
-        this.logEvent("session.reopen.failed", {
-          level: "error",
-          sessionId,
-          projectId: session.project,
-          message: `Reopen of ${sessionId} errored after restore already brought it back to running: ${message}`,
-        });
-        throw error;
-      }
-      // restore() itself kills the tmux pane it created before rethrowing
-      // for every failure inside its own try/catch (including the fresh
-      // pane created by createTmuxSession). Tear down defensively here too —
-      // killAgentPaneAndConfirmExit/cleanupSessionServices are best-effort and
-      // safe to call on an already-dead pane — to cover a pane restore()
-      // created but didn't get to kill before this catch ran.
-      await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
-      await this.cleanupSessionServices(latest);
-      const rolledBack: SessionRecord = {
-        ...this.sessionWithReleasedSidecarPorts(latest),
-        status: "completed",
-        updatedAt: nowIso(),
-      };
-      delete rolledBack.stopReason; // latest may still carry manual_pause
-      writeSession(this.config.dataDir, rolledBack);
-      this.stateCache.delete(sessionId);
-      await this.refreshDashboardCacheEntry(rolledBack);
+  private async rollbackReopenLocked(
+    session: SessionRecord,
+    error: unknown,
+  ): Promise<SessionView> {
+    const sessionId = session.id;
+    const message = error instanceof Error ? error.message : String(error);
+    // The completed record's Telegram binding, artifacts, and work-item
+    // completion are already destroyed, so leaving the flipped
+    // stopped/manual_pause record in place would make send/kill/sidecars
+    // legal on a gutted session. Roll back to completed instead — but
+    // read fresh, not from the pre-flip `session` snapshot: the record on
+    // disk is restorable (status stopped/manual_pause) the moment we wrote
+    // it above, so a concurrent send()/deliver() can legally queue a
+    // message, or restore() itself can persist status:"running" and then
+    // still throw from its own uncaught tail (most likely
+    // `await this.enrich(persistedRestored)`, its very last statement, but
+    // also captureAgentSessionId/writeSession/refreshDashboardCacheEntry
+    // just before it). Rolling back from the stale snapshot would discard
+    // whatever happened in that window instead of what's actually on disk.
+    const latest = readSession(this.config.dataDir, sessionId) ?? session;
+    if (latest.status === "running") {
+      // restore() got far enough to persist a genuinely live, running
+      // agent (writeSession succeeded) before failing afterward. That
+      // agent is real and working — killing its pane and stamping
+      // "completed" here would destroy a session that isn't actually
+      // broken just because the reopen call that revived it failed a step
+      // after the revival already landed. Leave it running.
       this.logEvent("session.reopen.failed", {
         level: "error",
         sessionId,
         projectId: session.project,
-        message: `Failed to reopen ${sessionId}: ${message}`,
+        message: `Reopen of ${sessionId} errored after restore already brought it back to running: ${message}`,
       });
       throw error;
     }
+    // restore() itself kills the tmux pane it created before rethrowing
+    // for every failure inside its own try/catch (including the fresh
+    // pane created by createTmuxSession). Tear down defensively here too —
+    // killAgentPaneAndConfirmExit/cleanupSessionServices are best-effort and
+    // safe to call on an already-dead pane — to cover a pane restore()
+    // created but didn't get to kill before this catch ran.
+    await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+    await this.cleanupSessionServices(latest);
+    const rolledBack: SessionRecord = {
+      ...this.sessionWithReleasedSidecarPorts(latest),
+      status: "completed",
+      updatedAt: nowIso(),
+    };
+    delete rolledBack.stopReason; // latest may still carry manual_pause
+    writeSession(this.config.dataDir, rolledBack);
+    this.stateCache.delete(sessionId);
+    await this.refreshDashboardCacheEntry(rolledBack);
+    this.logEvent("session.reopen.failed", {
+      level: "error",
+      sessionId,
+      projectId: session.project,
+      message: `Failed to reopen ${sessionId}: ${message}`,
+    });
+    throw error;
   }
 
   async switchAuth(
@@ -15486,9 +15636,17 @@ export class SessionService {
     accountId: string,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
   ): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.switchAuthLocked(sessionId, accountId, opts),
-    );
+    const hint = readSession(this.config.dataDir, sessionId);
+    if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    return this.withPaneWriteLock(hint.tmuxSession, async () => {
+      await this.withSessionLifecycleLocks(this.lifecycleIdsFor(hint), async () => {
+        const current = readSession(this.config.dataDir, sessionId);
+        if (!current || current.tmuxSession !== hint.tmuxSession) {
+          throw new Error(`Session ${sessionId} changed before auth migration`);
+        }
+      });
+      return this.switchAuthLocked(sessionId, accountId, opts);
+    });
   }
 
   private async switchAuthLocked(
@@ -15574,7 +15732,27 @@ export class SessionService {
     // other ensureSessionReadyForSend caller, so it must not refuse to relaunch.
     const relaunched = await this.ensureSessionReadyForSend(recoveryTarget, {
       paneAlreadyConfirmedGone: true,
+      paneAlreadyOwned: true,
     });
+    const generation = await this.capturePaneGeneration(relaunched.session);
+    if (relaunched.recoverySubmission) {
+      const outcome = await this.completeAgentMessage(relaunched.recoverySubmission, {
+        beforeResend: () =>
+          this.withWorkspaceLifecycleLocks(sessionId, async () => {
+            const current = readSession(this.config.dataDir, sessionId);
+            return Boolean(current && (await this.paneGenerationMatches(current, generation)));
+          }),
+      });
+      if (outcome === "stale") {
+        throw new Error(`Session ${sessionId} changed during auth migration`);
+      }
+    }
+    const current = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const latest = readSession(this.config.dataDir, sessionId);
+      if (!latest || !(await this.paneGenerationMatches(latest, generation))) return null;
+      return latest;
+    });
+    if (!current) throw new Error(`Session ${sessionId} changed during auth migration`);
     this.logEvent("session.auth.switched", {
       level: "info",
       sessionId,
@@ -15582,7 +15760,7 @@ export class SessionService {
       message: `Switched claude account for ${sessionId} to ${accountId}`,
       details: { accountId, reason: opts.reason, forced: force, method: "relaunch" },
     });
-    return this.enrich(relaunched);
+    return this.enrich(current);
   }
 
   // Rotate a rate-limited claude session onto the next ready account.

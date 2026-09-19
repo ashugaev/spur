@@ -7092,6 +7092,7 @@ describe("SessionService", () => {
       createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
+      internals.todoNudgeDisabled.set("api-1", { kind: "target_gone", reason: "test" });
       let releaseAck: () => void = () => {};
       const ackGate = new Promise<void>((resolve) => {
         releaseAck = resolve;
@@ -7123,6 +7124,191 @@ describe("SessionService", () => {
       releaseAck();
       await expect(send).resolves.toMatchObject({ id: "api-1" });
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      expect(internals.paneWriteLocks.size).toBe(0);
+    });
+
+    it("keeps ToDo responsive while fresh-relaunch recovery context awaits acknowledgement", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          status: "stopped",
+          stopReason: "stale_timeout",
+          prompt: "original recovery task",
+        }),
+      );
+      await useRealTodoLedger();
+      listSessionsMock.mockReturnValue([]);
+      let relaunched = false;
+      tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+      isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+      createTmuxSessionMock.mockImplementation(async () => {
+        relaunched = true;
+      });
+      waitForTmuxReadyMock.mockImplementationOnce(async () => {
+        throw new Error("resume failed");
+      });
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let releaseContextAck: () => void = () => {};
+      const contextAck = new Promise<void>((resolve) => {
+        releaseContextAck = resolve;
+      });
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async (_binding, message) => {
+        if (message.includes("original recovery task")) await contextAck;
+        return { found: true, lastScannedFile: null };
+      });
+
+      const send = service.send("api-1", { message: "trigger after recovery", queue: false });
+      await vi.waitFor(() =>
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining("original recovery task"),
+          expect.anything(),
+        ),
+      );
+
+      await expect(service.readTodo("api-1")).resolves.toMatchObject({ items: [] });
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalledWith(
+        "api-1",
+        "trigger after recovery",
+        expect.anything(),
+      );
+
+      releaseContextAck();
+      await expect(send).resolves.toMatchObject({ status: "running" });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        "trigger after recovery",
+        expect.anything(),
+      );
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+      expect(internals.paneWriteLocks.size).toBe(0);
+    });
+
+    it("keeps ToDo responsive while restore context awaits acknowledgement", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));
+      await useRealTodoLedger();
+      mockExitedThenRestoredProcess();
+      let releaseAck: () => void = () => {};
+      const ack = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: vi.fn(async () => {
+          await ack;
+          return { found: true, lastScannedFile: null };
+        }),
+      });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      mockTimerPromisesSleepWithFakeTimers();
+
+      const restore = service.restore("api-1");
+      await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalled());
+
+      await expect(service.readTodo("api-1")).resolves.toMatchObject({ items: [] });
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+
+      releaseAck();
+      await expect(restore).resolves.toMatchObject({ status: "running" });
+      expect(internals.paneWriteLocks.size).toBe(0);
+    });
+
+    it("waits to reopen behind an acknowledged pane owner without parking ToDo", async () => {
+      const sessions = createSessionStore();
+      const completed = runningSession({ status: "completed" });
+      sessions.set("api-1", completed);
+      await useRealTodoLedger();
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let releaseAck: () => void = () => {};
+      const ack = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+        await ack;
+        return { found: true, lastScannedFile: null };
+      });
+      const paneOwner = internals.sendAgentMessage(
+        {
+          id: completed.id,
+          tmuxSession: completed.tmuxSession,
+          agent: "claude",
+          launchCommand: completed.launchCommand,
+          worktreePath: completed.worktreePath,
+        },
+        "existing pane delivery",
+      );
+      await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalled());
+
+      const reopen = service.reopen("api-1");
+      await Promise.resolve();
+      await expect(service.readTodo("api-1")).resolves.toMatchObject({ items: [] });
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+
+      releaseAck();
+      await paneOwner;
+      await expect(reopen).resolves.toMatchObject({ status: "running" });
+      expect(internals.paneWriteLocks.size).toBe(0);
+    });
+
+    it("keeps ToDo responsive while switch-auth recovery context awaits acknowledgement", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));
+      await useRealTodoLedger();
+      testAccounts = [
+        {
+          id: "backup",
+          configDir: "/abs/backup",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      let relaunched = false;
+      killTmuxSessionMock.mockImplementation(async () => {
+        relaunched = false;
+      });
+      tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+      isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+      createTmuxSessionMock.mockImplementation(async () => {
+        relaunched = true;
+      });
+      waitForTmuxReadyMock.mockImplementationOnce(async () => {
+        throw new Error("resume failed");
+      });
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let releaseAck: () => void = () => {};
+      const ack = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+        await ack;
+        return { found: true, lastScannedFile: null };
+      });
+
+      const switched = service.switchAuth("api-1", "backup", {
+        reason: "manual",
+        force: true,
+      });
+      await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalled());
+
+      await expect(service.readTodo("api-1")).resolves.toMatchObject({ items: [] });
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+
+      releaseAck();
+      await expect(switched).resolves.toMatchObject({ activeClaudeAccountId: "backup" });
       expect(internals.paneWriteLocks.size).toBe(0);
     });
   });
