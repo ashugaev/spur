@@ -8966,6 +8966,53 @@ describe("SessionService", () => {
     expect(internals.sessionLifecycleLocks.size).toBe(0);
   });
 
+  it("keeps generation A queued when live generation B replaces it during timeout liveness probing (issue #907 R16)", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      runningSession({
+        queuedMessages: { messages: ["keep for B"], awaitingPrompt: false },
+      }),
+    );
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+    const internals = sessionServiceInternals(service);
+    let ackScans = 0;
+    let generationB = false;
+    let lifecycleLocksDuringLiveness = -1;
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+    vi.spyOn(internals, "paneGenerationMatches").mockImplementation(async () => !generationB);
+    vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+      ackScans += 1;
+      return { found: false, lastScannedFile: "/generation-a.jsonl" };
+    });
+    isProcessRunningInTmuxMock.mockImplementation(async () => {
+      if (ackScans === 3) {
+        lifecycleLocksDuringLiveness = internals.sessionLifecycleLocks.size;
+        generationB = true;
+      }
+      return true;
+    });
+
+    await expect(internals.tryDeliverQueuedMessage("api-1")).resolves.toBe(true);
+
+    expect(ackScans).toBe(3);
+    expect(lifecycleLocksDuringLiveness).toBe(0);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["keep for B"]);
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.message.delivery_recovered",
+      ),
+    ).toBe(false);
+    expect(internals.queueDeliveryInFlight.size).toBe(0);
+    expect(internals.paneWriteLocks.size).toBe(0);
+    expect(internals.sessionLifecycleLocks.size).toBe(0);
+  });
+
   it("retains a queued message and logs delivery_failed when the submit ack times out with a dead process, then retries on the next poll (AC2)", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();

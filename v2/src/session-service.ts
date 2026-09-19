@@ -6933,7 +6933,7 @@ export class SessionService {
               await send();
               return true;
             }),
-          beforeRecovery: () =>
+          recoveryGenerationMatches: () =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, () =>
               this.todoNudgeMatches(prepared),
             ),
@@ -12222,7 +12222,7 @@ export class SessionService {
               await send();
               return true;
             }),
-          beforeRecovery: () =>
+          recoveryGenerationMatches: () =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
               return Boolean(current && (await this.paneGenerationMatches(current, generation)));
@@ -12530,7 +12530,7 @@ export class SessionService {
               await send();
               return true;
             }),
-          beforeRecovery: () =>
+          recoveryGenerationMatches: () =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
               return Boolean(
@@ -12613,7 +12613,7 @@ export class SessionService {
         });
         const outcome = await this.completeAgentMessage(submission, {
           authorizeResend: authorizeGenerationResend,
-          beforeRecovery: generationStillMatches,
+          recoveryGenerationMatches: generationStillMatches,
         });
         if (outcome === "stale") {
           throw new Error(`Session ${sessionId} changed during message delivery`);
@@ -13000,7 +13000,7 @@ export class SessionService {
         }),
         {
           authorizeResend: authorizeGenerationResend,
-          beforeRecovery: () =>
+          recoveryGenerationMatches: () =>
             this.withSessionLifecycleLocks(lifecycleIds, generationStillMatches),
         },
       );
@@ -13178,7 +13178,7 @@ export class SessionService {
     started: StartedAgentMessage,
     options?: {
       authorizeResend?: (send: () => Promise<void>) => Promise<boolean>;
-      beforeRecovery?: () => Promise<boolean>;
+      recoveryGenerationMatches?: () => Promise<boolean>;
     },
   ): Promise<AgentSendOutcome | "stale"> {
     if (started.kind === "complete") return started.outcome;
@@ -13228,10 +13228,13 @@ export class SessionService {
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const recoveryGenerationMatches = options?.beforeRecovery
-      ? await options.beforeRecovery()
+    // The reusable tmux name can move from generation A to B while the fresh
+    // liveness probe runs. Guard both sides of that slow probe; each predicate
+    // owns only its short lifecycle snapshot, never the probe itself.
+    const recoveryGenerationMatches = options?.recoveryGenerationMatches
+      ? await options.recoveryGenerationMatches()
       : true;
-    const processAlive =
+    let processAlive =
       knownDead || !recoveryGenerationMatches
         ? false
         : await agentProcessAlive(
@@ -13242,6 +13245,9 @@ export class SessionService {
             },
             { fresh: true },
           );
+    if (processAlive && options?.recoveryGenerationMatches) {
+      processAlive = await options.recoveryGenerationMatches();
+    }
     const elapsedMs = Date.now() - startedAt;
     if (session.agent === "cursor" && processAlive) {
       this.logEvent("session.submit.recovered", {
@@ -15558,7 +15564,7 @@ export class SessionService {
                 await send();
                 return true;
               }),
-            beforeRecovery: () =>
+            recoveryGenerationMatches: () =>
               this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
                 const latest = readSession(this.config.dataDir, sessionId);
                 return Boolean(
@@ -16091,7 +16097,7 @@ export class SessionService {
             await send();
             return true;
           }),
-        beforeRecovery: () =>
+        recoveryGenerationMatches: () =>
           this.withWorkspaceLifecycleLocks(sessionId, async () => {
             const current = readSession(this.config.dataDir, sessionId);
             return Boolean(
