@@ -2479,12 +2479,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const saveTitleDraft = useCallback(() => {
     const trimmed = titleDraft.trim();
-    if (!trimmed) {
-      showErrorToast("Enter a title, or use Clear to remove it.");
-      return;
-    }
-    void updateManualTitle(trimmed);
-  }, [titleDraft, showErrorToast, updateManualTitle]);
+    void updateManualTitle(trimmed.length > 0 ? trimmed : null);
+  }, [titleDraft, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2804,7 +2800,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 saving={titleSaving}
                 onDraftChange={setTitleDraft}
                 onSave={saveTitleDraft}
-                onClear={() => void updateManualTitle(null)}
                 onCancel={closeTitleEditor}
               />
             ) : null}

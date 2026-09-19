@@ -534,22 +534,63 @@ test.describe("S1: Session detail header", () => {
     expect(titleRequests).toContainEqual({ title: "Manual title" });
 
     await openTitleMenu(page);
-    await page.getByRole("button", { name: /^clear$/i }).click();
+    const titleInput = page.getByLabel("Session title");
+    await expect(titleInput).toHaveValue("Manual title");
+    const clearInputButton = page.getByRole("button", { name: /clear title input/i });
+    await expect(clearInputButton).toBeVisible();
+    await clearInputButton.click();
+    await expect(titleInput).toHaveValue("");
+    await expect(clearInputButton).toBeHidden();
+    await page.getByRole("button", { name: /^save$/i }).click();
 
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeHidden();
     await expect(page.locator("h1")).toContainText("Implement the feature");
     expect(titleRequests).toContainEqual({ title: null });
   });
 
-  test("Clear survives a stale session poll landing after it", async ({ page }) => {
+  test("the in-input clear control empties the field without saving", async ({ page }) => {
+    const currentSession = makeWorkingSession({
+      id: "detail-s1-input-clear-only",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    let titleRequestCount = 0;
+
+    mockSessionDetail(page, currentSession);
+    await page.route(`**/api/sessions/${currentSession.id}/title`, async (route) => {
+      titleRequestCount += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(currentSession),
+      });
+    });
+
+    await page.goto(`/sessions/${currentSession.id}`);
+    await openTitleMenu(page);
+    const titleInput = page.getByLabel("Session title");
+    await expect(titleInput).toHaveValue("Agent title");
+
+    await page.getByRole("button", { name: /clear title input/i }).click();
+
+    await expect(titleInput).toHaveValue("");
+    await expect(titleInput).toBeFocused();
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
+    expect(titleRequestCount).toBe(0);
+  });
+
+  test("clearing via an emptied Save survives a stale session poll landing after it", async ({
+    page,
+  }) => {
     // Regression for a real bug: SessionDetail polls GET /api/sessions/:id on
-    // a fixed interval, independent of any in-flight title mutation. Clear
-    // used to call the bare `setSession` setter, which carries no defense
-    // against a GET that was already in flight before Clear started and
-    // resolves with pre-clear data after Clear's response lands — the poll's
-    // stale title silently overwrites the just-cleared title. `Save` and
-    // every other session mutator route through `applySessionUpdate`, which
-    // bumps `loadRequestIdRef` so `loadSession` discards a response that
-    // arrives for a superseded request; Clear alone skipped that guard.
+    // a fixed interval, independent of any in-flight title mutation. Clearing
+    // the title used to call the bare `setSession` setter, which carries no
+    // defense against a GET that was already in flight before the clear
+    // started and resolves with pre-clear data after the clear's response
+    // lands — the poll's stale title silently overwrites the just-cleared
+    // title. `Save` and every other session mutator route through
+    // `applySessionUpdate`, which bumps `loadRequestIdRef` so `loadSession`
+    // discards a response that arrives for a superseded request; clearing
+    // must go through the same guard.
     const initialSession = makeWorkingSession({
       id: "detail-s1-clear-race",
       slots: { title: "Agent title", titleSource: "agent", links: [] },
@@ -596,12 +637,14 @@ test.describe("S1: Session detail header", () => {
     await expect.poll(() => getCallCount).toBe(2);
 
     await openTitleMenu(page);
-    await page.getByRole("button", { name: /^clear$/i }).click();
+    await page.getByRole("button", { name: /clear title input/i }).click();
+    await page.getByRole("button", { name: /^save$/i }).click();
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeHidden();
     await expect(page.locator("h1")).toContainText("Implement the feature");
 
-    // Release the stale poll now that Clear has already landed. A correct
-    // implementation discards this response as superseded; the buggy one
-    // clobbers the cleared title back to "Agent title".
+    // Release the stale poll now that the clear has already landed. A
+    // correct implementation discards this response as superseded; the buggy
+    // one clobbers the cleared title back to "Agent title".
     releaseStalePoll();
     await page.waitForTimeout(200);
     await expect(page.locator("h1")).toContainText("Implement the feature");

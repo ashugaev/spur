@@ -2,14 +2,13 @@
 
 import { useEffect, useRef } from "react";
 import { IconCloseButton } from "@/components/IconCloseButton";
-import { INPUT_CLASS } from "@/design/classes";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 
 interface TitleEditDialogProps {
   draft: string;
   saving: boolean;
   onDraftChange: (draft: string) => void;
   onSave: () => void;
-  onClear: () => void;
   onCancel: () => void;
 }
 
@@ -21,7 +20,6 @@ export function TitleEditDialog({
   saving,
   onDraftChange,
   onSave,
-  onClear,
   onCancel,
 }: TitleEditDialogProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -104,14 +102,30 @@ export function TitleEditDialog({
           <label className="sr-only" htmlFor="session-title-edit">
             Session title
           </label>
-          <input
-            id="session-title-edit"
-            ref={inputRef}
-            className={`font-bold uppercase ${INPUT_CLASS}`}
-            disabled={saving}
-            onChange={(event) => onDraftChange(event.target.value)}
-            value={draft}
-          />
+          <div className="flex items-center gap-1 border border-[var(--color-input-border)] bg-[var(--color-input-bg)] py-1 pl-2.5 pr-1 transition focus-within:border-[var(--color-accent)]">
+            <input
+              id="session-title-edit"
+              ref={inputRef}
+              className="min-w-0 flex-1 border-none bg-transparent py-1 font-bold uppercase text-[var(--color-input-text)] outline-none"
+              disabled={saving}
+              onChange={(event) => onDraftChange(event.target.value)}
+              value={draft}
+            />
+            {draft.length > 0 ? (
+              <button
+                aria-label="Clear title input"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                disabled={saving}
+                onClick={() => {
+                  onDraftChange("");
+                  inputRef.current?.focus();
+                }}
+                type="button"
+              >
+                <CloseIcon />
+              </button>
+            ) : null}
+          </div>
           <div className="flex flex-wrap gap-2">
             <button
               className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
@@ -119,14 +133,6 @@ export function TitleEditDialog({
               type="submit"
             >
               Save
-            </button>
-            <button
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
-              disabled={saving}
-              onClick={onClear}
-              type="button"
-            >
-              Clear
             </button>
             <button
               className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:opacity-50"
