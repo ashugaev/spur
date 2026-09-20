@@ -7867,25 +7867,22 @@ export class SessionService {
                 details: { sidecarName: args.sidecarName },
               });
             }
-            // Mirrors the pane-alive early return's call exactly, but the
-            // eventual publishSidecarLink write is gated on
-            // sidecarTmuxAlive(sessionId, sidecarName) (see :7599's real
-            // gate) — and by this path's own definition tmux is gone, so
-            // that gate always blocks the write here. Harmless in the
-            // common case: a recorded sidecarProcs identity implies a
-            // prior successful start that already published the link, and
-            // tmux death alone does not unlink the slot. Narrow real gap:
-            // if an earlier probe failure ran
-            // writeSessionWithUnlinkedSidecarSlot, the link can never come
-            // back through this path — only an explicit stop+start
-            // recovers it. Not fixed here; tracked as
-            // https://github.com/ashugaev/spur/issues/912.
+            // Mirrors the pane-alive early return, except liveness: the
+            // probe's default gate is sidecarTmuxAlive, and by this path's
+            // own definition tmux is gone, so that gate would block every
+            // publish here. The recorded identity just proved itself alive
+            // and serving the reserved ports, so it is the liveness proof
+            // this path carries instead — otherwise a slot unlinked by an
+            // earlier probe failure could never re-link without an
+            // explicit stop+start.
             if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
               this.scheduleSidecarUrlReadyAndPublish(
                 args.session.id,
                 args.sidecarName,
                 args.sidecar,
                 args.session,
+                () =>
+                  this.recordedSidecarIdentityAlive(args.session.id, args.sidecarName, identity),
               );
             }
             return args.session;
@@ -8111,11 +8108,31 @@ export class SessionService {
     };
   }
 
+  /**
+   * Supervisor-free liveness for a sidecar whose tmux session is gone: the
+   * recorded identity is still on disk unchanged AND that pid is still the
+   * same process. A stop clears the sidecarProcs entry, so a stopped sidecar
+   * reads dead here without a /proc round trip.
+   */
+  private async recordedSidecarIdentityAlive(
+    sessionId: string,
+    sidecarName: string,
+    identity: SidecarProcessIdentity,
+  ): Promise<boolean> {
+    const current = readSession(this.config.dataDir, sessionId)?.sidecarProcs?.[sidecarName];
+    if (current?.pid !== identity.pid || current.starttime !== identity.starttime) return false;
+    return (await readProcessStarttime(identity.pid)) === identity.starttime;
+  }
+
   private scheduleSidecarUrlReadyAndPublish(
     sessionId: string,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
     record: SessionRecord,
+    // Liveness proof for both probe gates. Defaults to the tmux supervisor;
+    // a caller whose path has no supervisor left but holds a verified
+    // process identity passes that instead.
+    isAlive: () => Promise<boolean> = () => sidecarTmuxAlive(sessionId, sidecarName),
   ): void {
     const link = this.resolveSidecarUrlLink(record, sidecarName, sidecar);
     if (!link) return;
@@ -8129,10 +8146,17 @@ export class SessionService {
       sidecarName,
       reservedPort: link.reservedPort,
       signal: controller.signal,
+      isAlive,
     })
       .then(() => {
         if (controller.signal.aborted) return;
-        return this.publishSidecarLink(sessionId, sidecarName, link.reservedPort, link.linkUrl);
+        return this.publishSidecarLink(
+          sessionId,
+          sidecarName,
+          link.reservedPort,
+          link.linkUrl,
+          isAlive,
+        );
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -8361,8 +8385,9 @@ export class SessionService {
     sidecarName: string;
     reservedPort: number;
     signal: AbortSignal;
+    isAlive: () => Promise<boolean>;
   }): Promise<void> {
-    const { sessionId, sidecarName, reservedPort, signal } = args;
+    const { sidecarName, reservedPort, signal, isAlive } = args;
     const targetUrl = `http://127.0.0.1:${reservedPort}/`;
     for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
       signal.throwIfAborted();
@@ -8374,16 +8399,13 @@ export class SessionService {
         return;
       } catch {
         signal.throwIfAborted();
-        if (
-          i % SIDECAR_PROBE_LIVENESS_CHECK_INTERVAL === 0 &&
-          !(await sidecarTmuxAlive(sessionId, sidecarName))
-        ) {
+        if (i % SIDECAR_PROBE_LIVENESS_CHECK_INTERVAL === 0 && !(await isAlive())) {
           throw new SidecarUrlProbeSidecarExitedError(sidecarName);
         }
         await sleep(SIDECAR_PROBE_INTERVAL_MS, undefined, { signal });
       }
     }
-    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+    if (!(await isAlive())) {
       throw new SidecarUrlProbeSidecarExitedError(sidecarName);
     }
     throw new Error(`Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`);
@@ -8394,11 +8416,12 @@ export class SessionService {
     sidecarName: string,
     reservedPort: number,
     linkUrl: string,
+    isAlive: () => Promise<boolean> = () => sidecarTmuxAlive(sessionId, sidecarName),
   ): Promise<void> {
     const latest = readSession(this.config.dataDir, sessionId);
     if (!latest) return;
     if (isTerminalSessionStatus(latest.status)) return;
-    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
+    if (!(await isAlive())) return;
     const resolved = resolveWorkspaceState(this.config.dataDir, latest);
     const slots = applySlotsUpdate(resolved.slots, {
       links: [{ label: sidecarName, url: linkUrl }],
