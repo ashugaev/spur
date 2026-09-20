@@ -13625,7 +13625,12 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
-    options: { retainInList?: boolean; skipEnrichment: true; eventAction?: ManualStatusAction },
+    options: {
+      retainInList?: boolean;
+      skipEnrichment: true;
+      todoActor?: TodoActor;
+      eventAction?: ManualStatusAction;
+    },
   ): Promise<void>;
   private async applyManualStatusLocked(
     sessionId: string,
@@ -13701,7 +13706,7 @@ export class SessionService {
     let startupAttachmentsCleaned = false;
 
     try {
-      if (targetStatus === "completed") {
+      if (targetStatus === "completed" && eventAction !== "handoff") {
         const projection = ensureTodoLedger(this.config.dataDir, session);
         const block = todoLedgerBlock(projection);
         // The ledger gates the agent, never the human: a person closing through
@@ -15638,7 +15643,11 @@ export class SessionService {
         session.id,
         "completed",
         { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        { retainInList: true, eventAction: "handoff" },
+        {
+          retainInList: true,
+          eventAction: "handoff",
+          ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+        },
       );
 
       return spawned;
