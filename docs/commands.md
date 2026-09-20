@@ -1,6 +1,6 @@
 # Commands
 
-CLI reference: what to run, what it does, what `--help` skips. Config fields: [configuration.md](configuration.md). Daemon HTTP routes: [daemon-api.md](daemon-api.md).
+> Scope: CLI reference. Caveman, no overhead. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md).
 
 ## Surface
 
@@ -188,7 +188,7 @@ Delivery, wake, and lifecycle event names: [configuration.md](configuration.md#e
 
 On each live session's `PATH`. Updates the tmux status-line title and named links stored with the session: `spur-slots --title-if-absent "Fix flaky auth test"`, `spur-slots --link pr=<url> --link tracker=<url>`.
 
-`--title-if-absent` sets the title once; later conditional writes no-op once the workspace has a title source, including after a `--clear-title`. A title set from the web UI is manual and blocks `--title`, `--title-if-absent`, and `--clear-title` from this helper; a blocked write reports the lock message instead of applying.
+`--title-if-absent` sets the title once. Manual title (web UI) locks title, blocking conditional and manual writes from this helper; blocked write reports lock message.
 
 ## service
 

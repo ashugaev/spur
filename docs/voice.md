@@ -1,5 +1,7 @@
 # Voice input
 
+> Scope: voice input setup and provider dependencies. Caveman, no overhead.
+
 Dictate prompts and messages via the web UI microphone button (spawn modal, session message box, terminal controls) or a Telegram voice note. Stays disabled until the chosen provider's dependencies are installed. `openai_compatible` is the no-install path — one key in `~/.spur/.env`.
 
 ## Server dependencies
