@@ -427,8 +427,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (stopped || deps.signal.aborted || polling || shouldSkipGitHubCalls()) return;
     polling = true;
     try {
-      const sessions = listPollableSessions();
+      const allSessions = listSessions(deps.dataDir);
+      const sessions = allSessions.filter((session) =>
+        isEligibleForSourcePoll(session, deps.projectId),
+      );
       const currentSessionIds = new Set(sessions.map((session) => session.id));
+      // Persisted per-session state prunes on absence from disk, never on poll
+      // eligibility: a session that loses eligibility for one cycle (stopped into a
+      // non-parked status, worktree temporarily gone) must keep its snapshot and
+      // lifecycle baseline, or the source re-baselines and re-emits on its return.
+      const existingSessionIds = new Set(allSessions.map((session) => session.id));
       let cycleCiActive = false;
       let cycleHadPollError = false;
       // Cycle-scoped: a batch-level failure logs one source.poll.error for every
@@ -647,7 +655,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       lastCycleCiActive = cycleCiActive || (cycleHadPollError && lastCycleCiActive);
 
       for (const sessionId of [...snapshots.keys()]) {
-        if (!currentSessionIds.has(sessionId)) {
+        if (!existingSessionIds.has(sessionId)) {
           snapshots.delete(sessionId);
           deleteReviewSourceSnapshot(
             deps.dataDir,
