@@ -1240,6 +1240,8 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  restoreWarmupUntil: Map<string, number>;
+  withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   confirmAgentExited(
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean>;
@@ -2260,6 +2262,78 @@ describe("SessionService", () => {
       expect((await service.readTodo("api-1")).revision).toBe(before.revision);
       expect(sessions.get("api-1")?.status).toBe("stopped");
       service.dispose();
+    });
+
+    it("suppresses ToDo reads and delivery until the exact restore warmup deadline", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const session = runningSession({ agent: "codex" });
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockClear();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const deadline = Date.now() + 30_000;
+      internals.restoreWarmupUntil.set(session.id, deadline);
+
+      vi.setSystemTime(deadline - 1);
+      await internals.maybeNudgeTodo(session);
+      expect(todo.ensureTodoLedger).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+
+      vi.setSystemTime(deadline);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo is empty");
+      expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(1);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it("checks restore warmup after a ToDo nudge acquires the lifecycle lock", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const session = runningSession({ agent: "codex" });
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockClear();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let signalHeld!: () => void;
+      const held = new Promise<void>((resolve) => {
+        signalHeld = resolve;
+      });
+      const blocker = internals.withWorkspaceLifecycleLocks(session.id, async () => {
+        signalHeld();
+        await barrier;
+      });
+      await held;
+      const lock = vi.spyOn(internals, "withWorkspaceLifecycleLocks");
+      const queued = internals.maybeNudgeTodo(session);
+      const deadline = Date.now() + 30_000;
+      try {
+        expect(lock).toHaveBeenCalledWith(session.id, expect.any(Function));
+        expect(internals.restoreWarmupUntil.has(session.id)).toBe(false);
+        internals.restoreWarmupUntil.set(session.id, deadline);
+      } finally {
+        release();
+        await Promise.all([blocker, queued]);
+      }
+      expect(todo.ensureTodoLedger).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+
+      vi.setSystemTime(deadline);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(1);
     });
 
     it("nudges an empty ledger, at most once per 60s", async () => {

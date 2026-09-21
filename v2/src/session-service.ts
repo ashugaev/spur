@@ -6694,6 +6694,7 @@ export class SessionService {
 
   private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
     if (
+      this.isInRestoreWarmup(session.id) ||
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
       session.pipeline?.status === "running"
