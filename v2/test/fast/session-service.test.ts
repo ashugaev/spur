@@ -270,6 +270,8 @@ const workspaceExistsMock = vi.fn();
 const probeWorkspaceMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const normalizeSlotLinksMock = vi.fn();
+const applySlotsUpdateWithResultMock = vi.fn();
+const applyNormalizedSlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
@@ -749,12 +751,15 @@ vi.mock("../../src/session-slots.js", () => ({
   SLOT_TOOL_NAME: "spur-slots",
   TODO_TOOL_NAME: "spur-todo",
   applySlotsUpdate: applySlotsUpdateMock,
+  applySlotsUpdateWithResult: applySlotsUpdateWithResultMock,
+  applyNormalizedSlotsUpdate: applyNormalizedSlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
   normalizeSlotsUpdate: vi.fn(
     (request: {
       title?: string;
       clearTitle?: boolean;
       setTitleIfAbsent?: boolean;
+      source?: "manual" | "agent";
       links?: Array<{ label: string; url: string }>;
       unlinkLabels?: string[];
       tags?: string[];
@@ -763,6 +768,7 @@ vi.mock("../../src/session-slots.js", () => ({
       ...(request.title !== undefined ? { title: request.title } : {}),
       clearTitle: request.clearTitle === true,
       ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
+      source: request.source ?? "agent",
       links: request.links ?? [],
       unlinkLabels: request.unlinkLabels ?? [],
       tags: request.tags ?? [],
@@ -1697,7 +1703,89 @@ describe("SessionService", () => {
         : request.setTitleIfAbsent && current?.title?.trim()
           ? current.title
           : (request.title ?? current?.title);
-      return title || links.length > 0 ? { ...(title ? { title } : {}), links } : undefined;
+      const titleSource = request.clearTitle
+        ? (request.source ?? "agent")
+        : request.title !== undefined && title === request.title
+          ? (request.source ?? "agent")
+          : current?.titleSource;
+      return title || links.length > 0 || titleSource !== undefined
+        ? { ...(title ? { title } : {}), ...(titleSource ? { titleSource } : {}), links }
+        : undefined;
+    });
+    applySlotsUpdateWithResultMock.mockReset().mockImplementation((current, request) => ({
+      slots: applySlotsUpdateMock(current, request),
+      result: {
+        titleResult: request.clearTitle ? "cleared" : request.title ? "updated" : "unchanged",
+      },
+    }));
+    applyNormalizedSlotsUpdateMock.mockReset().mockImplementation((current, update) => {
+      const links = [...(current?.links ?? [])];
+      for (const label of update.unlinkLabels ?? []) {
+        const index = links.findIndex((link) => link.label === label);
+        if (index !== -1) {
+          links.splice(index, 1);
+        }
+      }
+      for (const link of update.links ?? []) {
+        const index = links.findIndex((entry) => entry.label === link.label);
+        if (index === -1) {
+          links.push(link);
+        } else {
+          links[index] = link;
+        }
+      }
+      // Mirrors the real applyNormalizedSlotsUpdate (session-slots.ts):
+      // a manual lock (titleSource === "manual") blocks any non-manual title
+      // edit, and the once-only initializer check treats a title as already
+      // present once titleSource is set at all, not only when literal title
+      // text is non-empty.
+      let title = current?.title;
+      let titleSource = current?.titleSource;
+      let titleResult: "unchanged" | "updated" | "cleared" | "blocked" = "unchanged";
+      let message: string | undefined;
+      const titleEditRequested = update.clearTitle || update.title !== undefined;
+      const blockedTitleEdit = current?.titleSource === "manual" && update.source !== "manual";
+      if (blockedTitleEdit && titleEditRequested) {
+        titleResult = "blocked";
+        message =
+          "title editing unavailable because title was set manually; do not attempt title edits again.";
+      } else if (update.clearTitle) {
+        title = undefined;
+        titleSource = update.source;
+        titleResult = "cleared";
+      } else if (update.title !== undefined) {
+        const hasExistingTitle =
+          Boolean(current?.title?.trim()) || current?.titleSource !== undefined;
+        if (!update.setTitleIfAbsent || !hasExistingTitle) {
+          title = update.title;
+          titleSource = update.source;
+          titleResult = "updated";
+        }
+      }
+      const tagSet = new Set<string>(current?.tags ?? []);
+      for (const tag of update.untags ?? []) {
+        tagSet.delete(tag);
+      }
+      for (const tag of update.tags ?? []) {
+        tagSet.add(tag);
+      }
+      const nextTags = [...tagSet];
+      const slots =
+        title || links.length > 0 || titleSource !== undefined || nextTags.length > 0
+          ? {
+              ...(title ? { title } : {}),
+              ...(titleSource ? { titleSource } : {}),
+              links,
+              ...(nextTags.length > 0 ? { tags: nextTags } : {}),
+            }
+          : undefined;
+      return {
+        ...(slots ? { slots } : {}),
+        result: {
+          titleResult,
+          ...(message ? { message } : {}),
+        },
+      };
     });
   });
 
@@ -15703,11 +15791,11 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("holds a due scheduled wake without claiming it while the memory hold is engaged and delivers it after the hold clears", async () => {
+    it("holds a due scheduled wake without claiming it for a stopped session while the memory hold is engaged and delivers it after the hold clears", async () => {
       loadConfigMock.mockReturnValue({ ...baseConfig() });
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({}));
+      sessions.set("api-1", runningSession({ status: "stopped", stopReason: "stale_timeout" }));
       readHostMemoryMock.mockReturnValue(denyingMemory());
 
       const { SessionService } = await loadSessionServiceModule();
@@ -15724,6 +15812,8 @@ describe("SessionService", () => {
       sessions.set(
         "api-1",
         runningSession({
+          status: "stopped",
+          stopReason: "stale_timeout",
           scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "reminder" },
         }),
       );
@@ -15750,6 +15840,197 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("reminder"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("delivers a due scheduled wake promptly for a live running session while the memory hold is engaged", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({}));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "live reminder" },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.scheduledWake).toBeUndefined();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("live reminder"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("delivers a due interval wake promptly for a live running session while the memory hold is engaged", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({}));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          intervalWake: {
+            intervalMs: 60000,
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "interval ping",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("interval ping"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("holds a due interval wake without claiming it for a stopped session while the memory hold is engaged and delivers it after the hold clears", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ status: "stopped", stopReason: "stale_timeout" }));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "stopped",
+          stopReason: "stale_timeout",
+          intervalWake: {
+            intervalMs: 60000,
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "interval ping",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      await advanceSeconds(11);
+
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("interval ping"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("delivers a due daily wake promptly for a live running session while the memory hold is engaged", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({}));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          dailyWake: {
+            dailyAt: ["10:05"],
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "daily report",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("daily report"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("holds a due daily wake without claiming it for a stopped session while the memory hold is engaged and delivers it after the hold clears", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ status: "stopped", stopReason: "stale_timeout" }));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "stopped",
+          stopReason: "stale_timeout",
+          dailyWake: {
+            dailyAt: ["10:05"],
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "daily report",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      await advanceSeconds(11);
+
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("daily report"),
         expect.objectContaining({}),
       );
       service.dispose();
@@ -15794,7 +16075,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("holds a queued message while the memory hold is engaged and delivers it after the hold clears", async () => {
+    it("delivers a queued message for a live running session while the memory hold is engaged", async () => {
       mockClaudeJsonlState("waiting");
       const service = await createDisposedSessionService();
       const sessions = createSessionStore();
@@ -15811,13 +16092,39 @@ describe("SessionService", () => {
         status: "running",
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:01:00.000Z",
+        queuedMessages: { messages: ["queued for live"], awaitingPrompt: false },
+      });
+
+      const holdState = service as unknown as { memoryHold: { engaged: boolean } };
+      holdState.memoryHold.engaged = true;
+
+      const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+      expect(delivered).toBe(true);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    });
+
+    it("does not deliver a queued message for a stopped session while the memory hold is engaged", async () => {
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "stale_timeout",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
         queuedMessages: { messages: ["queued while held"], awaitingPrompt: false },
       });
 
-      // The background loops are disposed (createDisposedSessionService), so
-      // the latch never ticks on its own here: drive it directly to prove
-      // the drain's own gate, deterministically, with no timer race against
-      // the wake-poll or memory-shed intervals.
       const holdState = service as unknown as { memoryHold: { engaged: boolean } };
       holdState.memoryHold.engaged = true;
 
@@ -15829,12 +16136,6 @@ describe("SessionService", () => {
         expect.objectContaining({ event: "session.message.delivery_failed" }),
       );
       expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued while held"]);
-
-      holdState.memoryHold.engaged = false;
-      const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
-      expect(delivered).toBe(true);
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
     });
 
     it("never engages the memory hold when admission is disabled, and still emits session.admission.memory_guard", async () => {
@@ -26334,11 +26635,20 @@ describe("SessionService", () => {
     });
 
     expect(result.slots?.title).toBe("First");
-    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(undefined, {
       title: "First",
       setTitleIfAbsent: true,
+      clearTitle: false,
+      source: "agent",
+      links: [],
+      unlinkLabels: [],
+      tags: [],
+      untags: [],
     });
-    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBeUndefined();
+    // The conditional write succeeded and left a title source behind: the
+    // observable outcome (title set) is unchanged from before the fold, the
+    // recorded mechanism is not.
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
     service.dispose();
   });
 
@@ -26381,7 +26691,7 @@ describe("SessionService", () => {
       { label: "tracker", url: "https://tracker.example.com/1" },
     ]);
     expect(cleared.slots?.title).toBeUndefined();
-    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
     service.dispose();
   });
 
@@ -26412,7 +26722,7 @@ describe("SessionService", () => {
       links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
     });
 
-    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
     service.dispose();
   });
 
@@ -26508,6 +26818,216 @@ describe("SessionService", () => {
     );
     await expect(service.updateSlots("api-1", { tags: ["bug"] })).resolves.toBeDefined();
     await expect(service.updateSlots("api-1", { tags: ["review"] })).resolves.toBeDefined();
+  });
+
+  it("passes setTitleIfAbsent through SessionService.updateSlots", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: { links: [] },
+    });
+    applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+      result: { titleResult: "updated" },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      title: "Agent title",
+      setTitleIfAbsent: true,
+    });
+
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(
+      { links: [] },
+      {
+        title: "Agent title",
+        setTitleIfAbsent: true,
+        clearTitle: false,
+        source: "agent",
+        links: [],
+        unlinkLabels: [],
+        tags: [],
+        untags: [],
+      },
+    );
+    expect(result.slotUpdate).toEqual({ titleResult: "updated" });
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        slots: { title: "Agent title", titleSource: "agent", links: [] },
+      }),
+    );
+  });
+
+  it("returns a blocked title result while still applying generic link updates", async () => {
+    const lockedSlots = {
+      title: "Manual title",
+      titleSource: "manual" as const,
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    };
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: lockedSlots,
+    });
+    applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
+      slots: {
+        ...lockedSlots,
+        links: [...lockedSlots.links, { label: "docs", url: "https://docs.example.com/" }],
+      },
+      result: {
+        titleResult: "blocked",
+        message:
+          "title editing unavailable because title was set manually; do not attempt title edits again.",
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      title: "Agent title",
+      links: [{ label: "docs", url: "https://docs.example.com/" }],
+    });
+
+    expect(result.slotUpdate).toEqual({
+      titleResult: "blocked",
+      message:
+        "title editing unavailable because title was set manually; do not attempt title edits again.",
+    });
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        slots: {
+          ...lockedSlots,
+          links: [
+            { label: "tracker", url: "https://tracker.example.com/1" },
+            { label: "docs", url: "https://docs.example.com/" },
+          ],
+        },
+      }),
+    );
+  });
+
+  it("always forwards a conditional title write to session-slots, even once titleSource is set", async () => {
+    // The block/no-op decision for an already-initialized title lives ONLY
+    // inside applyNormalizedSlotsUpdate (session-slots.ts); updateSlots must
+    // not re-derive it and drop the title before that call. See
+    // session-slots.test.ts for the semantic (blocked vs. unchanged) cases.
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: { titleSource: "agent", links: [] },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.updateSlots("api-1", {
+      title: "Second attempt",
+      setTitleIfAbsent: true,
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    });
+
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(
+      { titleSource: "agent", links: [] },
+      expect.objectContaining({ title: "Second attempt", setTitleIfAbsent: true }),
+    );
+  });
+
+  it("surfaces a blocked titleResult from an agent title-if-absent against a manually locked title", async () => {
+    const lockedSlots = {
+      title: "Manual title",
+      titleSource: "manual" as const,
+      links: [],
+    };
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: lockedSlots,
+    });
+    applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
+      slots: lockedSlots,
+      result: {
+        titleResult: "blocked",
+        message:
+          "title editing unavailable because title was set manually; do not attempt title edits again.",
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      title: "Agent title",
+      setTitleIfAbsent: true,
+    });
+
+    expect(applyNormalizedSlotsUpdateMock).toHaveBeenCalledWith(
+      lockedSlots,
+      expect.objectContaining({ title: "Agent title", setTitleIfAbsent: true }),
+    );
+    expect(result.slotUpdate).toEqual({
+      titleResult: "blocked",
+      message:
+        "title editing unavailable because title was set manually; do not attempt title edits again.",
+    });
+  });
+
+  it("rejects updateSlots on an unknown session with SessionResourceNotFoundError", async () => {
+    readSessionMock.mockReturnValue(undefined);
+
+    const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const promise = service.updateSlots("missing", { title: "Anything" });
+    await expect(promise).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+    await expect(promise).rejects.toMatchObject({
+      statusCode: 404,
+      message: "Session not found: missing",
+    });
   });
 
   it("keeps non-GitHub pr links as generic slots", async () => {
@@ -35015,9 +35535,12 @@ describe("SessionService", () => {
         const links = [...(current?.links ?? [])];
         const title = request.title ?? current?.title;
         const tags = request.tags ?? current?.tags;
+        const titleSource =
+          request.title !== undefined ? (request.source ?? "agent") : current?.titleSource;
         return {
           ...(title ? { title } : {}),
           links,
+          ...(titleSource ? { titleSource } : {}),
           ...(tags?.length ? { tags } : {}),
         };
       });
@@ -35031,11 +35554,15 @@ describe("SessionService", () => {
         .map(([, record]) => record as SessionRecord)
         .filter((record) => record.id === "api-1")
         .at(-1)?.slots;
+      // The carry call only adds knownTags ("feature"); it never sends
+      // untags, and production's applyNormalizedSlotsUpdate unions tags
+      // rather than replacing them, so a pre-existing unknown tag on the
+      // workspace ("unknown-tag") survives the handoff untouched.
       expect(carriedSlots).toMatchObject({
         title: "Handoff task",
-        tags: ["feature"],
+        tags: ["feature", "unknown-tag"],
       });
-      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.manualTitleOverride).toBe(true);
+      expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.titleSource).toBe("agent");
       expect(result.id).toBe("api-2");
     });
 
