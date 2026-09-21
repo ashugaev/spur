@@ -1,6 +1,6 @@
 # Configuration
 
-Canonical config reference. Any config or interface change updates this file in the same change.
+> Scope: config layers, fields, sources, triggers, and events. Caveman, no overhead. Canonical config reference. Any config or interface change updates this file in the same change.
 
 Two layers:
 

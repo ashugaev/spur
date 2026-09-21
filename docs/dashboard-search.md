@@ -1,5 +1,7 @@
 # Dashboard search
 
+> Scope: dashboard search syntax and field matching. Caveman, no overhead.
+
 Dashboard search uses case-insensitive substring matching.
 
 Session matches:

@@ -65,6 +65,8 @@ export interface SpurTagDefinition {
   color: string;
 }
 
+export type SpurSessionTitleSource = "manual" | "agent";
+
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
@@ -346,6 +348,7 @@ export interface SpurSessionView {
   runningSidecarNames?: string[];
   slots?: {
     title?: string;
+    titleSource?: SpurSessionTitleSource;
     links: SpurSessionLink[];
     tags?: string[];
   };
@@ -370,6 +373,15 @@ export interface SpurSessionView {
  * plus the real stop outcome (`sidecarStop`), never claiming a clean reap
  * when survivors were left behind. */
 export type SpurSidecarStopResponse = SpurSessionView & { sidecarStop: SpurSidecarStopReport };
+
+// Mirrors v2/src/types.ts UpdateSessionSlotsResponse — the daemon's reply to
+// POST /sessions/:id/slots.
+export interface SpurUpdateSessionSlotsResponse extends SpurSessionView {
+  slotUpdate: {
+    titleResult: "updated" | "cleared" | "unchanged" | "blocked";
+    message?: string;
+  };
+}
 
 export type SpurTodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }

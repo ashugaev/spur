@@ -1,5 +1,7 @@
 # Design workflow (Claude Design pre-implementation gate)
 
+> Scope: Claude Design workflow and export contract. Caveman, no overhead.
+
 Pre-implementation design gate in `$manager`: for visible `packages/web` UI, author a design first, get explicit user approval, then hand a runtime-neutral export to any coding agent (Claude/Codex/Cursor).
 
 ## Gate
