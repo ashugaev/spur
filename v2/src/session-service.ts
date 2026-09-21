@@ -5525,7 +5525,11 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
-          if (view.status === "running" && view.state === "waiting") {
+          if (
+            view.status === "running" &&
+            view.state === "waiting" &&
+            !this.isInRestoreWarmup(session.id)
+          ) {
             await this.maybeNudgeTodo(session);
           }
           // Gated on genuine transcript activity (resolveParkActivityAt), not

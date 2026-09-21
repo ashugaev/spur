@@ -1240,6 +1240,11 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  enrichWithClassified(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
+  ): Promise<{ view: SessionView; classified: unknown }>;
   restoreWarmupUntil: Map<string, number>;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   confirmAgentExited(
@@ -2262,6 +2267,41 @@ describe("SessionService", () => {
       expect((await service.readTodo("api-1")).revision).toBe(before.revision);
       expect(sessions.get("api-1")?.status).toBe("stopped");
       service.dispose();
+    });
+
+    it("skips scheduling ToDo nudges when warmup starts after a waiting view is enriched", async () => {
+      const sessions = createSessionStore();
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+        await Promise.resolve();
+      }
+      expect(internals.attentionMonitorRunning).toBe(false);
+      const session = runningSession({ worktree: false });
+      sessions.set(session.id, session);
+      const deadline = Date.now() + 30_000;
+      const views: SessionView[] = [];
+      const enrich = internals.enrichWithClassified.bind(internals);
+      vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (...args) => {
+        const result = await enrich(...args);
+        views.push(result.view);
+        if (views.length === 1) internals.restoreWarmupUntil.set(session.id, deadline);
+        return result;
+      });
+      const nudge = vi.spyOn(internals, "maybeNudgeTodo").mockResolvedValue();
+
+      await internals.pollAttentionStates(false);
+      expect(views).toHaveLength(1);
+      expect(views[0]).toMatchObject({ id: session.id, status: "running", state: "waiting" });
+      expect(internals.restoreWarmupUntil.get(session.id)).toBe(deadline);
+      expect(nudge).not.toHaveBeenCalled();
+
+      vi.setSystemTime(deadline);
+      await internals.pollAttentionStates(false);
+      expect(views).toHaveLength(2);
+      expect(views[1]).toMatchObject({ id: session.id, status: "running", state: "waiting" });
+      expect(nudge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }));
     });
 
     it("suppresses ToDo reads and delivery until the exact restore warmup deadline", async () => {
