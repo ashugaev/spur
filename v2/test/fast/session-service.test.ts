@@ -15791,11 +15791,11 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("holds a due scheduled wake without claiming it while the memory hold is engaged and delivers it after the hold clears", async () => {
+    it("holds a due scheduled wake without claiming it for a stopped session while the memory hold is engaged and delivers it after the hold clears", async () => {
       loadConfigMock.mockReturnValue({ ...baseConfig() });
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({}));
+      sessions.set("api-1", runningSession({ status: "stopped", stopReason: "stale_timeout" }));
       readHostMemoryMock.mockReturnValue(denyingMemory());
 
       const { SessionService } = await loadSessionServiceModule();
@@ -15812,6 +15812,8 @@ describe("SessionService", () => {
       sessions.set(
         "api-1",
         runningSession({
+          status: "stopped",
+          stopReason: "stale_timeout",
           scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "reminder" },
         }),
       );
@@ -15838,6 +15840,197 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("reminder"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("delivers a due scheduled wake promptly for a live running session while the memory hold is engaged", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({}));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          scheduledWake: { dueAt: "2026-03-18T10:05:00.000Z", message: "live reminder" },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.scheduledWake).toBeUndefined();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("live reminder"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("delivers a due interval wake promptly for a live running session while the memory hold is engaged", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({}));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          intervalWake: {
+            intervalMs: 60000,
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "interval ping",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("interval ping"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("holds a due interval wake without claiming it for a stopped session while the memory hold is engaged and delivers it after the hold clears", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ status: "stopped", stopReason: "stale_timeout" }));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "stopped",
+          stopReason: "stale_timeout",
+          intervalWake: {
+            intervalMs: 60000,
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "interval ping",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      await advanceSeconds(11);
+
+      expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:06:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("interval ping"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("delivers a due daily wake promptly for a live running session while the memory hold is engaged", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({}));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          dailyWake: {
+            dailyAt: ["10:05"],
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "daily report",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("daily report"),
+        expect.objectContaining({}),
+      );
+      service.dispose();
+    });
+
+    it("holds a due daily wake without claiming it for a stopped session while the memory hold is engaged and delivers it after the hold clears", async () => {
+      loadConfigMock.mockReturnValue({ ...baseConfig() });
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ status: "stopped", stopReason: "stale_timeout" }));
+      readHostMemoryMock.mockReturnValue(denyingMemory());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await advanceSeconds(1);
+      expect(service.memoryHoldEngaged()).toBe(true);
+
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "stopped",
+          stopReason: "stale_timeout",
+          dailyWake: {
+            dailyAt: ["10:05"],
+            nextDueAt: "2026-03-18T10:05:00.000Z",
+            message: "daily report",
+            stopCondition: "never",
+          },
+        }),
+      );
+
+      await advanceSeconds(5);
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-18T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+      readHostMemoryMock.mockReturnValue(recoveredMemory());
+      await advanceSeconds(11);
+
+      expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:05:00.000Z");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("daily report"),
         expect.objectContaining({}),
       );
       service.dispose();
@@ -15882,7 +16075,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("holds a queued message while the memory hold is engaged and delivers it after the hold clears", async () => {
+    it("delivers a queued message for a live running session while the memory hold is engaged", async () => {
       mockClaudeJsonlState("waiting");
       const service = await createDisposedSessionService();
       const sessions = createSessionStore();
@@ -15899,13 +16092,39 @@ describe("SessionService", () => {
         status: "running",
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:01:00.000Z",
+        queuedMessages: { messages: ["queued for live"], awaitingPrompt: false },
+      });
+
+      const holdState = service as unknown as { memoryHold: { engaged: boolean } };
+      holdState.memoryHold.engaged = true;
+
+      const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+      expect(delivered).toBe(true);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    });
+
+    it("does not deliver a queued message for a stopped session while the memory hold is engaged", async () => {
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        stopReason: "stale_timeout",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
         queuedMessages: { messages: ["queued while held"], awaitingPrompt: false },
       });
 
-      // The background loops are disposed (createDisposedSessionService), so
-      // the latch never ticks on its own here: drive it directly to prove
-      // the drain's own gate, deterministically, with no timer race against
-      // the wake-poll or memory-shed intervals.
       const holdState = service as unknown as { memoryHold: { engaged: boolean } };
       holdState.memoryHold.engaged = true;
 
@@ -15917,12 +16136,6 @@ describe("SessionService", () => {
         expect.objectContaining({ event: "session.message.delivery_failed" }),
       );
       expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued while held"]);
-
-      holdState.memoryHold.engaged = false;
-      const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
-      expect(delivered).toBe(true);
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
     });
 
     it("never engages the memory hold when admission is disabled, and still emits session.admission.memory_guard", async () => {

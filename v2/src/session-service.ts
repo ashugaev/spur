@@ -4076,7 +4076,12 @@ export class SessionService {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
-        if (scheduledWake && !this.memoryHold.engaged && Date.parse(scheduledWake.dueAt) <= now) {
+        if (
+          scheduledWake &&
+          (!this.memoryHold.engaged ||
+            (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
+          Date.parse(scheduledWake.dueAt) <= now
+        ) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
             // Claim the due occurrence BEFORE sending: clear scheduledWake and
             // persist it first. A slow or failing send must not leave the wake
@@ -4199,7 +4204,8 @@ export class SessionService {
         const intervalWake = session.intervalWake;
         if (
           intervalWake &&
-          !this.memoryHold.engaged &&
+          (!this.memoryHold.engaged ||
+            (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
           Date.parse(intervalWake.nextDueAt) <= now &&
           (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
@@ -4529,7 +4535,8 @@ export class SessionService {
         const dailyWake = session.dailyWake;
         if (
           !dailyWake ||
-          this.memoryHold.engaged ||
+          (this.memoryHold.engaged &&
+            !(this.isLiveSessionRecord(session) && !isStaleParked(session))) ||
           Date.parse(dailyWake.nextDueAt) > now ||
           !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
@@ -15703,22 +15710,25 @@ export class SessionService {
     if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
-    // While the memory hold is engaged, defer this attempt entirely: it
-    // would otherwise call ensureSessionReadyForSend, which can relaunch the
-    // session in place and write to its pane — real work this loop should
-    // not do under host memory pressure. Returning false is safe:
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
+      return false;
+    }
+    // While the memory hold is engaged, defer this attempt for cold or
+    // stale-parked sessions: it would otherwise call ensureSessionReadyForSend,
+    // which can relaunch the session in place and write to its pane — real
+    // work this loop should not do under host memory pressure. Live running
+    // sessions proceed with delivery. Returning false is safe:
     // runDeliveryLoop treats true/false identically, and false is what every
     // other stays-queued path below returns.
-    if (this.memoryHold.engaged) {
+    if (
+      this.memoryHold.engaged &&
+      !(this.isLiveSessionRecord(session) && !isStaleParked(session))
+    ) {
       return false;
     }
     this.queueDeliveryInFlight.add(sessionId);
     try {
-      const session = readSession(this.config.dataDir, sessionId);
-      if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
-        return false;
-      }
-
       let nextMessage: string | undefined;
       try {
         const readySession = await this.ensureSessionReadyForSend(session);
