@@ -160,6 +160,11 @@ async function getTerminalSocketCount(page: Page): Promise<number> {
   });
 }
 
+async function openTitleMenu(page: Page): Promise<void> {
+  await page.getByRole("button", { name: /more session actions/i }).click();
+  await page.getByRole("menuitem", { name: /change title/i }).click();
+}
+
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
     void route.fulfill({
@@ -490,6 +495,276 @@ test.describe("S1: Session detail header", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await expect(page).toHaveTitle("Detail task title");
+  });
+
+  test("manual title edit and clear update the session title", async ({ page }) => {
+    let currentSession = makeWorkingSession({
+      id: "detail-s1-manual-title",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    const titleRequests: unknown[] = [];
+
+    await page.route(`**/api/sessions/${currentSession.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(currentSession),
+      });
+    });
+    await page.route(`**/api/sessions/${currentSession.id}/title`, async (route) => {
+      const payload = route.request().postDataJSON() as { title: string | null };
+      titleRequests.push(payload);
+      currentSession = {
+        ...currentSession,
+        slots:
+          payload.title === null
+            ? { titleSource: "manual", links: [] }
+            : { title: payload.title, titleSource: "manual", links: [] },
+      };
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(currentSession),
+      });
+    });
+
+    await page.goto(`/sessions/${currentSession.id}`);
+    await openTitleMenu(page);
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
+    await page.getByLabel("Session title").fill("Manual title");
+    await page.getByRole("button", { name: /^save$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeHidden();
+    await expect(page.locator("h1")).toContainText("Manual title");
+    expect(titleRequests).toContainEqual({ title: "Manual title" });
+
+    await openTitleMenu(page);
+    const titleInput = page.getByLabel("Session title");
+    await expect(titleInput).toHaveValue("Manual title");
+    const clearInputButton = page.getByRole("button", { name: /clear title input/i });
+    await expect(clearInputButton).toBeVisible();
+    await clearInputButton.click();
+    await expect(titleInput).toHaveValue("");
+    await expect(clearInputButton).toBeHidden();
+    await page.getByRole("button", { name: /^save$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeHidden();
+    await expect(page.locator("h1")).toContainText("Implement the feature");
+    expect(titleRequests).toContainEqual({ title: null });
+  });
+
+  test("the in-input clear control empties the field without saving", async ({ page }) => {
+    const currentSession = makeWorkingSession({
+      id: "detail-s1-input-clear-only",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    let titleRequestCount = 0;
+
+    mockSessionDetail(page, currentSession);
+    await page.route(`**/api/sessions/${currentSession.id}/title`, async (route) => {
+      titleRequestCount += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(currentSession),
+      });
+    });
+
+    await page.goto(`/sessions/${currentSession.id}`);
+    await openTitleMenu(page);
+    const titleInput = page.getByLabel("Session title");
+    await expect(titleInput).toHaveValue("Agent title");
+
+    await page.getByRole("button", { name: /clear title input/i }).click();
+
+    await expect(titleInput).toHaveValue("");
+    await expect(titleInput).toBeFocused();
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
+    expect(titleRequestCount).toBe(0);
+  });
+
+  test("clearing via an emptied Save survives a stale session poll landing after it", async ({
+    page,
+  }) => {
+    // Regression for a real bug: SessionDetail polls GET /api/sessions/:id on
+    // a fixed interval, independent of any in-flight title mutation. Clearing
+    // the title used to call the bare `setSession` setter, which carries no
+    // defense against a GET that was already in flight before the clear
+    // started and resolves with pre-clear data after the clear's response
+    // lands — the poll's stale title silently overwrites the just-cleared
+    // title. `Save` and every other session mutator route through
+    // `applySessionUpdate`, which bumps `loadRequestIdRef` so `loadSession`
+    // discards a response that arrives for a superseded request; clearing
+    // must go through the same guard.
+    const initialSession = makeWorkingSession({
+      id: "detail-s1-clear-race",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+
+    let getCallCount = 0;
+    let releaseStalePoll: () => void = () => {};
+    const stalePollGate = new Promise<void>((resolve) => {
+      releaseStalePoll = resolve;
+    });
+
+    await page.route(`**/api/sessions/${initialSession.id}`, async (route) => {
+      getCallCount += 1;
+      if (getCallCount === 2) {
+        // This is the interval poll fired below via the fake clock: hold its
+        // response until the test explicitly releases it, simulating a slow
+        // response that was already in flight before Clear resolved.
+        await stalePollGate;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(initialSession),
+      });
+    });
+    await page.route(`**/api/sessions/${initialSession.id}/title`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...initialSession,
+          slots: { titleSource: "manual", links: [] },
+        }),
+      });
+    });
+
+    await page.clock.install();
+    await page.goto(`/sessions/${initialSession.id}`);
+    await expect(page.locator("h1")).toContainText("Agent title");
+
+    // Fires SessionDetail's 4s poll interval; that GET is now in flight and
+    // held open by stalePollGate above.
+    await page.clock.fastForward(4_000);
+    await expect.poll(() => getCallCount).toBe(2);
+
+    await openTitleMenu(page);
+    await page.getByRole("button", { name: /clear title input/i }).click();
+    await page.getByRole("button", { name: /^save$/i }).click();
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeHidden();
+    await expect(page.locator("h1")).toContainText("Implement the feature");
+
+    // Release the stale poll now that the clear has already landed. A
+    // correct implementation discards this response as superseded; the buggy
+    // one clobbers the cleared title back to "Agent title".
+    releaseStalePoll();
+    await page.waitForTimeout(200);
+    await expect(page.locator("h1")).toContainText("Implement the feature");
+  });
+
+  test("title editor popup closes on cancel, escape, and outside click", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-title-popup-dismiss",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    await mockSessionDetail(page, session);
+
+    await page.goto(`/sessions/${session.id}`);
+    const dialog = page.getByRole("dialog", { name: /edit title/i });
+
+    await openTitleMenu(page);
+    await expect(dialog).toBeVisible();
+    await expect(page.getByLabel("Session title")).toBeFocused();
+    await page.getByRole("button", { name: /^cancel$/i }).click();
+    await expect(dialog).toBeHidden();
+
+    await openTitleMenu(page);
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    await openTitleMenu(page);
+    await expect(dialog).toBeVisible();
+    await page.mouse.click(2, 2);
+    await expect(dialog).toBeHidden();
+  });
+
+  test("title save failing with 409 shows a toast and keeps the draft", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-manual-title-409",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/title`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "title editing unavailable" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await openTitleMenu(page);
+    await page.getByLabel("Session title").fill("Manual title");
+    await page.getByRole("button", { name: /^save$/i }).click();
+
+    await expect(page.getByText("title editing unavailable")).toBeVisible();
+    await expect(page.getByLabel("Session title")).toHaveValue("Manual title");
+    await expect(page.locator("h1")).toContainText("Agent title");
+  });
+
+  test("edit title always prefills with the currently displayed title", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-derived-title",
+      prompt: "Implement the derived-title feature end to end",
+    });
+    await mockSessionDetail(page, session);
+
+    await page.goto(`/sessions/${session.id}`);
+    await expect(page.locator("h1")).toContainText("Implement the derived-title feature");
+
+    // No stored slot title: the dialog still prefills from the derived
+    // string shown in the <h1>, never an empty input.
+    await openTitleMenu(page);
+    await expect(page.getByLabel("Session title")).toHaveValue(
+      "Implement the derived-title feature end to end",
+    );
+  });
+
+  test("kebab menu opens Change title on a touch device with no prior hover", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s1-touch-title",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.locator("h1")).toContainText("Agent title");
+
+      // The kebab sits in the normal action row, not a hover-revealed
+      // overlay: a touch device never fires :hover, so both taps below must
+      // land without `force`.
+      await page.getByRole("button", { name: /more session actions/i }).tap();
+      await page.getByRole("menuitem", { name: /change title/i }).tap();
+      await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("kebab menu is reachable and operable by keyboard", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-keyboard-title",
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /more session actions/i }).focus();
+    await page.keyboard.press("Enter");
+    const menuItem = page.getByRole("menuitem", { name: /change title/i });
+    await expect(menuItem).toBeVisible();
+    await menuItem.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog", { name: /edit title/i })).toBeVisible();
   });
 
   test("activity dot visible", async ({ page }) => {

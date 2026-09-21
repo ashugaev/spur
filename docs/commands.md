@@ -1,6 +1,6 @@
 # Commands
 
-CLI reference: what to run, what it does, what `--help` skips. Config fields: [configuration.md](configuration.md). Daemon HTTP routes: [daemon-api.md](daemon-api.md).
+> Scope: CLI reference. Caveman, no overhead. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md).
 
 ## Surface
 
@@ -160,6 +160,8 @@ Send controls belong to the recipient. Spawn controls belong to the first succes
 `--thread` suppresses one supported provider thread for this trigger route and destination.
 `--subscription` suppresses one source/event/trigger/action route and destination.
 
+Pick the scope by lifetime. An event suppression is bound to one emitted occurrence: every event handle in a delivery carries that same occurrence, so they collapse onto one suppression and `list` shows a single row. A later poll that re-emits the same provider comment is a new occurrence and is not covered. A thread suppression is bound to the provider thread id, which outlives any one occurrence — reach for `--thread` when a thread keeps coming back.
+
 Inside a session, `SPUR_SESSION` supplies the target session. Passing a different `--session` fails. Outside a session, pass `--session`.
 
 Trigger prompts print the session-bound wrapper form, for example:
@@ -188,7 +190,7 @@ Delivery, wake, and lifecycle event names: [configuration.md](configuration.md#e
 
 On each live session's `PATH`. Updates the tmux status-line title and named links stored with the session: `spur-slots --title-if-absent "Fix flaky auth test"`, `spur-slots --link pr=<url> --link tracker=<url>`.
 
-`--title-if-absent` sets the title once; later conditional writes no-op. `--title`/`--clear-title` are unrestricted manual controls; either blocks future conditional writes for that workspace.
+`--title-if-absent` sets the title once. Manual title (web UI) locks title, blocking conditional and manual writes from this helper; blocked write reports lock message.
 
 ## service
 
