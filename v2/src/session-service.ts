@@ -13625,12 +13625,7 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
-    options: {
-      retainInList?: boolean;
-      skipEnrichment: true;
-      todoActor?: TodoActor;
-      eventAction?: ManualStatusAction;
-    },
+    options: { retainInList?: boolean; skipEnrichment: true; eventAction?: ManualStatusAction },
   ): Promise<void>;
   private async applyManualStatusLocked(
     sessionId: string,
@@ -15643,11 +15638,7 @@ export class SessionService {
         session.id,
         "completed",
         { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
-        {
-          retainInList: true,
-          eventAction: "handoff",
-          ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
-        },
+        { retainInList: true, eventAction: "handoff" },
       );
 
       return spawned;
