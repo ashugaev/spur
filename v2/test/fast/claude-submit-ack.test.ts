@@ -295,4 +295,145 @@ describe("scanClaudeJsonlForMessage", () => {
     );
     expect(found).toBe(true);
   });
+
+  it("matches a queued send recorded as a queued_command attachment", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      { type: "user", message: { role: "user", content: "launch prompt" } },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    const fs = await import("node:fs/promises");
+    const stat = await fs.stat(filePath);
+    const baseline = { file: filePath, size: stat.size };
+
+    await appendJsonl(filePath, [
+      {
+        type: "attachment",
+        attachment: { type: "queued_command", prompt: "Automatic ping controls" },
+      },
+    ]);
+
+    expect(
+      await scanClaudeJsonlForMessage(baseline, "Automatic ping controls", "/tmp/worktree"),
+    ).toBe(true);
+  });
+
+  it("ignores an attachment that is not a queued_command", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      {
+        type: "attachment",
+        attachment: { type: "file", prompt: "Automatic ping controls" },
+      },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(false);
+  });
+
+  it("matches a queue-operation enqueue carrying the submitted text", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      { type: "queue-operation", operation: "enqueue", content: "Automatic ping controls" },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(true);
+  });
+
+  it("matches a queue-operation dequeue carrying the submitted text", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      { type: "queue-operation", operation: "dequeue", content: "Automatic ping controls" },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(true);
+  });
+
+  it("matches a queue-operation removed because the model absorbed it mid-turn", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      {
+        type: "queue-operation",
+        operation: "remove",
+        content: "Automatic ping controls",
+        reason: "absorbed_mid_turn",
+      },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not ack a queue-operation removed for any other reason", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      {
+        type: "queue-operation",
+        operation: "remove",
+        content: "Automatic ping controls",
+        reason: "cleared_by_user",
+      },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(false);
+  });
+
+  it("matches a queued send whose content uses the \\r separators claude records", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      {
+        type: "queue-operation",
+        operation: "enqueue",
+        content: "Automatic ping controls:\r- event: unsubscribe\r- subscription: unsubscribe",
+      },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls:\n- event: unsubscribe\n- subscription: unsubscribe",
+        "/tmp/worktree",
+      ),
+    ).toBe(true);
+  });
+
+  it("still returns false for queued text that does not match the target", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      { type: "queue-operation", operation: "enqueue", content: "some other message" },
+      {
+        type: "attachment",
+        attachment: { type: "queued_command", prompt: "some other message" },
+      },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(false);
+  });
+
 });
