@@ -13590,28 +13590,20 @@ export class SessionService {
   // Classifies a manual-status-gate refusal for the failure event. A ToDo
   // cause (empty ledger or unfinished work) demotes to `warn` with
   // `details.kind`, because the gate rejected before any teardown and the
-  // session is untouched. Exception: the `handoff` caller at the
-  // POST-SPAWN site (a successor session already exists at throw time, see
-  // the Handoff double-gate) stays `error` even on a ToDo cause; the
-  // `handoff` PRE-SPAWN gate throws before a successor exists and still
-  // demotes to `warn` like every other caller. Every other cause stays
-  // `error` with no `details`.
+  // session is untouched. Every other cause stays `error` with no `details`.
   private logManualStatusFailure(
     action: ManualStatusAction,
     targetStatus: ManualSessionStatus,
     sessionId: string,
     projectId: string,
     error: unknown,
-    site: "pre_spawn" | "post_spawn" = "pre_spawn",
   ): void {
     const message = error instanceof Error ? error.message : String(error);
     const isTodoCause = error instanceof TodoEmptyLedgerError || error instanceof TodoOpenWorkError;
-    const isPostSpawnHandoff = action === "handoff" && site === "post_spawn";
-    const level = isTodoCause && !isPostSpawnHandoff ? "warn" : "error";
-    const details =
-      isTodoCause && !isPostSpawnHandoff
-        ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
-        : undefined;
+    const level = isTodoCause ? "warn" : "error";
+    const details = isTodoCause
+      ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
+      : undefined;
     this.logEvent(`session.${action}.failed`, {
       level,
       sessionId,
@@ -13744,14 +13736,7 @@ export class SessionService {
         deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
       }
     } catch (error) {
-      this.logManualStatusFailure(
-        eventAction,
-        targetStatus,
-        sessionId,
-        session.project,
-        error,
-        "post_spawn",
-      );
+      this.logManualStatusFailure(eventAction, targetStatus, sessionId, session.project, error);
       throw error;
     }
 
