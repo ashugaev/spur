@@ -502,7 +502,6 @@ Source support:
 - `telegram`: event and subscription for send; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
 - `service`: no live automatic events.
 - `jira`: no controls; work-item spawn when `query` is set; connection only without `query`; no send triggers.
-- Cron, Sentry, and GitHub CI send triggers stay unsupported.
 
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:review_requested`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set. `github:review_requested` fires when the PR lists the authenticated `gh` account as a pending reviewer, and again on each re-request after that reviewer submits a review. Only a request naming that user counts; a request routed through a team is not matched.

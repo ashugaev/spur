@@ -38,7 +38,6 @@ describe("published interface contracts", () => {
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
     expect(daemonApi).toContain("`409` for pending grants or consumed-then-resumed grants");
     expect(configuration).toContain("`github-ci`: no controls; spawn triggers only");
-    expect(configuration).toContain("Cron, Sentry, and GitHub CI send triggers stay unsupported");
     expect(agentSkill).toContain("Stop unwanted auto-pings with `spur auto-ping unsubscribe`");
     expect(agentSkill).toContain("Scopes and resume: `docs/commands.md#auto-ping`");
     expect(agentSkill).toContain("API: `docs/daemon-api.md`");
