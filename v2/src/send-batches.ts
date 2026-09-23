@@ -609,9 +609,8 @@ function parsePersistedAutoPingState(value: unknown): PersistedAutoPingBatchStat
     destination !== null &&
     typeof destination === "object" &&
     !Array.isArray(destination) &&
-    ((destination as Record<string, unknown>)["kind"] === "trigger" ||
-      ((destination as Record<string, unknown>)["kind"] === "session" &&
-        typeof (destination as Record<string, unknown>)["sessionId"] === "string"));
+    (destination as Record<string, unknown>)["kind"] === "session" &&
+    typeof (destination as Record<string, unknown>)["sessionId"] === "string";
   if (
     typeof state["routeFingerprint"] !== "string" ||
     !destinationValid ||

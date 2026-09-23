@@ -1360,12 +1360,7 @@ describe("SessionService", () => {
     buildAgentLaunchPlanMock
       .mockReset()
       .mockImplementation(
-        (
-          agent: string,
-          initialMessage: string,
-          options?: { planMode?: boolean },
-          deferredSensitiveInitialMessage?: { text: string; sensitive: true },
-        ) => ({
+        (agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
           agent,
           launchCommand:
             agent === "codex"
@@ -1375,7 +1370,6 @@ describe("SessionService", () => {
                 : "claude --dangerously-skip-permissions",
           initialMessage,
           readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
-          ...(deferredSensitiveInitialMessage ? { deferredSensitiveInitialMessage } : {}),
         }),
       );
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
@@ -12164,32 +12158,6 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("waiting");
-  });
-
-  it("delivers sensitive spawn controls after the ordinary prompt without persisting them", async () => {
-    mockClaudeJsonlState("waiting");
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    const sensitiveControls = "unsubscribe ap1_secret-control";
-
-    await service.spawn(
-      { project: "api", prompt: "hello" },
-      { sensitivePromptSuffix: sensitiveControls },
-    );
-
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      expect.not.stringContaining("ap1_secret-control"),
-      { agent: "claude" },
-    );
-    expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledOnce();
-    expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledWith("api-1", sensitiveControls, {
-      agent: "claude",
-    });
-    expect(sendMessageToTmuxMock.mock.invocationCallOrder[0]).toBeLessThan(
-      sendSensitiveMessageToTmuxMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-    );
-    expect(JSON.stringify(writeSessionMock.mock.calls)).not.toContain("ap1_secret-control");
   });
 
   it("classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes", async () => {

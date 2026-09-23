@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.j
 import type * as eventLogModule from "../../src/event-log.js";
 import { EventBus } from "../../src/event-bus.js";
 import type {
+  AutoPingRouteDescriptor,
   PersistedPendingBatch,
   ReviewSignal,
   ReviewSnapshot,
@@ -327,26 +328,6 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
               ],
               autoComplete: options?.autoComplete ?? true,
             },
-          },
-        },
-      },
-    },
-  };
-}
-
-function reviewSpawnConfig() {
-  return {
-    dataDir: DATA_DIR,
-    projects: {
-      api: {
-        sources: {
-          "pr-watch": { type: "github" },
-        },
-        triggers: {
-          review: {
-            source: "pr-watch",
-            event: "github:comment",
-            spawn: { blocks: [{ prompt: "Review {{prTitle}}." }] },
           },
         },
       },
@@ -722,7 +703,6 @@ async function loadTriggersModule() {
         deps.sessionService.deliver(sessionId, message, {
           ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
         });
-      sessionService.spawn = async (request) => deps.sessionService.spawn(request);
       const controller = module.startConfiguredTriggers({
         ...deps,
         sessionService,
@@ -3844,102 +3824,6 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("filters suppressed review threads without dropping unrelated signals", async () => {
-    const policyDir = mkdtempSync(join(tmpdir(), "spur-review-policy-"));
-    const autoPing = new AutoPingService(policyDir);
-    const spawnMock = vi
-      .fn()
-      .mockResolvedValueOnce({ id: "api-1" })
-      .mockResolvedValueOnce({ id: "api-2" });
-    const descriptor = {
-      version: 1 as const,
-      projectId: "api",
-      triggerId: "review",
-      sourceId: "pr-watch",
-      sourceType: "github" as const,
-      eventName: "github:comment",
-      actionKind: "spawn" as const,
-      destination: { kind: "trigger" as const },
-      spawnDeskGroup: false,
-    };
-    const fingerprint = autoPingRouteFingerprint(descriptor);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: reviewSpawnConfig() as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      autoPing,
-      logger: { warn: vi.fn() },
-    });
-    const suppressedTarget = { kind: "github-review-thread" as const, threadId: "thread-a" };
-    const grant = autoPing.createGrant({
-      scope: "thread",
-      routeFingerprint: fingerprint,
-      destination: descriptor.destination,
-      target: suppressedTarget,
-      actorSessionId: "owner",
-    });
-    await autoPing.unsubscribe("owner", "thread", grant.handle);
-    const baseEvent = githubEvent();
-
-    try {
-      bus.emit({
-        ...baseEvent,
-        occurrenceId: "review-mixed-1",
-        data: {
-          ...baseEvent.data,
-          signals: [
-            {
-              key: "suppressed",
-              kind: "comment",
-              text: "suppressed thread",
-              providerThreadTarget: suppressedTarget,
-            },
-            { key: "lifecycle", kind: "approved", text: "unrelated approval" },
-          ],
-        },
-      });
-      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
-      const firstSuffix = (spawnMock.mock.calls[0]?.[1] as { sensitivePromptSuffix?: string })
-        .sensitivePromptSuffix;
-      expect(firstSuffix).not.toContain("--thread");
-
-      bus.emit({
-        ...baseEvent,
-        occurrenceId: "review-mixed-2",
-        data: {
-          ...baseEvent.data,
-          signals: [
-            {
-              key: "suppressed",
-              kind: "comment",
-              text: "suppressed thread",
-              providerThreadTarget: suppressedTarget,
-            },
-            {
-              key: "active",
-              kind: "comment",
-              text: "active thread",
-              providerThreadTarget: {
-                kind: "github-review-thread",
-                threadId: "thread-b",
-              },
-            },
-          ],
-        },
-      });
-      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
-      const secondSuffix = (spawnMock.mock.calls[1]?.[1] as { sensitivePromptSuffix?: string })
-        .sensitivePromptSuffix;
-      expect(secondSuffix?.match(/--thread/g)).toHaveLength(1);
-    } finally {
-      await controller.stop();
-      autoPing.dispose();
-      rmSync(policyDir, { recursive: true, force: true });
-    }
-  });
-
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();
@@ -4139,23 +4023,10 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("checks subscription suppression before claiming a work item", async () => {
+  it("spawns a work item without auto-ping controls", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    const records = useWorkItemLifecycleStore();
     const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));
     const autoPing = new AutoPingService(policyDir);
-    const descriptor = {
-      version: 1 as const,
-      projectId: "api",
-      triggerId: "pick-up",
-      sourceId: "pr-watch",
-      sourceType: "github" as const,
-      eventName: "github:work_item.new",
-      actionKind: "spawn" as const,
-      destination: { kind: "trigger" as const },
-      spawnDeskGroup: false,
-    };
-    const fingerprint = autoPingRouteFingerprint(descriptor);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -4165,25 +4036,157 @@ describe("startConfiguredTriggers", () => {
       autoPing,
       logger: { warn: vi.fn() },
     });
-    const grant = autoPing.createGrant({
-      scope: "subscription",
-      routeFingerprint: fingerprint,
-      destination: descriptor.destination,
-      target: { kind: "subscription" },
-      actorSessionId: "owner",
-    });
-    const suppression = await autoPing.unsubscribe("owner", "subscription", grant.handle);
 
     try {
       bus.emit(workItemEvent());
-      await vi.advanceTimersByTimeAsync(1);
-      expect(spawnMock).not.toHaveBeenCalled();
-      expect(records.size).toBe(0);
-
-      await autoPing.resume("owner", suppression.record.suppressionId);
-      bus.emit({ ...workItemEvent(), occurrenceId: "work-item-occurrence-2" });
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(records.get("acme/api#42")).toMatchObject({ state: "running" });
+      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+      const path = join(policyDir, "auto-ping.json");
+      const grants = existsSync(path)
+        ? (JSON.parse(readFileSync(path, "utf8")) as { grants: unknown[] }).grants
+        : [];
+      expect(grants).toHaveLength(0);
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(policyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a send-route subscription suppression does not stop a later work-item spawn", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-11" });
+    const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));
+    const autoPing = new AutoPingService(policyDir);
+    const sendRoute = {
+      version: 1 as const,
+      projectId: "api",
+      triggerId: "pick-up",
+      sourceId: "pr-watch",
+      sourceType: "github" as const,
+      eventName: "github:comment",
+      actionKind: "send" as const,
+      destination: { kind: "session" as const, sessionId: "api-9" },
+      spawnDeskGroup: false,
+    };
+    const fingerprint = autoPingRouteFingerprint(sendRoute);
+    const grant = autoPing.createGrant({
+      scope: "subscription",
+      routeFingerprint: fingerprint,
+      destination: sendRoute.destination,
+      target: { kind: "subscription" },
+      actorSessionId: "api-9",
+    });
+    await autoPing.unsubscribe("api-9", "subscription", grant.handle);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit({
+        ...workItemEvent(),
+        occurrenceId: "work-item-occurrence-43",
+        data: {
+          ...workItemEvent().data,
+          externalId: "acme/api#43",
+          number: 43,
+          url: "https://github.com/acme/api/pull/43",
+        },
+      });
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
+      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(policyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy trigger-destination subscription no longer mutes spawns", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));
+    const legacyDescriptor = {
+      version: 1,
+      projectId: "api",
+      triggerId: "pick-up",
+      sourceId: "pr-watch",
+      sourceType: "github",
+      eventName: "github:work_item.new",
+      actionKind: "spawn",
+      destination: { kind: "trigger" },
+      spawnDeskGroup: false,
+    };
+    const fingerprint = autoPingRouteFingerprint(
+      legacyDescriptor as unknown as AutoPingRouteDescriptor,
+    );
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(policyDir, "auto-ping.json"),
+      JSON.stringify({
+        version: 1,
+        routes: [{ routeFingerprint: fingerprint, descriptor: legacyDescriptor }],
+        grants: [],
+        suppressions: [
+          {
+            suppressionId: "legacy-suppression",
+            scope: "subscription",
+            routeFingerprint: fingerprint,
+            destination: { kind: "trigger" },
+            target: { kind: "subscription" },
+            canonicalKey: "legacy-key",
+            actorSessionId: "owner",
+            createdAt: now,
+          },
+        ],
+        mergeConflicts: [],
+      }),
+    );
+    const autoPing = new AutoPingService(policyDir);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
+      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      rmSync(policyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("spawn triggers never consult auto-ping suppression", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));
+    const autoPing = new AutoPingService(policyDir);
+    const isSuppressedSpy = vi.spyOn(autoPing, "isSuppressed").mockReturnValue(true);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      autoPing,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
+      expect(isSuppressedSpy).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
       autoPing.dispose();
@@ -4272,6 +4275,123 @@ describe("startConfiguredTriggers", () => {
       bus.emit(workItemEvent());
       await vi.advanceTimersByTimeAsync(1);
       expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it.each([
+    {
+      reason: "work_item_pending",
+      level: "info",
+      lifecycle: { ...runningWorkItemLifecycle(), state: "pending" as const, sessionId: undefined },
+      get: undefined,
+    },
+    {
+      reason: "work_item_completed",
+      level: "info",
+      lifecycle: {
+        ...runningWorkItemLifecycle(),
+        state: "completed" as const,
+        completedAt: new Date().toISOString(),
+      },
+      get: undefined,
+    },
+    {
+      reason: "owner_completed",
+      level: "info",
+      lifecycle: runningWorkItemLifecycle(),
+      get: {
+        id: "api-9",
+        status: "completed" as const,
+        state: "waiting" as const,
+        workspaceExists: true,
+      },
+    },
+    {
+      reason: "owner_active",
+      level: "info",
+      lifecycle: runningWorkItemLifecycle(),
+      get: {
+        id: "api-9",
+        status: "running" as const,
+        state: "needs_input" as const,
+        workspaceExists: true,
+      },
+    },
+    {
+      reason: "owner_not_replaceable",
+      level: "info",
+      lifecycle: runningWorkItemLifecycle(),
+      get: {
+        id: "api-9",
+        status: "running" as const,
+        state: "rate_limited" as const,
+        workspaceExists: true,
+      },
+    },
+  ])("logs the suppression reason: $reason", async ({ reason, level, lifecycle, get }) => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const getMock = get ? vi.fn().mockResolvedValue(get) : vi.fn();
+    useWorkItemLifecycleStore([lifecycle as unknown as WorkItemLifecycleRecord]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(
+          logSpurEventMock.mock.calls
+            .map(([, entry]) => entry)
+            .filter((entry) => entry.event === "trigger.spawn.suppressed"),
+        ).toHaveLength(1);
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
+      const [, entry] = logSpurEventMock.mock.calls.find(
+        ([, e]) => e.event === "trigger.spawn.suppressed",
+      ) as [string, { level: string; details: { reason: string } }];
+      expect(entry.level).toBe(level);
+      expect(entry.details.reason).toBe(reason);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs owner_load_failed with the underlying error at warn level", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const getMock = vi.fn().mockRejectedValue(new Error("boom"));
+    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(
+          logSpurEventMock.mock.calls
+            .map(([, entry]) => entry)
+            .filter((entry) => entry.event === "trigger.spawn.suppressed"),
+        ).toHaveLength(1);
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
+      const [, entry] = logSpurEventMock.mock.calls.find(
+        ([, e]) => e.event === "trigger.spawn.suppressed",
+      ) as [string, { level: string; details: { reason: string; error?: string } }];
+      expect(entry.level).toBe("warn");
+      expect(entry.details.reason).toBe("owner_load_failed");
+      expect(entry.details.error).toBe("boom");
     } finally {
       await controller.stop();
     }

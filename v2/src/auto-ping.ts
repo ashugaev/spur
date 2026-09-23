@@ -141,11 +141,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isDestination(value: unknown): value is AutoPingDestination {
-  return (
-    isRecord(value) &&
-    ((value.kind === "trigger" && Object.keys(value).length === 1) ||
-      (value.kind === "session" && typeof value.sessionId === "string"))
-  );
+  return isRecord(value) && value.kind === "session" && typeof value.sessionId === "string";
 }
 
 export function isAutoPingTarget(value: unknown): value is AutoPingTarget {
@@ -172,7 +168,7 @@ function isRouteDescriptor(value: unknown): value is AutoPingRouteDescriptor {
     typeof value.sourceId === "string" &&
     typeof value.sourceType === "string" &&
     typeof value.eventName === "string" &&
-    (value.actionKind === "send" || value.actionKind === "spawn") &&
+    value.actionKind === "send" &&
     isDestination(value.destination) &&
     typeof value.spawnDeskGroup === "boolean"
   );
@@ -190,10 +186,61 @@ function matchesScope(scope: unknown, target: AutoPingTarget): boolean {
       : scope === "thread" && target.kind !== "occurrence" && target.kind !== "subscription";
 }
 
-function parseState(raw: unknown): AutoPingState {
+// Drops legacy spawn-route records (destination `{kind: "trigger"}`, route
+// descriptors with `actionKind: "spawn"`) before validation. Spawn triggers
+// no longer issue auto-ping controls; these are relics of daemons that ran
+// an earlier version. Filtering here, rather than relying on gc, keeps the
+// narrowed `isDestination`/`isRouteDescriptor` guards from throwing at boot
+// on a still-live on-disk file.
+function isLegacySpawnDestination(value: unknown): boolean {
+  return isRecord(value) && value.kind === "trigger";
+}
+
+function dropLegacySpawnRecords(raw: Record<string, unknown>): {
+  raw: Record<string, unknown>;
+  migrated: boolean;
+} {
+  let migrated = false;
+  const filterOut = (
+    array: unknown,
+    isLegacy: (value: Record<string, unknown>) => boolean,
+  ): unknown => {
+    if (!Array.isArray(array)) return array;
+    const kept = array.filter((value) => {
+      if (!isRecord(value) || !isLegacy(value)) return true;
+      migrated = true;
+      return false;
+    });
+    return kept;
+  };
+  const next = {
+    ...raw,
+    grants: filterOut(raw.grants, (value) => isLegacySpawnDestination(value.destination)),
+    suppressions: filterOut(raw.suppressions, (value) =>
+      isLegacySpawnDestination(value.destination),
+    ),
+    routes: filterOut(
+      raw.routes,
+      (value) => isRecord(value.descriptor) && value.descriptor.actionKind === "spawn",
+    ),
+  };
+  return { raw: next, migrated };
+}
+
+function parseState(raw: unknown): { state: AutoPingState; migrated: boolean } {
   if (
     !isRecord(raw) ||
     raw.version !== STATE_VERSION ||
+    !Array.isArray(raw.grants) ||
+    !Array.isArray(raw.suppressions) ||
+    (raw.routes !== undefined && !Array.isArray(raw.routes))
+  ) {
+    throw new Error("Invalid auto-ping policy state");
+  }
+  const { raw: filtered, migrated } = dropLegacySpawnRecords(raw);
+  raw = filtered;
+  if (
+    !isRecord(raw) ||
     !Array.isArray(raw.grants) ||
     !Array.isArray(raw.suppressions) ||
     (raw.routes !== undefined && !Array.isArray(raw.routes))
@@ -275,7 +322,10 @@ function parseState(raw: unknown): AutoPingState {
       return value as unknown as PersistedMergeConflict;
     },
   );
-  return { version: STATE_VERSION, routes, grants, suppressions, mergeConflicts };
+  return {
+    state: { version: STATE_VERSION, routes, grants, suppressions, mergeConflicts },
+    migrated,
+  };
 }
 
 function view(record: PersistedSuppression): AutoPingSuppressionView {
@@ -306,9 +356,21 @@ export class AutoPingService {
     this.path = join(dataDir, "auto-ping.json");
     this.now = options.now ?? Date.now;
     this.clearIntervalFn = options.clearInterval ?? globalThis.clearInterval;
-    this.state = existsSync(this.path)
-      ? parseState(JSON.parse(readFileSync(this.path, "utf8")) as unknown)
-      : { version: STATE_VERSION, routes: [], grants: [], suppressions: [], mergeConflicts: [] };
+    if (existsSync(this.path)) {
+      const { state, migrated } = parseState(
+        JSON.parse(readFileSync(this.path, "utf8")) as unknown,
+      );
+      this.state = state;
+      if (migrated) this.persist();
+    } else {
+      this.state = {
+        version: STATE_VERSION,
+        routes: [],
+        grants: [],
+        suppressions: [],
+        mergeConflicts: [],
+      };
+    }
     const setIntervalFn = options.setInterval ?? globalThis.setInterval;
     this.timer = setIntervalFn(() => this.gc(), GC_INTERVAL_MS);
   }

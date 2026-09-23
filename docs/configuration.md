@@ -494,14 +494,14 @@ Auto-ping scopes and controls: [commands.md#auto-ping](commands.md#auto-ping).
 
 Source support:
 
-- `cron`: event and subscription for spawn triggers; no thread.
-- `github`: event and subscription for review send/spawn and work-item spawn; inline review comments add thread; issue comments, review bodies, lifecycle items, and work items have no thread.
-- `github-ci`: event and subscription for spawn triggers; no thread.
-- `gitlab`: event and subscription for review send/spawn; non-individual discussion notes add thread; individual notes have no thread.
-- `sentry`: event and subscription for spawn triggers; no thread.
-- `telegram`: event and subscription for send/spawn; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
+- `cron`: no controls; spawn triggers only.
+- `github`: event and subscription for review send; inline review comments add thread; issue comments, review bodies, and lifecycle items have no thread.
+- `github-ci`: no controls; spawn triggers only.
+- `gitlab`: event and subscription for review send; non-individual discussion notes add thread; individual notes have no thread.
+- `sentry`: no controls; spawn triggers only.
+- `telegram`: event and subscription for send; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
 - `service`: no live automatic events.
-- `jira`: event and subscription for work-item spawn when `query` is set; connection only without `query`; no thread or send triggers.
+- `jira`: no controls; work-item spawn when `query` is set; connection only without `query`; no send triggers.
 - Cron, Sentry, and GitHub CI send triggers stay unsupported.
 
 - `cron`: `cron:tick`.

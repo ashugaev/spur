@@ -42,8 +42,7 @@ describe("AutoPingService", () => {
   it("retains an empty leased route through startup GC and its later subscription through restart", async () => {
     const dir = createDir();
     const descriptor = route({
-      actionKind: "spawn",
-      destination: { kind: "trigger" },
+      destination: { kind: "session", sessionId: "owner" },
       sourceType: "cron",
       eventName: "cron:tick",
     });
@@ -171,13 +170,13 @@ describe("AutoPingService", () => {
     const dir = createDir();
     const service = new AutoPingService(dir);
     const fingerprint = autoPingRouteFingerprint(
-      route({ actionKind: "spawn", destination: { kind: "trigger" } }),
+      route({ destination: { kind: "session", sessionId: "owner" } }),
     );
     service.registerRoute(fingerprint);
     const grant = service.createGrant({
       scope: "subscription",
       routeFingerprint: fingerprint,
-      destination: { kind: "trigger" },
+      destination: { kind: "session", sessionId: "owner" },
       target: { kind: "subscription" },
     });
     let release!: () => void;
@@ -362,6 +361,95 @@ describe("AutoPingService", () => {
     );
     expect(() => new AutoPingService(dir)).toThrow("Invalid auto-ping policy state");
     expect(existsSync(join(dir, "auto-ping.json"))).toBe(true);
+  });
+
+  it("drops legacy spawn-route records on load and persists once", () => {
+    const dir = createDir();
+    const path = join(dir, "auto-ping.json");
+    const now = new Date().toISOString();
+    const spawnRoute = {
+      routeFingerprint: "spawnfp",
+      descriptor: {
+        version: 1,
+        projectId: "p",
+        triggerId: "spawn-trigger",
+        sourceId: "gh",
+        sourceType: "github",
+        eventName: "github:work_item.new",
+        actionKind: "spawn",
+        destination: { kind: "trigger" },
+        spawnDeskGroup: false,
+      },
+    };
+    const legacyGrant = {
+      handleHash: "legacy-hash",
+      scope: "subscription",
+      routeFingerprint: "spawnfp",
+      destination: { kind: "trigger" },
+      target: { kind: "subscription" },
+      canonicalKey: "legacy-key",
+      createdAt: now,
+      state: "pending",
+    };
+    const legacySuppression = {
+      suppressionId: "legacy-suppression",
+      scope: "subscription",
+      routeFingerprint: "spawnfp",
+      destination: { kind: "trigger" },
+      target: { kind: "subscription" },
+      canonicalKey: "legacy-key",
+      actorSessionId: "owner",
+      createdAt: now,
+    };
+    const sendRoute = {
+      routeFingerprint: "sendfp",
+      descriptor: route(),
+    };
+    const sendGrant = {
+      handleHash: "send-hash",
+      scope: "subscription",
+      routeFingerprint: "sendfp",
+      destination: { kind: "session", sessionId: "owner" },
+      target: { kind: "subscription" },
+      canonicalKey: "send-key",
+      createdAt: now,
+      state: "pending",
+    };
+    const sendSuppression = {
+      suppressionId: "send-suppression",
+      scope: "subscription",
+      routeFingerprint: "sendfp",
+      destination: { kind: "session", sessionId: "owner" },
+      target: { kind: "subscription" },
+      canonicalKey: "send-key",
+      actorSessionId: "owner",
+      createdAt: now,
+    };
+    const raw = {
+      version: 1,
+      routes: [spawnRoute, sendRoute],
+      grants: [legacyGrant, sendGrant],
+      suppressions: [legacySuppression, sendSuppression],
+      mergeConflicts: [],
+    };
+    writeFileSync(path, JSON.stringify(raw));
+
+    const service = new AutoPingService(dir);
+    service.dispose();
+
+    const persisted = JSON.parse(readFileSync(path, "utf8")) as {
+      routes: unknown[];
+      grants: unknown[];
+      suppressions: unknown[];
+    };
+    expect(persisted.routes).toEqual([sendRoute]);
+    expect(persisted.grants).toEqual([sendGrant]);
+    expect(persisted.suppressions).toEqual([sendSuppression]);
+
+    const contentBeforeReload = readFileSync(path, "utf8");
+    const restored = new AutoPingService(dir);
+    restored.dispose();
+    expect(readFileSync(path, "utf8")).toBe(contentBeforeReload);
   });
 
   it("clears its GC timer once across repeated disposal", () => {

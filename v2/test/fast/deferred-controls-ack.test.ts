@@ -1125,12 +1125,7 @@ describe("SessionService", () => {
     buildAgentLaunchPlanMock
       .mockReset()
       .mockImplementation(
-        (
-          agent: string,
-          initialMessage: string,
-          options?: { planMode?: boolean },
-          deferredSensitiveInitialMessage?: { text: string; sensitive: true },
-        ) => ({
+        (agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
           agent,
           launchCommand:
             agent === "codex"
@@ -1140,7 +1135,6 @@ describe("SessionService", () => {
                 : "claude --dangerously-skip-permissions",
           initialMessage,
           readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
-          ...(deferredSensitiveInitialMessage ? { deferredSensitiveInitialMessage } : {}),
         }),
       );
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
@@ -1594,39 +1588,6 @@ describe("SessionService", () => {
         .filter((entry) => entry.event.startsWith("session.controls."));
       expect(ownEvents).toHaveLength(0);
       service.dispose();
-    });
-
-    it("AC3b: spawn survives a live controls ack timeout; a dead agent still fails spawn", async () => {
-      mockClaudeJsonlState("waiting");
-      primeLiveNonAckingBinding();
-      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
-      mockTimerPromisesSleepWithFakeTimers();
-      const { SessionService } = await loadSessionServiceModule();
-      const liveService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      const view = await liveService.spawn(
-        { project: "api", prompt: "hello" },
-        { sensitivePromptSuffix: controlsMessage() },
-      );
-      expect(view.id).toBe("api-1");
-      const sentEvents = logSpurEventMock.mock.calls
-        .map(([, entry]) => entry)
-        .filter((entry) => entry.event === "session.spawn.sensitive_controls_sent");
-      expect(sentEvents).toHaveLength(1);
-      expect(sentEvents[0]?.details?.outcome).toBe("submit_unconfirmed");
-      expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      liveService.dispose();
-
-      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(false);
-      const { SessionService: DeadSessionService } = await loadSessionServiceModule();
-      const deadService = new DeadSessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      await expect(
-        deadService.spawn(
-          { project: "api", prompt: "hello" },
-          { sensitivePromptSuffix: controlsMessage() },
-        ),
-      ).rejects.toThrow();
-      deadService.dispose();
     });
 
     // Safety criteria, NOT a proof of the fix (they already hold against
