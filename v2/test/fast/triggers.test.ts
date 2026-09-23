@@ -4366,6 +4366,7 @@ describe("startConfiguredTriggers", () => {
   it("logs owner_load_failed with the underlying error at warn level", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
     const getMock = vi.fn().mockRejectedValue(new Error("boom"));
+    const warnMock = vi.fn();
     useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -4373,7 +4374,7 @@ describe("startConfiguredTriggers", () => {
       config: workItemSpawnConfig() as never,
       bus,
       sessionService: { get: getMock, spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
+      logger: { warn: warnMock },
     });
 
     try {
@@ -4392,6 +4393,9 @@ describe("startConfiguredTriggers", () => {
       expect(entry.level).toBe("warn");
       expect(entry.details.reason).toBe("owner_load_failed");
       expect(entry.details.error).toBe("boom");
+      expect(warnMock).toHaveBeenCalledWith(
+        expect.stringContaining("suppressed work item acme/api#42: boom"),
+      );
     } finally {
       await controller.stop();
     }

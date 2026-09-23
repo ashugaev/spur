@@ -322,6 +322,11 @@ async function runSpawnTrigger(
             ...(suppressed.error !== undefined ? { error: suppressed.error } : {}),
           },
         });
+        if (suppressed.reason === "owner_load_failed") {
+          logger.warn(
+            `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${suppressed.error}`,
+          );
+        }
         return;
       }
     }

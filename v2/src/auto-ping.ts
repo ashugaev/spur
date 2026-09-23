@@ -196,35 +196,38 @@ function isLegacySpawnDestination(value: unknown): boolean {
   return isRecord(value) && value.kind === "trigger";
 }
 
-function dropLegacySpawnRecords(raw: Record<string, unknown>): {
-  raw: Record<string, unknown>;
+interface RawAutoPingRecords {
+  grants: unknown[];
+  suppressions: unknown[];
+  routes: unknown[] | undefined;
+}
+
+function dropLegacySpawnRecords(input: RawAutoPingRecords): RawAutoPingRecords & {
   migrated: boolean;
 } {
   let migrated = false;
-  const filterOut = (
-    array: unknown,
+  const filterOut = <T extends unknown[] | undefined>(
+    array: T,
     isLegacy: (value: Record<string, unknown>) => boolean,
-  ): unknown => {
+  ): T => {
     if (!Array.isArray(array)) return array;
-    const kept = array.filter((value) => {
+    return array.filter((value) => {
       if (!isRecord(value) || !isLegacy(value)) return true;
       migrated = true;
       return false;
-    });
-    return kept;
+    }) as T;
   };
-  const next = {
-    ...raw,
-    grants: filterOut(raw.grants, (value) => isLegacySpawnDestination(value.destination)),
-    suppressions: filterOut(raw.suppressions, (value) =>
+  return {
+    grants: filterOut(input.grants, (value) => isLegacySpawnDestination(value.destination)),
+    suppressions: filterOut(input.suppressions, (value) =>
       isLegacySpawnDestination(value.destination),
     ),
     routes: filterOut(
-      raw.routes,
+      input.routes,
       (value) => isRecord(value.descriptor) && value.descriptor.actionKind === "spawn",
     ),
+    migrated,
   };
-  return { raw: next, migrated };
 }
 
 function parseState(raw: unknown): { state: AutoPingState; migrated: boolean } {
@@ -237,17 +240,13 @@ function parseState(raw: unknown): { state: AutoPingState; migrated: boolean } {
   ) {
     throw new Error("Invalid auto-ping policy state");
   }
-  const { raw: filtered, migrated } = dropLegacySpawnRecords(raw);
-  raw = filtered;
-  if (
-    !isRecord(raw) ||
-    !Array.isArray(raw.grants) ||
-    !Array.isArray(raw.suppressions) ||
-    (raw.routes !== undefined && !Array.isArray(raw.routes))
-  ) {
-    throw new Error("Invalid auto-ping policy state");
-  }
-  const grants: PersistedGrant[] = raw.grants.map((value) => {
+  const filtered = dropLegacySpawnRecords({
+    grants: raw.grants,
+    suppressions: raw.suppressions,
+    routes: raw.routes,
+  });
+  const migrated = filtered.migrated;
+  const grants: PersistedGrant[] = filtered.grants.map((value) => {
     if (
       !isRecord(value) ||
       typeof value.handleHash !== "string" ||
@@ -273,7 +272,7 @@ function parseState(raw: unknown): { state: AutoPingState; migrated: boolean } {
     }
     return value as unknown as PersistedGrant;
   });
-  const suppressions: PersistedSuppression[] = raw.suppressions.map((value) => {
+  const suppressions: PersistedSuppression[] = filtered.suppressions.map((value) => {
     if (
       !isRecord(value) ||
       typeof value.suppressionId !== "string" ||
@@ -292,8 +291,8 @@ function parseState(raw: unknown): { state: AutoPingState; migrated: boolean } {
     }
     return value as unknown as PersistedSuppression;
   });
-  const routes = Array.isArray(raw.routes)
-    ? raw.routes.map((value) => {
+  const routes = Array.isArray(filtered.routes)
+    ? filtered.routes.map((value) => {
         if (
           !isRecord(value) ||
           typeof value.routeFingerprint !== "string" ||
