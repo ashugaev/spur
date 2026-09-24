@@ -80,6 +80,7 @@ import {
   type OpenPrActionRequiredPayload,
   type ProjectInfo,
   type SpurSessionView,
+  type SpurPreflightTokenUsageView,
   type SpurSessionsResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
@@ -1085,6 +1086,13 @@ export function Dashboard() {
   const [spawnModelError, setSpawnModelError] = useState<string | null>(null);
   const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
+  const [spawnPreflightBatchId, setSpawnPreflightBatchId] = useState<string | null>(null);
+  const spawnPreflightBatchIdRef = useRef<string | null>(null);
+  const [spawnPreflightUsage, setSpawnPreflightUsage] =
+    useState<SpurPreflightTokenUsageView | null>(null);
+  useEffect(() => {
+    spawnPreflightBatchIdRef.current = spawnPreflightBatchId;
+  }, [spawnPreflightBatchId]);
   const spawnBranchExplicitRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
@@ -1587,6 +1595,9 @@ export function Dashboard() {
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
+    const restoresPreflight = draft?.preflightBatchProjectId === nextProjectId;
+    setSpawnPreflightBatchId(restoresPreflight ? (draft.preflightBatchId ?? null) : null);
+    setSpawnPreflightUsage(null);
     setSpawnAttachments([]);
   };
 
@@ -1612,6 +1623,10 @@ export function Dashboard() {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
+    if (normalizedProjectId !== spawnProjectId) {
+      setSpawnPreflightBatchId(null);
+      setSpawnPreflightUsage(null);
+    }
     // No explicit reset needed here: spawnWorkspaceModeAuto is derived from
     // spawnWorkspaceModeConfirmedFor !== spawnProjectId, so switching the
     // project alone re-derives it — a confirmation made for the previous
@@ -1659,6 +1674,8 @@ export function Dashboard() {
       steps: spawnSteps.map((step) => step.value),
       trackerUrl: spawnTrackerUrl,
       sessionMode: spawnSessionMode,
+      preflightBatchId: spawnPreflightBatchId,
+      preflightBatchProjectId: spawnPreflightBatchId ? spawnProjectId : null,
     };
   }, [
     spawnAgent,
@@ -1674,6 +1691,8 @@ export function Dashboard() {
     spawnTrackerUrl,
     spawnWorkspaceMode,
     spawnWorkspaceModeConfirmedFor,
+    spawnPreflightBatchId,
+    spawnProjectId,
   ]);
   const spawnDraftRef = useRef(spawnDraft);
   spawnDraftRef.current = spawnDraft;
@@ -1783,6 +1802,9 @@ export function Dashboard() {
         agent: spawnAgent,
         overrides,
       };
+      if (spawnPreflightBatchIdRef.current) {
+        payload.preflightBatchId = spawnPreflightBatchIdRef.current;
+      }
 
       fetch("/api/preflight", {
         method: "POST",
@@ -1790,11 +1812,21 @@ export function Dashboard() {
         body: JSON.stringify(payload),
       })
         .then((r) => (r.ok ? r.json() : null))
-        .then((result: { branch: string | null } | null) => {
-          if (!cancelled && result?.branch && !spawnBranchExplicitRef.current) {
-            setSpawnBranch(result.branch);
-          }
-        })
+        .then(
+          (
+            result: {
+              branch: string | null;
+              preflightBatchId?: string;
+              preflightTokenUsageView?: SpurPreflightTokenUsageView;
+            } | null,
+          ) => {
+            if (cancelled || !result) return;
+            if (result.preflightBatchId) setSpawnPreflightBatchId(result.preflightBatchId);
+            if (result.preflightTokenUsageView)
+              setSpawnPreflightUsage(result.preflightTokenUsageView);
+            if (result.branch && !spawnBranchExplicitRef.current) setSpawnBranch(result.branch);
+          },
+        )
         .catch(() => {});
     }, 500);
 
@@ -1864,6 +1896,7 @@ export function Dashboard() {
         trackerUrl: spawnTrackerUrl,
         workspaceMode: spawnWorkspaceMode,
         defaultBranch: spawnDefaultBranch,
+        preflightBatchId: spawnPreflightBatchId,
       });
 
       const response = await fetch("/api/spawn", {
@@ -1891,6 +1924,8 @@ export function Dashboard() {
       setSpawnModel(null);
       setSpawnSessionMode(null);
       setSpawnBranch("");
+      setSpawnPreflightBatchId(null);
+      setSpawnPreflightUsage(null);
       spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
@@ -2746,6 +2781,16 @@ export function Dashboard() {
                 },
                 branchNotesSlot: (
                   <>
+                    {spawnPreflightUsage ? (
+                      <p className="text-[var(--color-text-tertiary)]">
+                        Pre-flight tokens:{" "}
+                        {spawnPreflightUsage.status === "measured" ||
+                        spawnPreflightUsage.status === "partial"
+                          ? spawnPreflightUsage.totalTokens.toLocaleString()
+                          : "unavailable"}
+                        {spawnPreflightUsage.status === "partial" ? " · partial" : ""}
+                      </p>
+                    ) : null}
                     {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
                       <p className="text-xs text-[var(--color-text-tertiary)]">
                         will create {normalizedBranchPreview}

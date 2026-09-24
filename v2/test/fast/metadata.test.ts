@@ -748,6 +748,23 @@ describe("tokenUsage", () => {
       },
     } as unknown as SessionRecord);
     expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+
+    writeSession(dataDir, {
+      ...record,
+      tokenUsage: {
+        ...record.tokenUsage,
+        cacheReadInputTokens: 50,
+        cacheWriteInputTokens: 40,
+        generations: {
+          generation: {
+            ...record.tokenUsage?.generations.generation,
+            cacheReadInputTokens: 50,
+            cacheWriteInputTokens: 40,
+          },
+        },
+      },
+    } as unknown as SessionRecord);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
   });
 
   it.each([
@@ -807,6 +824,58 @@ describe("tokenUsage", () => {
     writeSession(dataDir, session);
 
     expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+  });
+
+  it("round-trips valid pre-flight usage and drops an invalid cache partition", async () => {
+    const dataDir = await newDataDir();
+    const session = {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      preflightTokenUsage: {
+        status: "measured",
+        attemptCount: 2,
+        unknownAttemptCount: 0,
+        providerIterationCount: 3,
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        cacheReadInputTokens: 30,
+        cacheWriteInputTokens: 10,
+        byProvider: {
+          claude: {
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            cacheReadInputTokens: 30,
+            cacheWriteInputTokens: 10,
+          },
+        },
+      },
+    } as SessionRecord;
+    writeSession(dataDir, session);
+    expect(readSession(dataDir, "api-1")?.preflightTokenUsage).toEqual(session.preflightTokenUsage);
+    const preflightTokenUsage = session.preflightTokenUsage;
+    if (!preflightTokenUsage) throw new Error("missing test pre-flight usage");
+
+    writeSession(dataDir, {
+      ...session,
+      preflightTokenUsage: {
+        ...preflightTokenUsage,
+        cacheReadInputTokens: 75,
+        cacheWriteInputTokens: 25,
+        byProvider: {
+          claude: {
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            cacheReadInputTokens: 75,
+            cacheWriteInputTokens: 25,
+          },
+        },
+      },
+    });
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("preflightTokenUsage");
   });
 });
 

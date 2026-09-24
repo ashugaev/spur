@@ -310,16 +310,25 @@ function hasInterruptMarker(message: Record<string, unknown>, blocks: unknown[])
 }
 
 function extractClaudeTokenUsage(usage: Record<string, unknown>): ClaudeMessageTokenUsage | null {
+  const isToken = (value: unknown): value is number =>
+    Number.isSafeInteger(value) && (value as number) >= 0;
+  const topLevelKeys = [
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+  ] as const;
+  if (topLevelKeys.some((key) => usage[key] !== undefined && !isToken(usage[key]))) return null;
   const token = (key: string): number => {
     const value = usage[key];
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+    return isToken(value) ? value : 0;
   };
   const optionalToken = (
     record: Record<string, unknown> | undefined,
     key: string,
   ): number | undefined => {
     const value = record?.[key];
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+    return isToken(value) ? value : undefined;
   };
   const cacheCreation =
     typeof usage["cache_creation"] === "object" && usage["cache_creation"] !== null
@@ -329,6 +338,18 @@ function extractClaudeTokenUsage(usage: Record<string, unknown>): ClaudeMessageT
     typeof usage["output_tokens_details"] === "object" && usage["output_tokens_details"] !== null
       ? (usage["output_tokens_details"] as Record<string, unknown>)
       : undefined;
+  if (
+    cacheCreation &&
+    ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"].some(
+      (key) => cacheCreation[key] !== undefined && !isToken(cacheCreation[key]),
+    )
+  )
+    return null;
+  if (
+    outputDetails?.["thinking_tokens"] !== undefined &&
+    !isToken(outputDetails["thinking_tokens"])
+  )
+    return null;
   const cacheWrite5mInputTokens = cacheCreation
     ? (optionalToken(cacheCreation, "ephemeral_5m_input_tokens") ?? 0)
     : undefined;

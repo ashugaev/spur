@@ -501,7 +501,13 @@ describe("SessionRow", () => {
             outputTokens: 20,
             totalTokens: 100,
             budget: 100,
+            exhausted: false,
+          },
+          tokenBudgetView: {
+            budget: 100,
+            knownTotalTokens: 100,
             exhausted: true,
+            enforced: true,
           },
         })}
         onCompleteSession={onCompleteSession}

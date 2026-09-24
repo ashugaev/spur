@@ -3,6 +3,7 @@ import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CodexModule from "../../src/agents/codex.js";
 import type * as ModelsModule from "../../src/agents/models.js";
+import type * as OpenCodeModule from "../../src/agents/opencode.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
@@ -15,6 +16,10 @@ const { mockRm } = vi.hoisted(() => ({
 }));
 const { mockReadFile } = vi.hoisted(() => ({
   mockReadFile: vi.fn<typeof FsPromises.readFile>(),
+}));
+const { mockExportOpenCodeSession, mockDeleteOpenCodeSession } = vi.hoisted(() => ({
+  mockExportOpenCodeSession: vi.fn(),
+  mockDeleteOpenCodeSession: vi.fn(),
 }));
 
 vi.mock("node:child_process", () => {
@@ -76,7 +81,23 @@ vi.mock("../../src/agents/models.js", async (importOriginal) => {
   };
 });
 
-import { PreflightBranchValidationError, runSpawnPreflight } from "../../src/preflight.js";
+vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof OpenCodeModule>();
+  return {
+    ...actual,
+    opencodeCommand: () => "/mock/bin/opencode",
+    exportOpenCodeSession: mockExportOpenCodeSession,
+    deleteOpenCodeSession: mockDeleteOpenCodeSession,
+  };
+});
+
+import {
+  PreflightBranchValidationError,
+  parseClaudePreflightOutput,
+  parseCodexPreflightUsage,
+  parseCursorPreflightOutput,
+  runSpawnPreflight,
+} from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
   path: "/repo/api",
@@ -104,6 +125,107 @@ function getCodexOutputPath(args: string[]): string {
   return outputPath;
 }
 
+describe("structured preflight usage", () => {
+  it("counts Claude aggregate once and adds advisor usage once", () => {
+    const raw = readFileSync(
+      new URL("../fixtures/preflight/claude-result.json", import.meta.url),
+      "utf8",
+    );
+    expect(parseClaudePreflightOutput(raw)).toEqual({
+      text: "feature/token-ledger",
+      providerIterationCount: 2,
+      usage: {
+        inputTokens: 155,
+        outputTokens: 43,
+        totalTokens: 198,
+        cacheReadInputTokens: 20,
+        cacheWriteInputTokens: 30,
+      },
+    });
+  });
+
+  it("falls back to Claude's flat cache write total when nested TTLs are absent", () => {
+    const raw = JSON.stringify({
+      result: "feature/cache-fallback",
+      usage: {
+        input_tokens: 10,
+        cache_creation_input_tokens: 7,
+        cache_read_input_tokens: 3,
+        cache_creation: {},
+        output_tokens: 2,
+      },
+    });
+    expect(parseClaudePreflightOutput(raw).usage).toMatchObject({
+      inputTokens: 20,
+      cacheWriteInputTokens: 7,
+      totalTokens: 22,
+    });
+  });
+
+  it("reads Codex terminal JSON usage without disabling ephemeral mode", () => {
+    const raw = readFileSync(
+      new URL("../fixtures/preflight/codex-result.jsonl", import.meta.url),
+      "utf8",
+    );
+    expect(parseCodexPreflightUsage(raw)).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      totalTokens: 150,
+      cacheReadInputTokens: 40,
+      cacheWriteInputTokens: 10,
+      reasoningOutputTokens: 12,
+    });
+  });
+
+  it("normalizes Cursor fresh and cached input from terminal JSON", () => {
+    const raw = readFileSync(
+      new URL("../fixtures/preflight/cursor-result.json", import.meta.url),
+      "utf8",
+    );
+    expect(parseCursorPreflightOutput(raw)).toEqual({
+      text: "feature/cursor-ledger",
+      usage: {
+        inputTokens: 90,
+        outputTokens: 20,
+        totalTokens: 110,
+        cacheReadInputTokens: 15,
+        cacheWriteInputTokens: 5,
+        reasoningOutputTokens: 4,
+      },
+    });
+  });
+
+  it("rejects malformed and overlapping structured token subsets", () => {
+    expect(
+      parseCodexPreflightUsage(
+        JSON.stringify({ usage: { input: 10, cached: 8, cache_write: 3, output: 1 } }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseCursorPreflightOutput(
+        JSON.stringify({
+          result: "feature/x",
+          usage: { inputTokens: "10", outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }),
+      ).usage,
+    ).toBeUndefined();
+    expect(
+      parseCursorPreflightOutput(
+        JSON.stringify({
+          result: "feature/x",
+          usage: {
+            inputTokens: 10,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 99,
+          },
+        }),
+      ).usage,
+    ).toBeUndefined();
+  });
+});
+
 describe("runSpawnPreflight", () => {
   beforeEach(() => {
     mockExecFileAsync.mockReset();
@@ -112,6 +234,9 @@ describe("runSpawnPreflight", () => {
     mockRm.mockResolvedValue(undefined);
     mockReadFile.mockReset();
     mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockExportOpenCodeSession.mockReset();
+    mockDeleteOpenCodeSession.mockReset();
+    mockDeleteOpenCodeSession.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -361,7 +486,7 @@ describe("runSpawnPreflight", () => {
       expect.arrayContaining([
         "-p",
         "--output-format",
-        "text",
+        "json",
         "--force",
         "--sandbox",
         "disabled",
@@ -605,6 +730,49 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix Cursor runtime integration",
       }),
     ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
+  });
+
+  it("uses the exact OpenCode run session for export accounting and cleanup", async () => {
+    const exported = JSON.parse(
+      readFileSync(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: [
+        JSON.stringify({ sessionID: "session-sanitized", part: { type: "step_start" } }),
+        JSON.stringify({
+          sessionID: "session-sanitized",
+          part: { type: "text", text: "feature/opencode-ledger" },
+        }),
+      ].join("\n"),
+      stderr: "",
+    });
+    mockExportOpenCodeSession.mockResolvedValueOnce(exported);
+
+    const result = await runSpawnPreflight({
+      agent: "opencode",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Account for preflight tokens",
+    });
+
+    expect(result).toEqual({
+      branch: "feature/opencode-ledger",
+      usage: {
+        inputTokens: 50,
+        outputTokens: 29,
+        totalTokens: 79,
+        cacheReadInputTokens: 34,
+        cacheWriteInputTokens: 4,
+        reasoningOutputTokens: 6,
+      },
+    });
+    expect(mockExportOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
   });
 
   it("surfaces a missing claude binary as command not found", async () => {

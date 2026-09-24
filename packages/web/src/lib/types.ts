@@ -336,6 +336,39 @@ export type SpurSessionTokenUsageView =
       reason: "structured_usage_unavailable";
     };
 
+export type SpurPreflightTokenUsageView =
+  | {
+      status: "measured" | "partial";
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      cacheReadInputTokens?: number;
+      cacheWriteInputTokens?: number;
+      reasoningOutputTokens?: number;
+      cacheWrite5mInputTokens?: number;
+      cacheWrite1hInputTokens?: number;
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+      byProvider: Partial<
+        Record<"claude" | "codex" | "cursor" | "opencode", { totalTokens: number }>
+      >;
+    }
+  | {
+      status: "unknown" | "legacy_unknown";
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+    };
+
+export interface SpurTokenBudgetView {
+  budget?: number;
+  knownTotalTokens: number;
+  exhausted: boolean;
+  enforced: boolean;
+  reason?: "legacy_unknown" | "preflight_unknown" | "main_usage_unavailable";
+}
+
 export type SpurSidecarStopReport =
   | { outcome: "reaped" }
   | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
@@ -398,6 +431,8 @@ export interface SpurSessionView {
     conditions?: string;
   };
   tokenUsageView?: SpurSessionTokenUsageView;
+  preflightTokenUsageView?: SpurPreflightTokenUsageView;
+  tokenBudgetView?: SpurTokenBudgetView;
 }
 
 /** `POST /sessions/:id/sidecars/:name/stop`'s response: the session view
@@ -762,6 +797,8 @@ export interface DashboardSession {
     conditions?: string;
   };
   tokenUsageView?: SpurSessionTokenUsageView;
+  preflightTokenUsageView?: SpurPreflightTokenUsageView;
+  tokenBudgetView?: SpurTokenBudgetView;
 }
 
 export interface SpawnOverrides {
@@ -845,6 +882,10 @@ export function toDashboardSession(
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
     ...(session.tokenUsageView ? { tokenUsageView: session.tokenUsageView } : {}),
+    ...(session.preflightTokenUsageView
+      ? { preflightTokenUsageView: session.preflightTokenUsageView }
+      : {}),
+    ...(session.tokenBudgetView ? { tokenBudgetView: session.tokenBudgetView } : {}),
   };
 }
 

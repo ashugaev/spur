@@ -227,6 +227,7 @@ export function SessionRow({
   const showRestore =
     (attentionLevel === "stopped" || attentionLevel === "error") &&
     isRestorable(session) &&
+    session.tokenBudgetView?.exhausted !== true &&
     session.tokenUsageView?.exhausted !== true;
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));

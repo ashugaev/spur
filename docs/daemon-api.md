@@ -50,6 +50,10 @@ Listing (part of the single-session `SessionView`, field `artifacts` — not on 
 
 `SessionView.tokenUsageView` and dashboard session rows report `available` with provider, gross `inputTokens`, `outputTokens`, `totalTokens`, optional `cacheReadInputTokens`, `cacheWriteInputTokens`, `reasoningOutputTokens`, `cacheWrite5mInputTokens`, `cacheWrite1hInputTokens`, optional `budget`, and `exhausted`; `waiting` before Claude, Codex, or OpenCode reports usage; or `unavailable` for Cursor. Omitted component fields mean the provider did not report that category; zero means it reported zero. Raw generation identifiers stay private. `unenforced: true` marks an unsupported session left running after a budget config edit. Budget exhaustion persists `stopReason: "token_budget"` and emits `session.token_budget.exhausted` once for that stop.
 
+`SessionView.preflightTokenUsageView` reports pre-flight usage separately as `measured`, `partial`, `unknown`, or `legacy_unknown`, with attempt and provider-iteration counts. Measured views include gross totals and `byProvider`; raw batch, native-session, artifact, and generation ids stay private. `SessionView.tokenBudgetView` reports `knownTotalTokens`, optional `budget`, `exhausted`, `enforced`, and an unenforced reason across pre-flight plus main usage.
+
+`POST /projects/:id/preflight` accepts optional `preflightBatchId` and returns `branch`, `preflightBatchId`, and `preflightTokenUsageView`. Reuse the returned id for later previews and the spawn request. A project change requires a new id. `POST /sessions` and `POST /sessions/background` accept the id, claim it once for the created session, and reject project mismatch or replay by another session.
+
 ## Project routes
 
 `GET /projects/:id/branches/exists?name=<branch>` — `200 { exists, remote, checkedOutAt }` for the project's repo. A blank or unnormalizable `name` returns `{ exists: false, remote: false, checkedOutAt: null }`.

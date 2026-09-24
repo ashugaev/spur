@@ -148,9 +148,28 @@ function displayLinkLabel(label: string, url: string): string {
   return label;
 }
 
-function tokenUsageRows(session: Pick<SpurSessionView, "tokenUsageView">): Array<[string, string]> {
+function tokenUsageRows(
+  session: Pick<SpurSessionView, "tokenUsageView" | "preflightTokenUsageView" | "tokenBudgetView">,
+): Array<[string, string]> {
   const usage = session.tokenUsageView;
-  if (!usage) return [["Tokens", "Waiting for usage"]];
+  const preflight = session.preflightTokenUsageView;
+  const preflightRow: [string, string] = [
+    "Pre-flight tokens",
+    !preflight || preflight.status === "legacy_unknown"
+      ? "Legacy usage unknown"
+      : !("totalTokens" in preflight)
+        ? "Usage unavailable"
+        : `${preflight.totalTokens.toLocaleString()}${preflight.status === "partial" ? " · partial" : ""}`,
+  ];
+  const budget = session.tokenBudgetView;
+  const budgetRow: [string, string] | null = budget?.budget
+    ? [
+        "Combined budget",
+        `${budget.knownTotalTokens.toLocaleString()} / ${budget.budget.toLocaleString()}${budget.exhausted ? " · limit hit" : budget.enforced ? "" : " · unenforced"}`,
+      ]
+    : null;
+  if (!usage)
+    return [["Tokens", "Waiting for usage"], preflightRow, ...(budgetRow ? [budgetRow] : [])];
   if (usage.status === "unavailable") {
     return [
       [
@@ -159,15 +178,20 @@ function tokenUsageRows(session: Pick<SpurSessionView, "tokenUsageView">): Array
           ? "Token usage unavailable · budget unenforced"
           : "Token usage unavailable",
       ],
+      preflightRow,
+      ...(budgetRow ? [budgetRow] : []),
     ];
   }
-  if (usage.status === "waiting") return [["Tokens", "Waiting for usage"]];
+  if (usage.status === "waiting")
+    return [["Tokens", "Waiting for usage"], preflightRow, ...(budgetRow ? [budgetRow] : [])];
   const used = usage.totalTokens.toLocaleString();
   const value = usage.budget === undefined ? used : `${used} / ${usage.budget.toLocaleString()}`;
   const component = (tokens: number | undefined): string =>
     tokens === undefined ? "Not reported" : tokens.toLocaleString();
   const rows: Array<[string, string]> = [
     ["Tokens", usage.exhausted ? `${value} · limit hit` : value],
+    preflightRow,
+    ...(budgetRow ? [budgetRow] : []),
     ["Input", usage.inputTokens.toLocaleString()],
     ["Output", usage.outputTokens.toLocaleString()],
     ["Cache read", component(usage.cacheReadInputTokens)],

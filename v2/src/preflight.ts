@@ -8,12 +8,17 @@ import { join } from "node:path";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
-import { opencodeCommand } from "./agents/opencode.js";
+import {
+  deleteOpenCodeSession,
+  exportOpenCodeSession,
+  opencodeCommand,
+  parseOpenCodeTokenUsage,
+} from "./agents/opencode.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { resolveTempDir } from "./temp-dir.js";
-import type { AgentName, ProjectConfig } from "./types.js";
+import type { AgentName, ProjectConfig, TokenUsageTotals } from "./types.js";
 
 const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
@@ -27,6 +32,16 @@ type ExecError = Error & {
   stderr?: string | Buffer;
   stdout?: string | Buffer;
 };
+
+class PreflightExecError extends Error {
+  constructor(
+    message: string,
+    readonly stdout: string,
+    options: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
 
 function describeExecOutput(value: string | Buffer | undefined): string {
   return (typeof value === "string" ? value : (value?.toString("utf8") ?? "")).trim();
@@ -66,7 +81,11 @@ async function runPreflightExec(
     const e = error as ExecError;
     const output = describeExecOutput(e.stderr) || describeExecOutput(e.stdout) || "no output";
     const cause = describeExecFailure(e, command);
-    throw new Error(`${label} preflight failed (${cause}): ${output}`, { cause: error });
+    throw new PreflightExecError(
+      `${label} preflight failed (${cause}): ${output}`,
+      describeExecOutput(e.stdout),
+      { cause: error },
+    );
   }
 }
 
@@ -83,6 +102,8 @@ export class PreflightBranchValidationError extends Error {
 export interface SpawnPreflightResult {
   noProjectBranchRequirements?: true;
   branch?: string;
+  usage?: TokenUsageTotals;
+  providerIterationCount?: number;
 }
 
 export interface RunSpawnPreflightInput {
@@ -141,28 +162,245 @@ function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   );
 }
 
-async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
-  return runPreflightExec(
-    "claude",
-    claudeCommand(),
-    ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
-    {
-      cwd,
-      env: {
-        ...process.env,
-        CLAUDECODE: "",
-      },
-      timeout: PREFLIGHT_TIMEOUT_MS,
-      maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-    },
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function token(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : null;
+}
+
+function optionalToken(value: unknown): number | undefined | null {
+  return value === undefined ? undefined : token(value);
+}
+
+function parseClaudeUsage(value: unknown): TokenUsageTotals | null {
+  const usage = record(value);
+  if (!usage) return null;
+  const fresh = token(usage["input_tokens"]);
+  const read = token(usage["cache_read_input_tokens"]);
+  const nested = record(usage["cache_creation"]);
+  const nested5m = optionalToken(nested?.["ephemeral_5m_input_tokens"]);
+  const nested1h = optionalToken(nested?.["ephemeral_1h_input_tokens"]);
+  const flatWrite = token(usage["cache_creation_input_tokens"]);
+  const output = token(usage["output_tokens"]);
+  const thinking = optionalToken(record(usage["output_tokens_details"])?.["thinking_tokens"]);
+  if (
+    fresh === null ||
+    read === null ||
+    flatWrite === null ||
+    output === null ||
+    nested5m === null ||
+    nested1h === null ||
+    thinking === null
+  )
+    return null;
+  const write =
+    nested5m !== undefined || nested1h !== undefined
+      ? (nested5m ?? 0) + (nested1h ?? 0)
+      : flatWrite;
+  if ((thinking ?? 0) > output) return null;
+  const input = fresh + read + write;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: input + output,
+    cacheReadInputTokens: read,
+    cacheWriteInputTokens: write,
+    ...(thinking !== undefined ? { reasoningOutputTokens: thinking } : {}),
+    ...(nested5m !== undefined ? { cacheWrite5mInputTokens: nested5m } : {}),
+    ...(nested1h !== undefined ? { cacheWrite1hInputTokens: nested1h } : {}),
+  };
+}
+
+export function parseClaudePreflightOutput(raw: string): {
+  text: string;
+  usage?: TokenUsageTotals;
+  providerIterationCount?: number;
+} {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw) as unknown;
+  } catch {
+    return { text: raw };
+  }
+  const parsed = record(decoded);
+  if (!parsed || typeof parsed["result"] !== "string") return { text: raw };
+  const base = parseClaudeUsage(parsed["usage"]);
+  const advisor = parseClaudeUsage(record(parsed["advisor_message"])?.["usage"]);
+  const iterations = Array.isArray(parsed["messages"]) ? parsed["messages"].length : 1;
+  const usage = base && advisor ? sumUsage([base, advisor]) : (base ?? advisor ?? undefined);
+  return {
+    text: parsed["result"],
+    ...(usage ? { usage } : {}),
+    providerIterationCount: iterations,
+  };
+}
+
+function parseAliasedUsage(value: unknown): TokenUsageTotals | null {
+  const usage = record(value);
+  if (!usage) return null;
+  const valueFor = (...keys: string[]): unknown =>
+    keys.map((key) => usage[key]).find((v) => v !== undefined);
+  const input = token(valueFor("input", "input_tokens", "inputTokens"));
+  const output = token(valueFor("output", "output_tokens", "outputTokens"));
+  const cached = optionalToken(valueFor("cached", "cached_input_tokens", "cacheReadTokens"));
+  const write = optionalToken(
+    valueFor("cache_write", "cache_write_input_tokens", "cacheWriteTokens"),
   );
+  const reasoning = optionalToken(
+    valueFor("reasoning", "reasoning_output_tokens", "reasoningTokens"),
+  );
+  if (input === null || output === null || cached === null || write === null || reasoning === null)
+    return null;
+  if ((cached ?? 0) + (write ?? 0) > input || (reasoning ?? 0) > output) return null;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: input + output,
+    ...(cached !== undefined ? { cacheReadInputTokens: cached } : {}),
+    ...(write !== undefined ? { cacheWriteInputTokens: write } : {}),
+    ...(reasoning !== undefined ? { reasoningOutputTokens: reasoning } : {}),
+  };
+}
+
+export function parseCodexPreflightUsage(raw: string): TokenUsageTotals | undefined {
+  let usage: TokenUsageTotals | undefined;
+  for (const line of raw.split("\n")) {
+    try {
+      const parsed = record(JSON.parse(line) as unknown);
+      const candidate = parseAliasedUsage(
+        parsed?.["usage"] ?? record(parsed?.["payload"])?.["usage"],
+      );
+      if (candidate) usage = candidate;
+    } catch {
+      // Codex JSON mode can interleave non-JSON diagnostics on stderr/stdout.
+    }
+  }
+  return usage;
+}
+
+export function parseCursorPreflightOutput(raw: string): {
+  text: string;
+  usage?: TokenUsageTotals;
+} {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw) as unknown;
+  } catch {
+    return { text: raw };
+  }
+  const parsed = record(decoded);
+  if (!parsed || typeof parsed["result"] !== "string")
+    throw new Error("Invalid Cursor JSON output");
+  const native = record(parsed["usage"]);
+  const fresh = token(native?.["inputTokens"]);
+  const output = token(native?.["outputTokens"]);
+  const read = token(native?.["cacheReadTokens"]);
+  const write = token(native?.["cacheWriteTokens"]);
+  const reasoning = optionalToken(native?.["reasoningTokens"]);
+  const reportedTotal = optionalToken(native?.["totalTokens"]);
+  if (
+    fresh === null ||
+    output === null ||
+    read === null ||
+    write === null ||
+    reasoning === null ||
+    reportedTotal === null
+  ) {
+    return { text: parsed["result"] };
+  }
+  const input = fresh + read + write;
+  if (reportedTotal !== undefined && reportedTotal !== input + output) {
+    return { text: parsed["result"] };
+  }
+  const usage = {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: input + output,
+    cacheReadInputTokens: read,
+    cacheWriteInputTokens: write,
+    ...(reasoning !== undefined ? { reasoningOutputTokens: reasoning } : {}),
+  };
+  return { text: parsed["result"], usage };
+}
+
+function sumUsage(values: TokenUsageTotals[]): TokenUsageTotals {
+  const sum = (key: keyof TokenUsageTotals) =>
+    values.reduce((total, value) => total + (value[key] ?? 0), 0);
+  return {
+    inputTokens: sum("inputTokens"),
+    outputTokens: sum("outputTokens"),
+    totalTokens: sum("totalTokens"),
+    ...Object.fromEntries(
+      [
+        "cacheReadInputTokens",
+        "cacheWriteInputTokens",
+        "reasoningOutputTokens",
+        "cacheWrite5mInputTokens",
+        "cacheWrite1hInputTokens",
+      ].flatMap((key) =>
+        values.every((value) => value[key as keyof TokenUsageTotals] !== undefined)
+          ? [[key, sum(key as keyof TokenUsageTotals)]]
+          : [],
+      ),
+    ),
+  };
+}
+
+function rethrowWithUsage(error: unknown, usage: TokenUsageTotals | undefined): never {
+  if (usage && error instanceof Error) Object.assign(error, { usage });
+  throw error instanceof Error ? error : new Error(String(error));
+}
+
+async function runClaudePreflight(prompt: string, cwd: string): Promise<SpawnPreflightResult> {
+  let raw: string;
+  try {
+    raw = await runPreflightExec(
+      "claude",
+      claudeCommand(),
+      [
+        "--print",
+        "--output-format",
+        "json",
+        "--no-session-persistence",
+        "--dangerously-skip-permissions",
+        prompt,
+      ],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          CLAUDECODE: "",
+        },
+        timeout: PREFLIGHT_TIMEOUT_MS,
+        maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+      },
+    );
+  } catch (error) {
+    const usage =
+      error instanceof PreflightExecError
+        ? parseClaudePreflightOutput(error.stdout).usage
+        : undefined;
+    rethrowWithUsage(error, usage);
+  }
+  const parsed = parseClaudePreflightOutput(raw);
+  return {
+    ...parseSpawnPreflightResult(parsed.text),
+    ...(parsed.usage ? { usage: parsed.usage } : {}),
+    ...(parsed.providerIterationCount !== undefined
+      ? { providerIterationCount: parsed.providerIterationCount }
+      : {}),
+  };
 }
 
 async function runCodexPreflight(
   prompt: string,
   cwd: string,
   codexArgs: string[] | undefined,
-): Promise<string> {
+): Promise<SpawnPreflightResult> {
   const tempDir = await mkdtemp(join(resolveTempDir(), "spur-preflight-"));
   const outputPath = join(tempDir, "output.txt");
   const codexHomePath = join(tempDir, "codex-home");
@@ -173,41 +411,52 @@ async function runCodexPreflight(
     await writeFile(join(codexHomePath, "config.toml"), ephemeralConfig, "utf8");
     await linkCodexAuth(codexHomePath);
 
-    const stdout = await runPreflightExec(
-      "codex",
-      codexCommand(),
-      [
-        "exec",
-        "--ephemeral",
-        "--disable",
-        "hooks",
-        "--disable",
-        "apps",
-        "--disable",
-        "plugins",
-        "--dangerously-bypass-approvals-and-sandbox",
-        ...(codexArgs ?? []),
-        "--output-last-message",
-        outputPath,
-        prompt,
-      ],
-      {
-        cwd,
-        env: {
-          ...process.env,
-          CODEX_HOME: codexHomePath,
-        },
-        timeout: PREFLIGHT_TIMEOUT_MS,
-        maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      } as ExecFileOptionsWithStringEncoding,
-    );
+    let stdout: string;
+    try {
+      stdout = await runPreflightExec(
+        "codex",
+        codexCommand(),
+        [
+          "exec",
+          "--ephemeral",
+          "--json",
+          "--disable",
+          "hooks",
+          "--disable",
+          "apps",
+          "--disable",
+          "plugins",
+          "--dangerously-bypass-approvals-and-sandbox",
+          ...(codexArgs ?? []),
+          "--output-last-message",
+          outputPath,
+          prompt,
+        ],
+        {
+          cwd,
+          env: {
+            ...process.env,
+            CODEX_HOME: codexHomePath,
+          },
+          timeout: PREFLIGHT_TIMEOUT_MS,
+          maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        } as ExecFileOptionsWithStringEncoding,
+      );
+    } catch (error) {
+      const usage =
+        error instanceof PreflightExecError ? parseCodexPreflightUsage(error.stdout) : undefined;
+      rethrowWithUsage(error, usage);
+    }
 
     try {
-      return await readFile(outputPath, "utf8");
+      const text = await readFile(outputPath, "utf8");
+      const usage = parseCodexPreflightUsage(stdout);
+      return { ...parseSpawnPreflightResult(text), ...(usage ? { usage } : {}) };
     } catch {
-      return stdout;
+      const usage = parseCodexPreflightUsage(stdout);
+      return { ...parseSpawnPreflightResult(stdout), ...(usage ? { usage } : {}) };
     }
   } finally {
     await rm(tempDir, {
@@ -219,38 +468,52 @@ async function runCodexPreflight(
   }
 }
 
-async function runCursorPreflight(prompt: string, cwd: string): Promise<string> {
+async function runCursorPreflight(prompt: string, cwd: string): Promise<SpawnPreflightResult> {
   const tempDir = await mkdtemp(join(resolveTempDir(), "spur-preflight-cursor-"));
   const model = await resolveCursorLaunchModel();
 
   try {
-    return await runPreflightExec(
-      "cursor",
-      cursorCommand(),
-      [
-        "-p",
-        "--output-format",
-        "text",
-        "--force",
-        "--sandbox",
-        "disabled",
-        "--trust",
-        "--workspace",
-        cwd,
-        "--model",
-        model,
-        prompt,
-      ],
-      {
-        cwd,
-        env: {
-          ...process.env,
-          CURSOR_CONFIG_DIR: tempDir,
+    let raw: string;
+    try {
+      raw = await runPreflightExec(
+        "cursor",
+        cursorCommand(),
+        [
+          "-p",
+          "--output-format",
+          "json",
+          "--force",
+          "--sandbox",
+          "disabled",
+          "--trust",
+          "--workspace",
+          cwd,
+          "--model",
+          model,
+          prompt,
+        ],
+        {
+          cwd,
+          env: {
+            ...process.env,
+            CURSOR_CONFIG_DIR: tempDir,
+          },
+          timeout: PREFLIGHT_TIMEOUT_MS,
+          maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
         },
-        timeout: PREFLIGHT_TIMEOUT_MS,
-        maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-      },
-    );
+      );
+    } catch (error) {
+      const usage =
+        error instanceof PreflightExecError
+          ? parseCursorPreflightOutput(error.stdout).usage
+          : undefined;
+      rethrowWithUsage(error, usage);
+    }
+    const parsed = parseCursorPreflightOutput(raw);
+    return {
+      ...parseSpawnPreflightResult(parsed.text),
+      ...(parsed.usage ? { usage: parsed.usage } : {}),
+    };
   } finally {
     await rm(tempDir, {
       recursive: true,
@@ -261,19 +524,55 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<string> 
   }
 }
 
-async function runOpenCodePreflight(prompt: string, cwd: string): Promise<string> {
-  return runPreflightExec("opencode", opencodeCommand(), ["run", "--agent", "build", prompt], {
-    cwd,
-    timeout: PREFLIGHT_TIMEOUT_MS,
-    maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-  });
+async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnPreflightResult> {
+  const raw = await runPreflightExec(
+    "opencode",
+    opencodeCommand(),
+    ["run", "--format", "json", "--agent", "build", prompt],
+    {
+      cwd,
+      timeout: PREFLIGHT_TIMEOUT_MS,
+      maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+    },
+  );
+  let sessionId: string | undefined;
+  let text = "";
+  for (const line of raw.split("\n")) {
+    try {
+      const parsed = record(JSON.parse(line) as unknown);
+      if (typeof parsed?.["sessionID"] === "string") sessionId ??= parsed["sessionID"];
+      const part = record(parsed?.["part"]);
+      if (part?.["type"] === "text" && typeof part["text"] === "string") text += part["text"];
+    } catch {
+      // Ignore non-JSON diagnostics; accounting only consumes structured rows.
+    }
+  }
+  if (!text) text = raw;
+  let usage: TokenUsageTotals | undefined;
+  try {
+    if (sessionId) {
+      const sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(sessionId));
+      if (sample) {
+        const {
+          provider: _provider,
+          generationId: _generationId,
+          observedAtMs: _observedAtMs,
+          ...totals
+        } = sample;
+        usage = totals;
+      }
+    }
+  } finally {
+    if (sessionId) await deleteOpenCodeSession(sessionId).catch(() => {});
+  }
+  return { ...parseSpawnPreflightResult(text), ...(usage ? { usage } : {}) };
 }
 
 export async function runSpawnPreflight(
   input: RunSpawnPreflightInput,
 ): Promise<SpawnPreflightResult> {
   const prompt = buildSpawnPreflightPrompt(input);
-  const raw =
+  const result =
     input.agent === "claude"
       ? await runClaudePreflight(prompt, input.project.path)
       : input.agent === "codex"
@@ -281,7 +580,6 @@ export async function runSpawnPreflight(
         : input.agent === "cursor"
           ? await runCursorPreflight(prompt, input.project.path)
           : await runOpenCodePreflight(prompt, input.project.path);
-  const result = parseSpawnPreflightResult(raw);
   if (result.branch && input.project.branchNaming) {
     const regex = input.project.branchNaming.regex;
     if (!compileBranchNamingRegex(regex, "branchNaming").test(result.branch)) {

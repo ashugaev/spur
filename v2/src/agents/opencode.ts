@@ -502,7 +502,7 @@ function releaseOpenCodeExportSlot(): void {
   else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
 }
 
-async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
+export async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
   await acquireOpenCodeExportSlot();
   try {
     const stdout = await readOpenCodeJson(["export", sessionId], {
@@ -512,6 +512,12 @@ async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
   } finally {
     releaseOpenCodeExportSlot();
   }
+}
+
+export async function deleteOpenCodeSession(sessionId: string): Promise<void> {
+  await readOpenCodeJson(["session", "delete", sessionId], {
+    timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
+  });
 }
 
 export interface OpenCodeSubmitBaseline {

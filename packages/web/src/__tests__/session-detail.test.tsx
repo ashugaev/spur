@@ -5808,6 +5808,43 @@ describe("SessionDetail token usage", () => {
     expect(screen.getByText("50")).toBeInTheDocument();
   });
 
+  it("keeps pre-flight usage separate and shows the combined budget", async () => {
+    stubFetch({
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 60,
+        outputTokens: 20,
+        totalTokens: 80,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "partial",
+        inputTokens: 15,
+        outputTokens: 5,
+        totalTokens: 20,
+        attemptCount: 2,
+        unknownAttemptCount: 1,
+        providerIterationCount: 2,
+        byProvider: { claude: { totalTokens: 20 } },
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 100,
+        exhausted: true,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Pre-flight tokens")).toBeInTheDocument();
+    expect(screen.getByText("20 · partial")).toBeInTheDocument();
+    expect(screen.getByText("Combined budget")).toBeInTheDocument();
+    expect(screen.getByText("100 / 100 · limit hit")).toBeInTheDocument();
+  });
+
   it("marks unsupported live sessions as unenforced", async () => {
     stubFetch({
       agent: "cursor",

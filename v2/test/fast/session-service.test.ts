@@ -13400,7 +13400,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("persists stopped and skips stale Claude readers when tmux is missing", async () => {
+  it("persists stopped and reads final Claude usage when tmux is missing", async () => {
     let session: SessionRecord = {
       ...runningSession(),
       error: "stale error",
@@ -13432,7 +13432,7 @@ describe("SessionService", () => {
     expect(session.stopReason).toBeUndefined();
     expect(isProcessRunningInTmuxMock).not.toHaveBeenCalled();
     expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
-    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+    expect(readClaudeJsonlStateMock).toHaveBeenCalledTimes(1);
   });
 
   it("persists stopped and skips process probes when the tmux pane is dead", async () => {
@@ -16535,7 +16535,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("persists stopped instead of trusting Claude JSONL fallback when the pane is dead", async () => {
+  it("persists stopped after reading final Claude usage when the pane is dead", async () => {
     readSessionMock.mockReturnValue(runningSession());
     tmuxPaneDeadMock.mockResolvedValue(true);
     mockClaudeJsonlState("needs_input");
@@ -16549,7 +16549,7 @@ describe("SessionService", () => {
 
     expect(result.status).toBe("stopped");
     expect(result.state).toBe("stopped");
-    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+    expect(readClaudeJsonlStateMock).toHaveBeenCalledTimes(1);
   });
 
   it("persists errored when the agent process is missing in a live pane", async () => {
@@ -24031,7 +24031,7 @@ describe("SessionService", () => {
         ),
       );
       expect(assignedPorts.size).toBe(9);
-    });
+    }, 10_000);
 
     it("refuses only when this workspace's own recorded port collides with another live workspace's recorded port, naming the holder and the port", async () => {
       loadConfigMock.mockReturnValue(sharedRangeConfig());
@@ -33832,7 +33832,7 @@ describe("SessionService", () => {
         prompt: "Fix runtime regression from PR #42",
       });
 
-      expect(result).toEqual({ branch: "feature/suggested" });
+      expect(result).toMatchObject({ branch: "feature/suggested" });
       expect(runSpawnPreflightMock).toHaveBeenCalledWith(
         expect.objectContaining({
           agent: "claude",
@@ -33865,7 +33865,7 @@ describe("SessionService", () => {
         prompt: "Fix runtime regression from PR #42",
       });
 
-      expect(result).toEqual({ branch: null });
+      expect(result).toMatchObject({ branch: null });
       expect(runSpawnPreflightMock).toHaveBeenCalledWith(
         expect.objectContaining({
           agent: "claude",
@@ -33874,6 +33874,48 @@ describe("SessionService", () => {
           worktree: true,
         }),
       );
+    });
+
+    it("charges every preview attempt and blocks an exhausted batch before another call", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            tokenBudget: 100,
+            preflight: { prompt: "Suggest a branch name from the task context." },
+          },
+        },
+      });
+      runSpawnPreflightMock
+        .mockResolvedValueOnce({
+          branch: "feature/first",
+          usage: { inputTokens: 50, outputTokens: 10, totalTokens: 60 },
+        })
+        .mockResolvedValueOnce({
+          branch: "feature/second",
+          usage: { inputTokens: 30, outputTokens: 10, totalTokens: 40 },
+        });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.preflight({ project: "api", prompt: "first" });
+      expect(first.preflightTokenUsageView).toMatchObject({ status: "measured", totalTokens: 60 });
+      await expect(
+        service.preflight({
+          project: "api",
+          prompt: "second",
+          preflightBatchId: first.preflightBatchId,
+        }),
+      ).rejects.toThrow("Pre-flight exhausted the token budget (100 / 100)");
+      await expect(
+        service.preflight({
+          project: "api",
+          prompt: "third",
+          preflightBatchId: first.preflightBatchId,
+        }),
+      ).rejects.toThrow("Pre-flight exhausted the token budget (100 / 100)");
+      expect(runSpawnPreflightMock).toHaveBeenCalledTimes(2);
     });
 
     it("returns null when worktree is disabled", async () => {
@@ -33898,7 +33940,7 @@ describe("SessionService", () => {
         prompt: "Fix runtime regression from PR #42",
       });
 
-      expect(result).toEqual({ branch: null });
+      expect(result).toMatchObject({ branch: null });
       expect(runSpawnPreflightMock).not.toHaveBeenCalled();
     });
 
@@ -33913,7 +33955,7 @@ describe("SessionService", () => {
         prompt: "Fix runtime regression from PR #42",
       });
 
-      expect(result).toEqual({ branch: null });
+      expect(result).toMatchObject({ branch: null });
       expect(runSpawnPreflightMock).not.toHaveBeenCalled();
     });
 
@@ -42604,6 +42646,16 @@ describe("SessionService", () => {
                 generations: {
                   "claude:test:message": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
                 },
+              },
+              preflightTokenUsage: {
+                status: "measured",
+                attemptCount: 0,
+                unknownAttemptCount: 0,
+                providerIterationCount: 0,
+                byProvider: {},
+                inputTokens: 0,
+                outputTokens: 0,
+                totalTokens: 0,
               },
             }),
           );

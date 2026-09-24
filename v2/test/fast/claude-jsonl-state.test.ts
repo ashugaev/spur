@@ -537,6 +537,22 @@ describe("parseJsonlRecord token usage", () => {
     });
   });
 
+  it("rejects a present malformed token instead of coercing it to zero", () => {
+    const parsed = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: {
+          id: "msg-bad",
+          role: "assistant",
+          usage: { input_tokens: "10", output_tokens: 2 },
+        },
+      }),
+      0,
+    );
+    expect(parsed?.tokenUsage).toBeUndefined();
+  });
+
   it("takes component-wise maxima for duplicate message records", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "claude-usage-components-"));
     const filePath = join(tempDir, "session.jsonl");

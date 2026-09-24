@@ -377,6 +377,11 @@ import {
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
+  PreflightUsageStore,
+  aggregatePreflightAttempts,
+  preflightUsageView,
+} from "./preflight-usage-store.js";
+import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
   isRespawnableStatus,
@@ -409,6 +414,7 @@ import {
   type SpawnDefaultsResponse,
   type PreflightRequest,
   type PreflightResponse,
+  type PreflightTokenUsageView,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type HandoffSessionRequest,
@@ -1003,6 +1009,25 @@ export class SpawnPreflightError extends Error {
       cause: lastError,
     });
     this.name = "SpawnPreflightError";
+  }
+}
+
+class PreflightTokenBudgetError extends Error {}
+
+function assertPreflightTokenBudget(
+  usage: PreflightTokenUsageView,
+  budget: number | undefined,
+): void {
+  if (budget === undefined) return;
+  if (usage.status !== "measured") {
+    throw new PreflightTokenBudgetError(
+      "Pre-flight token usage is unknown; token budget blocks launch",
+    );
+  }
+  if (usage.totalTokens >= budget) {
+    throw new PreflightTokenBudgetError(
+      `Pre-flight exhausted the token budget (${usage.totalTokens} / ${budget})`,
+    );
   }
 }
 
@@ -2323,6 +2348,7 @@ interface PreparedSpawn {
   placeholder: SessionRecord;
   sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
+  preflightBatchId: string;
 }
 
 function resolveCarriedSpawnModel(
@@ -2494,6 +2520,7 @@ async function runSpawnPreflightForSpawn(args: {
   baseBranch: string;
   worktree: boolean;
   prompt: string;
+  runAttempt?: (execute: () => Promise<SpawnPreflightResult>) => Promise<SpawnPreflightResult>;
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
@@ -2506,16 +2533,19 @@ async function runSpawnPreflightForSpawn(args: {
   for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
     let preflight: SpawnPreflightResult;
     try {
-      preflight = await runSpawnPreflight({
-        agent: args.agent,
-        projectId: args.projectId,
-        project: args.project,
-        baseBranch: args.baseBranch,
-        worktree: args.worktree,
-        prompt: args.prompt,
-        ...(feedback ? { feedback } : {}),
-      });
+      const execute = () =>
+        runSpawnPreflight({
+          agent: args.agent,
+          projectId: args.projectId,
+          project: args.project,
+          baseBranch: args.baseBranch,
+          worktree: args.worktree,
+          prompt: args.prompt,
+          ...(feedback ? { feedback } : {}),
+        });
+      preflight = args.runAttempt ? await args.runAttempt(execute) : await execute();
     } catch (error) {
+      if (error instanceof PreflightTokenBudgetError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
       feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
@@ -2578,6 +2608,7 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
 }
 
 export class SessionService {
+  private readonly preflightUsageStore: PreflightUsageStore;
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
   config: AppConfig;
@@ -2944,6 +2975,8 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
+    void this.preflightUsageStore.prune();
     this.applyConfig(scan.config, scan.configPaths);
     if (!options.deferBackgroundLoops) this.startBackgroundLoops();
   }
@@ -5342,8 +5375,15 @@ export class SessionService {
     if (session.agent === "cursor") {
       return `Session ${session.id} uses ${session.agent}, which cannot enforce tokenBudget`;
     }
-    if ((session.tokenUsage?.totalTokens ?? 0) >= budget) {
-      return `Session ${session.id} exhausted its token budget (${session.tokenUsage?.totalTokens} / ${budget})`;
+    if (!session.preflightTokenUsage) {
+      return `Session ${session.id} has unknown legacy pre-flight usage; tokenBudget cannot be enforced`;
+    }
+    if (session.preflightTokenUsage.status !== "measured") {
+      return `Session ${session.id} has unknown pre-flight usage; tokenBudget blocks activation`;
+    }
+    const total = session.preflightTokenUsage.totalTokens + (session.tokenUsage?.totalTokens ?? 0);
+    if (total >= budget) {
+      return `Session ${session.id} exhausted its token budget (${total} / ${budget})`;
     }
     return undefined;
   }
@@ -5355,7 +5395,15 @@ export class SessionService {
 
   private warnIfTokenBudgetUnenforced(session: SessionRecord): void {
     const budget = this.resolveTokenBudget(session);
-    if (budget === undefined || session.status !== "running" || session.agent !== "cursor") {
+    const reason =
+      session.agent === "cursor"
+        ? `${session.agent} does not expose structured main-session token usage`
+        : !session.preflightTokenUsage
+          ? "legacy pre-flight usage is unknown"
+          : session.preflightTokenUsage.status !== "measured"
+            ? "pre-flight usage is unknown"
+            : undefined;
+    if (budget === undefined || session.status !== "running" || !reason) {
       this.tokenBudgetUnsupportedWarnings.delete(session.id);
       return;
     }
@@ -5365,8 +5413,8 @@ export class SessionService {
       level: "warn",
       sessionId: session.id,
       projectId: session.project,
-      message: `Token budget is not enforced for ${session.id}: ${session.agent} does not expose structured token usage`,
-      details: { budget, agent: session.agent },
+      message: `Token budget is not enforced for ${session.id}: ${reason}`,
+      details: { budget, agent: session.agent, reason },
     });
   }
 
@@ -5383,7 +5431,9 @@ export class SessionService {
         const sample = classified.tokenUsage;
         const usage = sample ? reconcileTokenUsage(fresh.tokenUsage, sample) : fresh.tokenUsage;
         const budget = this.resolveTokenBudget(fresh);
-        if (!usage || budget === undefined || usage.totalTokens < budget) return;
+        const preflight = fresh.preflightTokenUsage;
+        const combined = (preflight?.totalTokens ?? 0) + (usage?.totalTokens ?? 0);
+        if (!usage || budget === undefined || combined < budget) return;
         await this.killAgentPaneAndConfirmExit(fresh, { failOnSurvivors: false });
         try {
           await this.teardownSessionSidecars(fresh);
@@ -5416,8 +5466,8 @@ export class SessionService {
           level: "warn",
           sessionId: stopped.id,
           projectId: stopped.project,
-          message: `Stopped ${stopped.id} after observing ${finalUsage.totalTokens} / ${budget} tokens`,
-          details: { used: finalUsage.totalTokens, budget },
+          message: `Stopped ${stopped.id} after observing ${(preflight?.totalTokens ?? 0) + finalUsage.totalTokens} / ${budget} tokens`,
+          details: { used: (preflight?.totalTokens ?? 0) + finalUsage.totalTokens, budget },
         });
       });
     });
@@ -9612,18 +9662,74 @@ export class SessionService {
     const overrides = parseSpawnOverrides(request.overrides, "overrides");
     const worktree = resolveSpawnWorktree(project, overrides);
     const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+    const preflightBatchId = await this.preflightUsageStore.resolve(
+      request.project,
+      request.preflightBatchId,
+    );
     if (!worktree || !project.preflight) {
-      return { branch: null };
+      return {
+        branch: null,
+        preflightBatchId,
+        preflightTokenUsageView: await this.preflightUsageStore.view(
+          preflightBatchId,
+          request.project,
+        ),
+      };
     }
-    const result = await runSpawnPreflight({
-      agent,
-      projectId: request.project,
-      project,
-      baseBranch: defaultBranch,
-      worktree,
-      prompt: request.prompt,
-    });
-    return { branch: result.branch ?? null };
+    assertPreflightTokenBudget(
+      await this.preflightUsageStore.view(preflightBatchId, request.project),
+      project.tokenBudget,
+    );
+    let result: SpawnPreflightResult;
+    try {
+      result = await this.preflightUsageStore.runAttempt(
+        preflightBatchId,
+        request.project,
+        agent,
+        () =>
+          runSpawnPreflight({
+            agent,
+            projectId: request.project,
+            project,
+            baseBranch: defaultBranch,
+            worktree,
+            prompt: request.prompt,
+          }),
+      );
+      assertPreflightTokenBudget(
+        await this.preflightUsageStore.view(preflightBatchId, request.project),
+        project.tokenBudget,
+      );
+    } catch (error) {
+      if (project.tokenBudget !== undefined) {
+        assertPreflightTokenBudget(
+          await this.preflightUsageStore.view(preflightBatchId, request.project),
+          project.tokenBudget,
+        );
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        !message.startsWith("preflight branch ") &&
+        !message.startsWith("Spawn preflight must return exactly one branch name")
+      )
+        throw error;
+      return {
+        branch: null,
+        preflightBatchId,
+        preflightTokenUsageView: await this.preflightUsageStore.view(
+          preflightBatchId,
+          request.project,
+        ),
+      };
+    }
+    return {
+      branch: result.branch ?? null,
+      preflightBatchId,
+      preflightTokenUsageView: await this.preflightUsageStore.view(
+        preflightBatchId,
+        request.project,
+      ),
+    };
   }
 
   // Shared by resolveSpawnTarget's three branches. "strict" (default) is the
@@ -9779,6 +9885,8 @@ export class SessionService {
     let preflightBranch: string | undefined;
     let preflightNoProjectBranchRequirements = false;
     let preflightAttempts: number | undefined;
+    let preflightBatchId: string | undefined;
+    let preflightTokenUsage: ReturnType<typeof aggregatePreflightAttempts>;
     let allocatedNewWorktree = false;
     let reuseCtx: {
       workspaceId: string;
@@ -9809,11 +9917,23 @@ export class SessionService {
         agent,
         options?.validatedExplicitModel,
       );
+      if (
+        request.preflightBatchId ||
+        (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
+      ) {
+        preflightBatchId = await this.preflightUsageStore.resolve(
+          request.project,
+          request.preflightBatchId,
+        );
+      }
+      const tokenBudget = project.tokenBudget;
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
       if (!reuseCtx && !effectiveBranch && worktree && project.preflight && prompt) {
         stage = "preflight";
+        if (!preflightBatchId) throw new Error("missing pre-flight batch");
+        const activePreflightBatchId = preflightBatchId;
         const preflight = await runSpawnPreflightForSpawn({
           agent,
           projectId: request.project,
@@ -9821,6 +9941,35 @@ export class SessionService {
           baseBranch: defaultBranch,
           worktree,
           prompt,
+          runAttempt: async (execute) => {
+            assertPreflightTokenBudget(
+              await this.preflightUsageStore.view(activePreflightBatchId, request.project),
+              tokenBudget,
+            );
+            let result: SpawnPreflightResult | undefined;
+            let executionError: unknown;
+            try {
+              result = await this.preflightUsageStore.runAttempt(
+                activePreflightBatchId,
+                request.project,
+                agent as AgentName,
+                execute,
+              );
+            } catch (error) {
+              executionError = error;
+            }
+            assertPreflightTokenBudget(
+              await this.preflightUsageStore.view(activePreflightBatchId, request.project),
+              tokenBudget,
+            );
+            if (executionError) {
+              throw executionError instanceof Error
+                ? executionError
+                : new Error(String(executionError));
+            }
+            if (!result) throw new Error("Pre-flight attempt returned no result");
+            return result;
+          },
         });
         preflightOutcome = preflight.outcome;
         preflightAttempts = preflight.attempts;
@@ -9842,6 +9991,9 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      preflightTokenUsage = preflightBatchId
+        ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
+        : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
@@ -9947,6 +10099,7 @@ export class SessionService {
         tmuxSession,
         launchCommand: "",
         status: "spawning",
+        preflightTokenUsage,
         createdAt,
         updatedAt: createdAt,
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
@@ -9962,6 +10115,7 @@ export class SessionService {
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
+      assertPreflightTokenBudget(preflightUsageView(preflightTokenUsage), project.tokenBudget);
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
       workspacePath = placeholder.worktreePath;
@@ -10741,6 +10895,15 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      const preflightBatchId = await this.preflightUsageStore.resolve(
+        request.project,
+        request.preflightBatchId,
+      );
+      const preflightTokenUsage = await this.preflightUsageStore.claim(
+        preflightBatchId,
+        request.project,
+        sessionId,
+      );
       if (reuseCtx) {
         resolvedBranch = reuseCtx.resolvedBranch;
       } else if (!worktree) {
@@ -10788,6 +10951,7 @@ export class SessionService {
         tmuxSession: sessionId,
         launchCommand: "",
         status: "spawning",
+        preflightTokenUsage,
         createdAt,
         updatedAt: createdAt,
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
@@ -10852,6 +11016,7 @@ export class SessionService {
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
+        preflightBatchId,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -10945,6 +11110,40 @@ export class SessionService {
             baseBranch: prepared.defaultBranch,
             worktree: prepared.worktree,
             prompt,
+            runAttempt: async (execute) => {
+              assertPreflightTokenBudget(
+                await this.preflightUsageStore.view(prepared.preflightBatchId, request.project),
+                project.tokenBudget,
+              );
+              let result: SpawnPreflightResult | undefined;
+              let executionError: unknown;
+              try {
+                result = await this.preflightUsageStore.runAttempt(
+                  prepared.preflightBatchId,
+                  request.project,
+                  agent,
+                  execute,
+                  sessionId,
+                );
+              } catch (error) {
+                executionError = error;
+              }
+              const usage = await this.preflightUsageStore.claim(
+                prepared.preflightBatchId,
+                request.project,
+                sessionId,
+              );
+              prepared.placeholder = { ...prepared.placeholder, preflightTokenUsage: usage };
+              writeSession(this.config.dataDir, prepared.placeholder);
+              assertPreflightTokenBudget(preflightUsageView(usage), project.tokenBudget);
+              if (executionError) {
+                throw executionError instanceof Error
+                  ? executionError
+                  : new Error(String(executionError));
+              }
+              if (!result) throw new Error("Pre-flight attempt returned no result");
+              return result;
+            },
           });
           preflightOutcome = preflight.outcome;
           preflightAttempts = preflight.attempts;
@@ -17517,6 +17716,31 @@ export class SessionService {
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
+    // The provider can flush one final structured sample immediately before
+    // exit. Read it once after death is confirmed; terminal text is never an
+    // accounting source. Cursor main sessions expose no structured counter.
+    if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
+      if (session.agent === "claude") {
+        const finalState = await readClaudeJsonlState(
+          session.worktreePath,
+          this.claudeJsonlReaders.get(session.id),
+          session.agentSessionId,
+        );
+        if (finalState) {
+          this.claudeJsonlReaders.set(session.id, finalState.reader);
+          tokenUsage = finalState.tokenUsage;
+        }
+      } else if (session.agent === "codex") {
+        tokenUsage = (await this.classifyCodexState(session.id)).tokenUsage;
+      } else if (session.agent === "opencode") {
+        tokenUsage = (
+          await readOpenCodeStructuredState(
+            session.agentSessionId,
+            runtime.tmuxActivityAt?.getTime() ?? null,
+          )
+        ).tokenUsage;
+      }
+    }
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.paneUsable || !runtime.processAlive) {
@@ -17961,6 +18185,7 @@ export class SessionService {
       sidecarNames: _sidecarNames,
       sidecarPorts: _sidecarPorts,
       tokenUsage: _tokenUsage,
+      preflightTokenUsage: _preflightTokenUsage,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -18019,6 +18244,8 @@ export class SessionService {
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
       tokenUsageView: this.deriveTokenUsageView(session),
+      preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
+      tokenBudgetView: this.deriveTokenBudgetView(session),
     };
   }
 
@@ -18060,6 +18287,37 @@ export class SessionService {
       ...publicUsage,
       ...(budget !== undefined ? { budget } : {}),
       exhausted: budget !== undefined && session.tokenUsage.totalTokens >= budget,
+    };
+  }
+
+  private derivePreflightTokenUsageView(session: SessionRecord) {
+    return session.preflightTokenUsage
+      ? preflightUsageView(session.preflightTokenUsage)
+      : {
+          status: "legacy_unknown" as const,
+          attemptCount: 0,
+          unknownAttemptCount: 0,
+          providerIterationCount: 0,
+        };
+  }
+
+  private deriveTokenBudgetView(session: SessionRecord) {
+    const budget = this.resolveTokenBudget(session);
+    const preflight = session.preflightTokenUsage;
+    const knownTotalTokens = (preflight?.totalTokens ?? 0) + (session.tokenUsage?.totalTokens ?? 0);
+    const reason = !preflight
+      ? ("legacy_unknown" as const)
+      : preflight.status !== "measured"
+        ? ("preflight_unknown" as const)
+        : session.agent === "cursor"
+          ? ("main_usage_unavailable" as const)
+          : undefined;
+    return {
+      ...(budget !== undefined ? { budget } : {}),
+      knownTotalTokens,
+      exhausted: budget !== undefined && knownTotalTokens >= budget,
+      enforced: budget === undefined || reason === undefined,
+      ...(reason ? { reason } : {}),
     };
   }
 
@@ -18235,6 +18493,7 @@ export class SessionService {
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
       tokenUsage: _tokenUsage,
+      preflightTokenUsage: _preflightTokenUsage,
       ...sessionWithoutDetailFields
     } = session;
 
@@ -18261,6 +18520,8 @@ export class SessionService {
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
       tokenUsageView,
+      preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
+      tokenBudgetView: this.deriveTokenBudgetView(session),
     };
     return { view, classified };
   }
