@@ -1,1 +1,45 @@
-{"info":{"id":"session-sanitized"},"messages":[{"info":{"id":"msg-user","role":"user"},"parts":[]},{"info":{"id":"msg-assistant-1","role":"assistant","tokens":{"input":10,"output":20,"reasoning":5,"cache":{"read":30,"write":4},"total":69},"time":{"completed":1}},"parts":[]},{"info":{"id":"msg-assistant-1","role":"assistant","tokens":{"input":10,"output":20,"reasoning":5,"cache":{"read":30,"write":4},"total":69},"time":{"completed":1}},"parts":[]},{"info":{"id":"msg-assistant-2","role":"assistant","tokens":{"input":2,"output":3,"reasoning":1,"cache":{"read":4,"write":0}},"error":{"name":"ApiError"}},"parts":[]}]}
+{
+  "info": { "id": "session-sanitized" },
+  "messages": [
+    { "info": { "id": "msg-user", "role": "user" }, "parts": [] },
+    {
+      "info": {
+        "id": "msg-assistant-1",
+        "role": "assistant",
+        "tokens": {
+          "input": 10,
+          "output": 20,
+          "reasoning": 5,
+          "cache": { "read": 30, "write": 4 },
+          "total": 69
+        },
+        "time": { "completed": 1 }
+      },
+      "parts": []
+    },
+    {
+      "info": {
+        "id": "msg-assistant-1",
+        "role": "assistant",
+        "tokens": {
+          "input": 10,
+          "output": 20,
+          "reasoning": 5,
+          "cache": { "read": 30, "write": 4 },
+          "total": 69
+        },
+        "time": { "completed": 1 }
+      },
+      "parts": []
+    },
+    {
+      "info": {
+        "id": "msg-assistant-2",
+        "role": "assistant",
+        "tokens": { "input": 2, "output": 3, "reasoning": 1, "cache": { "read": 4, "write": 0 } },
+        "error": { "name": "ApiError" }
+      },
+      "parts": []
+    }
+  ]
+}
