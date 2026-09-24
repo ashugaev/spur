@@ -3390,7 +3390,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
-                    Not accepting input. Restore to continue.
+                    {session.tokenUsageView?.exhausted === true
+                      ? "Not accepting input. Token budget limit hit."
+                      : "Not accepting input. Restore to continue."}
                   </p>
                 )}
               </section>

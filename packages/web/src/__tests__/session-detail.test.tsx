@@ -5881,6 +5881,8 @@ describe("SessionDetail token usage", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     expect(await screen.findByText("2,000 / 2,000 · limit hit")).toBeInTheDocument();
+    expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
+    expect(screen.queryByText("Not accepting input. Restore to continue.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
 });

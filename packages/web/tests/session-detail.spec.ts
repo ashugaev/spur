@@ -3967,6 +3967,8 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByText("Token usage unavailable · budget unenforced")).toBeVisible();
     await page.goto("/sessions/detail-s5-token-exhausted");
     await expect(page.getByText("2,000 / 2,000 · limit hit")).toBeVisible();
+    await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
+    await expect(page.getByText("Not accepting input. Restore to continue.")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
   });
 
