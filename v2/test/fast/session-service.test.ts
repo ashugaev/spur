@@ -1113,6 +1113,9 @@ function mockClaudeJsonlState(
       inputTokens: number;
       outputTokens: number;
       totalTokens: number;
+      cacheReadInputTokens?: number;
+      cacheWriteInputTokens?: number;
+      reasoningOutputTokens?: number;
     };
   },
 ) {
@@ -42468,6 +42471,9 @@ describe("SessionService", () => {
             inputTokens: 80,
             outputTokens: 20,
             totalTokens: 100,
+            cacheReadInputTokens: 50,
+            cacheWriteInputTokens: 30,
+            reasoningOutputTokens: 10,
           },
         });
         const sessions = createSessionStore();
@@ -42488,7 +42494,12 @@ describe("SessionService", () => {
         expect(sessions.get("api-1")).toMatchObject({
           status: "stopped",
           stopReason: "token_budget",
-          tokenUsage: { totalTokens: 100 },
+          tokenUsage: {
+            totalTokens: 100,
+            cacheReadInputTokens: 50,
+            cacheWriteInputTokens: 30,
+            reasoningOutputTokens: 10,
+          },
         });
         expect(
           logSpurEventMock.mock.calls

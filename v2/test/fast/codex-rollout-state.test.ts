@@ -8,6 +8,7 @@ import {
   readCodexTranscriptEntries,
   type CodexRolloutReaderState,
 } from "../../src/agents/codex.js";
+import { reconcileTokenUsage } from "../../src/token-usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STALE_WORKING_FIXTURE = join(
@@ -29,6 +30,14 @@ const IDLE_FIXTURE_SESSION_FIXTURE = join(
 const WORKING_UNMATCHED_TOOL_CALL_FIXTURE = join(
   __dirname,
   "../fixtures/agent-history/codex/working-unmatched-tool-call-tail.jsonl",
+);
+const TOKEN_RESET_ALIASES_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/token-reset-aliases.jsonl",
+);
+const CHILD_PREFIX_REPLAY_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/child-prefix-replay.jsonl",
 );
 
 const tempDirs: string[] = [];
@@ -265,6 +274,137 @@ describe("readCodexRolloutState", () => {
       outputTokens: 30,
       totalTokens: 120,
     });
+  });
+
+  it("normalizes aliases and preserves usage across cumulative resets", async () => {
+    const content = await readFile(TOKEN_RESET_ALIASES_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-token-reset-aliases.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const first = await readCodexRolloutState(sessionsDir, reader);
+    const reread = await readCodexRolloutState(sessionsDir, reader);
+
+    expect(first.tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:codex-reset-sanitized",
+      inputTokens: 148,
+      outputTokens: 32,
+      totalTokens: 180,
+      cacheReadInputTokens: 62,
+      cacheWriteInputTokens: 18,
+      reasoningOutputTokens: 13,
+      observedAtMs: Date.parse("2026-09-24T10:00:04.000Z"),
+    });
+    expect(reread.tokenUsage).toEqual(first.tokenUsage);
+    if (!first.tokenUsage || !reread.tokenUsage) throw new Error("expected token usage");
+    const persisted = reconcileTokenUsage(undefined, first.tokenUsage);
+    expect(reconcileTokenUsage(persisted, reread.tokenUsage).totalTokens).toBe(180);
+  });
+
+  it("removes a child rollout's copied parent prefix", async () => {
+    const content = await readFile(CHILD_PREFIX_REPLAY_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-child-prefix.jsonl");
+
+    expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:codex-child-sanitized",
+      inputTokens: 24,
+      outputTokens: 6,
+      totalTokens: 30,
+      cacheReadInputTokens: 8,
+      reasoningOutputTokens: 2,
+      observedAtMs: Date.parse("2026-09-24T11:00:05.000Z"),
+    });
+  });
+
+  it("rejects token samples with conflicting canonical and alias fields", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        sessionMeta("usage-conflict"),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                prompt_tokens: 91,
+                output_tokens: 30,
+                total_tokens: 120,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+      "rollout-usage-conflict.jsonl",
+    );
+
+    expect(await readCodexRolloutState(sessionsDir)).not.toHaveProperty("tokenUsage");
+  });
+
+  it("rejects samples whose cache subsets exceed inclusive input", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        sessionMeta("usage-invalid-subsets"),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                cached_input_tokens: 60,
+                cache_write_input_tokens: 40,
+                output_tokens: 30,
+                total_tokens: 120,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+      "rollout-usage-invalid-subsets.jsonl",
+    );
+
+    expect(await readCodexRolloutState(sessionsDir)).not.toHaveProperty("tokenUsage");
+  });
+
+  it("distinguishes absent optional components from measured zero", async () => {
+    const tokenLine = (sessionId: string, optional: Record<string, number>) =>
+      [
+        sessionMeta(sessionId),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                output_tokens: 30,
+                total_tokens: 120,
+                ...optional,
+              },
+            },
+          },
+        }),
+      ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "unknown.jsonl",
+        content: tokenLine("unknown", {}),
+        mtimeMs: 1_000_000_000_000,
+      },
+      {
+        filename: "zero.jsonl",
+        content: tokenLine("zero", { cached_input_tokens: 0 }),
+        mtimeMs: 2_000_000_000_000,
+      },
+    ]);
+
+    const measured = await readCodexRolloutState(sessionsDir);
+    expect(measured.tokenUsage?.cacheReadInputTokens).toBe(0);
+    expect(measured.tokenUsage).not.toHaveProperty("cacheWriteInputTokens");
   });
 
   it("selects token-only files by the token event timestamp, not file mtime", async () => {

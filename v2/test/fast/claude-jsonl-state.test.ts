@@ -485,6 +485,29 @@ describe("parseJsonlRecord token usage", () => {
     });
   });
 
+  it("counts advisor calls once and gives nested cache TTL totals precedence", async () => {
+    const filePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/advisor-token-components.jsonl",
+    );
+    const result = await readClaudeJsonlState("/unused", {
+      filePath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    });
+
+    expect(result?.tokenUsage).toEqual({
+      provider: "claude",
+      generationId: "claude:session-advisor-sanitized:msg-advisor",
+      inputTokens: 77,
+      outputTokens: 13,
+      totalTokens: 90,
+      cacheReadInputTokens: 37,
+      cacheWriteInputTokens: 27,
+    });
+  });
+
   it("counts cache input and exposes a message id for deduplication", () => {
     const record = parseJsonlRecord(
       JSON.stringify({
@@ -548,6 +571,42 @@ describe("parseJsonlRecord token usage", () => {
         inputTokens: 1,
         outputTokens: 0,
         totalTokens: 1,
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps nested cache totals authoritative across progressive duplicates", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-cache-precedence-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const record = (usage: Record<string, unknown>) =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: { id: "msg-1", role: "assistant", usage },
+      });
+    try {
+      await writeFile(
+        filePath,
+        `${record({ input_tokens: 1, cache_creation_input_tokens: 99, cache_creation: { ephemeral_5m_input_tokens: 3 }, output_tokens: 1 })}\n${record({ input_tokens: 1, cache_creation_input_tokens: 99, output_tokens: 1 })}\n`,
+        "utf8",
+      );
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result?.tokenUsage).toMatchObject({
+        inputTokens: 4,
+        cacheWriteInputTokens: 3,
+        cacheWrite5mInputTokens: 3,
+        cacheWrite1hInputTokens: 0,
+        outputTokens: 1,
+        totalTokens: 5,
       });
     } finally {
       await rm(tempDir, { recursive: true, force: true });

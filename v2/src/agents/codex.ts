@@ -1022,74 +1022,207 @@ function extractCodexRateLimitsLine(parsed: Record<string, unknown>): unknown {
   return payload["rate_limits"];
 }
 
+interface CodexTokenUsageSnapshot {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+}
+
+interface CodexTokenUsageEvent {
+  total: CodexTokenUsageSnapshot;
+  last?: CodexTokenUsageSnapshot;
+  observedAtMs: number;
+}
+
 function extractCodexTokenUsageLine(
   parsed: Record<string, unknown>,
-  generationId: string | undefined,
-): ProviderTokenUsageSample | undefined {
-  if (!generationId) return undefined;
+): CodexTokenUsageEvent | undefined {
   if (parsed["type"] !== "event_msg") return undefined;
   const payload = parsed["payload"];
   if (!isRecord(payload) || payload["type"] !== "token_count") return undefined;
   const info = payload["info"];
   if (!isRecord(info)) return undefined;
-  const total = info["total_token_usage"];
-  if (!isRecord(total)) return undefined;
-  const inputTokens = total["input_tokens"];
-  const outputTokens = total["output_tokens"];
-  const totalTokens = total["total_tokens"];
-  const cachedInputTokens = total["cached_input_tokens"];
-  const cacheWriteInputTokens = total["cache_write_input_tokens"];
-  const reasoningOutputTokens = total["reasoning_output_tokens"];
   const timestamp = parsed["timestamp"];
   const observedAtMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+  const total = readCodexTokenUsageSnapshot(info["total_token_usage"]);
+  if (!total || !Number.isFinite(observedAtMs)) return undefined;
+  const last = readCodexTokenUsageSnapshot(info["last_token_usage"]);
+  return { total, ...(last ? { last } : {}), observedAtMs };
+}
+
+function readCodexTokenUsageSnapshot(value: unknown): CodexTokenUsageSnapshot | null {
+  if (!isRecord(value)) return null;
+  const inputTokens = readTokenUsageNumber(value, ["input_tokens", "prompt_tokens"]);
+  const outputTokens = readTokenUsageNumber(value, ["output_tokens", "completion_tokens"]);
+  const totalTokens = readTokenUsageNumber(value, ["total_tokens"]);
+  const cacheReadInputTokens = readTokenUsageNumber(value, [
+    "cached_input_tokens",
+    "cache_read_input_tokens",
+    "cached_tokens",
+  ]);
+  const cacheWriteInputTokens = readTokenUsageNumber(value, [
+    "cache_write_input_tokens",
+    "cache_creation_input_tokens",
+  ]);
+  const reasoningOutputTokens = readTokenUsageNumber(value, [
+    "reasoning_output_tokens",
+    "reasoning_tokens",
+  ]);
   if (
-    typeof inputTokens !== "number" ||
-    !Number.isSafeInteger(inputTokens) ||
-    inputTokens < 0 ||
-    typeof outputTokens !== "number" ||
-    !Number.isSafeInteger(outputTokens) ||
-    outputTokens < 0 ||
-    typeof totalTokens !== "number" ||
-    !Number.isSafeInteger(totalTokens) ||
-    totalTokens < 0 ||
+    inputTokens === null ||
+    inputTokens === undefined ||
+    outputTokens === null ||
+    outputTokens === undefined ||
+    totalTokens === null ||
+    totalTokens === undefined ||
+    cacheReadInputTokens === null ||
+    cacheWriteInputTokens === null ||
+    reasoningOutputTokens === null ||
     totalTokens !== inputTokens + outputTokens ||
-    !Number.isFinite(observedAtMs)
-  )
-    return undefined;
-  if (
-    (cachedInputTokens !== undefined &&
-      (typeof cachedInputTokens !== "number" ||
-        !Number.isSafeInteger(cachedInputTokens) ||
-        cachedInputTokens < 0 ||
-        cachedInputTokens > inputTokens)) ||
-    (cacheWriteInputTokens !== undefined &&
-      (typeof cacheWriteInputTokens !== "number" ||
-        !Number.isSafeInteger(cacheWriteInputTokens) ||
-        cacheWriteInputTokens < 0 ||
-        cacheWriteInputTokens > inputTokens)) ||
-    (reasoningOutputTokens !== undefined &&
-      (typeof reasoningOutputTokens !== "number" ||
-        !Number.isSafeInteger(reasoningOutputTokens) ||
-        reasoningOutputTokens < 0 ||
-        reasoningOutputTokens > outputTokens))
+    (cacheReadInputTokens ?? 0) + (cacheWriteInputTokens ?? 0) > inputTokens ||
+    (reasoningOutputTokens !== undefined && reasoningOutputTokens > outputTokens)
   ) {
-    return undefined;
+    return null;
   }
   return {
-    provider: "codex",
-    generationId,
     inputTokens,
     outputTokens,
     totalTokens,
-    ...(cachedInputTokens !== undefined ? { cacheReadInputTokens: cachedInputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
-    observedAtMs,
   };
+}
+
+function readTokenUsageNumber(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+): number | null | undefined {
+  let result: number | undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      return null;
+    }
+    if (result !== undefined && result !== value) {
+      return null;
+    }
+    result = value;
+  }
+  return result;
+}
+
+const CODEX_OPTIONAL_USAGE_COMPONENTS = [
+  "cacheReadInputTokens",
+  "cacheWriteInputTokens",
+  "reasoningOutputTokens",
+] as const;
+
+function codexUsageReset(
+  current: CodexTokenUsageSnapshot,
+  previous: CodexTokenUsageSnapshot,
+): boolean {
+  if (
+    current.inputTokens < previous.inputTokens ||
+    current.outputTokens < previous.outputTokens ||
+    current.totalTokens < previous.totalTokens
+  ) {
+    return true;
+  }
+  return CODEX_OPTIONAL_USAGE_COMPONENTS.some(
+    (component) =>
+      current[component] !== undefined &&
+      previous[component] !== undefined &&
+      current[component] < previous[component],
+  );
+}
+
+function subtractCodexUsage(
+  current: CodexTokenUsageSnapshot,
+  previous?: CodexTokenUsageSnapshot,
+): CodexTokenUsageSnapshot {
+  return {
+    inputTokens: current.inputTokens - (previous?.inputTokens ?? 0),
+    outputTokens: current.outputTokens - (previous?.outputTokens ?? 0),
+    totalTokens: current.totalTokens - (previous?.totalTokens ?? 0),
+    ...Object.fromEntries(
+      CODEX_OPTIONAL_USAGE_COMPONENTS.flatMap((component) => {
+        const value = current[component];
+        const prior = previous?.[component];
+        return value !== undefined && (previous === undefined || prior !== undefined)
+          ? [[component, value - (prior ?? 0)]]
+          : [];
+      }),
+    ),
+  };
+}
+
+function addCodexUsage(
+  accumulated: CodexTokenUsageSnapshot | undefined,
+  delta: CodexTokenUsageSnapshot,
+): CodexTokenUsageSnapshot | undefined {
+  const inputTokens = (accumulated?.inputTokens ?? 0) + delta.inputTokens;
+  const outputTokens = (accumulated?.outputTokens ?? 0) + delta.outputTokens;
+  const totalTokens = (accumulated?.totalTokens ?? 0) + delta.totalTokens;
+  if (![inputTokens, outputTokens, totalTokens].every(Number.isSafeInteger)) return undefined;
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    ...Object.fromEntries(
+      CODEX_OPTIONAL_USAGE_COMPONENTS.flatMap((component) => {
+        if (
+          delta[component] === undefined ||
+          (accumulated && accumulated[component] === undefined)
+        ) {
+          return [];
+        }
+        const value = (accumulated?.[component] ?? 0) + delta[component];
+        return Number.isSafeInteger(value) ? [[component, value]] : [];
+      }),
+    ),
+  };
+}
+
+function extractCodexLifetimeTokenUsage(
+  lines: string[],
+  generationId: string | undefined,
+  replayBeforeMs: number | undefined,
+): ProviderTokenUsageSample | undefined {
+  if (!generationId) return undefined;
+  let previous: CodexTokenUsageSnapshot | undefined;
+  let accumulated: CodexTokenUsageSnapshot | undefined;
+  let observedAtMs: number | undefined;
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+    const event = extractCodexTokenUsageLine(parsed);
+    if (!event) continue;
+    const reset = previous !== undefined && codexUsageReset(event.total, previous);
+    const delta = reset ? event.last : subtractCodexUsage(event.total, previous);
+    previous = event.total;
+    if (event.observedAtMs < (replayBeforeMs ?? -Infinity) || !delta) continue;
+    accumulated = addCodexUsage(accumulated, delta);
+    if (!accumulated) return undefined;
+    observedAtMs = event.observedAtMs;
+  }
+  return accumulated && observedAtMs !== undefined
+    ? { provider: "codex", generationId, ...accumulated, observedAtMs }
+    : undefined;
 }
 
 function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
   let generationId: string | undefined;
+  let replayBeforeMs: number | undefined;
   for (const line of lines) {
     let parsed: unknown;
     try {
@@ -1101,13 +1234,22 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
     const payload = parsed["payload"];
     if (!isRecord(payload) || typeof payload["id"] !== "string" || !payload["id"]) continue;
     generationId = `codex:${payload["id"]}`;
+    const source = payload["source"];
+    const subagent = isRecord(source) ? source["subagent"] : undefined;
+    const threadSpawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
+    if (isRecord(threadSpawn) && typeof threadSpawn["parent_thread_id"] === "string") {
+      const timestamp =
+        typeof payload["timestamp"] === "string" ? payload["timestamp"] : parsed["timestamp"];
+      const timestampMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+      if (Number.isFinite(timestampMs)) replayBeforeMs = timestampMs;
+    }
     break;
   }
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
   let model: string | undefined;
-  let tokenUsage: ProviderTokenUsageSample | undefined;
+  const tokenUsage = extractCodexLifetimeTokenUsage(lines, generationId, replayBeforeMs);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     // Parse each changed rollout line once and share it across the extractors.
     let parsed: unknown;
@@ -1125,7 +1267,6 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
         rateLimit = detection;
       }
     }
-    tokenUsage ??= extractCodexTokenUsageLine(parsed, generationId);
     if (rollout === null) {
       const state = extractCodexRolloutStateLine(parsed);
       if (state && !(state.callId && matchedCallIds.has(state.callId))) {
