@@ -96,6 +96,16 @@ const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
 const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CURSOR_SUBMIT_MAX_RESENDS = 12;
+// Deferred sensitive-controls ack scan window, all agents. The scan runs
+// inside withPaneWriteLock, so a long window starves every other send to
+// that pane; bounded short so the lock releases quickly regardless of agent.
+export const DEFERRED_CONTROLS_ACK_WINDOW_MS = 5_000;
+// Resend budget for the deferred controls leg, all agents. Cursor's old
+// pacing here was 12 resends x 5s = a 65s pane-lock hold; forensics found it
+// never rescued anything in the measured failures. 2 matches every other
+// agent's DEFAULT_SUBMIT_MAX_RESENDS and restores just enough recovery for a
+// genuinely dropped Enter without reintroducing that hold.
+export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // Launch-send pacing for claude. A claude TUI still rendering the pasted launch
 // message swallows the submit Enter, and nothing is submitted until another one
 // arrives, so the launch send scans in short windows instead of the mid-session
@@ -253,11 +263,59 @@ function openCodePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
+function derivedLaunchBinaryName(agent: AgentName, launchCommand: string): string {
+  return basename(extractCommandBinary(launchCommand, agentExecutableCommand(agent)));
+}
+
 function defaultProcessMatchers(agent: AgentName, launchCommand: string): string[] {
-  const derived = basename(extractCommandBinary(launchCommand, agentExecutableCommand(agent)));
+  const derived = derivedLaunchBinaryName(agent, launchCommand);
   return [...new Set([derived, ...agentProcessNames(agent)])].filter(
     (matcher) => matcher.length > 0,
   );
+}
+
+// RESIDUAL 1: a wrapper whose own filename IS the canonical name (a script named
+// `claude` on PATH that execs .../versions/2.1.251) leaves this gate CLOSED, so that
+// host stays false-DEAD in isProcessRunningInTmux. Accepted: SPUR_<AGENT>_BIN is not
+// used as a second gate condition because its common use is pointing at an off-PATH
+// binary whose basename IS canonical, and opening the fallback there trades zero gain
+// for a possible hang (see RESIDUAL 2).
+// RESIDUAL 2: when this gate is open, isProcessRunningInTmux's pane-child fallback
+// gates on the tty's foreground process group (tpgid), not "any direct child of the
+// pane shell" (#857 P1: that wider rule kept reading ALIVE off a persistent shell
+// helper — gitstatusd, a `sleep 300 &` job — left behind after the agent exited).
+// Two narrower residuals remain:
+//   - A SIGTSTP-suspended agent is not the tty's foreground job (job control hands
+//     the foreground back to the shell while it is stopped), so this now reads DEAD
+//     even though the agent is alive and resumable: keystrokes still buffer on the
+//     tty and the agent consumes them on resume. This matches main's existing
+//     behavior for a suspended agent — not a regression introduced by the fgPgid gate.
+//   - With job control disabled in the pane shell (`set +m`), a lingering child
+//     shares the shell's own process group, so `row.pgid === fgPgid` still matches
+//     it and it reads false-ALIVE, same as before.
+// Accepted because it is confined to hosts that are otherwise 100% destructively
+// false-DEAD today.
+// RESIDUAL 3: this gate cannot separate "pass 1 serves this host" from "pass 1 never
+// will" from (agent, launchCommand) alone. (a) Pass 2 is reached only after pass 1
+// already failed on THIS snapshot (runtime-tmux.ts:822), so "cannot be matched by
+// pass 1" already IS the arming condition — no further stateless fact narrows it.
+// (b) launchCommand's first token is always agentExecutableCommand(agent)
+// (executable.ts:33-36), never a user-authored `exec ...` prefix — the
+// `exec $BIN "$@"` shape in issue #871 is wrapper-script CONTENT a plan never
+// records as the launch command itself. That token is not always what
+// extractCommandBinary derives, though: a quoted env prefix whose value
+// contains whitespace (OpenCode's restrictWrites OPENCODE_CONFIG_CONTENT)
+// mis-tokenizes to an arbitrary fragment, neither the canonical name nor an
+// SPUR_*_BIN path.
+// (c) The remaining real case is a non-exec wrapper (e.g. matchers
+// ["codex-wrap.sh","codex"]) whose pass 1 matches for the agent's whole life: the
+// gate still arms there, and on such a host RESIDUAL 2's `set +m` shape can read a
+// leftover pane-shell child as ALIVE. Rejected: a sticky "pass 1 matched once" latch
+// (poisons a session that later hits a genuinely dead-pass-1 host, agent-helpers.test.ts:122)
+// and exec-token handling in extractCommandBinary (inert — the canonical name is
+// re-appended unconditionally at :260-265, so it changes no matcher set today).
+export function agentLaunchUsesForeignBinary(agent: AgentName, launchCommand: string): boolean {
+  return !agentProcessNames(agent).includes(derivedLaunchBinaryName(agent, launchCommand));
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -498,14 +556,19 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
     submitAck: async (ctx) => {
-      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath);
+      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
       if (!baseline) {
         return null;
       }
       return {
         async scan(text) {
-          const found = await scanCursorJsonlForMessage(baseline, text, ctx.worktreePath);
-          return { found, lastScannedFile: baseline.file };
+          const result = await scanCursorJsonlForMessage(
+            baseline,
+            text,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+          );
+          return { found: result.found, lastScannedFile: result.scannedFile };
         },
       };
     },
@@ -562,8 +625,14 @@ export function parseAgentName(agent: string): AgentName {
   throw new Error(`Unsupported agent: ${agent}`);
 }
 
-export function buildAgentLaunchPlan(agent: AgentName, prompt: string, options?: AgentPlanOptions) {
-  return agentAdapter(agent).buildLaunchPlan(prompt, options);
+export function buildAgentLaunchPlan(
+  agent: AgentName,
+  prompt: string,
+  options?: AgentPlanOptions,
+  deferredSensitiveInitialMessage?: { text: string; sensitive: true },
+) {
+  const plan = agentAdapter(agent).buildLaunchPlan(prompt, options);
+  return deferredSensitiveInitialMessage ? { ...plan, deferredSensitiveInitialMessage } : plan;
 }
 
 export async function buildAgentRestorePlan(

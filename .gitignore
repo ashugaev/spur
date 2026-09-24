@@ -77,3 +77,6 @@ spur.*.local.yaml
 docs/workflow-technical-updates.md
 docs/context-engineering-backlog.md
 .scratch/
+
+# playwright-cli scratch output (QA sessions write it into the worktree)
+.playwright-cli/

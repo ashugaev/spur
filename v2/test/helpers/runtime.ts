@@ -1090,7 +1090,7 @@ export async function stopDaemonByPid(pid?: number): Promise<void> {
     return;
   }
   const stillAlive = await pollUntil(() => processExists(pid), {
-    timeoutMs: 10_000,
+    timeoutMs: 20_000,
     intervalMs: 200,
     accept: (alive) => alive === false,
   });

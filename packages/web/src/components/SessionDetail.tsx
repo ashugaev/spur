@@ -24,13 +24,16 @@ import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
+import { TitleEditDialog } from "@/components/TitleEditDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
+import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -54,7 +57,6 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { SessionTodo } from "@/components/SessionTodo";
-import { TodoOverrideDialog } from "@/components/TodoOverrideDialog";
 import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
@@ -108,8 +110,6 @@ import {
   isRestorable,
   isSessionNotRestorablePayload,
   isTerminalSession,
-  isTodoLedgerEmptyPayload,
-  isTodoOpenWorkPayload,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
@@ -118,7 +118,10 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarPortConflictCandidate,
+  type SpurSidecarStopResponse,
   type SpurSessionView,
+  type SpurUpdateSessionSlotsResponse,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
@@ -157,6 +160,21 @@ function tokenUsageLabel(session: Pick<SpurSessionView, "tokenUsageView">): stri
   return usage.exhausted ? `${value} · limit hit` : value;
 }
 
+// Two failing portIds can share an overlapping declared range and both name
+// the same numeric port as a candidate — one <option> per portId would
+// render duplicate values in the busy-port <select>. Keep the first
+// occurrence only.
+function dedupeConflictCandidatesByPort(
+  candidates: SpurSidecarPortConflictCandidate[],
+): SpurSidecarPortConflictCandidate[] {
+  const seen = new Set<number>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.port)) return false;
+    seen.add(candidate.port);
+    return true;
+  });
+}
+
 function splitSessionLinks(
   links: DashboardSession["links"],
   sidecarLinkLabels: Set<string>,
@@ -188,25 +206,6 @@ function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
-function WakeIcon({ recurring }: { recurring: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <circle cx="12" cy="12" r="8" />
-      <path d="M12 8v5l3 2" />
-      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -250,6 +249,16 @@ function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
         strokeLinejoin="round"
         strokeWidth="1.5"
       />
+    </svg>
+  );
+}
+
+function KebabIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
+      <circle cx="8" cy="2.5" r="1.5" />
+      <circle cx="8" cy="8" r="1.5" />
+      <circle cx="8" cy="13.5" r="1.5" />
     </svg>
   );
 }
@@ -1616,17 +1625,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
-  const [todoOverride, setTodoOverride] = useState<
-    | { body?: Record<string, unknown>; empty: true }
-    | { body?: Record<string, unknown>; openCount: number; heldCount: number }
-    | null
-  >(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
     action: "complete" | "kill";
     body?: Record<string, unknown>;
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
   const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -1717,6 +1725,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // means "follow the live tail" (the default, no `from` query param).
   const [fromIndex, setFromIndex] = useState<number | null>(null);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  // Monotonic id of the newest conversation request. A tail poll issued before
+  // a load-older can resolve after it; without this its stale payload lands in
+  // `conversation` and the [conversation] effect below clears the older-page
+  // spinner while the older page is still in flight.
+  const conversationRequestRef = useRef(0);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
@@ -1765,6 +1778,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setFromIndex(null);
     dismissLoadErrorToast();
   }, [dismissLoadErrorToast, sessionId]);
+
+  const applySessionUpdate = useCallback((next: DashboardSession) => {
+    loadRequestIdRef.current += 1;
+    setSession(next);
+  }, []);
 
   const loadSession = useCallback(async () => {
     const requestedSessionId = sessionId;
@@ -1878,18 +1896,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       return;
     }
     const query = fromIndex !== null ? `?from=${fromIndex}` : "";
+    const requestId = conversationRequestRef.current + 1;
+    conversationRequestRef.current = requestId;
+    const isNewest = () => conversationRequestRef.current === requestId;
     try {
       const res = await fetch(
         `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
         { cache: "no-store" },
       );
-      if (res.ok) {
-        setConversation((await res.json()) as ConversationResponse);
-      } else {
-        setConversation(null);
+      if (!res.ok) {
+        if (isNewest()) setConversation(null);
+        return;
       }
+      const payload = (await res.json()) as ConversationResponse;
+      if (isNewest()) setConversation(payload);
     } catch {
-      setConversation(null);
+      if (isNewest()) setConversation(null);
     }
   }, [session?.agent, sessionId, fromIndex]);
 
@@ -1983,19 +2005,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       const payload = await readResponsePayload(response);
       if (!response.ok) {
-        if (action === "complete" && isTodoOpenWorkPayload(payload)) {
-          const { sessions } = payload;
-          setTodoOverride({
-            body,
-            openCount: sessions.reduce((count, entry) => count + entry.openItemIds.length, 0),
-            heldCount: sessions.reduce((count, entry) => count + entry.heldItemIds.length, 0),
-          });
-          return false;
-        }
-        if (action === "complete" && isTodoLedgerEmptyPayload(payload)) {
-          setTodoOverride({ body, empty: true });
-          return false;
-        }
         if (
           (action === "complete" || action === "kill") &&
           isOpenPrActionRequiredPayload(payload)
@@ -2305,7 +2314,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           const conflict = await readSidecarPortConflict(response.clone());
           if (conflict) {
             setSidecarPortConflict(conflict);
-            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            // Never default onto a clearable:false candidate — it renders
+            // disabled in the dropdown, and submitting it is a silent
+            // repeat 409 (a port already claimed by a sibling portId in the
+            // same attempt never enters the clear path).
+            setSelectedClearPort(
+              conflict.candidates.find((candidate) => candidate.clearable !== false)?.port ?? null,
+            );
             return;
           }
         }
@@ -2313,10 +2328,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
         );
       }
-      const payload = (await response.json()) as SpurSessionView;
+      const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
+      if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        const { survivors, unverifiedPorts = [] } = payload.sidecarStop;
+        showErrorToast(
+          survivors.length === 0 && unverifiedPorts.length > 0
+            ? `Stopped sidecar ${sidecarName}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Run \`spur sidecar sweep\`.`
+            : `Stopped sidecar ${sidecarName}, but ${survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+        );
+      }
     } catch (sidecarError) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
@@ -2432,7 +2455,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [error, session, title]);
 
   const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
-
+  const openTitleEditor = useCallback(() => {
+    if (!session) return;
+    // Always prefill with the title currently shown in the <h1> — the
+    // derived/fallback string when the session has no stored title, not an
+    // empty input.
+    setTitleDraft(title);
+    setTitleEditing(true);
+  }, [session, title]);
+  const closeTitleEditor = useCallback(() => {
+    setTitleEditing(false);
+  }, []);
+  const sessionMenu = useAnchoredMenu({
+    open: sessionMenuOpen,
+    onClose: () => setSessionMenuOpen(false),
+    contentDeps: [],
+    preferredSide: "below",
+    align: "end",
+  });
+  const updateManualTitle = useCallback(
+    async (nextTitle: string | null) => {
+      if (!session || titleSaving) return;
+      setTitleSaving(true);
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: nextTitle }),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to update title"));
+        }
+        const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
+        applySessionUpdate(toDashboardSession(payload));
+        setTitleEditing(false);
+        setTitleDraft("");
+      } catch (titleError) {
+        showErrorToast(errorMessage(titleError, "Failed to update title"));
+      } finally {
+        setTitleSaving(false);
+      }
+    },
+    [session, sessionId, titleSaving, showErrorToast, applySessionUpdate],
+  );
+  const saveTitleDraft = useCallback(() => {
+    const trimmed = titleDraft.trim();
+    void updateManualTitle(trimmed.length > 0 ? trimmed : null);
+  }, [titleDraft, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2704,7 +2773,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [showErrorToast, showSuccessToast],
   );
 
-  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  // Same clearable:false skip as the 409 handler that sets selectedClearPort
+  // (readSidecarPortConflict's caller): if selectedClearPort is null (every
+  // candidate was clearable:false, so the handler set null), this fallback
+  // must not silently re-enable Clear/Retry onto a disabled option.
+  const conflictClearPort =
+    selectedClearPort ??
+    sidecarPortConflict?.candidates.find((candidate) => candidate.clearable !== false)?.port ??
+    null;
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
@@ -2739,6 +2815,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
+            {titleEditing ? (
+              <TitleEditDialog
+                draft={titleDraft}
+                saving={titleSaving}
+                onDraftChange={setTitleDraft}
+                onSave={saveTitleDraft}
+                onCancel={closeTitleEditor}
+              />
+            ) : null}
             {promptView &&
             (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
               <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
@@ -2862,33 +2947,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {session.branch}
                   </span>
                 ) : null}
-                {wakeSummary ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                    title={
-                      wakeSummary.kind === "interval"
-                        ? "Interval wake scheduled"
-                        : wakeSummary.kind === "daily"
-                          ? "Daily wake scheduled"
-                          : "Wake scheduled"
-                    }
-                  >
-                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                    <span>{wakeSummary.label.toLowerCase()}</span>
-                    <span className="font-mono text-[var(--color-text-primary)]">
-                      {wakeCountdown}
-                    </span>
-                    {wakeSummary.intervalMs ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        every {formatIntervalDuration(wakeSummary.intervalMs)}
-                      </span>
-                    ) : null}
-                    {wakeSummary.dailyAt ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        daily {wakeSummary.dailyAt.join(", ")}
-                      </span>
-                    ) : null}
-                  </span>
+                {session && getWakeSummary(session) ? (
+                  <WakeControls
+                    onRefresh={loadSession}
+                    onSessionUpdated={applySessionUpdate}
+                    session={session}
+                    showErrorToast={showErrorToast}
+                    showSuccessToast={showSuccessToast}
+                  />
                 ) : null}
                 {surfacedLinks.map((link) => (
                   <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
@@ -3052,6 +3118,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               Logs
             </button>
+            <div className="relative" ref={sessionMenu.containerRef}>
+              <button
+                aria-expanded={sessionMenuOpen}
+                aria-haspopup="menu"
+                aria-label="More session actions"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                onClick={() => setSessionMenuOpen((value) => !value)}
+                ref={sessionMenu.buttonRef}
+                type="button"
+              >
+                <KebabIcon />
+              </button>
+              {sessionMenuOpen ? (
+                <div
+                  aria-label="Session actions"
+                  className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  ref={sessionMenu.menuRef}
+                  role="menu"
+                  style={sessionMenu.menuStyle}
+                >
+                  <button
+                    className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                    onClick={() => {
+                      setSessionMenuOpen(false);
+                      openTitleEditor();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Change title
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {/* Content */}
@@ -3606,7 +3706,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
-                            {sc.alive && canAttach ? (
+                            {(sc.alive || sc.deadPane) && canAttach ? (
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
@@ -3716,6 +3816,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {recoverPayload ? (
             <RecoverActionDialog
               busy={busyAction !== null}
+              canForceKill={!isTerminalSession(session)}
               onCancel={() => setRecoverPayload(null)}
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
@@ -3738,20 +3839,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
-            />
-          ) : null}
-          {todoOverride ? (
-            <TodoOverrideDialog
-              {...("empty" in todoOverride
-                ? { empty: true }
-                : { openCount: todoOverride.openCount, heldCount: todoOverride.heldCount })}
-              busy={busyAction === "complete"}
-              onCancel={() => setTodoOverride(null)}
-              onSubmit={(reason) => {
-                const body = { ...(todoOverride.body ?? {}), todoOverrideReason: reason };
-                setTodoOverride(null);
-                void handleAction("complete", body);
-              }}
             />
           ) : null}
           {prCheckUnavailable ? (
@@ -3820,15 +3907,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }
                       value={conflictClearPort ?? ""}
                     >
-                      {sidecarPortConflict.candidates.map((candidate) => (
-                        <option
-                          key={`${candidate.portId}:${candidate.port}`}
-                          value={candidate.port}
-                        >
-                          {candidate.portId}:{candidate.port}
-                          {candidate.owner ? ` — ${candidate.owner}` : ""}
-                        </option>
-                      ))}
+                      {dedupeConflictCandidatesByPort(sidecarPortConflict.candidates).map(
+                        (candidate) => {
+                          const label = candidate.reservedBy
+                            ? `reserved by ${candidate.reservedBy}`
+                            : candidate.holder
+                              ? `pid ${candidate.holder.pid}${candidate.holder.cwd ? ` (${candidate.holder.cwd})` : ""}`
+                              : candidate.owner && candidate.owner !== "external"
+                                ? candidate.owner
+                                : "holder unknown";
+                          return (
+                            <option
+                              key={`${candidate.portId}:${candidate.port}`}
+                              disabled={candidate.clearable === false}
+                              value={candidate.port}
+                            >
+                              {candidate.portId}:{candidate.port} — {label}
+                            </option>
+                          );
+                        },
+                      )}
                     </select>
                   </label>
                   <div className="flex justify-end gap-2">

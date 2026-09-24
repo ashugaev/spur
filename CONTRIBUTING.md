@@ -18,6 +18,14 @@ Run from source without a global install: `node v2/dist/cli.js <cmd>` after `pnp
 
 For a throwaway verification daemon instead of pointing `--config` at an ad hoc path with prod-shaped `port`/`dataDir`, use `scripts/spur-isolated-daemon.sh`. `isolated-daemon` and `isolated-ui` project sidecars start an isolated Spur daemon and the web UI against it; new isolated worktrees inherit the current `spur.yaml`, agent instructions, and `.env` via the config overlay plus symlinks, and `isolated-ui` uses its own Next `distDir` so its cache stays isolated from normal `packages/web` runs. Session tool wrappers, including `spur-isolated`, are documented in [commands.md](docs/commands.md#session-tools-and-environment).
 
+First start of either sidecar in a fresh worktree pays a full cold `pnpm install --frozen-lockfile`: it replaces the worktree's symlinked `node_modules` trees with a real install.
+
+`packages/web` Playwright runs start Next themselves, in CI and locally alike, through the `webServer` block in `packages/web/playwright.config.ts`. It targets an isolated daemon URL, config, tmux socket, and UI port allocated by `packages/web/tests/harness/daemon-target.ts` — free loopback ports, nothing listening on the daemon one. `src/lib/spur-daemon.ts` carries no daemon-URL default: an `SPUR_DAEMON_URL` the harness failed to apply throws instead of resolving `127.0.0.1:4310`. Run needs `pnpm --dir packages/web build` first: `next start` serves the built app.
+
+Setting `PLAYWRIGHT_BASE_URL`, or running inside a Spur session with an `isolated-ui` sidecar, switches to the external-server path: that URL is used as is and no Next is started. Under `CI` only `PLAYWRIGHT_BASE_URL` switches it — a runner that carries `SPUR_SESSION` from a co-hosted Spur fleet still gets the harness.
+
+Specs import `test`, `expect`, and `devices` from `./fixtures.js`, never `playwright/test` — ESLint enforces it, type-only imports excepted. The extended `test` aborts and records any `/api` request no spec mocked, then fails the test at teardown; app-shell routes (`runtime/*`, `tags`, `todo`, `conversation`, ...) carry neutral defaults a spec can override.
+
 ## PR Checks
 
 Before opening or updating a PR:

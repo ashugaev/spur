@@ -1,4 +1,5 @@
-import type { Page } from "@playwright/test";
+import { test as base } from "playwright/test";
+import type { BrowserContext, Page } from "@playwright/test";
 import type {
   AvailableBacklogItem,
   ProjectInfo,
@@ -422,6 +423,105 @@ export async function mockTagCatalog(page: Page): Promise<void> {
     });
   });
 }
+
+export { expect, devices } from "playwright/test";
+export type { Browser, Locator, Page } from "playwright/test";
+
+/**
+ * Every spec imports `test` from here, so an /api request no spec mocked is
+ * aborted and reported instead of reaching whatever daemon the environment
+ * resolves to. Registered before the spec body runs, and Playwright checks the
+ * most recently registered route first, so a spec's own narrower `page.route`
+ * still wins. The throw lives after `use()` because a throw inside a route
+ * handler is swallowed.
+ */
+const NEUTRAL_PR_STATUS = {
+  state: null,
+  ciStatus: null,
+  canMerge: false,
+  totalThreads: 0,
+  unresolvedThreads: 0,
+};
+
+// Routes every page fetches on load, independent of what a spec exercises.
+// Registered after the catch-all (so they win over it) and before the spec body
+// (so a spec's own route wins over them).
+const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unknown }[] = [
+  { pattern: "**/api/runtime/info", body: { version: "0.0.0-test" } },
+  {
+    pattern: "**/api/runtime/versions",
+    body: { current: "0.0.0-test", autoUpdate: false, available: [] },
+  },
+  { pattern: "**/api/runtime/voice", body: { available: false } },
+  { pattern: "**/api/runtime/resources", body: { available: false, daemonAlive: true } },
+  { pattern: "**/api/tags", body: { tags: [] } },
+  { pattern: "**/api/github-status", body: DEFAULT_GITHUB_STATUS },
+  { pattern: "**/api/gitlab-status", body: DEFAULT_GITLAB_STATUS },
+  { pattern: /\/api\/pr-status\/batch$/, body: { results: {} } },
+  { pattern: /\/api\/pr-status\?/, body: NEUTRAL_PR_STATUS },
+  { pattern: /\/api\/models(\?.*)?$/, body: { models: [] } },
+  {
+    pattern: /\/api\/projects\/[^/]+\/spawn-defaults(\?.*)?$/,
+    body: { model: null, worktree: true },
+  },
+  {
+    pattern: /\/api\/projects\/[^/]+\/branches\/exists(\?.*)?$/,
+    body: { exists: false, remote: false, checkedOutAt: null },
+  },
+  {
+    pattern: /\/api\/sessions\/[^/]+\/todo$/,
+    body: {
+      revision: "event-0",
+      status: "empty",
+      counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+      items: [],
+    },
+  },
+  {
+    pattern: /\/api\/sessions\/[^/]+\/conversation(\?.*)?$/,
+    body: { entries: [], messages: [], durationMs: 0, state: "working" },
+  },
+  // Artifact bytes belong to the spec that fabricated the artifact row; a run
+  // that never mocked one gets the daemon's own answer for a file it does not
+  // have.
+  { pattern: /\/api\/sessions\/[^/]+\/artifacts\//, status: 404, body: { error: "Not found" } },
+];
+
+type ApiRouteTarget = Page | BrowserContext;
+
+async function installApiRouteGuards(target: ApiRouteTarget, seen: string[]): Promise<void> {
+  await target.route("**/api/**", async (route) => {
+    seen.push(route.request().url());
+    await route.abort("failed");
+  });
+  for (const { pattern, status, body } of APP_SHELL_ROUTES) {
+    await target.route(pattern, async (route) => {
+      await route.fulfill({
+        status: status ?? 200,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    });
+  }
+}
+
+export async function installApiRouteGuardsOnContext(context: BrowserContext): Promise<void> {
+  await installApiRouteGuards(context, []);
+}
+
+export const test = base.extend<{ unmockedApiRequests: string[] }>({
+  unmockedApiRequests: [
+    async ({ page }, use) => {
+      const seen: string[] = [];
+      await installApiRouteGuards(page, seen);
+      await use(seen);
+      if (seen.length > 0) {
+        throw new Error(`Unmocked /api request(s): ${seen.join(", ")}`);
+      }
+    },
+    { auto: true },
+  ],
+});
 
 /**
  * Navigate to the given path after setting up mocks and wait until the

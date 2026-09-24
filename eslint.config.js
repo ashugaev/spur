@@ -107,6 +107,33 @@ export default tseslint.config(
     },
   },
 
+  // Playwright specs take `test` from ./fixtures.js, whose extended test carries
+  // the catch-all that fails any unmocked /api request. Importing the bare
+  // `test` bypasses it. Type-only imports are fine; they carry no fixture.
+  {
+    files: ["packages/web/tests/**/*.ts"],
+    ignores: ["packages/web/tests/fixtures.ts"],
+    rules: {
+      "@typescript-eslint/no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "playwright/test",
+              message: "Import test/expect from ./fixtures.js",
+              allowTypeImports: true,
+            },
+            {
+              name: "@playwright/test",
+              message: "Import test/expect from ./fixtures.js",
+              allowTypeImports: true,
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Waiting states use animated feedback; static wait copy is inaccessible visual noise.
   {
     files: ["packages/web/src/**/*.tsx", "packages/web/src/**/*.ts"],

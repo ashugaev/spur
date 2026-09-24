@@ -3,7 +3,7 @@ import { EventBus } from "../../src/event-bus.js";
 import type { SpurEvent } from "../../src/event-sources/types.js";
 
 function makeEvent(name: string): SpurEvent {
-  return { name, projectId: "proj", sourceId: "src" };
+  return { name, occurrenceId: "occ-1", projectId: "proj", sourceId: "src" };
 }
 
 afterEach(() => {

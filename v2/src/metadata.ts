@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -11,6 +12,9 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
+  AUTOMATIC_REMINDER_MAX_ATTEMPTS,
+  DELIVERY_MAX_ATTEMPTS,
+  CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type ReviewProviderId,
@@ -194,6 +198,30 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
+  const accounting = value["retryAccounting"];
+  if (
+    accounting !== undefined &&
+    (!Array.isArray(accounting) ||
+      !accounting.every(
+        (entry: unknown) =>
+          isRecord(entry) &&
+          typeof entry["itemKey"] === "string" &&
+          typeof entry["fingerprint"] === "string" &&
+          /^[a-f0-9]{64}$/.test(entry["fingerprint"]) &&
+          typeof entry["deliveryAttempts"] === "number" &&
+          Number.isInteger(entry["deliveryAttempts"]) &&
+          entry["deliveryAttempts"] >= 0 &&
+          entry["deliveryAttempts"] <= DELIVERY_MAX_ATTEMPTS &&
+          typeof entry["ciAttempts"] === "number" &&
+          Number.isInteger(entry["ciAttempts"]) &&
+          entry["ciAttempts"] >= 0 &&
+          entry["ciAttempts"] <= CI_FAILED_MAX_ATTEMPTS &&
+          typeof entry["nextAttemptAt"] === "number" &&
+          Number.isFinite(entry["nextAttemptAt"]) &&
+          entry["nextAttemptAt"] >= 0,
+      ))
+  )
+    return false;
   return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
@@ -264,6 +292,17 @@ interface CachedSessionFile extends FileFingerprint {
 }
 
 const sessionFileCache = new Map<string, CachedSessionFile>();
+
+interface CachedSessionIndex extends FileFingerprint {
+  index: Readonly<Record<string, string>>;
+}
+
+// Keyed on sessionIndexFilePath(dataDir). The .index.json of a live fleet is
+// hundreds of KB and every readSession() parses it, so the parsed AND filtered
+// projection is cached together — a hit must rebuild nothing.
+const sessionIndexCache = new Map<string, CachedSessionIndex>();
+
+const EMPTY_INDEX: Readonly<Record<string, string>> = Object.freeze({});
 
 function statFingerprint(path: string): FileFingerprint | null {
   try {
@@ -360,25 +399,45 @@ function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
   return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
 }
 
-function readSessionIndex(dataDir: string): Record<string, string> {
+function readSessionIndex(dataDir: string): Readonly<Record<string, string>> {
   const path = sessionIndexFilePath(dataDir);
-  if (!existsSync(path)) {
-    return {};
+  // One stat replaces the existsSync + read pair: it both proves the file is
+  // there and carries the fingerprint the cache is keyed on.
+  const stat = statFingerprint(path);
+  if (!stat) {
+    sessionIndexCache.delete(path);
+    return EMPTY_INDEX;
+  }
+
+  const cached = sessionIndexCache.get(path);
+  if (cached && sameFingerprint(cached, stat)) {
+    return cached.index;
   }
 
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
     if (!isRecord(parsed)) {
-      return {};
+      sessionIndexCache.delete(path);
+      return EMPTY_INDEX;
     }
-    return Object.fromEntries(
+    const index = Object.fromEntries(
       Object.entries(parsed).filter(
         (entry): entry is [string, string] =>
           typeof entry[0] === "string" && typeof entry[1] === "string",
       ),
     );
+    sessionIndexCache.set(path, {
+      ino: stat.ino,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      index,
+    });
+    return index;
   } catch {
-    return {};
+    // A corrupt or torn file is never cached: it must be retried, and the
+    // caller must keep seeing an empty index until it parses again.
+    sessionIndexCache.delete(path);
+    return EMPTY_INDEX;
   }
 }
 
@@ -415,10 +474,29 @@ function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogIte
   }
 }
 
+// Sole writer of .index.json. Caches the object it wrote against the
+// fingerprint of the tmp inode that carries those bytes, so a foreign writer
+// landing on the destination afterwards reads as a mismatch, never as a hit.
+function writeSessionIndexFile(dataDir: string, index: Readonly<Record<string, string>>): void {
+  const path = sessionIndexFilePath(dataDir);
+  const fingerprint = writeJsonFile(path, index);
+  if (fingerprint) {
+    sessionIndexCache.set(path, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      index,
+    });
+  } else {
+    sessionIndexCache.delete(path);
+  }
+}
+
 function writeSessionIndexEntry(dataDir: string, sessionId: string, filePath: string): void {
   const index = readSessionIndex(dataDir);
-  index[sessionId] = relative(dataDir, filePath);
-  writeJsonFile(sessionIndexFilePath(dataDir), index);
+  // Copy, never mutate: the object may be the one every other reader is holding.
+  const next = { ...index, [sessionId]: relative(dataDir, filePath) };
+  writeSessionIndexFile(dataDir, next);
 }
 
 function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
@@ -427,7 +505,7 @@ function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
     return;
   }
   const { [sessionId]: _removed, ...nextIndex } = index;
-  writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+  writeSessionIndexFile(dataDir, nextIndex);
 }
 
 function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleRecord> {
@@ -552,11 +630,30 @@ function findSessionFilePath(dataDir: string, sessionId: string): string | null 
   return null;
 }
 
-function writeJsonFile(path: string, value: unknown): void {
+// Returns the fingerprint of the bytes just written, taken on the tmp path
+// BEFORE the rename. tmpPath sits in the destination's own directory, so the
+// rename is never a cross-device copy: ino, mtimeMs and size all survive it.
+// Fingerprinting the tmp inode instead of the destination is what keeps a
+// foreign writer from pinning our object to their fingerprint forever.
+function writeJsonFile(path: string, value: unknown): FileFingerprint | null {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", "utf-8");
+  const fingerprint = statFingerprint(tmpPath);
   renameSync(tmpPath, path);
+  return fingerprint;
+}
+
+function writePrivateJsonFile(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, path);
+  chmodSync(path, 0o600);
 }
 
 // Discriminates the current envelope (`{prNumber, signals}`) from the legacy
@@ -572,8 +669,16 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
     | ReviewSignal[]
     | undefined;
   const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
+  const mergeConflictClearId = envelope?.mergeConflictClearId;
+  if (
+    mergeConflictClearId !== undefined &&
+    (typeof mergeConflictClearId !== "string" || !/^[0-9a-f-]{36}$/.test(mergeConflictClearId))
+  ) {
+    throw new Error("Invalid merge-conflict clear identifier");
+  }
   return {
     prNumber,
+    ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
     signals: new Map(
       (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
     ),
@@ -711,6 +816,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
+  const workspaceId = workspaceIdOf(normalizedSession);
+  const closeoutOwner =
+    typeof normalizedSession.closeoutOwner === "boolean"
+      ? normalizedSession.closeoutOwner
+      : normalizedSession.restrictWrites !== true &&
+        normalizedSession.worktree === true &&
+        workspaceId === normalizedSession.id;
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
@@ -718,7 +830,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
     // stays written in exactly one place (session-desk.ts).
-    workspaceId: workspaceIdOf(normalizedSession),
+    workspaceId,
     agent: normalizedSession.agent,
     ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
     ...(normalizedSession.mode !== undefined ? { mode: normalizedSession.mode } : {}),
@@ -726,6 +838,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
       : {}),
+    closeoutOwner,
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
       : {}),
@@ -774,6 +887,20 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
+    ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
+    Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&
+    normalizedSession.serverErrorReactivationAttempts >= 0 &&
+    normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
+      : {}),
+    ...(normalizedSession.todoNudge &&
+    typeof normalizedSession.todoNudge.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(normalizedSession.todoNudge.fingerprint) &&
+    Number.isInteger(normalizedSession.todoNudge.attempts) &&
+    normalizedSession.todoNudge.attempts >= 0 &&
+    normalizedSession.todoNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { todoNudge: normalizedSession.todoNudge }
+      : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
@@ -890,7 +1017,7 @@ export function archiveSessions(
     const nextIndex = Object.fromEntries(
       Object.entries(index).filter(([id]) => !archivedIdSet.has(id)),
     );
-    writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+    writeSessionIndexFile(dataDir, nextIndex);
   }
 
   return { archivedIds, archiveDir };
@@ -1047,6 +1174,9 @@ export function writeReviewSourceSnapshot(
   writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
     prNumber: snapshot.prNumber,
     signals: [...snapshot.signals.values()],
+    ...(snapshot.mergeConflictClearId !== undefined
+      ? { mergeConflictClearId: snapshot.mergeConflictClearId }
+      : {}),
   });
 }
 
@@ -1327,7 +1457,7 @@ export function readPendingSendBatches(dataDir: string): Map<string, PersistedPe
 export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
@@ -1337,11 +1467,70 @@ export function recordPendingSendBatch(dataDir: string, record: PersistedPending
 export function deletePendingSendBatch(dataDir: string, queueKey: string): void {
   const records = readPendingSendBatches(dataDir);
   if (!records.delete(queueKey)) return;
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
   });
+}
+
+export function readPendingSendBatch(
+  dataDir: string,
+  workId: string,
+): PersistedPendingBatch | null {
+  return (
+    [...readPendingSendBatches(dataDir).values()].find((record) => record.workId === workId) ?? null
+  );
+}
+
+export function updatePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision: number; claimId?: string },
+  next: PersistedPendingBatch,
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    current.revision !== expected.revision ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  records.set(next.queueKey, next);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
+}
+
+// Deletes the record owning `workId`, never the record sitting at a queue key.
+// A stale controller that deleted by queue key would drop a newer generation's
+// work. `revision`/`claimId` narrow the delete further when the caller holds a
+// claim.
+export function deletePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision?: number; claimId?: string },
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    (expected.revision !== undefined && current.revision !== expected.revision) ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
 }
 
 export function readServiceSourceState(

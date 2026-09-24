@@ -24,6 +24,8 @@ export interface ParsedRecord {
   hasToolUse?: boolean;
   /** True when a tool_use payload is explicitly asking the human a question. */
   requestsUserInput?: boolean;
+  /** True when the record is Claude's synthetic "[Request interrupted by user…]" turn. */
+  interrupted?: boolean;
   /** True when the record is a synthetic `error: "rate_limit"` API error. */
   rateLimited?: boolean;
   /**
@@ -40,6 +42,7 @@ export interface ParsedRecord {
   messageId?: string;
   tokenUsage?: ClaudeMessageTokenUsage;
   timestampMs: number;
+  ownTimestampMs?: number;
 }
 
 export interface ClaudeJsonlReaderState {
@@ -65,6 +68,14 @@ export interface ClaudeConversationReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
+// Ceiling on a cold read's allocation. A reader with no prior offset would
+// otherwise `Buffer.alloc` the whole transcript and then copy it again into a
+// string — on this host the largest is 49.5 MB, and the state reader keeps
+// only TAIL_RECORD_LIMIT records out of it. Cold reads are not rare: every
+// daemon restart is one, and pruneSessionScopedState drops a reader whenever
+// its session leaves the live set, so a session that flips back to live pays
+// the full re-read again. Sized well above 50 records of ordinary transcript.
+const MAX_COLD_READ_BYTES = 1 << 20; // 1 MiB
 // Claude stamps locally-generated placeholder assistant records (API errors,
 // stop-sequence stubs) with this instead of a model id.
 const SYNTHETIC_MODEL = "<synthetic>";
@@ -104,6 +115,23 @@ export function hasTrailingClaudeServerError(records: readonly ParsedRecord[]): 
       continue;
     }
     return record.serverError === true;
+  }
+  return false;
+}
+
+export function hasClaudeRecoveryAfter(records: readonly ParsedRecord[], errorAt: string): boolean {
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index];
+    if (!record || CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) continue;
+    return (
+      record.role === "assistant" &&
+      (record.model !== undefined || record.hasToolUse === true) &&
+      !record.serverError &&
+      !record.rateLimited &&
+      !record.interrupted &&
+      record.ownTimestampMs !== undefined &&
+      record.ownTimestampMs > Date.parse(errorAt)
+    );
   }
   return false;
 }
@@ -157,6 +185,14 @@ export function classifyClaudeJsonlState(
     if (record.type === "user") {
       const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
       if (nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS) return "working";
+      // An interrupt ends the turn at an idle prompt: nothing is in flight and
+      // no tool call is stalled. Most interrupt records are a text block, which
+      // already lands on "waiting" below; this covers the tool_result-shaped
+      // one, which would otherwise read as "needs_input" (agent stalled) once
+      // the activity window passes and raise a false attention alert.
+      if (record.interrupted) {
+        return "waiting";
+      }
       return record.role === "tool_result" ? "needs_input" : "waiting";
     }
   }
@@ -229,6 +265,37 @@ function hasBlockType(blocks: unknown[], type: string): boolean {
   );
 }
 
+// The synthetic user turn Claude Code writes when the human interrupts. The
+// whole content is the marker and nothing else, so this matches exactly rather
+// than by prefix: a Bash tool_result whose stdout merely starts with the
+// marker is a genuine stalled tool call, and flagging it would suppress the
+// needs_input alert it should raise — the inverse of the case this fixes.
+const CLAUDE_INTERRUPT_TEXTS: ReadonlySet<string> = new Set([
+  "[request interrupted by user]",
+  "[request interrupted by user for tool use]",
+]);
+
+function blockInterruptText(block: unknown): string | undefined {
+  if (typeof block !== "object" || block === null) {
+    return undefined;
+  }
+  const record = block as Record<string, unknown>;
+  const value = record["type"] === "tool_result" ? record["content"] : record["text"];
+  return typeof value === "string" ? value : undefined;
+}
+
+function isInterruptText(text: string | undefined): boolean {
+  return CLAUDE_INTERRUPT_TEXTS.has((text ?? "").trim().toLowerCase());
+}
+
+function hasInterruptMarker(message: Record<string, unknown>, blocks: unknown[]): boolean {
+  const raw = message["content"];
+  if (typeof raw === "string") {
+    return isInterruptText(raw);
+  }
+  return blocks.some((block) => isInterruptText(blockInterruptText(block)));
+}
+
 /** Detect tool_use blocks and whether any explicitly asks the human a question. */
 function extractToolUseHints(blocks: unknown[]): {
   hasToolUse: boolean;
@@ -284,13 +351,17 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
   const message = unwrapMessage(parsed);
   const ownTimestampMs = extractRecordTimestampMs(parsed, message);
   const recordTimestampMs = ownTimestampMs ?? timestampMs;
+  const timestamps = {
+    timestampMs: recordTimestampMs,
+    ...(ownTimestampMs !== undefined ? { ownTimestampMs } : {}),
+  };
 
   if (type === "progress") {
-    return { type: "progress", timestampMs: recordTimestampMs };
+    return { type: "progress", ...timestamps };
   }
 
   if (CLAUDE_BOOKKEEPING_RECORD_TYPES.has(type)) {
-    return { type, timestampMs: recordTimestampMs };
+    return { type, ...timestamps };
   }
 
   const role = extractRole(parsed, message);
@@ -347,20 +418,22 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
             },
           }
         : {}),
-      timestampMs: recordTimestampMs,
+      ...timestamps,
     };
   }
 
   if (role === "user") {
+    const blocks = contentBlocks(message);
     return {
       type: "user",
-      role: hasBlockType(contentBlocks(message), "tool_result") ? "tool_result" : "user",
-      timestampMs: recordTimestampMs,
+      role: hasBlockType(blocks, "tool_result") ? "tool_result" : "user",
+      ...(hasInterruptMarker(message, blocks) ? { interrupted: true } : {}),
+      ...timestamps,
     };
   }
 
   if (type) {
-    return { type, timestampMs: recordTimestampMs };
+    return { type, ...timestamps };
   }
 
   return null;
@@ -491,8 +564,15 @@ export async function readClaudeJsonlState(
     };
   }
 
-  // Read only new bytes since last offset
-  const readOffset = Math.min(currentReader.lastOffset, fileStat.size);
+  // Incremental reads always consume the full delta from lastOffset. The
+  // cold-read ceiling applies only when unreadFrom is 0 — a reader with no
+  // prior offset would otherwise Buffer.alloc the whole transcript. The window
+  // may start mid-file; the partial line that opens it is handled below.
+  const unreadFrom = Math.min(currentReader.lastOffset, fileStat.size);
+  const readOffset =
+    unreadFrom === 0 && fileStat.size > MAX_COLD_READ_BYTES
+      ? fileStat.size - MAX_COLD_READ_BYTES
+      : unreadFrom;
   const nowMs = Date.now();
 
   const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
@@ -502,6 +582,9 @@ export async function readClaudeJsonlState(
   }
 
   const newRecords: ParsedRecord[] = [];
+  // A truncated window can open mid-record; that fragment is not valid JSON,
+  // so parseJsonlRecord drops it. Discarding the first line unconditionally
+  // would instead lose a whole record whenever the cut lands on a boundary.
   for (const line of chunk.consumedText.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;

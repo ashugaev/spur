@@ -1,4 +1,6 @@
+import { EventEmitter } from "node:events";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,13 +19,69 @@ const execFileMock: ((...args: unknown[]) => void) & {
 } = Object.assign(vi.fn(), {
   [promisify.custom]: execFileAsyncMock,
 });
+class FakeSpawnChild extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly stdinChunks: string[] = [];
+  readonly killedSignals: string[] = [];
+  pid: number | undefined = 1234;
+  private didClose = false;
+
+  constructor(
+    private readonly options: {
+      autoClose?: boolean;
+      code?: number | null;
+      signal?: NodeJS.Signals | null;
+      beforeClose?: () => void;
+    } = {},
+  ) {
+    super();
+    this.stdin.on("data", (chunk: Buffer) => {
+      this.stdinChunks.push(chunk.toString("utf8"));
+    });
+    this.stdin.on("finish", () => {
+      if (this.options.autoClose !== false) {
+        queueMicrotask(() => this.close());
+      }
+    });
+  }
+
+  kill(signal?: NodeJS.Signals | number): boolean {
+    this.killedSignals.push(String(signal));
+    return true;
+  }
+
+  close(): void {
+    if (this.didClose) {
+      this.emit("close", this.options.code ?? 0, this.options.signal ?? null);
+      return;
+    }
+    this.didClose = true;
+    this.options.beforeClose?.();
+    this.emit("close", this.options.code ?? 0, this.options.signal ?? null);
+  }
+}
+
+const spawnCalls: Array<{
+  file: string;
+  args: string[];
+  options: unknown;
+  child: FakeSpawnChild;
+}> = [];
+const spawnQueue: FakeSpawnChild[] = [];
+const spawnMock = vi.fn((file: string, args: string[], options: unknown) => {
+  const child = spawnQueue.shift() ?? new FakeSpawnChild();
+  spawnCalls.push({ file, args, options, child });
+  return child;
+});
 const sleepMock = vi.fn().mockResolvedValue(undefined);
 
-vi.mock("node:child_process", () => ({
+vi.doMock("node:child_process", () => ({
   execFile: execFileMock,
+  spawn: spawnMock,
 }));
 
-vi.mock("node:timers/promises", () => ({
+vi.doMock("node:timers/promises", () => ({
   setTimeout: sleepMock,
 }));
 
@@ -39,6 +97,9 @@ describe("runtime-tmux", () => {
 
   afterEach(() => {
     execFileAsyncMock.mockReset();
+    spawnMock.mockClear();
+    spawnCalls.length = 0;
+    spawnQueue.length = 0;
     sleepMock.mockReset().mockResolvedValue(undefined);
     if (originalSkipCodexSubmitAck === undefined) {
       delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
@@ -70,6 +131,55 @@ describe("runtime-tmux", () => {
     const { killTmuxSessionTree } = await import("../../src/runtime-tmux.js");
 
     await expect(killTmuxSessionTree("api-1--dev")).resolves.toBe(false);
+  });
+
+  // AC1: every fork issued through the file-local tmux() chokepoint carries
+  // the timeout option — capture-pane and send-keys cover the swallowed-error
+  // path and the propagating path respectively.
+  it("AC1: forks capture-pane with a 5s timeout", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "pane text", stderr: "" });
+
+    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+
+    await captureTmuxPane("api-1");
+
+    const call = execFileAsyncMock.mock.calls.find(
+      ([file, args]) => file === "tmux" && args[0] === "capture-pane",
+    );
+    expect(call?.[2]).toEqual({ timeout: 5_000 });
+  });
+
+  it("AC1: forks send-keys with a 5s timeout", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up");
+
+    for (const [file, args, options] of execFileAsyncMock.mock.calls) {
+      if (file === "tmux" && args[0] === "send-keys") {
+        expect(options).toEqual({ timeout: 5_000 });
+      }
+    }
+  });
+
+  // AC2: a capture-pane killed by its own timeout must never surface as a
+  // thrown error out of captureTmuxPane — the sweep continues to the next
+  // session on null ("could not look"), kept distinct from "" so no caller
+  // reads a failed fork as an observation of a blank pane.
+  it("AC2: captureTmuxPane resolves null when capture-pane is killed by its own timeout", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { captureTmuxPane, captureTmuxPaneOrEmpty } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-1")).resolves.toBeNull();
+    // Display-only callers keep the old collapsed value.
+    await expect(captureTmuxPaneOrEmpty("api-2")).resolves.toBe("");
   });
 
   it("starts tmux sessions with the Spur-specific config", async () => {
@@ -296,6 +406,252 @@ describe("runtime-tmux", () => {
     const { readFileSync } = await import("node:fs");
     const config = readFileSync(expectedConfigPath, "utf-8");
     expect(config).toMatch(/^set -g status off$/m);
+  });
+
+  it("sends sensitive single-line payloads through tmux load-buffer stdin only", async () => {
+    const sentinel = "ap1_secret_handle";
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" });
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.file).toBe("tmux");
+    expect(spawnCalls[0]?.args.slice(0, 2)).toEqual(["load-buffer", "-b"]);
+    expect(spawnCalls[0]?.args.at(-1)).toBe("-");
+    expect(spawnCalls[0]?.args).not.toContain(sentinel);
+    expect(JSON.stringify(spawnCalls[0]?.options)).not.toContain(sentinel);
+    expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+    for (const [, args] of execFileAsyncMock.mock.calls) {
+      expect(args).not.toContain(sentinel);
+    }
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-d");
+    expect(pasteCall?.[1]).not.toContain("-p");
+    expect(execFileAsyncMock.mock.calls.at(-1)?.[1]).toContain("Enter");
+  });
+
+  it("keeps sensitive multiline and long payloads out of send-keys, argv, and temp files", async () => {
+    const { readdirSync } = await import("node:fs");
+    const originalTmpdir = process.env["TMPDIR"];
+    const parent = await createTempDir("spur-sensitive-tmux-test-");
+    process.env["TMPDIR"] = parent;
+    const sentinel = `ap1_secret_handle\n${"x".repeat(250)}`;
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    try {
+      const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+      await sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" });
+
+      expect(spawnCalls).toHaveLength(1);
+      expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+      expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
+      expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("load-buffer"))).toBe(
+        false,
+      );
+      expect(readdirSync(parent)).toEqual([]);
+    } finally {
+      if (originalTmpdir === undefined) {
+        delete process.env["TMPDIR"];
+      } else {
+        process.env["TMPDIR"] = originalTmpdir;
+      }
+    }
+  });
+
+  it.each([
+    { agent: "codex" as const, bracketed: true, waits: false },
+    { agent: "opencode" as const, bracketed: true, waits: false },
+    { agent: "claude" as const, bracketed: false, waits: true },
+    { agent: "cursor" as const, bracketed: false, waits: true },
+  ])("uses the sensitive send mode for $agent", async ({ agent, bracketed, waits }) => {
+    const sentinel = `ap1_${agent}_secret`;
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendSensitiveMessageToTmux("api-1", sentinel, { agent });
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+    expect(spawnCalls[0]?.args).not.toContain(sentinel);
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1].includes("-p")).toBe(bracketed);
+    if (waits) {
+      expect(sleepMock).toHaveBeenCalledWith(300);
+    } else {
+      expect(sleepMock).not.toHaveBeenCalledWith(300);
+    }
+  });
+
+  it("scrubs and deletes the named buffer after a sensitive paste failure", async () => {
+    const sentinel = "ap1_paste_failure_secret";
+    const buffers = new Set<string>();
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "paste-buffer") {
+        throw Object.assign(new Error("paste failed " + sentinel), { code: "PASTE_FAILED" });
+      }
+      if (args[0] === "delete-buffer") {
+        buffers.delete(String(args.at(-1)));
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "list-buffers") {
+        return { stdout: [...buffers].join("\n"), stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    spawnQueue.push(
+      new FakeSpawnChild({
+        beforeClose: () => {
+          const bufferName = spawnCalls[0]?.args[2];
+          if (bufferName) buffers.add(bufferName);
+        },
+      }),
+      new FakeSpawnChild({
+        beforeClose: () => {
+          const bufferName = spawnCalls[1]?.args[2];
+          if (bufferName) buffers.add(bufferName);
+        },
+      }),
+    );
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" }),
+    ).rejects.toMatchObject({
+      name: "SensitiveTmuxTransportError",
+      code: "PASTE_FAILED",
+      operation: "paste-buffer",
+    });
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls[0]?.child.stdinChunks.join("")).toBe(sentinel);
+    expect(spawnCalls[1]?.child.stdinChunks.join("")).toBe("");
+    expect(JSON.stringify(execFileAsyncMock.mock.calls)).not.toContain(sentinel);
+    expect(JSON.stringify(spawnCalls.map(({ args }) => args))).not.toContain(sentinel);
+    expect(buffers.size).toBe(0);
+  });
+
+  it("does not treat a vanished target session as server-wide buffer absence", async () => {
+    const buffers = new Set<string>();
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "paste-buffer") {
+        throw Object.assign(new Error("paste failed"), { code: "PASTE_FAILED" });
+      }
+      if (args[0] === "delete-buffer") {
+        throw Object.assign(new Error("delete failed"), { code: "DELETE_FAILED" });
+      }
+      if (args[0] === "list-buffers") {
+        throw new Error("buffer listing failed");
+      }
+      return { stdout: "", stderr: "" };
+    });
+    for (let index = 0; index < 4; index += 1) {
+      spawnQueue.push(
+        new FakeSpawnChild({
+          beforeClose: () => {
+            const bufferName = spawnCalls[0]?.args[2];
+            if (bufferName) buffers.add(bufferName);
+          },
+        }),
+      );
+    }
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      sendSensitiveMessageToTmux("vanished-target", "secret", { agent: "claude" }),
+    ).rejects.toMatchObject({
+      name: "SensitiveTmuxCleanupError",
+      cleanupCode: "DELETE_FAILED",
+    });
+    expect(buffers.size).toBe(1);
+    expect(
+      execFileAsyncMock.mock.calls.filter(([, args]) => args[0] === "list-buffers"),
+    ).toHaveLength(3);
+  });
+
+  it("waits for sensitive load close before cleanup and escalates TERM then KILL", async () => {
+    const sentinel = "ap1_withheld_close_secret";
+    const buffers = new Set<string>();
+    const waits: Array<() => void> = [];
+    sleepMock.mockImplementation(() => new Promise<void>((resolve) => waits.push(resolve)));
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "delete-buffer") {
+        buffers.delete(String(args.at(-1)));
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "list-buffers") {
+        return { stdout: [...buffers].join("\n"), stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const originalLoad = new FakeSpawnChild({
+      autoClose: false,
+      beforeClose: () => {
+        const bufferName = spawnCalls[0]?.args[2];
+        if (bufferName) buffers.add(bufferName);
+      },
+    });
+    spawnQueue.push(originalLoad);
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    let settled = false;
+    const sent = sendSensitiveMessageToTmux("api-1", sentinel, { agent: "claude" }).finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(spawnCalls).toHaveLength(1));
+    originalLoad.stdin.emit(
+      "error",
+      Object.assign(new Error("boom " + sentinel), { code: "EPIPE" }),
+    );
+    await Promise.resolve();
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "paste-buffer")).toBe(false);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "delete-buffer")).toBe(
+      false,
+    );
+    waits.shift()?.();
+    await vi.waitFor(() => expect(originalLoad.killedSignals).toEqual(["SIGTERM"]));
+    expect(originalLoad.killedSignals).toEqual(["SIGTERM"]);
+    waits.shift()?.();
+    await vi.waitFor(() => expect(originalLoad.killedSignals).toEqual(["SIGTERM", "SIGKILL"]));
+    expect(originalLoad.killedSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "paste-buffer")).toBe(false);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "delete-buffer")).toBe(
+      false,
+    );
+    expect(settled).toBe(false);
+    originalLoad.close();
+    await expect(sent).rejects.toMatchObject({
+      name: "SensitiveTmuxTransportError",
+      code: "EPIPE",
+      operation: "load-buffer",
+    });
+    expect(spawnCalls[1]?.child.stdinChunks.join("")).toBe("");
+    expect(buffers.size).toBe(0);
+    originalLoad.emit("error", new Error("late " + sentinel));
+    originalLoad.close();
+    expect(spawnCalls).toHaveLength(2);
+  });
+
+  it("waits for sensitive load close before paste on success", async () => {
+    const sentinel = "ap1_success_wait_secret";
+    const originalLoad = new FakeSpawnChild({ autoClose: false });
+    spawnQueue.push(originalLoad);
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendSensitiveMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    const sent = sendSensitiveMessageToTmux("api-1", sentinel, { agent: "codex" });
+    await vi.waitFor(() => expect(spawnCalls).toHaveLength(1));
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "paste-buffer")).toBe(false);
+    originalLoad.close();
+    await expect(sent).resolves.toBeUndefined();
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-p");
+    expect(execFileAsyncMock.mock.calls.at(-1)?.[1]).toContain("Enter");
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {
@@ -769,7 +1125,7 @@ describe("runtime-tmux", () => {
         return { stdout: "api-1 1 1 0 1234 /dev/pts/0", stderr: "" };
       }
       if (file === "ps") {
-        return { stdout: "1234 pts/0 node agent", stderr: "" };
+        return { stdout: "1234 1 1234 1234 pts/0 512 agent", stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
@@ -794,9 +1150,9 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 pts/8 4200 -zsh",
-            "2301303 pts/8 512000 /home/vershinin/.local/bin/codex --enable hooks --model gpt-5.6-sol",
-            "2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 512000 /home/vershinin/.local/bin/codex --enable hooks --model gpt-5.6-sol",
+            "2302772 2300788 2301303 2301303 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
           ].join("\n"),
           stderr: "",
         };
@@ -839,8 +1195,13 @@ describe("runtime-tmux", () => {
       if (file === "ps") {
         return {
           stdout: [
-            "2300788 pts/8 4200 -zsh",
-            "2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
+            // codex exited, so the tty's foreground job reverted to the pane
+            // shell itself: tpgid == the shell's own pgid.
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            // Reparented to init (ppid 1) with its own leftover pgid, neither
+            // of which is the pane shell's foreground pgid — the pane-child
+            // fallback's fgPgid check must not resurrect it either.
+            "2302772 1 2302772 2302772 pts/8 128000 /home/vershinin/.local/share/codex/versions/0.147.0/codex-code-mode-host",
           ].join("\n"),
           stderr: "",
         };
@@ -851,5 +1212,261 @@ describe("runtime-tmux", () => {
     const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("reads a wrapper-exec'd codex as alive through the pane-child fallback (issue #806)", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The wrapper-exec'd codex is the tty's foreground job: the
+            // shell's own tpgid is the codex process's pgid, not the shell's.
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 512000 /opt/codex-0.147.0 --model x",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    // Name matchers alone miss the wrapper-exec'd binary.
+    expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(true);
+  });
+
+  it("reads a wrapper-exec'd claude version binary as alive through the pane-child fallback", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 512000 /home/u/.claude/versions/2.1.251 --resume",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("intelas-c007", ["claude"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["claude"], { paneChildFallback: true }),
+    ).toBe(true);
+  });
+
+  it("keeps the pane-child fallback dead when the pane holds no child process", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout: "2300788 1 2300788 2300788 pts/8 4200 -zsh", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("never counts one pane pid as another pane's child", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return {
+          stdout: [
+            "intelas-c007 1 1 0 2300788 /dev/pts/8",
+            "intelas-c007 0 0 0 2300900 /dev/pts/9",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      if (file === "ps") {
+        // 2300900's ppid IS a pane pid (2300788), but 2300900 is ITSELF also
+        // a pane pid, so it must not be counted as a pane-shell child.
+        return {
+          stdout: [
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            "2300900 2300788 2300900 2300900 pts/9 4200 -zsh",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("never counts a foreign-tty row whose ppid happens to match a pane pid", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        // 9999's ppid IS a pane pid (2300788), but it sits on pts/99, a tty
+        // this session's pane snapshot never reported — a different
+        // session's pane, or a stale/reused pid — so it must not count as
+        // this session's pane-shell child even though the ppid matches.
+        return {
+          stdout: [
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            "9999 2300788 2300788 2300788 pts/99 128000 rogue-child",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("reads DEAD when a persistent shell helper outlives the agent (issue #857 P1 repro)", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The agent exited; the tty's foreground job reverted to the
+            // pane shell itself.
+            "100 1 100 100 pts/1 4200 -zsh",
+            // A persistent shell helper (gitstatusd, a `sleep 300 &` job)
+            // started before the agent exited and was never reaped: same
+            // tty, direct child of the pane shell, but NOT the tty's
+            // foreground process group. The old "any direct child" rule read
+            // this ALIVE forever; the fgPgid rule must read it DEAD.
+            "101 100 101 100 pts/1 2048 gitstatusd",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("fails CLOSED when the pane pid's own ps row is unreadable, so a helper-only pane is not read alive", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The pane pid's own row is absent from this ps snapshot, so
+            // fgPgid is unresolvable for this tty: this row never reaches
+            // `panePids.has(row.pid)` in the fgPgidByTty pass.
+            "101 100 101 100 pts/1 2048 codex-wrapper-child",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
+  });
+
+  it("fails closed on ONE tty's unresolvable foreground group without blinding a different tty's live agent in the same session", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return {
+          stdout: ["s 1 1 0 100 /dev/pts/1", "s 0 0 0 200 /dev/pts/2"].join("\n"),
+          stderr: "",
+        };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // pane A (pts/1): the pane pid's own row is absent from this ps
+            // snapshot, so fgPgid is unresolvable for pts/1 — a helper child
+            // alone must not read alive here.
+            "101 100 101 100 pts/1 2048 codex-wrapper-child",
+            // pane B (pts/2): the pane pid's own row is intact and the
+            // wrapper-exec'd agent IS pts/2's foreground job.
+            "200 1 200 201 pts/2 4200 -zsh",
+            "201 200 201 201 pts/2 512000 /opt/codex-0.147.0 --model x",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("s", ["codex"], { paneChildFallback: true })).toBe(true);
+  });
+
+  it("fails closed on a -1 (no-controlling-terminal) foreground group instead of matching it against an unparseable -1 pgid", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The pane pid's own row parses fine but its tpgid is the
+            // literal no-controlling-terminal marker (-1), not merely
+            // absent.
+            "100 1 100 -1 pts/1 4200 -zsh",
+            // This child's pgid column is unparseable; getPsSnapshot
+            // normalizes it to -1 too. Without the `fgPgid <= 0` guard,
+            // -1 === -1 would read this row alive.
+            "101 100 abc 100 pts/1 2048 codex-wrapper-child",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    // Pass 1 must miss this row too, or the test would prove nothing about
+    // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher
+    // (no `/` or whitespace boundary after "codex").
+    expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
+    expect(
+      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).toBe(false);
   });
 });
