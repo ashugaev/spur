@@ -626,6 +626,19 @@ describe("staleSidecars", () => {
 });
 
 describe("tokenUsage", () => {
+  const base = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    launchCommand: "claude",
+    status: "stopped" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
   it("survives the session metadata whitelist", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, {
@@ -646,12 +659,95 @@ describe("tokenUsage", () => {
         inputTokens: 80,
         outputTokens: 20,
         totalTokens: 100,
-        sources: {
-          "rollout.jsonl": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+        generations: {
+          "codex:thread": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
         },
       },
     });
     expect(readSession(dataDir, "api-1")?.tokenUsage?.totalTokens).toBe(100);
+  });
+
+  it("migrates valid legacy baselines and rejects aggregate overflow", async () => {
+    const dataDir = await newDataDir();
+    const record = {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      tokenUsage: {
+        provider: "claude",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        sources: {
+          first: { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+        },
+      },
+    } as unknown as SessionRecord;
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, "api-1")?.tokenUsage?.generations).toEqual({
+      first: { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+      "legacy:claude": { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+    });
+
+    writeSession(dataDir, {
+      ...record,
+      tokenUsage: {
+        provider: "claude",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        sources: {
+          first: { inputTokens: 60, outputTokens: 20, totalTokens: 80 },
+          second: { inputTokens: 60, outputTokens: 20, totalTokens: 80 },
+        },
+      },
+    } as unknown as SessionRecord);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+  });
+
+  it("preserves complete optional components and rejects subset violations", async () => {
+    const dataDir = await newDataDir();
+    const record = {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      tokenUsage: {
+        provider: "opencode",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        cacheReadInputTokens: 30,
+        cacheWriteInputTokens: 10,
+        reasoningOutputTokens: 5,
+        generations: {
+          generation: {
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            cacheReadInputTokens: 30,
+            cacheWriteInputTokens: 10,
+            reasoningOutputTokens: 5,
+          },
+        },
+      },
+    } as unknown as SessionRecord;
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, "api-1")?.tokenUsage?.reasoningOutputTokens).toBe(5);
+
+    writeSession(dataDir, {
+      ...record,
+      tokenUsage: {
+        ...record.tokenUsage,
+        cacheReadInputTokens: 81,
+        generations: {
+          generation: {
+            ...record.tokenUsage?.generations.generation,
+            cacheReadInputTokens: 81,
+          },
+        },
+      },
+    } as unknown as SessionRecord);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
   });
 
   it.each([

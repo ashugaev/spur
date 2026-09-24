@@ -353,6 +353,7 @@ describe("server-error recovery evidence", () => {
     const record = parseJsonlRecord(
       JSON.stringify({
         type: "assistant",
+        sessionId: "session-1",
         timestamp,
         message: {
           role: "assistant",
@@ -461,10 +462,34 @@ describe("parseJsonlRecord server_error detection", () => {
 });
 
 describe("parseJsonlRecord token usage", () => {
+  it("extracts every structured component from a sanitized real-format fixture", async () => {
+    const filePath = join(__dirname, "../fixtures/agent-history/claude/token-components.jsonl");
+    const result = await readClaudeJsonlState("/unused", {
+      filePath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    });
+
+    expect(result?.tokenUsage).toEqual({
+      provider: "claude",
+      generationId: "claude:session-sanitized:msg-first",
+      inputTokens: 69,
+      outputTokens: 50,
+      totalTokens: 119,
+      cacheReadInputTokens: 34,
+      cacheWriteInputTokens: 23,
+      reasoningOutputTokens: 16,
+      cacheWrite5mInputTokens: 5,
+      cacheWrite1hInputTokens: 18,
+    });
+  });
+
   it("counts cache input and exposes a message id for deduplication", () => {
     const record = parseJsonlRecord(
       JSON.stringify({
         type: "assistant",
+        sessionId: "session-1",
         message: {
           id: "msg-1",
           role: "assistant",
@@ -495,6 +520,7 @@ describe("parseJsonlRecord token usage", () => {
     const record = (usage: Record<string, number>) =>
       JSON.stringify({
         type: "assistant",
+        sessionId: "session-1",
         message: { id: "msg-1", role: "assistant", usage },
       });
     try {
@@ -787,18 +813,16 @@ describe("parseConversationBatch", () => {
     }
   });
 
-  it("caps a cold read to the transcript tail instead of allocating the whole file", async () => {
+  it("scans a cold transcript in bounded chunks", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "cold-read-cap-"));
     const tempFile = join(tempDir, "huge.jsonl");
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
 
     try {
-      // Layout: many small head records, then one record larger than the
-      // cold-read ceiling, then three tail records. The ceiling puts the
-      // window inside the oversized record, so only the three tail records
-      // can be reached. Without the cap the read reaches the head and the
-      // retained tail fills to TAIL_RECORD_LIMIT instead.
+      // Layout crosses the read chunk boundary inside one oversized record.
+      // The scanner must retain that partial record without allocating the
+      // whole transcript as one buffer.
       const headRecord = JSON.stringify({
         type: "user",
         timestamp: "2026-05-04T00:00:00.000Z",
@@ -834,9 +858,7 @@ describe("parseConversationBatch", () => {
 
       expect(result).not.toBeNull();
       if (!result) throw new Error("expected a result");
-      // Only the records after the oversized one are reachable through the
-      // capped window; the head is never allocated.
-      expect(result.reader.tailRecords).toHaveLength(3);
+      expect(result.reader.tailRecords).toHaveLength(50);
       expect(result.liveModel).toBe("claude-tail");
       // The reader still ends aligned with the file, so the next incremental
       // read continues from the right place.

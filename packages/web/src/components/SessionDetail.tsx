@@ -148,16 +148,39 @@ function displayLinkLabel(label: string, url: string): string {
   return label;
 }
 
-function tokenUsageLabel(session: Pick<SpurSessionView, "tokenUsageView">): string {
+function tokenUsageRows(session: Pick<SpurSessionView, "tokenUsageView">): Array<[string, string]> {
   const usage = session.tokenUsageView;
-  if (!usage) return "Waiting for usage";
+  if (!usage) return [["Tokens", "Waiting for usage"]];
   if (usage.status === "unavailable") {
-    return usage.unenforced ? "Unavailable · budget unenforced" : "Unavailable";
+    return [
+      [
+        "Tokens",
+        usage.unenforced
+          ? "Token usage unavailable · budget unenforced"
+          : "Token usage unavailable",
+      ],
+    ];
   }
-  if (usage.status === "waiting") return "Waiting for usage";
+  if (usage.status === "waiting") return [["Tokens", "Waiting for usage"]];
   const used = usage.totalTokens.toLocaleString();
   const value = usage.budget === undefined ? used : `${used} / ${usage.budget.toLocaleString()}`;
-  return usage.exhausted ? `${value} · limit hit` : value;
+  const component = (tokens: number | undefined): string =>
+    tokens === undefined ? "Not reported" : tokens.toLocaleString();
+  const rows: Array<[string, string]> = [
+    ["Tokens", usage.exhausted ? `${value} · limit hit` : value],
+    ["Input", usage.inputTokens.toLocaleString()],
+    ["Output", usage.outputTokens.toLocaleString()],
+    ["Cache read", component(usage.cacheReadInputTokens)],
+    ["Cache write", component(usage.cacheWriteInputTokens)],
+    ["Reasoning", component(usage.reasoningOutputTokens)],
+  ];
+  if (usage.provider === "claude") {
+    rows.push(
+      ["Cache write 5m", component(usage.cacheWrite5mInputTokens)],
+      ["Cache write 1h", component(usage.cacheWrite1hInputTokens)],
+    );
+  }
+  return rows;
 }
 
 // Two failing portIds can share an overlapping declared range and both name
@@ -3560,7 +3583,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
-                  ["Tokens", tokenUsageLabel(session)],
+                  ...tokenUsageRows(session),
                   ...(wakeSummary && wakeCountdown
                     ? ([
                         ["Wake", wakeSummary.label],

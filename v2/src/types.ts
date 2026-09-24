@@ -716,17 +716,39 @@ export interface TokenUsageTotals {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+  cacheWrite5mInputTokens?: number;
+  cacheWrite1hInputTokens?: number;
 }
 
 export interface SessionTokenUsageRecord extends TokenUsageTotals {
-  provider: "claude" | "codex";
-  sources: Record<string, TokenUsageTotals>;
+  provider: "claude" | "codex" | "opencode";
+  generations: Record<string, TokenUsageTotals>;
 }
 
 export type SessionTokenUsageView =
-  | ({ status: "available"; budget?: number; exhausted: boolean } & TokenUsageTotals)
-  | { status: "waiting"; budget?: number; exhausted: false }
-  | { status: "unavailable"; budget?: number; exhausted: false; unenforced: boolean };
+  | ({
+      status: "available";
+      provider: "claude" | "codex" | "opencode";
+      budget?: number;
+      exhausted: boolean;
+    } & TokenUsageTotals)
+  | {
+      status: "waiting";
+      provider: "claude" | "codex" | "opencode";
+      budget?: number;
+      exhausted: false;
+    }
+  | {
+      status: "unavailable";
+      provider: "cursor";
+      budget?: number;
+      exhausted: false;
+      unenforced: boolean;
+      reason: "structured_usage_unavailable";
+    };
 
 export type ProviderReasoningEffort = "low" | "medium" | "high";
 export type AgentReasoningEffortConfig = Partial<
@@ -1175,6 +1197,7 @@ export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmitt
   hasServiceIssues?: boolean;
   runningSidecarNames?: string[];
   deskGroupMembers?: SessionDeskMember[];
+  tokenUsageView?: SessionTokenUsageView;
 }
 
 export type SidecarStopReport =

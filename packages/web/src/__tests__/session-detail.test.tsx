@@ -5784,9 +5784,15 @@ describe("SessionDetail token usage", () => {
     stubFetch({
       tokenUsageView: {
         status: "available",
+        provider: "claude",
         inputTokens: 1000,
         outputTokens: 234,
         totalTokens: 1234,
+        cacheReadInputTokens: 300,
+        cacheWriteInputTokens: 200,
+        reasoningOutputTokens: 34,
+        cacheWrite5mInputTokens: 50,
+        cacheWrite1hInputTokens: 150,
         budget: 2000,
         exhausted: false,
       },
@@ -5796,6 +5802,10 @@ describe("SessionDetail token usage", () => {
 
     expect(await screen.findByText("Tokens")).toBeInTheDocument();
     expect(screen.getByText("1,234 / 2,000")).toBeInTheDocument();
+    expect(screen.getByText("Cache read")).toBeInTheDocument();
+    expect(screen.getByText("300")).toBeInTheDocument();
+    expect(screen.getByText("Cache write 5m")).toBeInTheDocument();
+    expect(screen.getByText("50")).toBeInTheDocument();
   });
 
   it("marks unsupported live sessions as unenforced", async () => {
@@ -5803,6 +5813,9 @@ describe("SessionDetail token usage", () => {
       agent: "cursor",
       tokenUsageView: {
         status: "unavailable",
+        provider: "cursor",
+        reason: "structured_usage_unavailable",
+        exhausted: false,
         unenforced: true,
       },
     });
@@ -5810,18 +5823,29 @@ describe("SessionDetail token usage", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     expect(await screen.findByText("Tokens")).toBeInTheDocument();
-    expect(screen.getByText("Unavailable · budget unenforced")).toBeInTheDocument();
+    expect(screen.getByText("Token usage unavailable · budget unenforced")).toBeInTheDocument();
   });
 
   it.each([
-    [{ status: "waiting", budget: 2000, exhausted: false } as const, "Waiting for usage"],
     [
-      { status: "unavailable", budget: 2000, exhausted: false, unenforced: false } as const,
-      "Unavailable",
+      { status: "waiting", provider: "codex", budget: 2000, exhausted: false } as const,
+      "Waiting for usage",
+    ],
+    [
+      {
+        status: "unavailable",
+        provider: "cursor",
+        reason: "structured_usage_unavailable",
+        budget: 2000,
+        exhausted: false,
+        unenforced: false,
+      } as const,
+      "Token usage unavailable",
     ],
     [
       {
         status: "available",
+        provider: "opencode",
         inputTokens: 1000,
         outputTokens: 234,
         totalTokens: 1234,
@@ -5845,6 +5869,7 @@ describe("SessionDetail token usage", () => {
       stopReason: "token_budget",
       tokenUsageView: {
         status: "available",
+        provider: "codex",
         inputTokens: 1700,
         outputTokens: 300,
         totalTokens: 2000,

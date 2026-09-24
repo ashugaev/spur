@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
 
 describe("reconcileTokenUsage", () => {
-  it("does not decrease a repeated source sample", () => {
+  it("does not decrease a repeated generation sample", () => {
     const first = reconcileTokenUsage(undefined, {
       provider: "codex",
-      sourceId: "one",
+      generationId: "one",
       inputTokens: 80,
       outputTokens: 20,
       totalTokens: 100,
@@ -13,18 +13,18 @@ describe("reconcileTokenUsage", () => {
     expect(
       reconcileTokenUsage(first, {
         provider: "codex",
-        sourceId: "one",
+        generationId: "one",
         inputTokens: 70,
         outputTokens: 10,
         totalTokens: 80,
-      }).totalTokens,
-    ).toBe(180);
+      }),
+    ).toEqual(first);
   });
 
-  it("adds a new native source to the Spur-session lifetime", () => {
+  it("adds a new native generation to the Spur-session lifetime", () => {
     const first = reconcileTokenUsage(undefined, {
       provider: "claude",
-      sourceId: "one",
+      generationId: "one",
       inputTokens: 80,
       outputTokens: 20,
       totalTokens: 100,
@@ -32,7 +32,7 @@ describe("reconcileTokenUsage", () => {
     expect(
       reconcileTokenUsage(first, {
         provider: "claude",
-        sourceId: "two",
+        generationId: "two",
         inputTokens: 30,
         outputTokens: 10,
         totalTokens: 40,
@@ -40,40 +40,61 @@ describe("reconcileTokenUsage", () => {
     ).toBe(140);
   });
 
-  it("retains each source baseline when observations alternate", () => {
-    const sourceA = reconcileTokenUsage(undefined, {
+  it("retains generation baselines when observations alternate", () => {
+    const generationA = reconcileTokenUsage(undefined, {
       provider: "codex",
-      sourceId: "a",
+      generationId: "a",
       inputTokens: 80,
       outputTokens: 20,
       totalTokens: 100,
     });
-    const sourceB = reconcileTokenUsage(sourceA, {
+    const generationB = reconcileTokenUsage(generationA, {
       provider: "codex",
-      sourceId: "b",
+      generationId: "b",
       inputTokens: 30,
       outputTokens: 10,
       totalTokens: 40,
     });
-    const sourceAAgain = reconcileTokenUsage(sourceB, {
+    const generationAAgain = reconcileTokenUsage(generationB, {
       provider: "codex",
-      sourceId: "a",
+      generationId: "a",
       inputTokens: 90,
       outputTokens: 20,
       totalTokens: 110,
     });
 
-    expect(sourceAAgain.totalTokens).toBe(150);
-    expect(sourceAAgain.sources).toEqual({
+    expect(generationAAgain.totalTokens).toBe(150);
+    expect(generationAAgain.generations).toEqual({
       a: { inputTokens: 90, outputTokens: 20, totalTokens: 110 },
       b: { inputTokens: 30, outputTokens: 10, totalTokens: 40 },
     });
   });
 
-  it("reconciles from persisted source baselines after restart", () => {
+  it("preserves unknown versus measured-zero component completeness", () => {
+    const first = reconcileTokenUsage(undefined, {
+      provider: "claude",
+      generationId: "a",
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+      cacheReadInputTokens: 0,
+    });
+    expect(first.cacheReadInputTokens).toBe(0);
+
+    const incomplete = reconcileTokenUsage(first, {
+      provider: "claude",
+      generationId: "b",
+      inputTokens: 30,
+      outputTokens: 10,
+      totalTokens: 40,
+    });
+    expect(incomplete).not.toHaveProperty("cacheReadInputTokens");
+  });
+
+  it("reconciles from persisted generation baselines after restart", () => {
     const beforeRestart = reconcileTokenUsage(undefined, {
       provider: "codex",
-      sourceId: "a",
+      generationId: "a",
       inputTokens: 80,
       outputTokens: 20,
       totalTokens: 100,
@@ -83,7 +104,7 @@ describe("reconcileTokenUsage", () => {
     expect(
       reconcileTokenUsage(restored, {
         provider: "codex",
-        sourceId: "a",
+        generationId: "a",
         inputTokens: 85,
         outputTokens: 25,
         totalTokens: 110,
@@ -91,25 +112,25 @@ describe("reconcileTokenUsage", () => {
     ).toBe(110);
   });
 
-  it("keeps lifetime totals but clears incompatible source baselines on provider change", () => {
+  it("drops incompatible lifetime totals on provider change", () => {
     const claude = reconcileTokenUsage(undefined, {
       provider: "claude",
-      sourceId: "shared-path",
+      generationId: "claude-generation",
       inputTokens: 80,
       outputTokens: 20,
       totalTokens: 100,
     });
     const codex = reconcileTokenUsage(claude, {
       provider: "codex",
-      sourceId: "shared-path",
+      generationId: "codex-generation",
       inputTokens: 30,
       outputTokens: 10,
       totalTokens: 40,
     });
 
-    expect(codex.totalTokens).toBe(140);
-    expect(codex.sources).toEqual({
-      "shared-path": { inputTokens: 30, outputTokens: 10, totalTokens: 40 },
+    expect(codex.totalTokens).toBe(40);
+    expect(codex.generations).toEqual({
+      "codex-generation": { inputTokens: 30, outputTokens: 10, totalTokens: 40 },
     });
   });
 });

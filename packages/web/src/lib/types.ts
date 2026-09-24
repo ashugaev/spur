@@ -312,15 +312,28 @@ export type SpurSessionTokenUsageView =
       inputTokens: number;
       outputTokens: number;
       totalTokens: number;
+      cacheReadInputTokens?: number;
+      cacheWriteInputTokens?: number;
+      reasoningOutputTokens?: number;
+      cacheWrite5mInputTokens?: number;
+      cacheWrite1hInputTokens?: number;
+      provider: "claude" | "codex" | "opencode";
       budget?: number;
       exhausted: boolean;
     }
-  | { status: "waiting"; budget?: number; exhausted: false }
+  | {
+      status: "waiting";
+      provider: "claude" | "codex" | "opencode";
+      budget?: number;
+      exhausted: false;
+    }
   | {
       status: "unavailable";
       budget?: number;
       exhausted: false;
       unenforced: boolean;
+      provider: "cursor";
+      reason: "structured_usage_unavailable";
     };
 
 export type SpurSidecarStopReport =

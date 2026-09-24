@@ -3907,15 +3907,26 @@ test.describe("S5: Runtime sidebar", () => {
     const sessions = [
       makeWorkingSession({
         id: "detail-s5-token-waiting",
-        tokenUsageView: { status: "waiting", budget: 2_000, exhausted: false },
+        tokenUsageView: {
+          status: "waiting",
+          provider: "claude",
+          budget: 2_000,
+          exhausted: false,
+        },
       }),
       makeWorkingSession({
         id: "detail-s5-token-available",
         tokenUsageView: {
           status: "available",
+          provider: "claude",
           inputTokens: 1_000,
           outputTokens: 234,
           totalTokens: 1_234,
+          cacheReadInputTokens: 300,
+          cacheWriteInputTokens: 200,
+          reasoningOutputTokens: 34,
+          cacheWrite5mInputTokens: 50,
+          cacheWrite1hInputTokens: 150,
           budget: 2_000,
           exhausted: false,
         },
@@ -3925,6 +3936,8 @@ test.describe("S5: Runtime sidebar", () => {
         agent: "cursor",
         tokenUsageView: {
           status: "unavailable",
+          provider: "cursor",
+          reason: "structured_usage_unavailable",
           budget: 2_000,
           exhausted: false,
           unenforced: true,
@@ -3935,6 +3948,7 @@ test.describe("S5: Runtime sidebar", () => {
         stopReason: "token_budget",
         tokenUsageView: {
           status: "available",
+          provider: "codex",
           inputTokens: 1_700,
           outputTokens: 300,
           totalTokens: 2_000,
@@ -3950,7 +3964,7 @@ test.describe("S5: Runtime sidebar", () => {
     await page.goto("/sessions/detail-s5-token-available");
     await expect(page.getByText("1,234 / 2,000")).toBeVisible();
     await page.goto("/sessions/detail-s5-token-unavailable");
-    await expect(page.getByText("Unavailable · budget unenforced")).toBeVisible();
+    await expect(page.getByText("Token usage unavailable · budget unenforced")).toBeVisible();
     await page.goto("/sessions/detail-s5-token-exhausted");
     await expect(page.getByText("2,000 / 2,000 · limit hit")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);

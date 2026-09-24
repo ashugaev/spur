@@ -35,7 +35,7 @@ import {
 } from "./agents/index.js";
 import {
   captureOpenCodeSessionBaseline,
-  readOpenCodeState,
+  readOpenCodeStructuredState,
   resolveNewOpenCodeSessionId,
   waitForOpenCodeLaunchMessage,
   withOpenCodeLaunchIdentityLock,
@@ -448,6 +448,7 @@ import {
   type SessionStatus,
   type SessionQueuedMessagesView,
   type SessionState,
+  type SessionTokenUsageView,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
@@ -5328,9 +5329,9 @@ export class SessionService {
     agent: AgentName,
     projectId: string,
   ): void {
-    if (project.tokenBudget !== undefined && (agent === "cursor" || agent === "opencode")) {
+    if (project.tokenBudget !== undefined && agent === "cursor") {
       throw new Error(
-        `${agent} does not expose structured token usage; remove projects.${projectId}.tokenBudget or choose claude/codex`,
+        `${agent} does not expose structured token usage; remove projects.${projectId}.tokenBudget or choose claude/codex/opencode`,
       );
     }
   }
@@ -5338,7 +5339,7 @@ export class SessionService {
   private tokenBudgetActivationError(session: SessionRecord): string | undefined {
     const budget = this.resolveTokenBudget(session);
     if (budget === undefined) return undefined;
-    if (session.agent === "cursor" || session.agent === "opencode") {
+    if (session.agent === "cursor") {
       return `Session ${session.id} uses ${session.agent}, which cannot enforce tokenBudget`;
     }
     if ((session.tokenUsage?.totalTokens ?? 0) >= budget) {
@@ -5354,11 +5355,7 @@ export class SessionService {
 
   private warnIfTokenBudgetUnenforced(session: SessionRecord): void {
     const budget = this.resolveTokenBudget(session);
-    if (
-      budget === undefined ||
-      session.status !== "running" ||
-      (session.agent !== "cursor" && session.agent !== "opencode")
-    ) {
+    if (budget === undefined || session.status !== "running" || session.agent !== "cursor") {
       this.tokenBudgetUnsupportedWarnings.delete(session.id);
       return;
     }
@@ -17618,10 +17615,12 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       } else {
-        const structuredState = await readOpenCodeState(
+        const structured = await readOpenCodeStructuredState(
           session.agentSessionId,
           runtime.tmuxActivityAt?.getTime() ?? null,
         );
+        const structuredState = structured.state;
+        tokenUsage = structured.tokenUsage;
         state = structuredState?.state ?? "working";
         stateSource = "jsonl";
         classifiedDetail = structuredState
@@ -17955,7 +17954,7 @@ export class SessionService {
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
     const classified = await this.classifySessionRecord(session, { scanPane: false });
-    session = classified.session;
+    session = this.persistClassifiedTokenUsage(classified.session, classified.tokenUsage);
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -18019,6 +18018,48 @@ export class SessionService {
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
+      tokenUsageView: this.deriveTokenUsageView(session),
+    };
+  }
+
+  private persistClassifiedTokenUsage(
+    session: SessionRecord,
+    sample: ProviderTokenUsageSample | undefined,
+  ): SessionRecord {
+    if (!sample) return session;
+    const tokenUsage = reconcileTokenUsage(session.tokenUsage, sample);
+    if (JSON.stringify(tokenUsage) === JSON.stringify(session.tokenUsage)) return session;
+    const updated = { ...session, tokenUsage };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
+  private deriveTokenUsageView(session: SessionRecord): SessionTokenUsageView {
+    const budget = this.resolveProjectForSession(session)?.tokenBudget;
+    if (session.agent === "cursor") {
+      return {
+        status: "unavailable",
+        provider: "cursor",
+        ...(budget !== undefined ? { budget } : {}),
+        exhausted: false,
+        unenforced: budget !== undefined && session.status === "running",
+        reason: "structured_usage_unavailable",
+      };
+    }
+    if (!session.tokenUsage) {
+      return {
+        status: "waiting",
+        provider: session.agent,
+        ...(budget !== undefined ? { budget } : {}),
+        exhausted: false,
+      };
+    }
+    const { generations: _generations, ...publicUsage } = session.tokenUsage;
+    return {
+      status: "available",
+      ...publicUsage,
+      ...(budget !== undefined ? { budget } : {}),
+      exhausted: budget !== undefined && session.tokenUsage.totalTokens >= budget,
     };
   }
 
@@ -18109,14 +18150,7 @@ export class SessionService {
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<{ view: SessionListItemView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
-    session = classified.session;
-    if (classified.tokenUsage) {
-      const reconciled = reconcileTokenUsage(session.tokenUsage, classified.tokenUsage);
-      if (JSON.stringify(reconciled) !== JSON.stringify(session.tokenUsage)) {
-        session = { ...session, tokenUsage: reconciled };
-        writeSession(this.config.dataDir, session);
-      }
-    }
+    session = this.persistClassifiedTokenUsage(classified.session, classified.tokenUsage);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
@@ -18140,29 +18174,7 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
-    const budget = project?.tokenBudget;
-    const tokenUsageView =
-      session.agent === "cursor" || session.agent === "opencode"
-        ? {
-            status: "unavailable" as const,
-            ...(budget !== undefined ? { budget } : {}),
-            exhausted: false as const,
-            unenforced: budget !== undefined && session.status === "running",
-          }
-        : session.tokenUsage
-          ? {
-              status: "available" as const,
-              inputTokens: session.tokenUsage.inputTokens,
-              outputTokens: session.tokenUsage.outputTokens,
-              totalTokens: session.tokenUsage.totalTokens,
-              ...(budget !== undefined ? { budget } : {}),
-              exhausted: budget !== undefined && session.tokenUsage.totalTokens >= budget,
-            }
-          : {
-              status: "waiting" as const,
-              ...(budget !== undefined ? { budget } : {}),
-              exhausted: false as const,
-            };
+    const tokenUsageView = this.deriveTokenUsageView(session);
     // Fetched at most once per enrich (zero extra IO for a non-desk session,
     // where deskAnchorRecord returns `session` itself unchanged): reused for
     // the sidecars' owner state (ports, still per-record) below. Passed into

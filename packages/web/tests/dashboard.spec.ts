@@ -1176,6 +1176,30 @@ test.describe("D4: Terminal button state", () => {
     ).toHaveCount(0);
   });
 
+  test("token-budget exhausted session hides restore", async ({ page }) => {
+    const session = makeStoppedSession({
+      id: "restore-token-exhausted",
+      prompt: "Token exhausted",
+      stopReason: "token_budget",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        budget: 100,
+        exhausted: true,
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByText("Token exhausted")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") }),
+    ).toHaveCount(0);
+  });
+
   test("errored restorable session shows restore instead of disabled terminal", async ({
     page,
   }) => {

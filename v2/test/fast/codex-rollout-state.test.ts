@@ -57,6 +57,14 @@ interface SessionFile {
   mtimeMs: number;
 }
 
+function sessionMeta(id: string): string {
+  return JSON.stringify({
+    timestamp: "2026-06-28T08:00:00.000Z",
+    type: "session_meta",
+    payload: { id },
+  });
+}
+
 // Writes multiple rollout files into one sessions dir and pins each file's mtime
 // via utimes so tests can control the mtime ordering independently of content.
 async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<string> {
@@ -231,22 +239,25 @@ describe("readCodexRolloutState", () => {
 
   it("uses provider total_tokens without adding cached or reasoning subsets", async () => {
     const sessionsDir = await makeSessionsDir(
-      JSON.stringify({
-        timestamp: "2026-06-28T09:03:41.314Z",
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: {
-              input_tokens: 90,
-              cached_input_tokens: 50,
-              output_tokens: 30,
-              reasoning_output_tokens: 20,
-              total_tokens: 120,
+      [
+        sessionMeta("usage-session"),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                cached_input_tokens: 50,
+                output_tokens: 30,
+                reasoning_output_tokens: 20,
+                total_tokens: 120,
+              },
             },
           },
-        },
-      }),
+        }),
+      ].join("\n"),
       "rollout-usage.jsonl",
     );
     expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toMatchObject({
@@ -257,59 +268,65 @@ describe("readCodexRolloutState", () => {
   });
 
   it("selects token-only files by the token event timestamp, not file mtime", async () => {
-    const tokenLine = (timestamp: string, totalTokens: number) =>
-      JSON.stringify({
-        timestamp,
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: {
-              input_tokens: totalTokens - 10,
-              output_tokens: 10,
-              total_tokens: totalTokens,
+    const tokenLine = (timestamp: string, totalTokens: number, sessionId: string) =>
+      [
+        sessionMeta(sessionId),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: totalTokens - 10,
+                output_tokens: 10,
+                total_tokens: totalTokens,
+              },
             },
           },
-        },
-      });
+        }),
+      ].join("\n");
     const sessionsDir = await makeMultiFileSessionsDir([
       {
         filename: "newer-mtime.jsonl",
-        content: tokenLine("2026-06-28T09:00:00.000Z", 100),
+        content: tokenLine("2026-06-28T09:00:00.000Z", 100, "older-event"),
         mtimeMs: 2_000_000_000_000,
       },
       {
         filename: "newer-event.jsonl",
-        content: tokenLine("2026-06-28T10:00:00.000Z", 200),
+        content: tokenLine("2026-06-28T10:00:00.000Z", 200, "newer-event"),
         mtimeMs: 1_000_000_000_000,
       },
     ]);
 
     expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toMatchObject({
-      sourceId: join(sessionsDir, "2026", "04", "19", "newer-event.jsonl"),
+      generationId: "codex:newer-event",
       totalTokens: 200,
       observedAtMs: Date.parse("2026-06-28T10:00:00.000Z"),
     });
   });
 
   it("keeps token usage bound to the selected active rollout", async () => {
-    const tokenLine = (timestamp: string, totalTokens: number) =>
-      JSON.stringify({
-        timestamp,
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: {
-              input_tokens: totalTokens - 10,
-              output_tokens: 10,
-              total_tokens: totalTokens,
+    const tokenLine = (timestamp: string, totalTokens: number, sessionId: string) =>
+      [
+        sessionMeta(sessionId),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: totalTokens - 10,
+                output_tokens: 10,
+                total_tokens: totalTokens,
+              },
             },
           },
-        },
-      });
+        }),
+      ].join("\n");
     const active = [
-      tokenLine("2026-06-28T09:00:00.000Z", 100),
+      tokenLine("2026-06-28T09:00:00.000Z", 100, "active"),
       JSON.stringify({
         timestamp: "2026-06-28T11:00:00.000Z",
         type: "event_msg",
@@ -320,7 +337,7 @@ describe("readCodexRolloutState", () => {
       { filename: "active.jsonl", content: active, mtimeMs: 1_000_000_000_000 },
       {
         filename: "sibling.jsonl",
-        content: tokenLine("2026-06-28T10:00:00.000Z", 200),
+        content: tokenLine("2026-06-28T10:00:00.000Z", 200, "sibling"),
         mtimeMs: 2_000_000_000_000,
       },
     ]);

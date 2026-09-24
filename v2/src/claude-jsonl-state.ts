@@ -14,6 +14,9 @@ interface ClaudeMessageTokenUsage {
   cacheCreationInputTokens: number;
   cacheReadInputTokens: number;
   outputTokens: number;
+  cacheWrite5mInputTokens?: number;
+  cacheWrite1hInputTokens?: number;
+  reasoningOutputTokens?: number;
 }
 
 /** Minimal shape extracted from a JSONL record for state classification. */
@@ -40,6 +43,7 @@ export interface ParsedRecord {
   /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
   model?: string;
   messageId?: string;
+  sessionId?: string;
   tokenUsage?: ClaudeMessageTokenUsage;
   timestampMs: number;
   ownTimestampMs?: number;
@@ -51,6 +55,8 @@ export interface ClaudeJsonlReaderState {
   lastMtimeMs: number;
   tailRecords: ParsedRecord[];
   usageByMessage?: Map<string, ClaudeMessageTokenUsage>;
+  generationId?: string;
+  fileIno?: number;
 }
 
 /**
@@ -393,7 +399,27 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     const cacheCreationInputTokens = token("cache_creation_input_tokens");
     const cacheReadInputTokens = token("cache_read_input_tokens");
     const outputTokens = token("output_tokens");
+    const cacheCreation =
+      typeof usage?.["cache_creation"] === "object" && usage["cache_creation"] !== null
+        ? (usage["cache_creation"] as Record<string, unknown>)
+        : undefined;
+    const outputDetails =
+      typeof usage?.["output_tokens_details"] === "object" &&
+      usage["output_tokens_details"] !== null
+        ? (usage["output_tokens_details"] as Record<string, unknown>)
+        : undefined;
+    const optionalToken = (
+      record: Record<string, unknown> | undefined,
+      key: string,
+    ): number | undefined => {
+      const value = record?.[key];
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+    };
+    const cacheWrite5mInputTokens = optionalToken(cacheCreation, "ephemeral_5m_input_tokens");
+    const cacheWrite1hInputTokens = optionalToken(cacheCreation, "ephemeral_1h_input_tokens");
+    const reasoningOutputTokens = optionalToken(outputDetails, "thinking_tokens");
     const messageId = typeof message["id"] === "string" ? message["id"] : undefined;
+    const sessionId = typeof parsed["sessionId"] === "string" ? parsed["sessionId"] : undefined;
     return {
       type: "assistant",
       role: "assistant",
@@ -407,6 +433,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
         ? { model: message["model"] }
         : {}),
       ...(messageId ? { messageId } : {}),
+      ...(sessionId ? { sessionId } : {}),
       ...(messageId &&
       inputTokens + cacheCreationInputTokens + cacheReadInputTokens + outputTokens > 0
         ? {
@@ -415,6 +442,9 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
               cacheCreationInputTokens,
               cacheReadInputTokens,
               outputTokens,
+              ...(cacheWrite5mInputTokens !== undefined ? { cacheWrite5mInputTokens } : {}),
+              ...(cacheWrite1hInputTokens !== undefined ? { cacheWrite1hInputTokens } : {}),
+              ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
             },
           }
         : {}),
@@ -478,6 +508,60 @@ async function readNewJsonlBytes(
   }
 }
 
+async function scanJsonlRecords(
+  filePath: string,
+  size: number,
+  offset: number,
+  timestampMs: number,
+): Promise<{ records: ParsedRecord[]; consumedBytes: number } | null> {
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fd = await open(filePath, "r");
+    const records: ParsedRecord[] = [];
+    let position = offset;
+    let pending = Buffer.alloc(0);
+    while (position < size) {
+      const length = Math.min(MAX_COLD_READ_BYTES, size - position);
+      const chunk = Buffer.alloc(length);
+      const { bytesRead } = await fd.read(chunk, 0, length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      const combined =
+        pending.length === 0
+          ? chunk.subarray(0, bytesRead)
+          : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+      const lastNewline = combined.lastIndexOf(0x0a);
+      if (lastNewline < 0) {
+        pending = combined;
+        continue;
+      }
+      for (const line of combined
+        .subarray(0, lastNewline + 1)
+        .toString("utf8")
+        .split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const record = parseJsonlRecord(trimmed, timestampMs);
+        if (record) records.push(record);
+      }
+      pending = combined.subarray(lastNewline + 1);
+    }
+    const trailing = pending.toString("utf8").trim();
+    if (trailing) {
+      const record = parseJsonlRecord(trailing, timestampMs);
+      if (record) {
+        records.push(record);
+        pending = Buffer.alloc(0);
+      }
+    }
+    return { records, consumedBytes: position - offset - pending.length };
+  } catch {
+    return null;
+  } finally {
+    await fd?.close();
+  }
+}
+
 export async function readClaudeJsonlState(
   worktreePath: string,
   reader?: ClaudeJsonlReaderState,
@@ -502,7 +586,7 @@ export async function readClaudeJsonlState(
     return null;
   }
 
-  let fileStat: { size: number; mtimeMs: number };
+  let fileStat: { size: number; mtimeMs: number; ino: number };
   try {
     fileStat = await stat(filePath);
   } catch {
@@ -512,6 +596,7 @@ export async function readClaudeJsonlState(
   const reuse =
     reader !== undefined &&
     reader.filePath === filePath &&
+    reader.fileIno === fileStat.ino &&
     fileStat.size >= reader.lastOffset &&
     fileStat.mtimeMs >= reader.lastMtimeMs;
   const currentReader: ClaudeJsonlReaderState = reuse
@@ -522,24 +607,46 @@ export async function readClaudeJsonlState(
         lastMtimeMs: 0,
         tailRecords: [],
         usageByMessage: new Map(),
+        fileIno: fileStat.ino,
       };
   const usageByMessage = currentReader.usageByMessage ?? new Map();
 
   const usageSample = (): ProviderTokenUsageSample | undefined => {
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheReadInputTokens = 0;
+    let cacheWriteInputTokens = 0;
+    let reasoningOutputTokens = 0;
+    let cacheWrite5mInputTokens = 0;
+    let cacheWrite1hInputTokens = 0;
+    let reasoningComplete = true;
+    let cache5mComplete = true;
+    let cache1hComplete = true;
     for (const usage of usageByMessage.values()) {
       inputTokens +=
         usage.inputTokens + usage.cacheCreationInputTokens + usage.cacheReadInputTokens;
       outputTokens += usage.outputTokens;
+      cacheReadInputTokens += usage.cacheReadInputTokens;
+      cacheWriteInputTokens += usage.cacheCreationInputTokens;
+      reasoningComplete &&= usage.reasoningOutputTokens !== undefined;
+      cache5mComplete &&= usage.cacheWrite5mInputTokens !== undefined;
+      cache1hComplete &&= usage.cacheWrite1hInputTokens !== undefined;
+      reasoningOutputTokens += usage.reasoningOutputTokens ?? 0;
+      cacheWrite5mInputTokens += usage.cacheWrite5mInputTokens ?? 0;
+      cacheWrite1hInputTokens += usage.cacheWrite1hInputTokens ?? 0;
     }
-    return inputTokens + outputTokens > 0
+    return inputTokens + outputTokens > 0 && currentReader.generationId
       ? {
           provider: "claude",
-          sourceId: filePath,
+          generationId: currentReader.generationId,
           inputTokens,
           outputTokens,
           totalTokens: inputTokens + outputTokens,
+          cacheReadInputTokens,
+          cacheWriteInputTokens,
+          ...(reasoningComplete ? { reasoningOutputTokens } : {}),
+          ...(cache5mComplete ? { cacheWrite5mInputTokens } : {}),
+          ...(cache1hComplete ? { cacheWrite1hInputTokens } : {}),
         }
       : undefined;
   };
@@ -569,13 +676,10 @@ export async function readClaudeJsonlState(
   // prior offset would otherwise Buffer.alloc the whole transcript. The window
   // may start mid-file; the partial line that opens it is handled below.
   const unreadFrom = Math.min(currentReader.lastOffset, fileStat.size);
-  const readOffset =
-    unreadFrom === 0 && fileStat.size > MAX_COLD_READ_BYTES
-      ? fileStat.size - MAX_COLD_READ_BYTES
-      : unreadFrom;
+  const readOffset = unreadFrom;
   const nowMs = Date.now();
 
-  const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
+  const chunk = await scanJsonlRecords(filePath, fileStat.size, readOffset, nowMs);
   if (!chunk) {
     // If we can't read, return null to fall back to other classification
     return null;
@@ -585,15 +689,15 @@ export async function readClaudeJsonlState(
   // A truncated window can open mid-record; that fragment is not valid JSON,
   // so parseJsonlRecord drops it. Discarding the first line unconditionally
   // would instead lose a whole record whenever the cut lands on a boundary.
-  for (const line of chunk.consumedText.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const record = parseJsonlRecord(trimmed, nowMs);
-    if (record) {
-      newRecords.push(record);
-      if (record.messageId && record.tokenUsage) {
+  for (const record of chunk.records) {
+    newRecords.push(record);
+    if (record.messageId && record.sessionId && record.tokenUsage) {
+      const generationId = `claude:${record.sessionId}:${record.messageId}`;
+      if (!currentReader.generationId) currentReader.generationId = generationId;
+      if (currentReader.generationId.startsWith(`claude:${record.sessionId}:`)) {
         const prior = usageByMessage.get(record.messageId);
         usageByMessage.set(record.messageId, {
+          ...prior,
           inputTokens: Math.max(prior?.inputTokens ?? 0, record.tokenUsage.inputTokens),
           cacheCreationInputTokens: Math.max(
             prior?.cacheCreationInputTokens ?? 0,
@@ -604,6 +708,30 @@ export async function readClaudeJsonlState(
             record.tokenUsage.cacheReadInputTokens,
           ),
           outputTokens: Math.max(prior?.outputTokens ?? 0, record.tokenUsage.outputTokens),
+          ...(record.tokenUsage.reasoningOutputTokens !== undefined
+            ? {
+                reasoningOutputTokens: Math.max(
+                  prior?.reasoningOutputTokens ?? 0,
+                  record.tokenUsage.reasoningOutputTokens,
+                ),
+              }
+            : {}),
+          ...(record.tokenUsage.cacheWrite5mInputTokens !== undefined
+            ? {
+                cacheWrite5mInputTokens: Math.max(
+                  prior?.cacheWrite5mInputTokens ?? 0,
+                  record.tokenUsage.cacheWrite5mInputTokens,
+                ),
+              }
+            : {}),
+          ...(record.tokenUsage.cacheWrite1hInputTokens !== undefined
+            ? {
+                cacheWrite1hInputTokens: Math.max(
+                  prior?.cacheWrite1hInputTokens ?? 0,
+                  record.tokenUsage.cacheWrite1hInputTokens,
+                ),
+              }
+            : {}),
         });
       }
     }
@@ -616,6 +744,8 @@ export async function readClaudeJsonlState(
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords: combined,
     usageByMessage,
+    ...(currentReader.generationId ? { generationId: currentReader.generationId } : {}),
+    fileIno: fileStat.ino,
   };
 
   if (combined.length === 0) {

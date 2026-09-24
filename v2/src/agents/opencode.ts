@@ -6,6 +6,7 @@ import { shellEscape } from "./shell-escape.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { SidecarMcpBinding, TranscriptEntry } from "../types.js";
+import type { ProviderTokenUsageSample } from "../token-usage.js";
 import {
   agentExecutableCommand,
   missingAgentExecutableMessage,
@@ -404,6 +405,72 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
   return { state: "working", reason: "assistant incomplete" };
 }
 
+export function parseOpenCodeTokenUsage(value: unknown): ProviderTokenUsageSample | undefined {
+  if (!isRecord(value)) return undefined;
+  const rootInfo = isRecord(value["info"]) ? value["info"] : value;
+  const rootId = rootInfo["id"];
+  if (typeof rootId !== "string" || !rootId) return undefined;
+  const seen = new Set<string>();
+  let firstAssistantId: string | undefined;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadInputTokens = 0;
+  let cacheWriteInputTokens = 0;
+  let reasoningOutputTokens = 0;
+  for (const message of openCodeMessages(value)) {
+    const info = messageInfo(message);
+    if (info?.["role"] !== "assistant") continue;
+    const id = info["id"];
+    if (typeof id !== "string" || !id || seen.has(id)) continue;
+    const tokens = info["tokens"];
+    if (!isRecord(tokens)) return undefined;
+    const input = tokens["input"];
+    const output = tokens["output"];
+    const reasoning = tokens["reasoning"];
+    const cache = tokens["cache"];
+    if (
+      !Number.isSafeInteger(input) ||
+      (input as number) < 0 ||
+      !Number.isSafeInteger(output) ||
+      (output as number) < 0 ||
+      !Number.isSafeInteger(reasoning) ||
+      (reasoning as number) < 0 ||
+      !isRecord(cache) ||
+      !Number.isSafeInteger(cache["read"]) ||
+      (cache["read"] as number) < 0 ||
+      !Number.isSafeInteger(cache["write"]) ||
+      (cache["write"] as number) < 0
+    )
+      return undefined;
+    const messageInput = (input as number) + (cache["read"] as number) + (cache["write"] as number);
+    const messageOutput = (output as number) + (reasoning as number);
+    const computedTotal = messageInput + messageOutput;
+    if (
+      tokens["total"] !== undefined &&
+      (!Number.isSafeInteger(tokens["total"]) || tokens["total"] !== computedTotal)
+    )
+      return undefined;
+    seen.add(id);
+    firstAssistantId ??= id;
+    inputTokens += messageInput;
+    outputTokens += messageOutput;
+    cacheReadInputTokens += cache["read"] as number;
+    cacheWriteInputTokens += cache["write"] as number;
+    reasoningOutputTokens += reasoning as number;
+  }
+  if (!firstAssistantId) return undefined;
+  return {
+    provider: "opencode",
+    generationId: `opencode:${rootId}:${firstAssistantId}`,
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    cacheReadInputTokens,
+    cacheWriteInputTokens,
+    reasoningOutputTokens,
+  };
+}
+
 // Every export is a subprocess that queries the one multi-gigabyte SQLite DB
 // all opencode sessions share, so its cost scales with fleet size, not with the
 // caller. Callers that cannot tolerate stale data — the launch wait and the
@@ -545,13 +612,18 @@ const OPENCODE_STATE_MAX_AGE_MS = 600_000;
 const ACTIVITY_SETTLED_MS = 3_000;
 type OpenCodeStateEntry = {
   at: number;
-  state: OpenCodeStructuredState | null;
+  result: OpenCodeStructuredRead;
   /** Activity timestamp observed when this entry's export STARTED. */
   activityAtMs: number | null;
   startedAtMs: number;
 };
 const openCodeStateCache = new Map<string, OpenCodeStateEntry>();
-const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredState | null>>();
+const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredRead>>();
+
+export interface OpenCodeStructuredRead {
+  state: OpenCodeStructuredState | null;
+  tokenUsage?: ProviderTokenUsageSample;
+}
 
 /** Drops every session's cached state and the export gate's counters. Test seam. */
 export function resetOpenCodeExportState(): void {
@@ -578,7 +650,7 @@ function shouldServeCachedOpenCodeState(
   // A failed export is cached as null and classified as "working" by the
   // caller. Pinning that for the ceiling would hold a wrong LIVE state, not a
   // stale one, so it always retries on the TTL.
-  if (cached.state === null) return false;
+  if (cached.result.state === null) return false;
   // Unknown activity falls back to TTL-only behaviour.
   if (activityAtMs === null || cached.activityAtMs === null) return false;
   return (
@@ -586,37 +658,42 @@ function shouldServeCachedOpenCodeState(
   );
 }
 
-export async function readOpenCodeState(
+export async function readOpenCodeStructuredState(
   sessionId?: string,
   activityAtMs?: number | null,
-): Promise<OpenCodeStructuredState | null> {
-  if (!sessionId) return null;
+): Promise<OpenCodeStructuredRead> {
+  if (!sessionId) return { state: null };
 
   const now = Date.now();
   const observedActivityAtMs = activityAtMs ?? null;
   const cached = openCodeStateCache.get(sessionId);
   if (cached && shouldServeCachedOpenCodeState(cached, now, observedActivityAtMs)) {
-    return cached.state;
+    return cached.result;
   }
   const inFlight = openCodeStateInFlight.get(sessionId);
   if (inFlight) {
     return inFlight;
   }
 
-  const pending = (async (): Promise<OpenCodeStructuredState | null> => {
+  const pending = (async (): Promise<OpenCodeStructuredRead> => {
     try {
-      return parseOpenCodeState(await exportOpenCodeSession(sessionId));
+      const exported = await exportOpenCodeSession(sessionId);
+      const tokenUsage = parseOpenCodeTokenUsage(exported);
+      return {
+        state: parseOpenCodeState(exported),
+        ...(tokenUsage ? { tokenUsage } : {}),
+      };
     } catch {
-      return null;
+      return { state: null };
     }
   })();
   openCodeStateInFlight.set(sessionId, pending);
   const startedAtMs = now;
   try {
-    const state = await pending;
+    const result = await pending;
     openCodeStateCache.set(sessionId, {
       at: Date.now(),
-      state,
+      result,
       activityAtMs: observedActivityAtMs,
       startedAtMs,
     });
@@ -630,10 +707,17 @@ export async function readOpenCodeState(
         openCodeStateCache.delete(id);
       }
     }
-    return state;
+    return result;
   } finally {
     openCodeStateInFlight.delete(sessionId);
   }
+}
+
+export async function readOpenCodeState(
+  sessionId?: string,
+  activityAtMs?: number | null,
+): Promise<OpenCodeStructuredState | null> {
+  return (await readOpenCodeStructuredState(sessionId, activityAtMs)).state;
 }
 
 export async function readOpenCodeConversation(

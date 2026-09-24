@@ -1024,8 +1024,9 @@ function extractCodexRateLimitsLine(parsed: Record<string, unknown>): unknown {
 
 function extractCodexTokenUsageLine(
   parsed: Record<string, unknown>,
-  filePath: string,
+  generationId: string | undefined,
 ): ProviderTokenUsageSample | undefined {
+  if (!generationId) return undefined;
   if (parsed["type"] !== "event_msg") return undefined;
   const payload = parsed["payload"];
   if (!isRecord(payload) || payload["type"] !== "token_count") return undefined;
@@ -1036,32 +1037,72 @@ function extractCodexTokenUsageLine(
   const inputTokens = total["input_tokens"];
   const outputTokens = total["output_tokens"];
   const totalTokens = total["total_tokens"];
+  const cachedInputTokens = total["cached_input_tokens"];
+  const cacheWriteInputTokens = total["cache_write_input_tokens"];
+  const reasoningOutputTokens = total["reasoning_output_tokens"];
   const timestamp = parsed["timestamp"];
   const observedAtMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
   if (
     typeof inputTokens !== "number" ||
-    !Number.isFinite(inputTokens) ||
+    !Number.isSafeInteger(inputTokens) ||
     inputTokens < 0 ||
     typeof outputTokens !== "number" ||
-    !Number.isFinite(outputTokens) ||
+    !Number.isSafeInteger(outputTokens) ||
     outputTokens < 0 ||
     typeof totalTokens !== "number" ||
-    !Number.isFinite(totalTokens) ||
+    !Number.isSafeInteger(totalTokens) ||
     totalTokens < 0 ||
+    totalTokens !== inputTokens + outputTokens ||
     !Number.isFinite(observedAtMs)
   )
     return undefined;
+  if (
+    (cachedInputTokens !== undefined &&
+      (typeof cachedInputTokens !== "number" ||
+        !Number.isSafeInteger(cachedInputTokens) ||
+        cachedInputTokens < 0 ||
+        cachedInputTokens > inputTokens)) ||
+    (cacheWriteInputTokens !== undefined &&
+      (typeof cacheWriteInputTokens !== "number" ||
+        !Number.isSafeInteger(cacheWriteInputTokens) ||
+        cacheWriteInputTokens < 0 ||
+        cacheWriteInputTokens > inputTokens)) ||
+    (reasoningOutputTokens !== undefined &&
+      (typeof reasoningOutputTokens !== "number" ||
+        !Number.isSafeInteger(reasoningOutputTokens) ||
+        reasoningOutputTokens < 0 ||
+        reasoningOutputTokens > outputTokens))
+  ) {
+    return undefined;
+  }
   return {
     provider: "codex",
-    sourceId: filePath,
+    generationId,
     inputTokens,
     outputTokens,
     totalTokens,
+    ...(cachedInputTokens !== undefined ? { cacheReadInputTokens: cachedInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+    ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
     observedAtMs,
   };
 }
 
 function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
+  let generationId: string | undefined;
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed["type"] !== "session_meta") continue;
+    const payload = parsed["payload"];
+    if (!isRecord(payload) || typeof payload["id"] !== "string" || !payload["id"]) continue;
+    generationId = `codex:${payload["id"]}`;
+    break;
+  }
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
@@ -1084,7 +1125,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
         rateLimit = detection;
       }
     }
-    tokenUsage ??= extractCodexTokenUsageLine(parsed, filePath);
+    tokenUsage ??= extractCodexTokenUsageLine(parsed, generationId);
     if (rollout === null) {
       const state = extractCodexRolloutStateLine(parsed);
       if (state && !(state.callId && matchedCallIds.has(state.callId))) {

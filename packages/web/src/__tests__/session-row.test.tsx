@@ -496,6 +496,7 @@ describe("SessionRow", () => {
           runtimeAlive: false,
           tokenUsageView: {
             status: "available",
+            provider: "codex",
             inputTokens: 80,
             outputTokens: 20,
             totalTokens: 100,

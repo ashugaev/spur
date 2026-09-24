@@ -31,11 +31,13 @@ import {
   type SidecarProcessIdentity,
   type TelegramBinding,
   type TelegramReplyTarget,
+  type TokenUsageTotals,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 import { workspaceIdOf } from "./session-desk.js";
+import { aggregateTokenUsage } from "./token-usage.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -769,46 +771,89 @@ function normalizeStateSubscriptions(
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function normalizeTokenTotals(value: unknown): {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-} | null {
+const OPTIONAL_TOKEN_COMPONENTS = [
+  "cacheReadInputTokens",
+  "cacheWriteInputTokens",
+  "reasoningOutputTokens",
+  "cacheWrite5mInputTokens",
+  "cacheWrite1hInputTokens",
+] as const;
+
+function normalizeTokenTotals(value: unknown): TokenUsageTotals | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const totals = value as Record<string, unknown>;
   const values = [totals["inputTokens"], totals["outputTokens"], totals["totalTokens"]];
   if (!values.every((token) => Number.isSafeInteger(token) && (token as number) >= 0)) return null;
-  return {
+  const normalized = {
     inputTokens: totals["inputTokens"] as number,
     outputTokens: totals["outputTokens"] as number,
     totalTokens: totals["totalTokens"] as number,
-  };
+  } as TokenUsageTotals;
+  if (normalized.totalTokens !== normalized.inputTokens + normalized.outputTokens) return null;
+  for (const component of OPTIONAL_TOKEN_COMPONENTS) {
+    const token = totals[component];
+    if (token === undefined) continue;
+    if (!Number.isSafeInteger(token) || (token as number) < 0) return null;
+    normalized[component] = token as number;
+  }
+  if (
+    (normalized.cacheReadInputTokens ?? 0) > normalized.inputTokens ||
+    (normalized.cacheWriteInputTokens ?? 0) > normalized.inputTokens ||
+    (normalized.reasoningOutputTokens ?? 0) > normalized.outputTokens ||
+    (normalized.cacheWrite5mInputTokens ?? 0) + (normalized.cacheWrite1hInputTokens ?? 0) >
+      (normalized.cacheWriteInputTokens ?? 0)
+  )
+    return null;
+  return normalized;
 }
 
 function normalizeTokenUsage(value: unknown): SessionTokenUsageRecord | undefined {
   const totals = normalizeTokenTotals(value);
   if (!totals || typeof value !== "object" || value === null) return undefined;
   const usage = value as Record<string, unknown>;
-  if (usage["provider"] !== "claude" && usage["provider"] !== "codex") return undefined;
-  const rawSources = usage["sources"];
-  if (typeof rawSources !== "object" || rawSources === null || Array.isArray(rawSources)) {
+  const provider = usage["provider"];
+  if (provider !== "claude" && provider !== "codex" && provider !== "opencode") return undefined;
+  const rawGenerations = usage["generations"] ?? usage["sources"];
+  if (
+    typeof rawGenerations !== "object" ||
+    rawGenerations === null ||
+    Array.isArray(rawGenerations)
+  ) {
     return undefined;
   }
-  const sources: Record<string, typeof totals> = {};
-  for (const [sourceId, rawSource] of Object.entries(rawSources)) {
-    const source = normalizeTokenTotals(rawSource);
+  const generations: Record<string, TokenUsageTotals> = {};
+  for (const [generationId, rawGeneration] of Object.entries(rawGenerations)) {
+    const generation = normalizeTokenTotals(rawGeneration);
+    if (!generationId || !generation) return undefined;
+    generations[generationId] = generation;
+  }
+  if (Object.keys(generations).length === 0) return undefined;
+  const aggregate = aggregateTokenUsage(provider, generations);
+  if (usage["generations"] === undefined) {
     if (
-      !sourceId ||
-      !source ||
-      source.inputTokens > totals.inputTokens ||
-      source.outputTokens > totals.outputTokens ||
-      source.totalTokens > totals.totalTokens
+      aggregate.inputTokens > totals.inputTokens ||
+      aggregate.outputTokens > totals.outputTokens ||
+      aggregate.totalTokens > totals.totalTokens
     )
       return undefined;
-    sources[sourceId] = source;
+    if (aggregate.totalTokens < totals.totalTokens) {
+      generations[`legacy:${provider}`] = {
+        inputTokens: totals.inputTokens - aggregate.inputTokens,
+        outputTokens: totals.outputTokens - aggregate.outputTokens,
+        totalTokens: totals.totalTokens - aggregate.totalTokens,
+      };
+    }
+    return aggregateTokenUsage(provider, generations);
   }
-  if (Object.keys(sources).length === 0) return undefined;
-  return { ...totals, provider: usage["provider"], sources };
+  for (const component of [
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    ...OPTIONAL_TOKEN_COMPONENTS,
+  ] as const) {
+    if (aggregate[component] !== totals[component]) return undefined;
+  }
+  return aggregate;
 }
 
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {

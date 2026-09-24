@@ -99,7 +99,7 @@ const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
 const captureOpenCodeSessionBaselineMock = vi.fn();
 const resolveNewOpenCodeSessionIdMock = vi.fn();
-const readOpenCodeStateMock = vi.fn();
+const readOpenCodeStructuredStateMock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
@@ -465,7 +465,7 @@ vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
     ...actual,
     captureOpenCodeSessionBaseline: captureOpenCodeSessionBaselineMock,
     resolveNewOpenCodeSessionId: resolveNewOpenCodeSessionIdMock,
-    readOpenCodeState: readOpenCodeStateMock,
+    readOpenCodeStructuredState: readOpenCodeStructuredStateMock,
   };
 });
 
@@ -1109,7 +1109,7 @@ function mockClaudeJsonlState(
     lastMtimeMs?: number;
     tokenUsage?: {
       provider: "claude";
-      sourceId: string;
+      generationId: string;
       inputTokens: number;
       outputTokens: number;
       totalTokens: number;
@@ -1420,7 +1420,7 @@ describe("SessionService", () => {
       sessionIds: new Set<string>(),
     }));
     resolveNewOpenCodeSessionIdMock.mockReset().mockResolvedValue("ses_owned");
-    readOpenCodeStateMock.mockReset().mockResolvedValue(null);
+    readOpenCodeStructuredStateMock.mockReset().mockResolvedValue({ state: null });
     agentProcessMatchersMock
       .mockReset()
       .mockImplementation((agent: string, launchCommand: string) => {
@@ -42464,7 +42464,7 @@ describe("SessionService", () => {
         mockClaudeJsonlState("waiting", {
           tokenUsage: {
             provider: "claude",
-            sourceId: "test.jsonl",
+            generationId: "claude:test:message",
             inputTokens: 80,
             outputTokens: 20,
             totalTokens: 100,
@@ -42505,7 +42505,7 @@ describe("SessionService", () => {
         mockClaudeJsonlState("waiting", {
           tokenUsage: {
             provider: "claude",
-            sourceId: "test.jsonl",
+            generationId: "claude:test:message",
             inputTokens: 80,
             outputTokens: 20,
             totalTokens: 100,
@@ -42525,8 +42525,8 @@ describe("SessionService", () => {
               inputTokens: 95,
               outputTokens: 25,
               totalTokens: 120,
-              sources: {
-                "test.jsonl": { inputTokens: 95, outputTokens: 25, totalTokens: 120 },
+              generations: {
+                "claude:test:message": { inputTokens: 95, outputTokens: 25, totalTokens: 120 },
               },
             },
           });
@@ -42554,8 +42554,8 @@ describe("SessionService", () => {
               inputTokens: 80,
               outputTokens: 20,
               totalTokens: 100,
-              sources: {
-                "test.jsonl": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+              generations: {
+                "claude:test:message": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
               },
             },
             scheduledWake: {
@@ -42590,8 +42590,8 @@ describe("SessionService", () => {
                 inputTokens: 80,
                 outputTokens: 20,
                 totalTokens: 100,
-                sources: {
-                  "test.jsonl": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+                generations: {
+                  "claude:test:message": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
                 },
               },
             }),
@@ -42647,7 +42647,7 @@ describe("SessionService", () => {
               },
               tokenUsage: {
                 provider: "claude",
-                sourceId: "test.jsonl",
+                generationId: "claude:test:message",
                 inputTokens: 80,
                 outputTokens: 20,
                 totalTokens: 100,
@@ -42688,6 +42688,110 @@ describe("SessionService", () => {
           level: "warn",
           sessionId: "api-1",
           details: { budget: 100, agent: "cursor" },
+        });
+      });
+
+      it("exposes the same private-free usage projection on detail and dashboard", async () => {
+        const sessions = createSessionStore();
+        const record = runningSession({
+          tokenUsage: {
+            provider: "claude",
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            cacheReadInputTokens: 30,
+            generations: {
+              "claude:session:message": {
+                inputTokens: 80,
+                outputTokens: 20,
+                totalTokens: 100,
+                cacheReadInputTokens: 30,
+              },
+            },
+          },
+        });
+        sessions.set("api-1", record);
+        mockClaudeJsonlState("waiting");
+        const service = await createDisposedSessionService();
+
+        const detail = await service.get("api-1");
+        const dashboard = (await sessionServiceInternals(service).enrichDashboard(record)) as {
+          tokenUsageView?: SessionView["tokenUsageView"];
+        };
+
+        expect(dashboard.tokenUsageView).toEqual(detail.tokenUsageView);
+        expect(detail.tokenUsageView).toMatchObject({
+          status: "available",
+          provider: "claude",
+          cacheReadInputTokens: 30,
+        });
+        expect(detail).not.toHaveProperty("tokenUsage");
+        expect(dashboard).not.toHaveProperty("tokenUsage");
+        expect(JSON.stringify(detail)).not.toContain("claude:session:message");
+      });
+
+      it("ignores misleading pane token text for accounting", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession());
+        mockClaudeJsonlState("waiting", {
+          tokenUsage: {
+            provider: "claude",
+            generationId: "claude:structured:message",
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        });
+        captureTmuxPaneMock.mockResolvedValue("Tokens: 999999 input, 888888 output");
+
+        const service = await createDisposedSessionService();
+        const detail = await service.get("api-1");
+
+        expect(detail.tokenUsageView).toMatchObject({ totalTokens: 100 });
+      });
+
+      it("projects persisted OpenCode structured usage and enforces its budget", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            agent: "opencode",
+            launchCommand: "opencode",
+            agentSessionId: "session",
+            tokenUsage: {
+              provider: "opencode",
+              inputTokens: 80,
+              outputTokens: 20,
+              totalTokens: 100,
+              cacheReadInputTokens: 30,
+              cacheWriteInputTokens: 10,
+              reasoningOutputTokens: 5,
+              generations: {
+                "opencode:session:message": {
+                  inputTokens: 80,
+                  outputTokens: 20,
+                  totalTokens: 100,
+                  cacheReadInputTokens: 30,
+                  cacheWriteInputTokens: 10,
+                  reasoningOutputTokens: 5,
+                },
+              },
+            },
+          }),
+        );
+
+        const service = await createDisposedSessionService();
+        const detail = await service.get("api-1");
+
+        expect(detail.tokenUsageView).toMatchObject({
+          status: "available",
+          provider: "opencode",
+          totalTokens: 100,
+          exhausted: true,
         });
       });
 
