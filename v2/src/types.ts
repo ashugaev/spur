@@ -1270,6 +1270,13 @@ export interface SourceReplyResponse {
   messageThreadId?: number;
 }
 
+export interface SourcePollEnableResponse {
+  ok: true;
+  sessionId: string;
+  projectId: string;
+  cleared: { sourceId: string; prNumber: number }[];
+}
+
 export type WakeTarget = "scheduled" | "interval" | "daily";
 
 export interface ScheduleSessionWakeRequest {

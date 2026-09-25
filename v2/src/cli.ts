@@ -161,6 +161,7 @@ import {
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
   type SharedMemoryScope,
+  type SourcePollEnableResponse,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
@@ -448,6 +449,15 @@ function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
   return `Sent ${response.source} reply for ${response.sessionId}.`;
+}
+
+function renderSourcePollEnableResponse(response: SourcePollEnableResponse): string {
+  if (response.cleared.length === 0) {
+    return `Source polling was not disabled for ${response.sessionId}`;
+  }
+  return response.cleared
+    .map((entry) => `${entry.sourceId}: re-enabled polling for PR #${entry.prNumber}`)
+    .join("\n");
 }
 
 function renderStateSubscription(record: SessionStateSubscription): string {
@@ -4626,6 +4636,33 @@ export function createProgram(cliEntrypoint: string): Command {
         });
       },
     );
+
+  source
+    .command("poll-enable")
+    .description("Re-enable GitHub signal polling for a session disabled by a not-found PR.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(async (options: { session?: string; json?: boolean }, command: Command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+      if (!sessionId) {
+        throw new Error("source poll-enable requires --session or SPUR_SESSION");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "re-enabling source polling",
+        action: () =>
+          postJson<SourcePollEnableResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/source-poll-enable`,
+            {},
+            configPath,
+          ),
+        render: renderSourcePollEnableResponse,
+      });
+    });
 
   const daemon = program
     .command("daemon", { hidden: true })
