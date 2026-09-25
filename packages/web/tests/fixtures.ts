@@ -472,9 +472,10 @@ const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unkno
     pattern: /\/api\/sessions\/[^/]+\/todo$/,
     body: {
       revision: "event-0",
-      status: "empty",
+      status: "resolved",
       counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
       items: [],
+      finishOverrides: [],
     },
   },
   {

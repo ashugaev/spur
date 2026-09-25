@@ -954,6 +954,15 @@ test.describe("S1: Session detail header", () => {
 });
 
 test.describe("Spur ToDo audit", () => {
+  test("default empty projection is available", async ({ page }) => {
+    const session = makeStoppedSession({ id: "detail-todo-empty" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("No ToDo items yet.")).toBeVisible();
+    await expect(page.getByText(/ToDo unavailable/)).toHaveCount(0);
+  });
+
   test("renders delayed loading then a resolved expandable projection", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const session = makeCompletedSession({ id: "detail-todo-resolved" });

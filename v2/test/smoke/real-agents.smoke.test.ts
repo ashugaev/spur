@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { startServer } from "../../src/server.js";
+import { isRestorableSession } from "../../src/session-service.js";
 import type { AgentName } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
@@ -412,7 +413,14 @@ After the file and the session metadata are set, wait for more instructions.`,
         timeoutMs: initialSmokeTimeoutMs,
         accept: Boolean,
       });
-      const liveState = await service.get(session.id);
+      const liveState = await pollUntil(() => service.get(session.id), {
+        timeoutMs: 30_000,
+        accept: (state) =>
+          state.status === "running" &&
+          state.worktreePath === session.worktreePath &&
+          state.workspaceExists,
+        label: "running agent with an initialized worktree",
+      });
       if (liveState.slots?.title) {
         expect(liveState.slots.title).toBe(expectedTitle);
         expect(liveState.slots.links).toHaveLength(expectedLinks.length);
@@ -425,6 +433,12 @@ After the file and the session metadata are set, wait for more instructions.`,
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
       await killTmuxSession(session.id);
+
+      await pollUntil(() => service.get(session.id), {
+        timeoutMs: 30_000,
+        accept: isRestorableSession,
+        label: "restorable agent after tmux exit",
+      });
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);
