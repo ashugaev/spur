@@ -182,7 +182,11 @@ interface AgentAdapter {
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
-  sendsInterruptKey: boolean;
+  /**
+   * tmux key names that interrupt a running turn, sent in order. Empty when
+   * the agent has no interrupt key safe to send (cursor).
+   */
+  interruptKeys: readonly string[];
   waitsForSubmitAck: boolean;
   submitAckWindowMs: number;
   submitAckMaxResends: number;
@@ -436,7 +440,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("claude", launchCommand),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
-    sendsInterruptKey: true,
+    interruptKeys: ["C-c"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -499,7 +503,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("codex", launchCommand),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
-    sendsInterruptKey: true,
+    interruptKeys: ["C-c"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -549,7 +553,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("cursor", launchCommand),
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
-    sendsInterruptKey: false,
+    interruptKeys: [],
     waitsForSubmitAck: true,
     submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
@@ -590,7 +594,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
     stateStrategy: "opencode",
     sendMode: "bracketed_paste",
-    sendsInterruptKey: true,
+    // opencode 1.18 binds ctrl+c to app_exit and session_interrupt to escape,
+    // pressed twice ("esc again to interrupt"; the second press must follow
+    // within ~1s).
+    interruptKeys: ["Escape", "Escape"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -730,8 +737,8 @@ export function agentSendMode(agent: AgentName): AgentSendMode {
   return agentAdapter(agent).sendMode;
 }
 
-export function agentSendsInterruptKey(agent: AgentName): boolean {
-  return agentAdapter(agent).sendsInterruptKey;
+export function agentInterruptKeys(agent: AgentName): readonly string[] {
+  return agentAdapter(agent).interruptKeys;
 }
 
 export function agentProcessMatchers(agent: AgentName, launchCommand: string): string[] {

@@ -232,6 +232,7 @@ const findForeignAgentProcessesForSessionMock = vi.fn(() =>
 );
 const killTmuxSessionTreeMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
+const sendInterruptKeysToTmuxMock = vi.fn();
 const sendSensitiveMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
 const sendMenuSelectionKeysMock = vi.fn();
@@ -723,6 +724,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
     sendMessageToTmux: sendMessageToTmuxMock,
+    sendInterruptKeysToTmux: sendInterruptKeysToTmuxMock,
     sendSensitiveMessageToTmux: sendSensitiveMessageToTmuxMock,
     sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
     sendMenuSelectionKeys: sendMenuSelectionKeysMock,
@@ -1577,6 +1579,7 @@ describe("SessionService", () => {
       .mockResolvedValue({ status: "unavailable" });
     killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
+    sendInterruptKeysToTmuxMock.mockReset().mockResolvedValue(true);
     sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
@@ -6356,7 +6359,6 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
-      interrupt: false,
       agent: "claude",
     });
     expect(writeSessionMock).toHaveBeenCalledWith(
@@ -6427,7 +6429,6 @@ describe("SessionService", () => {
     );
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
-      interrupt: false,
       agent: "codex",
     });
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
@@ -6463,7 +6464,6 @@ describe("SessionService", () => {
     await sendPromise;
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
-      interrupt: false,
       agent: "codex",
     });
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
@@ -7255,7 +7255,6 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(sendMessageToTmuxMock).toHaveBeenCalled();
     expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(1, "api-1", "follow up", {
-      interrupt: false,
       agent: "claude",
     });
   });
@@ -7371,8 +7370,8 @@ describe("SessionService", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "send immediately", {
-      interrupt: true,
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
@@ -7387,6 +7386,40 @@ describe("SessionService", () => {
         }),
       }),
     ]);
+  });
+
+  it("never types a direct send into the pane when the interrupt ended the agent", async () => {
+    mockClaudeJsonlState("working");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+    sendInterruptKeysToTmuxMock.mockImplementation(async () => {
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      return true;
+    });
+
+    const service = await createDisposedSessionService();
+
+    await expect(
+      service.send("api-1", { message: "send immediately", queue: false, interrupt: true }),
+    ).rejects.toThrow("exited after the interrupt; message not sent");
+
+    expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
   it("holds queued message delivery while tmux activity is fresher than 30s", async () => {
@@ -7455,7 +7488,6 @@ describe("SessionService", () => {
     try {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
-        interrupt: false,
         agent: "claude",
       });
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -8345,7 +8377,6 @@ describe("SessionService", () => {
     try {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
-        interrupt: false,
         agent: "claude",
       });
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -8394,7 +8425,6 @@ describe("SessionService", () => {
 
     expect(delivered).toBe(true);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first queued", {
-      interrupt: false,
       agent: "claude",
     });
     expect(logSpurEventMock).toHaveBeenCalledWith(
@@ -8418,7 +8448,6 @@ describe("SessionService", () => {
     const deliveredSecond = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
     expect(deliveredSecond).toBe(true);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "second queued", {
-      interrupt: false,
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -8770,7 +8799,6 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(0);
     // Parked in the send for "first"; nothing committed to disk yet.
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
-      interrupt: false,
       agent: "claude",
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
@@ -8899,7 +8927,6 @@ describe("SessionService", () => {
 
     expect(flushed.status).toBe("running");
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "second", {
-      interrupt: false,
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first"]);
@@ -8910,7 +8937,6 @@ describe("SessionService", () => {
     await advanceSeconds(2);
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
-      interrupt: false,
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -9008,7 +9034,6 @@ describe("SessionService", () => {
     // waiting on its ack. Removing it now would report success even though
     // the text was already sent.
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
-      interrupt: false,
       agent: "claude",
     });
 
@@ -9048,7 +9073,6 @@ describe("SessionService", () => {
     await service.flushQueuedMessage("api-1", "second");
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "second", {
-      interrupt: false,
       agent: "claude",
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
@@ -9428,7 +9452,6 @@ describe("SessionService", () => {
       "api-1",
       "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-shot.png]\ninspect this",
       {
-        interrupt: true,
         agent: "claude",
       },
     );
@@ -10362,7 +10385,6 @@ describe("SessionService", () => {
     try {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
-        interrupt: false,
         agent: "claude",
       });
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -12917,7 +12939,6 @@ describe("SessionService", () => {
     try {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("spur-hung", "please continue", {
-        interrupt: false,
         agent: "codex",
       });
       expect(queuedMessagesAtDiscovery).toEqual([]);
@@ -22226,7 +22247,6 @@ describe("SessionService", () => {
       },
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
-      interrupt: false,
       agent: "claude",
     });
     expect(writeSessionMock).toHaveBeenCalledWith(
@@ -22264,7 +22284,6 @@ describe("SessionService", () => {
     const result = await service.send("api-1", { message: "resume work" });
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
-      interrupt: false,
       agent: "claude",
     });
     expect(result.status).toBe("running");
@@ -37844,7 +37863,7 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
         expect.stringContaining("Diagnose update"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       service.dispose();
     });
@@ -38078,7 +38097,7 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
         expect.stringContaining("Review all projects"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
       service.dispose();
@@ -38120,7 +38139,6 @@ describe("SessionService", () => {
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(2, "shp-1", "Retry wake", {
-        interrupt: false,
         agent: "claude",
       });
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
@@ -38184,12 +38202,12 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
         expect.stringContaining("Stop condition: Quality CI is green"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
         expect.stringContaining("spur wake shp-1 --cancel"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:10.000Z");
 
@@ -38399,12 +38417,12 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
         expect.stringContaining("Stop condition: Daily check done"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
         expect.stringContaining("spur wake shp-1 --cancel"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:05:00.000Z");
 
@@ -38550,7 +38568,7 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
         expect.stringContaining("Interval msg"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
@@ -38663,7 +38681,7 @@ describe("SessionService", () => {
         2,
         "shp-1",
         expect.stringContaining("Retry daily wake"),
-        { interrupt: false, agent: "claude" },
+        { agent: "claude" },
       );
       expect(sessions.get("shp-1")?.dailyWake?.nextDueAt).toBe("2026-03-19T10:06:00.000Z");
       expect(sessions.get("shp-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -39030,7 +39048,7 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-2",
         expect.stringContaining("Due one-shot wake"),
-        { agent: "claude", interrupt: false },
+        { agent: "claude" },
       );
       service.dispose();
     });
@@ -40610,7 +40628,6 @@ describe("SessionService", () => {
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
         agent: "claude",
-        interrupt: false,
       });
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
       service.dispose();
@@ -40798,7 +40815,6 @@ describe("SessionService", () => {
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
         agent: "claude",
-        interrupt: false,
       });
       service.dispose();
     });
@@ -40842,7 +40858,6 @@ describe("SessionService", () => {
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
         agent: "claude",
-        interrupt: false,
       });
       expect(suppressedEvents()).toHaveLength(0);
       service.dispose();
@@ -41055,7 +41070,6 @@ describe("SessionService", () => {
         SERVER_ERROR_REACTIVATION_PROMPT,
         {
           agent: "claude",
-          interrupt: false,
         },
       );
       expect(reactivatedEventCount()).toBe(1);
@@ -42209,7 +42223,6 @@ describe("SessionService", () => {
       try {
         await vi.advanceTimersByTimeAsync(2_000);
         expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
-          interrupt: false,
           agent: "claude",
         });
         expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -42921,11 +42934,9 @@ describe("SessionService", () => {
         }
 
         expect(createTmuxSessionMock).toHaveBeenCalled();
-        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-          "api-1",
-          "queued during teardown",
-          expect.objectContaining({ interrupt: false }),
-        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued during teardown", {
+          agent: "claude",
+        });
         const persisted = sessions.get("api-1");
         expect(persisted?.status).toBe("running");
         expect(persisted).not.toHaveProperty("stopReason");
@@ -43352,11 +43363,9 @@ describe("SessionService", () => {
         releasePark();
         await pending;
 
-        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-          "api-1",
-          "flush me",
-          expect.objectContaining({ interrupt: false }),
-        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
+          agent: "claude",
+        });
         expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
       });
 
@@ -43458,11 +43467,9 @@ describe("SessionService", () => {
         const delivered = await pending;
 
         expect(delivered).toBe(true);
-        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-          "api-1",
-          "direct deliver",
-          expect.objectContaining({ interrupt: false }),
-        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "direct deliver", {
+          agent: "claude",
+        });
         expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
       });
 

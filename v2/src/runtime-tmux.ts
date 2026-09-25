@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { agentSendMode, agentSendsInterruptKey } from "./agents/index.js";
+import { agentInterruptKeys, agentSendMode } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
@@ -1230,24 +1230,42 @@ export async function sendSensitiveMessageToTmux(
   }
 }
 
+const INTERRUPT_KEY_GAP_MS = 200;
+const INTERRUPT_SETTLE_MS = 500;
+
+/**
+ * Sends the agent's interrupt key sequence and waits for the turn to settle.
+ * Returns false when the agent has no interrupt key, so nothing was sent.
+ */
+export async function sendInterruptKeysToTmux(
+  sessionName: string,
+  agent: AgentName,
+): Promise<boolean> {
+  const keys = agentInterruptKeys(agent);
+  if (keys.length === 0) {
+    return false;
+  }
+  const target = exactPaneTarget(sessionName);
+  for (const [index, key] of keys.entries()) {
+    if (index > 0) {
+      await sleep(INTERRUPT_KEY_GAP_MS);
+    }
+    await tmux("send-keys", "-t", target, key);
+  }
+  await sleep(INTERRUPT_SETTLE_MS);
+  return true;
+}
+
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { interrupt?: boolean; agent?: AgentName },
+  options?: { agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   const useBracketedPaste =
     options?.agent !== undefined &&
     agentSendMode(options.agent) === "bracketed_paste" &&
     !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
-  const sendInterruptKey =
-    options?.interrupt === true &&
-    options.agent !== undefined &&
-    agentSendsInterruptKey(options.agent);
-  if (sendInterruptKey) {
-    await tmux("send-keys", "-t", target, "C-c");
-    await sleep(500);
-  }
   // Exit copy-mode before issuing line-edit keys. `-X cancel` is a no-op
   // outside copy-mode; if a user accidentally entered it (mouse drag, PageUp),
   // C-u and Enter would otherwise be interpreted by the copy buffer and never

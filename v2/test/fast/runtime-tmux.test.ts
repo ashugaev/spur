@@ -877,48 +877,67 @@ describe("runtime-tmux", () => {
     }
   });
 
-  it("keeps interrupt behavior before codex atomic send", async () => {
+  it("sends C-c then settles for a codex interrupt", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
-    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
 
-    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "codex" });
+    await expect(sendInterruptKeysToTmux("api-1", "codex")).resolves.toBe(true);
 
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
-    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
-    expect(pasteCall?.[1]).toContain("-p");
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual(["C-c"]);
     expect(sleepMock).toHaveBeenCalledWith(500);
   });
 
-  it("skips the interrupt keystroke for cursor sends", async () => {
+  it("sends C-c for a claude interrupt", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(sendInterruptKeysToTmux("api-1", "claude")).resolves.toBe(true);
+
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual(["C-c"]);
+  });
+
+  // opencode binds ctrl+c to app_exit: C-c here kills the agent and the
+  // message that follows lands in the pane's shell.
+  it("interrupts opencode with a double Escape, never C-c", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(sendInterruptKeysToTmux("api-1", "opencode")).resolves.toBe(true);
+
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "Escape",
+      "Escape",
+    ]);
+    expect(sleepMock.mock.calls.map(([ms]) => ms)).toEqual([200, 500]);
+  });
+
+  it("sends no interrupt key for cursor", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(sendInterruptKeysToTmux("api-1", "cursor")).resolves.toBe(false);
+
+    expect(execFileAsyncMock).not.toHaveBeenCalled();
+    expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("types a cursor message without any interrupt key", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
     const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
 
-    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "cursor" });
+    await sendMessageToTmux("api-1", "follow up", { agent: "cursor" });
 
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(false);
-    expect(sleepMock).not.toHaveBeenCalledWith(500);
-    expect(sleepMock).toHaveBeenCalledWith(300);
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
       "cancel",
       "C-u",
       "follow up",
       "Enter",
     ]);
-  });
-
-  it("keeps the interrupt keystroke for claude sends", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
-
-    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
-
-    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "claude" });
-
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
-    expect(sleepMock).toHaveBeenCalledWith(500);
   });
 
   it("auto-confirms the Cursor workspace trust prompt before reporting ready", async () => {
