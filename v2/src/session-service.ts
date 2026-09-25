@@ -14317,13 +14317,10 @@ export class SessionService {
       return session;
     }
 
-    // Claude, OpenCode, and Cursor sessions pin their native session id. Never overwrite
-    // one with newest-session discovery, which could bind a sibling session
-    // sharing the worktree. Legacy records without an id keep discovery below.
-    if (
-      (session.agent === "claude" || session.agent === "opencode" || session.agent === "cursor") &&
-      session.agentSessionId
-    ) {
+    // Stored native session ids are pinned. Never overwrite one with newest-session
+    // discovery, which could bind a sibling session sharing the worktree. Legacy
+    // records without an id keep discovery below.
+    if (session.agentSessionId) {
       return session;
     }
 
@@ -15028,12 +15025,16 @@ export class SessionService {
           ? { agentSessionId: current.agentSessionId }
           : {}),
       };
-      const launchPlan = await waitForRestorePlan(
-        current.agent,
-        current.worktreePath,
-        restorePrompt,
-        launchPlanOptions,
-      );
+      const pinnedCodexId =
+        current.agent === "codex" && current.agentSessionId ? current.agentSessionId : undefined;
+      const launchPlan = pinnedCodexId
+        ? null
+        : await waitForRestorePlan(
+            current.agent,
+            current.worktreePath,
+            restorePrompt,
+            launchPlanOptions,
+          );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
       await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: true });
@@ -15044,7 +15045,9 @@ export class SessionService {
       const pinnedOpenCodeId =
         current.agent === "opencode" && current.agentSessionId ? current.agentSessionId : undefined;
       let restoredAgentSessionId =
-        current.agent === "cursor" ? current.agentSessionId : (pinnedClaudeId ?? pinnedOpenCodeId);
+        current.agent === "cursor"
+          ? current.agentSessionId
+          : (pinnedClaudeId ?? pinnedOpenCodeId ?? pinnedCodexId);
       if (launchPlan && !restoredAgentSessionId) {
         const codexSessionRootDir =
           current.agent === "codex"

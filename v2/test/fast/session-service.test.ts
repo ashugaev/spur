@@ -12661,20 +12661,26 @@ describe("SessionService", () => {
       },
     );
 
-    it("does not overwrite pinned cursor agentSessionId with discovery", async () => {
-      findAgentSessionIdMock.mockReset().mockResolvedValue("discovered-cursor-id");
-      const sessions = createSessionStore();
-      const seeded = runningSession({ agent: "cursor", agentSessionId: "pinned-cursor-id" });
-      sessions.set("api-1", seeded);
-      const service = await createDisposedSessionService();
-      const internals = sessionServiceInternals(service);
+    it.each([
+      ["codex", "pinned-codex-id", "discovered-codex-subagent-id"],
+      ["cursor", "pinned-cursor-id", "discovered-cursor-id"],
+    ] as const)(
+      "does not overwrite pinned %s agentSessionId with discovery",
+      async (agent, pinnedId, discoveredId) => {
+        findAgentSessionIdMock.mockReset().mockResolvedValue(discoveredId);
+        const sessions = createSessionStore();
+        const seeded = runningSession({ agent, agentSessionId: pinnedId });
+        sessions.set("api-1", seeded);
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
 
-      const result = await internals.captureAgentSessionId(seeded, 0);
+        const result = await internals.captureAgentSessionId(seeded, 0);
 
-      expect(result.agentSessionId).toBe("pinned-cursor-id");
-      expect(findAgentSessionIdMock).not.toHaveBeenCalled();
-      expect(writeSessionMock).not.toHaveBeenCalled();
-    });
+        expect(result.agentSessionId).toBe(pinnedId);
+        expect(findAgentSessionIdMock).not.toHaveBeenCalled();
+        expect(writeSessionMock).not.toHaveBeenCalled();
+      },
+    );
 
     it("does not re-emit session.agent_session_id.discovered for an unchanged id", async () => {
       findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
@@ -12699,12 +12705,10 @@ describe("SessionService", () => {
       expect(writeSessionMock).not.toHaveBeenCalled();
     });
 
-    it("emits again when the discovered id actually changes", async () => {
-      // codex, not claude: a pinned claude id short-circuits before discovery
-      // (:9116-9118) and would never re-poll for a changed id.
+    it("emits again when an unpinned discovered id actually changes", async () => {
       findAgentSessionIdMock.mockReset().mockResolvedValue("native-1");
       const sessions = createSessionStore();
-      const seeded = runningSession({ agent: "codex" });
+      const seeded = runningSession();
       sessions.set("api-1", seeded);
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
@@ -27461,6 +27465,49 @@ describe("SessionService", () => {
       expect.objectContaining({
         agent: "opencode",
         launchCommand: `opencode --auto --session ${nativeSessionId}`,
+      }),
+    );
+  });
+
+  it("restores Codex from the stored native session id without newest-session discovery", async () => {
+    const nativeSessionId = "codex-main-thread";
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "codex",
+        agentSessionId: nativeSessionId,
+        launchCommand:
+          "CODEX_HOME='/tmp/spur-tools/api-1/codex-home' codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    buildAgentRestorePlanMock.mockResolvedValue({
+      agent: "codex",
+      launchCommand: "codex resume codex-wrong-newest-subagent",
+      initialMessage: "restore prompt",
+      readyMarkers: ["›"],
+    });
+    buildAgentResumePlanMock.mockImplementation((agent: string, agentSessionId: string) => ({
+      agent,
+      launchCommand: `codex resume ${agentSessionId}`,
+      readyMarkers: ["›"],
+    }));
+    findAgentSessionIdMock.mockResolvedValue("codex-wrong-newest-subagent");
+    mockExitedThenRestoredProcess();
+
+    const service = await createDisposedSessionService();
+    await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock).not.toHaveBeenCalled();
+    expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+      "codex",
+      nativeSessionId,
+      "CODEX_HOME='/tmp/spur-tools/api-1/codex-home' codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
+      expect.any(Object),
+    );
+    expect(findAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "codex",
+        launchCommand: `codex resume ${nativeSessionId}`,
       }),
     );
   });
