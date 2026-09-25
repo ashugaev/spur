@@ -50,9 +50,6 @@ function tryParseJson(line: string): Record<string, unknown> | null {
 }
 
 function extractUserMessageText(parsed: Record<string, unknown>): string | null {
-  if (parsed["type"] !== "user") {
-    return null;
-  }
   const message = parsed["message"];
   if (!isRecord(message)) {
     return null;
@@ -63,16 +60,26 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
   return extractTextContent(message);
 }
 
-// Claude records a submit that gets absorbed mid-turn only as a
-// type:"queue-operation" record (operation enqueue/remove/popAll/...), never
-// as a type:"user" turn. The content is written verbatim at submit time, so
-// it is delivery evidence of the same strength as a user turn.
-function extractQueuedMessageText(parsed: Record<string, unknown>): string | null {
-  if (parsed["type"] !== "queue-operation") {
+// A send typed into a busy pane is queued, and claude writes no `type:"user"`
+// record for it until the turn absorbing it ends. The queue `enqueue` record is
+// written when Enter lands and carries the submitted text, so it is the ack.
+function extractEnqueuedText(parsed: Record<string, unknown>): string | null {
+  if (parsed["operation"] !== "enqueue") {
     return null;
   }
   const content = parsed["content"];
   return typeof content === "string" ? content : null;
+}
+
+function extractDeliveredText(parsed: Record<string, unknown>): string | null {
+  switch (parsed["type"]) {
+    case "user":
+      return extractUserMessageText(parsed);
+    case "queue-operation":
+      return extractEnqueuedText(parsed);
+    default:
+      return null;
+  }
 }
 
 const CTRL_U = String.fromCharCode(0x15);
@@ -88,7 +95,7 @@ function stripLeadingCtrlU(value: string): string {
 const normalize = (s: string) =>
   stripLeadingCtrlU(s).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 
-async function scanFileForSubmittedText(
+async function scanFileForDeliveredText(
   filePath: string,
   startOffset: number,
   normalizedTarget: string,
@@ -102,7 +109,7 @@ async function scanFileForSubmittedText(
         if (!trimmed) continue;
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
-        const text = extractUserMessageText(parsed) ?? extractQueuedMessageText(parsed);
+        const text = extractDeliveredText(parsed);
         if (text !== null && normalize(text) === normalizedTarget) {
           reader.close();
           return true;
@@ -125,7 +132,7 @@ export async function scanClaudeJsonlForMessage(
 ): Promise<boolean> {
   const normalizedTarget = normalize(text);
 
-  if (await scanFileForSubmittedText(baseline.file, baseline.size, normalizedTarget)) {
+  if (await scanFileForDeliveredText(baseline.file, baseline.size, normalizedTarget)) {
     return true;
   }
 
@@ -137,5 +144,5 @@ export async function scanClaudeJsonlForMessage(
   if (!latest || latest === baseline.file) {
     return false;
   }
-  return scanFileForSubmittedText(latest, 0, normalizedTarget);
+  return scanFileForDeliveredText(latest, 0, normalizedTarget);
 }
