@@ -12,6 +12,7 @@ import {
   parseCursorJsonlRecord,
   readCursorJsonlState,
   readCursorTranscriptEntries,
+  resetCursorTurnEndedProbe,
   resolveCursorPinnedTranscriptPath,
   toCursorProjectPath,
   type CursorParsedRecord,
@@ -570,6 +571,66 @@ describe("findLatestCursorTranscriptFile", () => {
     expect(closed?.state).toBe("waiting");
   });
 
+  async function writeCursorChat(prefix: string, lines: string[], mtime?: Date) {
+    const worktreePath = await mkdtemp(join(homedir(), prefix));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    const chatDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+      "chat",
+    );
+    await mkdir(chatDir, { recursive: true });
+    const transcriptPath = join(chatDir, "chat.jsonl");
+    await writeFile(transcriptPath, lines.join("\n") + "\n");
+    if (mtime) await utimes(transcriptPath, mtime, mtime);
+    return worktreePath;
+  }
+  const userLine = JSON.stringify({
+    role: "user",
+    message: { content: [{ type: "text", text: "run it" }] },
+  });
+  const assistantLine = JSON.stringify({
+    role: "assistant",
+    message: { content: [{ type: "text", text: "Running the command now" }] },
+  });
+
+  // A daemon restart mid-command starts a fresh reader on a file that holds no
+  // turn_ended (every submit rewrites it away); another transcript of the same
+  // cursor build proves the build writes the marker.
+  it("reads a mid-command transcript as working on a fresh reader when the host cursor writes turn_ended", async () => {
+    resetCursorTurnEndedProbe();
+    await writeCursorChat("spur-cursor-jsonl-closed-", [
+      userLine,
+      assistantLine,
+      '{"type":"turn_ended","status":"success"}',
+    ]);
+    const running = await writeCursorChat("spur-cursor-jsonl-open-", [userLine, assistantLine]);
+
+    const state = await readCursorJsonlState(running, undefined, "chat");
+    expect(state?.state).toBe("working");
+  });
+
+  it("stops reading an unclosed turn as working past the 15-minute tool-use grace", async () => {
+    resetCursorTurnEndedProbe();
+    await writeCursorChat("spur-cursor-jsonl-closed-", [
+      userLine,
+      assistantLine,
+      '{"type":"turn_ended","status":"success"}',
+    ]);
+    const stale = await writeCursorChat(
+      "spur-cursor-jsonl-stale-",
+      [userLine, assistantLine],
+      new Date(Date.now() - CURSOR_JSONL_TOOL_USE_GRACE_MS - 60_000),
+    );
+
+    const state = await readCursorJsonlState(stale, undefined, "chat");
+    expect(state?.state).toBe("waiting");
+  });
+
   it("keeps a trailing turn_ended error visible across reads until cursor rewrites it", async () => {
     const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-trailing-"));
     tempRoots.push(worktreePath);
@@ -633,7 +694,8 @@ describe("findLatestCursorTranscriptFile", () => {
     await mkdir(join(canonicalTranscriptsDir, agentSessionId), { recursive: true });
     await writeFile(
       join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
+      // A closed turn, as the host's cursor build writes it.
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n{"type":"turn_ended","status":"success"}\n',
     );
 
     const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);

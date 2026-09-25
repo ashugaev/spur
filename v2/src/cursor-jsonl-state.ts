@@ -23,7 +23,7 @@ export interface CursorJsonlReaderState {
   tailRecords: CursorParsedRecord[];
   /** Records parsed from the trailing turn_ended lines past lastOffset. */
   trailingRecords: CursorParsedRecord[];
-  /** This transcript has closed a turn with turn_ended at least once. */
+  /** The installed cursor closes turns with turn_ended (this file or the host). */
   usesTurnEnded: boolean;
   /** The file currently ends in a turn_ended line. */
   turnEnded: boolean;
@@ -31,9 +31,79 @@ export interface CursorJsonlReaderState {
 
 // A cursor build that closes turns with turn_ended writes no tool records while
 // a shell command runs: the tail is a plain assistant text line for the whole
-// run. Once the transcript is known to use the marker, its absence after the
-// last record is the running-turn signal, bounded by the tool-use grace so a
-// turn cursor never closed cannot pin the session working.
+// run. Once the build is known to use the marker, its absence after the last
+// record is the running-turn signal, bounded by the tool-use grace so a turn
+// cursor never closed cannot pin the session working.
+//
+// The file alone cannot prove it: every submit rewrites away the previous
+// turn_ended, so a transcript mid-command holds none. The marker is a property
+// of the installed cursor build, so any transcript on the host that ends in it
+// answers for all of them — which also covers a daemon restart mid-command.
+let hostCursorWritesTurnEnded = false;
+let hostProbeAtMs = 0;
+const HOST_PROBE_INTERVAL_MS = 10 * 60_000;
+const HOST_PROBE_FILE_LIMIT = 20;
+const HOST_PROBE_TAIL_BYTES = 512;
+
+export function resetCursorTurnEndedProbe(): void {
+  hostCursorWritesTurnEnded = false;
+  hostProbeAtMs = 0;
+}
+
+async function endsWithTurnEnded(filePath: string): Promise<boolean> {
+  const fd = await open(filePath, "r");
+  try {
+    const { size } = await fd.stat();
+    const start = Math.max(0, size - HOST_PROBE_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    if (buffer.length > 0) await fd.read(buffer, 0, buffer.length, start);
+    return cursorStablePrefixBytes(buffer) < buffer.lastIndexOf(NEWLINE) + 1;
+  } finally {
+    await fd.close();
+  }
+}
+
+async function cursorBuildWritesTurnEnded(projectsDir: string, nowMs: number): Promise<boolean> {
+  if (hostCursorWritesTurnEnded || nowMs - hostProbeAtMs < HOST_PROBE_INTERVAL_MS) {
+    return hostCursorWritesTurnEnded;
+  }
+  hostProbeAtMs = nowMs;
+  const files: Array<{ path: string; mtimeMs: number }> = [];
+  try {
+    for (const project of await readdir(projectsDir)) {
+      const transcriptsDir = join(projectsDir, project, "agent-transcripts");
+      let chats: string[];
+      try {
+        chats = await readdir(transcriptsDir);
+      } catch {
+        continue;
+      }
+      for (const chat of chats) {
+        const path = join(transcriptsDir, chat, `${chat}.jsonl`);
+        try {
+          files.push({ path, mtimeMs: (await stat(path)).mtimeMs });
+        } catch {
+          // Not a transcript dir.
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+  files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  for (const file of files.slice(0, HOST_PROBE_FILE_LIMIT)) {
+    try {
+      if (await endsWithTurnEnded(file.path)) {
+        hostCursorWritesTurnEnded = true;
+        break;
+      }
+    } catch {
+      // Rotated away between listing and read.
+    }
+  }
+  return hostCursorWritesTurnEnded;
+}
+
 function cursorReaderState(
   records: CursorParsedRecord[],
   reader: Pick<CursorJsonlReaderState, "usesTurnEnded" | "turnEnded">,
@@ -42,7 +112,7 @@ function cursorReaderState(
 ): SessionState {
   const state = classifyCursorJsonlState(records, nowMs, fileMtimeMs);
   const turnOpen =
-    reader.usesTurnEnded &&
+    (reader.usesTurnEnded || hostCursorWritesTurnEnded) &&
     !reader.turnEnded &&
     nowMs - fileMtimeMs <= CURSOR_JSONL_TOOL_USE_GRACE_MS;
   return state === "waiting" && turnOpen ? "working" : state;
@@ -460,13 +530,17 @@ export async function readCursorJsonlState(
 
   const tailRecords = [...currentReader.tailRecords, ...stableRecords].slice(-TAIL_RECORD_LIMIT);
   const combined = [...tailRecords, ...trailingRecords].slice(-TAIL_RECORD_LIMIT);
+  if (turnEnded) hostCursorWritesTurnEnded = true;
   const nextReader: CursorJsonlReaderState = {
     filePath,
     lastOffset: readOffset + stableBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords,
     trailingRecords,
-    usesTurnEnded: currentReader.usesTurnEnded || turnEnded,
+    usesTurnEnded:
+      currentReader.usesTurnEnded ||
+      turnEnded ||
+      (await cursorBuildWritesTurnEnded(join(homedir(), ".cursor", "projects"), nowMs)),
     turnEnded,
   };
 
