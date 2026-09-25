@@ -526,10 +526,35 @@ describe("createAgentSubmitAckBinding", () => {
       "hello",
       ctx.worktreePath,
       "sid-1",
+      undefined,
     );
     // The rotated path, not baseline.file: change (e) reports the file the scan
     // actually read, not a hardcoded baseline.
     expect(result).toEqual({ found: true, lastScannedFile: "/rotated/chat.jsonl" });
+  });
+
+  it("forwards cursorConfigDir into the cursor scan when present", async () => {
+    captureCursorSubmitBaselineMock.mockResolvedValue({ file: "/some/chat.jsonl", size: 7 });
+    scanCursorJsonlForMessageMock.mockResolvedValue({
+      found: false,
+      scannedFile: "/some/chat.jsonl",
+    });
+
+    const pinnedCtx = {
+      ...ctx,
+      agentSessionId: "sid-1",
+      cursorConfigDir: "/tmp/spur-data/cursor/session-1",
+    };
+    const binding = await createAgentSubmitAckBinding("cursor", pinnedCtx);
+    await binding?.scan("hello");
+
+    expect(scanCursorJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/chat.jsonl", size: 7 },
+      "hello",
+      ctx.worktreePath,
+      "sid-1",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
   });
 });
 

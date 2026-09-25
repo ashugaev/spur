@@ -5,10 +5,20 @@ import {
   findCursorAckTranscriptFile,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
+import { findCursorSessionId } from "./cursor.js";
 
 export interface CursorSubmitBaseline {
   file: string;
   size: number;
+  // Mutated in place across polls of the same binding (session-service.ts
+  // captures one baseline object and calls scan() repeatedly against it, see
+  // waitForSubmitAck). Records the byte offset a rotated chat-id transcript
+  // was FIRST seen at, so a later poll only scans records written after that
+  // sighting rather than the rotated file's full pre-existing history.
+  // Optional: attached lazily by scanCursorJsonlForMessage the first time a
+  // rotation is observed, so callers that build a baseline literal (tests)
+  // need not know about it up front.
+  rotationOffsets?: Map<string, number>;
 }
 
 export interface CursorSubmitAckScanResult {
@@ -126,6 +136,7 @@ export async function scanCursorJsonlForMessage(
   text: string,
   worktreePath: string,
   agentSessionId?: string,
+  options?: { cursorConfigDir?: string },
 ): Promise<CursorSubmitAckScanResult> {
   const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
@@ -134,6 +145,41 @@ export async function scanCursorJsonlForMessage(
 
   if (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget)) {
     return { found: true, scannedFile: baseline.file };
+  }
+
+  if (agentSessionId && options?.cursorConfigDir) {
+    // Cursor rotates its chat id mid-session; a pinned id's transcript never
+    // rotates, so re-resolve the current chat id from the session-private
+    // config dir (never the shared project transcripts dir — see #889/#890).
+    const resolvedId = await findCursorSessionId(worktreePath, {
+      configDir: options.cursorConfigDir,
+    });
+    if (resolvedId && resolvedId !== agentSessionId) {
+      const rotated = await findCursorAckTranscriptFile(worktreePath, resolvedId);
+      if (rotated) {
+        // The rotated chat id can carry history from before this send (or
+        // even before the rotation was first detected by this binding): a
+        // full-history scan from 0 lets a short send like "continue" match an
+        // unrelated earlier turn (substring match, see submitAckMatchText).
+        // Baseline against the file's size the FIRST time this binding sees
+        // it, and remember that offset for every later poll of the same
+        // binding, so only records written after that sighting can ack.
+        baseline.rotationOffsets ??= new Map();
+        let offset = baseline.rotationOffsets.get(rotated);
+        if (offset === undefined) {
+          const rotatedStat = await stat(rotated).catch(() => null);
+          offset = rotatedStat ? rotatedStat.size : 0;
+          baseline.rotationOffsets.set(rotated, offset);
+        }
+        const found = await scanFileForUserText(rotated, offset, normalizedTarget);
+        return { found, scannedFile: rotated };
+      }
+    }
+    // No chat-id rotation (or no rotated file yet): fall through to the
+    // existing pinned-file re-resolve below. A symlinked worktree can baseline
+    // against a candidate path that never gets written while cursor writes
+    // the pinned transcript under a different worktree-path candidate; that
+    // rescan must still run even when the chat id itself never rotated.
   }
 
   const latest = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
