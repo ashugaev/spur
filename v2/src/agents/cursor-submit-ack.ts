@@ -152,7 +152,11 @@ export async function scanCursorJsonlForMessage(
         return { found, scannedFile: rotated };
       }
     }
-    return { found: false, scannedFile: baseline.file };
+    // No chat-id rotation (or no rotated file yet): fall through to the
+    // existing pinned-file re-resolve below. A symlinked worktree can baseline
+    // against a candidate path that never gets written while cursor writes
+    // the pinned transcript under a different worktree-path candidate; that
+    // rescan must still run even when the chat id itself never rotated.
   }
 
   const latest = await findCursorAckTranscriptFile(worktreePath, agentSessionId);

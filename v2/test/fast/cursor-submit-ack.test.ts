@@ -272,9 +272,16 @@ describe("scanCursorJsonlForMessage", () => {
 
   // AC6: the re-resolved id equals the pin, or resolves to nothing — no extra
   // file is scanned, result stays bound to the baseline file.
-  it("does not rescan when the re-resolved chat id equals the pin or is unavailable", async () => {
+  // AC6 (revised): when the re-resolved chat id equals the pin or is
+  // unavailable, no chat-id rotation happened, but the pre-existing
+  // pinned-file re-resolve still runs (composed, not short-circuited) — it
+  // covers a symlinked worktree's different candidate-path resolution, a
+  // separate axis from chat-id rotation. Both compose to "no rescan" here
+  // because findCursorAckTranscriptFile also resolves back to baseline.file.
+  it("falls through to the pinned-file re-resolve, and finds no rescan when both agree with the pin", async () => {
     const pinnedFile = await makeJsonl("pinned-2.jsonl", [userTurn("earlier turn")]);
     const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
+    findCursorAckTranscriptFileMock.mockResolvedValue(pinnedFile);
 
     findCursorSessionIdMock.mockResolvedValue("pinned-id");
     const sameIdResult = await scanCursorJsonlForMessage(
@@ -285,8 +292,9 @@ describe("scanCursorJsonlForMessage", () => {
       { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
     );
     expect(sameIdResult).toEqual({ found: false, scannedFile: pinnedFile });
-    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
+    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
 
+    findCursorAckTranscriptFileMock.mockClear();
     findCursorSessionIdMock.mockResolvedValue(null);
     const noIdResult = await scanCursorJsonlForMessage(
       baseline,
@@ -296,6 +304,35 @@ describe("scanCursorJsonlForMessage", () => {
       { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
     );
     expect(noIdResult).toEqual({ found: false, scannedFile: pinnedFile });
-    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
+    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
+  });
+
+  // Regression: a symlinked worktree resolves to two candidates. The WAITING
+  // baseline is built from the LAST candidate (cursor-jsonl-state.ts:155-156)
+  // while findLatestCursorTranscriptFile returns the FIRST candidate whose
+  // pinned file actually exists (cursor-jsonl-state.ts:100-107). No chat-id
+  // rotation happens here (findCursorSessionId agrees with the pin), so the
+  // fix must fall through to the pre-existing pinned-file re-resolve instead
+  // of returning found:false as soon as the chat-id check is done.
+  it("acks a pinned file written under a different worktree-path candidate with no chat-id rotation", async () => {
+    const staleWaitingPath = "/tmp/worktree-symlink/last-candidate/pinned-id.jsonl";
+    const actualPinnedFile = await makeJsonl("first-candidate.jsonl", []);
+    await appendJsonl(actualPinnedFile, [userTurn("ship the task")]);
+    const baseline = { file: staleWaitingPath, size: 0 };
+
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "pinned-id" ? actualPinnedFile : null,
+    );
+
+    const result = await scanCursorJsonlForMessage(
+      baseline,
+      "ship the task",
+      "/tmp/worktree",
+      "pinned-id",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
+
+    expect(result).toEqual({ found: true, scannedFile: actualPinnedFile });
   });
 });
