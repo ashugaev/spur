@@ -1225,9 +1225,13 @@ type SessionServiceInternals = {
       agentSessionId?: string;
     },
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: { interrupt?: boolean; freshLaunch?: boolean; interactive?: boolean },
   ): Promise<AgentSendOutcome>;
   writeAgentMessage: SessionServiceInternals["sendAgentMessage"];
+  scheduleTodoNudge(session: SessionRecord): void;
+  waitForQueuedMessage(sessionId: string): Promise<string>;
+  queuedDeliveryAckedAt: Map<string, number>;
+  withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   enrichDashboard(session: SessionRecord): Promise<{ id: string; model?: string }>;
   classifySessionRecord(
     session: SessionRecord,
@@ -1457,14 +1461,19 @@ describe("SessionService", () => {
       .mockImplementation((agent: string) => agent === "claude");
     agentSubmitAckPacingMock
       .mockReset()
-      .mockImplementation((agent: string, options?: { freshLaunch?: boolean }) => {
-        if (agent === "claude" && options?.freshLaunch === true) {
-          return { windowMs: 5_000, maxResends: 2 };
-        }
-        return agent === "cursor"
-          ? { windowMs: 5_000, maxResends: 12 }
-          : { windowMs: 300_000, maxResends: 2 };
-      });
+      .mockImplementation(
+        (agent: string, options?: { freshLaunch?: boolean; interactive?: boolean }) => {
+          if (agent === "claude" && options?.freshLaunch === true) {
+            return { windowMs: 5_000, maxResends: 2 };
+          }
+          if (options?.interactive === true) {
+            return { windowMs: 5_000, maxResends: 3 };
+          }
+          return agent === "cursor"
+            ? { windowMs: 5_000, maxResends: 12 }
+            : { windowMs: 300_000, maxResends: 2 };
+        },
+      );
     captureCodexRolloutBaselineMock.mockReset().mockResolvedValue(new Map());
     scanCodexRolloutForMessageMock
       .mockReset()
@@ -2286,6 +2295,94 @@ describe("SessionService", () => {
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(2);
       service.dispose();
+    });
+
+    // A reminder's ack wait holds the session lock; the long default pacing
+    // (300s x 3) held it for 900s and blocked every user send behind it.
+    it("sends the ToDo reminder with the short interactive ack pacing", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+
+      await internals.maybeNudgeTodo(session);
+
+      expect(send).toHaveBeenCalledWith(expect.anything(), expect.stringContaining("Spur ToDo"), {
+        interrupt: false,
+        interactive: true,
+      });
+    });
+
+    it("never runs a ToDo reminder inside the sweep or behind a busy session", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      let releaseSend: () => void = () => {};
+      const send = vi.spyOn(internals, "writeAgentMessage").mockImplementation(
+        () =>
+          new Promise<AgentSendOutcome>((resolve) => {
+            releaseSend = () => resolve(SUBMITTED);
+          }),
+      );
+
+      // A user send holds the session lock: the reminder stands down.
+      let releaseUser: () => void = () => {};
+      const userSend = internals.withWorkspaceLifecycleLocks(
+        session.id,
+        () =>
+          new Promise<void>((resolve) => {
+            releaseUser = resolve;
+          }),
+      );
+      internals.scheduleTodoNudge(session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(send).not.toHaveBeenCalled();
+      releaseUser();
+      await userSend;
+      await vi.advanceTimersByTimeAsync(0);
+      // Stood down, not queued behind the user send.
+      expect(send).not.toHaveBeenCalled();
+
+      // Idle: the reminder starts detached, and a second sweep tick while its
+      // ack is outstanding does not start another.
+      internals.scheduleTodoNudge(session);
+      internals.scheduleTodoNudge(session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(send).toHaveBeenCalledTimes(1);
+      releaseSend();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    it("finishes the attention sweep while a ToDo reminder's ack is outstanding", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      listSessionsMock.mockReturnValue([session]);
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const send = vi
+        .spyOn(
+          SessionService.prototype as unknown as Pick<SessionServiceInternals, "writeAgentMessage">,
+          "writeAgentMessage",
+        )
+        .mockImplementation(() => new Promise<AgentSendOutcome>(() => {}));
+      // The constructor starts the first attention sweep.
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(sessionServiceInternals(service).attentionMonitorRunning).toBe(false);
+      } finally {
+        send.mockRestore();
+        service.dispose();
+      }
     });
 
     it.each([false, true])(
@@ -7422,7 +7519,133 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
-  it("holds queued message delivery while tmux activity is fresher than 30s", async () => {
+  // Send-now used the agent's 300s x 3 pacing and threw after ~900s, past the
+  // web proxy's 300s timeout, while the text sat in a live agent.
+  it("recovers an unacked send-now to a live agent within the interactive ack budget", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+    createAgentSubmitAckBindingMock.mockImplementation(async () => ({ scan: vi.fn() }));
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    const service = await createDisposedSessionService();
+    const waitForAck = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/x.jsonl" });
+
+    const result = await service
+      .send("api-1", { message: "hello there", queue: false, interrupt: true })
+      .then(
+        (view) => ({ view, error: null }),
+        (error: unknown) => ({ view: null, error }),
+      );
+
+    expect(result.error).toBeNull();
+    expect(result.view?.id).toBe("api-1");
+    expect(agentSubmitAckPacingMock).toHaveBeenCalledWith("claude", {
+      freshLaunch: false,
+      interactive: true,
+    });
+    expect(waitForAck.mock.calls.map(([, , windowMs]) => windowMs)).toEqual([
+      5_000, 5_000, 5_000, 5_000,
+    ]);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(3);
+    const events = logSpurEventMock.mock.calls.map(([, entry]) => entry.event);
+    expect(events.filter((event) => event === "session.message.delivery_recovered")).toHaveLength(
+      1,
+    );
+    expect(events).not.toContain("session.message.failed");
+  });
+
+  it("releases the prompt hold as soon as the agent writes after a confirmed ack", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      // Fresh: inside the 15s prompt grace.
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      queuedMessages: { messages: ["next"], awaitingPrompt: true },
+    });
+    listSessionsMock.mockReturnValue([]);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    // The reply to the delivered message landed after the ack was confirmed.
+    mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:59.800Z") });
+    // Live service (a disposed one stops every wait); listSessions is empty so
+    // no delivery runner of its own races this wait.
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const internals = sessionServiceInternals(service);
+
+    try {
+      internals.queuedDeliveryAckedAt.set("api-1", Date.parse("2026-03-18T10:04:59.500Z"));
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      // The record is inside the 15s grace; only the ack evidence releases it.
+      const outcome = await Promise.race([
+        internals.waitForQueuedMessage("api-1"),
+        realTimers.setTimeout(500, "held"),
+      ]);
+      expect(outcome).toBe("ready");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("shows no awaiting-prompt state when nothing is left in the queue", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    const base = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    sessions.set("api-1", { ...base, queuedMessages: { messages: [], awaitingPrompt: true } });
+    listSessionsMock.mockReturnValue([]);
+    const service = await createDisposedSessionService();
+
+    expect((await service.get("api-1")).queuedMessages).toBeUndefined();
+
+    sessions.set("api-1", {
+      ...base,
+      queuedMessages: { messages: ["next"], awaitingPrompt: true },
+    });
+    expect((await service.get("api-1")).queuedMessages).toEqual({
+      messages: ["next"],
+      awaitingPrompt: true,
+    });
+  });
+
+  it("holds queued message delivery while agent activity is fresher than the settle window", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -7444,15 +7667,29 @@ describe("SessionService", () => {
       },
     });
     listSessionsMock.mockReturnValue([sessions.get("api-1")]);
-    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:55.000Z"));
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:59.900Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async () => ({
+      scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
+    }));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     try {
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued follow up"]);
+      // The settle window is 2s, not the 30s trigger batching window.
+      vi.setSystemTime(new Date("2026-03-18T10:05:02.000Z"));
+      expect(await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1")).toBe(true);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
+        agent: "claude",
+      });
+      // The drain types into an idle agent: short interactive ack pacing.
+      expect(agentSubmitAckPacingMock).toHaveBeenCalledWith("claude", {
+        freshLaunch: false,
+        interactive: true,
+      });
     } finally {
       service.dispose();
     }
@@ -7518,9 +7755,9 @@ describe("SessionService", () => {
       },
     });
     listSessionsMock.mockReturnValue([sessions.get("api-1")]);
-    // Agent activity fresher than the idle wait: the first drain attempt
+    // Agent activity fresher than the settle window: the first drain attempt
     // stands down without delivering, so the loop parks on its poll sleep.
-    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:55.000Z"));
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:59.900Z"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

@@ -562,6 +562,11 @@ const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
+// Quiet time after the agent's last transcript write before a queued message
+// is typed. The state gate already requires "waiting"; this only lets the TUI
+// finish rendering the turn it just closed. A swallowed Enter is recovered by
+// the submit-ack resend loop. The trigger batching window above stays 30s.
+export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
   const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
@@ -997,6 +1002,12 @@ type BackgroundSpawnAttemptResult = "completed" | "retry";
  * the pipeline delivery loop acts on for steps 2..N.
  */
 export type AgentSendOutcome = "submitted" | "submit_unconfirmed";
+interface AgentMessageWriteOptions {
+  interrupt?: boolean;
+  freshLaunch?: boolean;
+  /** Target is idle or just interrupted: INTERACTIVE_SUBMIT_ACK_PACING. */
+  interactive?: boolean;
+}
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 
 export class SpawnPreflightError extends Error {
@@ -1689,8 +1700,10 @@ function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipelin
 function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesView | undefined {
   const messages = queuedMessages(session);
   const pipelineMessages = queuedPipelineMessages(session);
-  const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
-  if (messages.length === 0 && pipelineMessages.length === 0 && !awaitingPrompt) {
+  // The record's awaitingPrompt keeps holding the next send after a delivery;
+  // with nothing queued there is nothing waiting on the prompt to show.
+  const awaitingPrompt = messages.length > 0 && session.queuedMessages?.awaitingPrompt === true;
+  if (messages.length === 0 && pipelineMessages.length === 0) {
     return undefined;
   }
   return {
@@ -2621,6 +2634,10 @@ export class SessionService {
   // forever; only a CHANGE in the failure (a new problem, or a fresh
   // failure after a successful delivery cleared the entry) logs again.
   private readonly queuedMessageDeliveryLastFailure = new Map<string, string>();
+  // Epoch ms at which the last queued delivery's submit ack was confirmed;
+  // lets waitForQueuedMessage release the prompt hold without its grace.
+  private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  private readonly todoNudgesInFlight = new Set<string>();
   // Log-once-per-episode plus a retention bound for the rate-limit
   // reactivation guard's pane-unavailable skip: keyed by session id, value
   // tracks which rateLimitedAt episode the skip was last logged against and
@@ -5533,7 +5550,7 @@ export class SessionService {
             await this.maybeNudgeForgottenReply(view);
           }
           if (view.status === "running" && view.state === "waiting") {
-            await this.maybeNudgeTodo(session);
+            this.scheduleTodoNudge(session);
           }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
           // view.lastActivityAt: that value is the UI-facing max of agent
@@ -6695,6 +6712,26 @@ export class SessionService {
     }
   }
 
+  // Detached from the attention sweep and skipped while the session is busy:
+  // a reminder never queues behind (or ahead of) a user send, and one pane's
+  // ack wait never stalls the sweep for every other session. A skipped tick
+  // is retried by the next sweep; attempts stay bounded by todoNudge.
+  private scheduleTodoNudge(session: SessionRecord): void {
+    if (
+      this.todoNudgesInFlight.has(session.id) ||
+      this.sessionLifecycleLocks.has(session.id) ||
+      this.paneWriteLocks.has(session.tmuxSession)
+    ) {
+      return;
+    }
+    this.todoNudgesInFlight.add(session.id);
+    void this.maybeNudgeTodo(session)
+      .catch(() => {})
+      .finally(() => {
+        this.todoNudgesInFlight.delete(session.id);
+      });
+  }
+
   private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
     return this.withWorkspaceLifecycleLocks(session.id, () => this.maybeNudgeTodoLocked(session));
   }
@@ -6811,7 +6848,7 @@ export class SessionService {
             message: `Spur ToDo reminder budget exhausted for ${session.id}`,
           });
         }
-        await this.writeAgentMessage(session, message, { interrupt: false });
+        await this.writeAgentMessage(session, message, { interrupt: false, interactive: true });
         this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
         this.todoNudgeBackoff.delete(session.id);
       });
@@ -11953,9 +11990,9 @@ export class SessionService {
   // Immediate delivery of an already-queued entry. Order: probe -> deliver
   // -> re-read -> subtract. Never remove-then-deliver — a failed delivery
   // would lose the message outright. Delivery reuses deliverPrepared (the
-  // existing immediate-send path, given recoverOnLiveAckTimeout so a live
-  // ack timeout returns success instead of a false session.message.failed),
-  // so there is exactly one immediate-delivery path, not a second one forked
+  // existing immediate-send path, whose interactive entry points turn a live
+  // ack timeout into success instead of a false session.message.failed), so
+  // there is exactly one immediate-delivery path, not a second one forked
   // for flush.
   async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
@@ -11979,10 +12016,7 @@ export class SessionService {
     }
     this.queueDeliveryInFlight.add(sessionId);
     try {
-      await this.deliverPreparedLocked(sessionId, message, {
-        entryPoint: "flush",
-        recoverOnLiveAckTimeout: true,
-      });
+      await this.deliverPreparedLocked(sessionId, message, { entryPoint: "flush" });
       // Re-read: the delivery just wrote the record, so `session` is stale.
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
       const persisted = this.writeQueueWithout(latest, message);
@@ -12036,11 +12070,6 @@ export class SessionService {
       interrupt?: boolean;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
-      // Flush's ack-timeout policy: a submit ack timeout with the process
-      // still alive means the pane write landed, so the delivery is treated
-      // as recovered instead of failed. Absent (deliver(), queue:false
-      // send) keeps today's throw-and-log-failed semantics unchanged.
-      recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
@@ -12055,9 +12084,13 @@ export class SessionService {
       interrupt?: boolean;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
-      recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
+    // send and flush are user-driven: short ack pacing, and a live-process ack
+    // timeout means the pane write landed, so it is recovered, not failed.
+    // deliver() (triggers) keeps the agent's long pacing and throws, which
+    // drives its own retry.
+    const interactive = options.entryPoint !== "deliver";
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
       if (!initialSession) {
@@ -12086,9 +12119,9 @@ export class SessionService {
       }
       let recovered: SubmitAckTimeoutError | null = null;
       try {
-        await this.sendAgentMessage(readySession, message, { interrupt });
+        await this.sendAgentMessage(readySession, message, { interrupt, interactive });
       } catch (error) {
-        if (options.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
+        if (!interactive || !isRecoveredSubmitAckTimeout(error)) {
           throw error;
         }
         recovered = error;
@@ -12368,7 +12401,7 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: AgentMessageWriteOptions,
   ): Promise<AgentSendOutcome> {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
@@ -12480,9 +12513,10 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: AgentMessageWriteOptions,
   ): Promise<AgentSendOutcome> {
     const freshLaunch = options?.freshLaunch === true;
+    const interactive = options?.interactive === true;
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) &&
       !(session.agent === "codex" && process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"]);
@@ -12522,6 +12556,7 @@ export class SessionService {
     }
     const { windowMs: ackWindowMs, maxResends } = agentSubmitAckPacing(session.agent, {
       freshLaunch,
+      interactive,
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     // Set only when the mid-loop probe below observes a dead pane; reused for
@@ -12543,7 +12578,7 @@ export class SessionService {
         // result here can be trusted for the rest of this loop; { fresh: true }
         // is mandatory — a stale cached hit would report an agent that just
         // died as alive.
-        if (session.agent === "cursor") {
+        if (session.agent === "cursor" || interactive) {
           const alive = await agentProcessAlive(
             {
               tmuxSession: session.tmuxSession,
@@ -12574,7 +12609,9 @@ export class SessionService {
           { fresh: true },
         );
     const elapsedMs = Date.now() - startedAt;
-    if (session.agent === "cursor" && processAlive) {
+    // Interactive callers own the live-timeout policy (delivered + warn), so
+    // they get the typed timeout, never this silent cursor pass.
+    if (session.agent === "cursor" && processAlive && !interactive) {
       this.logEvent("session.submit.recovered", {
         level: "warn",
         sessionId: session.id,
@@ -15756,9 +15793,7 @@ export class SessionService {
         // attaching the web terminal (which makes the TUI repaint) would delay it
         // by another full window. The agent's transcript is inherently scoped to
         // the agent and is untouched by both.
-        if (
-          !isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())
-        ) {
+        if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), QUEUED_MESSAGE_SETTLE_MS)) {
           return false;
         }
 
@@ -15818,8 +15853,10 @@ export class SessionService {
   ): Promise<SessionRecord> {
     let recovered: SubmitAckTimeoutError | null = null;
     try {
-      await this.sendAgentMessage(session, message, { interrupt: false });
+      await this.sendAgentMessage(session, message, { interrupt: false, interactive: true });
+      this.queuedDeliveryAckedAt.set(session.id, Date.now());
     } catch (error) {
+      this.queuedDeliveryAckedAt.delete(session.id);
       // A live process past a submit-ack timeout means the pane write
       // landed; treat it as delivered rather than rethrow into the caller's
       // failure branch (isRecoveredSubmitAckTimeout, module scope, shared
@@ -16270,7 +16307,8 @@ export class SessionService {
       const messageUpdatedAt = new Date(session.updatedAt);
       const promptGraceMs = agentQueuedSendPromptGraceMs(session.agent);
 
-      const agentState = await this.classifySessionState(session);
+      const classified = await this.classifySessionRecord(session);
+      const agentState = classified.state;
       if (agentState === "working") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
@@ -16279,7 +16317,19 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(messageUpdatedAt, promptGraceMs)) {
+      // A confirmed ack plus a transcript write after it means the agent took
+      // the delivered message and closed that turn: no grace needed. Without
+      // that evidence (unconfirmed ack, restart) the grace bridges the lag
+      // before the agent's transcript shows it working.
+      const ackedAt = this.queuedDeliveryAckedAt.get(sessionId);
+      const activityAt = resolveAgentActivityAt(classified);
+      const turnClosedAfterAck =
+        ackedAt !== undefined && activityAt !== null && activityAt.getTime() > ackedAt;
+      if (
+        agentState === "waiting" &&
+        (turnClosedAfterAck || !isFresh(messageUpdatedAt, promptGraceMs))
+      ) {
+        this.queuedDeliveryAckedAt.delete(sessionId);
         return "ready";
       }
 
@@ -18051,6 +18101,8 @@ export class SessionService {
       launchCommand: _launchCommand,
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
+      // The record's queue state is internal; the view carries queuedMessagesView.
+      queuedMessages: _queuedMessages,
       ...sessionWithoutDetailFields
     } = session;
 

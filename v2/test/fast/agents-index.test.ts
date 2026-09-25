@@ -550,6 +550,20 @@ describe("agentSubmitAckPacing", () => {
     expect(agentHasLaunchSubmitAck("cursor")).toBe(false);
   });
 
+  it("bounds an interactive send to four 5s windows for every agent", () => {
+    for (const agent of ["claude", "codex", "cursor", "opencode"] as const) {
+      expect(agentSubmitAckPacing(agent, { interactive: true })).toEqual({
+        windowMs: 5_000,
+        maxResends: 3,
+      });
+    }
+    // A launch send keeps its own pacing.
+    expect(agentSubmitAckPacing("claude", { freshLaunch: true, interactive: true })).toEqual({
+      windowMs: 5_000,
+      maxResends: 2,
+    });
+  });
+
   it("keeps cursor and codex pacing on a launch send", () => {
     expect(agentSubmitAckPacing("cursor", { freshLaunch: true })).toEqual({
       windowMs: 5_000,
