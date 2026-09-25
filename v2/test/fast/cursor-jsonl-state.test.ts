@@ -1,8 +1,8 @@
 import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { detectCursorRateLimit } from "../../src/rate-limit-detect.js";
 import {
   classifyCursorJsonlState,
@@ -46,6 +46,20 @@ function rec(overrides: Partial<CursorParsedRecord>): CursorParsedRecord {
     ...overrides,
   };
 }
+
+// The host turn_ended probe reads this root, never the operator's real
+// ~/.cursor/projects; the learned flag starts cleared for every test.
+let probeRoot = "";
+
+beforeEach(async () => {
+  probeRoot = await mkdtemp(join(tmpdir(), "spur-cursor-probe-"));
+  resetCursorTurnEndedProbe(probeRoot);
+});
+
+afterEach(async () => {
+  resetCursorTurnEndedProbe();
+  await rm(probeRoot, { recursive: true, force: true });
+});
 
 describe("classifyCursorJsonlState", () => {
   it("returns working for empty records", () => {
@@ -589,6 +603,11 @@ describe("findLatestCursorTranscriptFile", () => {
     if (mtime) await utimes(transcriptPath, mtime, mtime);
     return worktreePath;
   }
+  async function writeProbeTranscript(lines: string[]) {
+    const chatDir = join(probeRoot, "closed-project", "agent-transcripts", "chat");
+    await mkdir(chatDir, { recursive: true });
+    await writeFile(join(chatDir, "chat.jsonl"), lines.join("\n") + "\n");
+  }
   const userLine = JSON.stringify({
     role: "user",
     message: { content: [{ type: "text", text: "run it" }] },
@@ -602,8 +621,7 @@ describe("findLatestCursorTranscriptFile", () => {
   // turn_ended (every submit rewrites it away); another transcript of the same
   // cursor build proves the build writes the marker.
   it("reads a mid-command transcript as working on a fresh reader when the host cursor writes turn_ended", async () => {
-    resetCursorTurnEndedProbe();
-    await writeCursorChat("spur-cursor-jsonl-closed-", [
+    await writeProbeTranscript([
       userLine,
       assistantLine,
       '{"type":"turn_ended","status":"success"}',
@@ -615,8 +633,7 @@ describe("findLatestCursorTranscriptFile", () => {
   });
 
   it("stops reading an unclosed turn as working past the 15-minute tool-use grace", async () => {
-    resetCursorTurnEndedProbe();
-    await writeCursorChat("spur-cursor-jsonl-closed-", [
+    await writeProbeTranscript([
       userLine,
       assistantLine,
       '{"type":"turn_ended","status":"success"}',
@@ -694,8 +711,7 @@ describe("findLatestCursorTranscriptFile", () => {
     await mkdir(join(canonicalTranscriptsDir, agentSessionId), { recursive: true });
     await writeFile(
       join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
-      // A closed turn, as the host's cursor build writes it.
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n{"type":"turn_ended","status":"success"}\n',
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
     );
 
     const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);

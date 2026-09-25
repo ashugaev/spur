@@ -45,9 +45,13 @@ const HOST_PROBE_INTERVAL_MS = 10 * 60_000;
 const HOST_PROBE_FILE_LIMIT = 20;
 const HOST_PROBE_TAIL_BYTES = 512;
 
-export function resetCursorTurnEndedProbe(): void {
+let hostProbeProjectsRoot: string | null = null;
+
+/** Test seam: clears the learned flag and points the host probe at `projectsRoot`. */
+export function resetCursorTurnEndedProbe(projectsRoot: string | null = null): void {
   hostCursorWritesTurnEnded = false;
   hostProbeAtMs = 0;
+  hostProbeProjectsRoot = projectsRoot;
 }
 
 async function endsWithTurnEnded(filePath: string): Promise<boolean> {
@@ -540,7 +544,10 @@ export async function readCursorJsonlState(
     usesTurnEnded:
       currentReader.usesTurnEnded ||
       turnEnded ||
-      (await cursorBuildWritesTurnEnded(join(homedir(), ".cursor", "projects"), nowMs)),
+      (await cursorBuildWritesTurnEnded(
+        hostProbeProjectsRoot ?? join(homedir(), ".cursor", "projects"),
+        nowMs,
+      )),
     turnEnded,
   };
 
