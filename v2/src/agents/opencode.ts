@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
@@ -472,15 +473,54 @@ export function hasNewOpenCodeUserMessage(
   return [...current].some((id) => !baseline.userMessageIds.has(id));
 }
 
+export function openCodeDatabasePath(env: NodeJS.ProcessEnv = process.env): string {
+  const dataHome = env["XDG_DATA_HOME"] || join(homedir(), ".local", "share");
+  return join(dataHome, "opencode", "opencode.db");
+}
+
+// One indexed query (message_session_time_created_id_idx) against opencode's
+// own SQLite store: ~1ms where `opencode export` costs 2-4s per call, so the
+// submit-ack scan can poll without a subprocess per tick. The schema is
+// opencode-internal, so a read that fails — missing DB, renamed table or
+// column — answers from the CLI export instead. `node:sqlite` loads lazily:
+// Node 22 prints an ExperimentalWarning on import, which must not reach every
+// CLI run that merely loads this module.
+export async function readOpenCodeUserMessageIdsFromDatabase(
+  sessionId: string,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<Set<string>> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const rows = database
+      .prepare(
+        "SELECT id FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user'",
+      )
+      .all(sessionId);
+    const ids = new Set<string>();
+    for (const row of rows) {
+      if (typeof row["id"] === "string") ids.add(row["id"]);
+    }
+    return ids;
+  } finally {
+    database.close();
+  }
+}
+
+async function readOpenCodeUserMessageIds(sessionId: string): Promise<Set<string>> {
+  try {
+    return await readOpenCodeUserMessageIdsFromDatabase(sessionId);
+  } catch {
+    return parseOpenCodeUserMessageIds(await exportOpenCodeSession(sessionId));
+  }
+}
+
 export async function captureOpenCodeSubmitBaseline(
   sessionId?: string,
 ): Promise<OpenCodeSubmitBaseline | null> {
   if (!sessionId) return null;
   try {
-    return {
-      sessionId,
-      userMessageIds: parseOpenCodeUserMessageIds(await exportOpenCodeSession(sessionId)),
-    };
+    return { sessionId, userMessageIds: await readOpenCodeUserMessageIds(sessionId) };
   } catch {
     return null;
   }
@@ -490,14 +530,15 @@ export async function scanOpenCodeForNewUserMessage(
   baseline: OpenCodeSubmitBaseline,
 ): Promise<boolean> {
   try {
-    const current = parseOpenCodeUserMessageIds(await exportOpenCodeSession(baseline.sessionId));
+    const current = await readOpenCodeUserMessageIds(baseline.sessionId);
     return hasNewOpenCodeUserMessage(baseline, current);
   } catch {
     return false;
   }
 }
 
-// One `opencode export` costs 2-4s on a loaded host, so the launch check needs
+// The scan reads opencode.db, but falls back to `opencode export` (2-4s per
+// call on a loaded host) when the DB is unreadable, so the launch check keeps
 // the same budget as identity binding rather than a few polls' worth.
 const OPENCODE_LAUNCH_MESSAGE_WAIT_MS = 60_000;
 

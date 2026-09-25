@@ -1,8 +1,8 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import {
   findCursorAckTranscriptFile,
+  readCursorStableOffset,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
 
@@ -34,8 +34,7 @@ export async function captureCursorSubmitBaseline(
     return { file: await resolveCursorPinnedTranscriptPath(worktreePath, agentSessionId), size: 0 };
   }
   try {
-    const fileStat = await stat(file);
-    return { file, size: fileStat.size };
+    return { file, size: await readCursorStableOffset(file) };
   } catch {
     return agentSessionId ? { file, size: 0 } : null;
   }

@@ -41,6 +41,7 @@ import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { getReleases } from "./releases-cache.js";
 import {
+  AgentExitedBeforeSendError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidConfigPathError,
@@ -1984,7 +1985,8 @@ export async function startServer(
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||
-        error instanceof QueueDeliveryInFlightError
+        error instanceof QueueDeliveryInFlightError ||
+        error instanceof AgentExitedBeforeSendError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;

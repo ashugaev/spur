@@ -1,6 +1,7 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAgentLaunchPlan } from "../../src/agents/index.js";
 import {
@@ -11,14 +12,18 @@ import {
   buildOpenCodePlan,
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
+  captureOpenCodeSubmitBaseline,
   diffOpenCodeSessionIds,
   hasNewOpenCodeUserMessage,
   isSupportedOpenCodeVersion,
+  openCodeDatabasePath,
   OPENCODE_EXPORT_MAX_CONCURRENCY,
   OPENCODE_RESTRICT_WRITES_CONFIG,
   parseOpenCodeExport,
   parseOpenCodeSessionListOutput,
   parseOpenCodeState,
+  readOpenCodeUserMessageIdsFromDatabase,
+  scanOpenCodeForNewUserMessage,
   waitForOpenCodeLaunchMessage,
   parseOpenCodeUserMessageIds,
   withOpenCodeLaunchIdentityLock,
@@ -726,11 +731,78 @@ describe("OpenCode adapter", () => {
     );
     await chmod(binPath, 0o755);
     vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+    // No opencode.db under this data home: the check answers from the CLI export.
+    vi.stubEnv("XDG_DATA_HOME", join(binDir, "no-data"));
     try {
       await expect(waitForOpenCodeLaunchMessage("ses_launch", 5_000)).resolves.toBe(true);
     } finally {
       vi.unstubAllEnvs();
       await rm(binDir, { recursive: true, force: true });
     }
+  });
+
+  describe("submit ack from opencode.db", () => {
+    async function makeDatabase(dataHome: string): Promise<DatabaseSync> {
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      return database;
+    }
+
+    function insert(database: DatabaseSync, id: string, sessionId: string, role: string): void {
+      database
+        .prepare("INSERT INTO message VALUES (?, ?, 0, 0, ?)")
+        .run(id, sessionId, JSON.stringify({ role }));
+    }
+
+    it("reads only the session's user message ids", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      insert(database, "msg_u1", "ses_1", "user");
+      insert(database, "msg_a1", "ses_1", "assistant");
+      insert(database, "msg_u2", "ses_other", "user");
+      database.close();
+      try {
+        await expect(
+          readOpenCodeUserMessageIdsFromDatabase(
+            "ses_1",
+            openCodeDatabasePath({ XDG_DATA_HOME: dataHome }),
+          ),
+        ).resolves.toEqual(new Set(["msg_u1"]));
+      } finally {
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    // `opencode export` costs 2-4s per call; the ack scan polls every 250ms.
+    it("acks a new user message from the database without spawning the CLI", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      insert(database, "msg_u1", "ses_1", "user");
+      const binPath = join(dataHome, "opencode-bin");
+      const spawnedMarker = join(dataHome, "spawned");
+      await writeFile(
+        binPath,
+        `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(spawnedMarker)}, "1");\nprocess.stdout.write("{}");\n`,
+        "utf8",
+      );
+      await chmod(binPath, 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        const baseline = await captureOpenCodeSubmitBaseline("ses_1");
+        if (!baseline) throw new Error("expected a baseline");
+        await expect(scanOpenCodeForNewUserMessage(baseline)).resolves.toBe(false);
+        insert(database, "msg_u2", "ses_1", "user");
+        await expect(scanOpenCodeForNewUserMessage(baseline)).resolves.toBe(true);
+        await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
+      } finally {
+        database.close();
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
   });
 });

@@ -106,6 +106,16 @@ export const DEFERRED_CONTROLS_ACK_WINDOW_MS = 5_000;
 // agent's DEFAULT_SUBMIT_MAX_RESENDS and restores just enough recovery for a
 // genuinely dropped Enter without reintroducing that hold.
 export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
+// Pacing for a send typed into an agent known to be idle or just interrupted:
+// the user's send/flush, the queued-message drain, the ToDo reminder. An idle
+// agent records the submit within seconds, so a miss means a swallowed Enter,
+// not a slow agent; short windows resend it fast and bound the lock hold to
+// 4 x 5s. The long default windows stay for deliver() into a busy agent,
+// which records the message only when its turn ends.
+export const INTERACTIVE_SUBMIT_ACK_PACING: SubmitAckPacing = {
+  windowMs: 5_000,
+  maxResends: 3,
+};
 // Launch-send pacing for claude. A claude TUI still rendering the pasted launch
 // message swallows the submit Enter, and nothing is submitted until another one
 // arrives, so the launch send scans in short windows instead of the mid-session
@@ -182,7 +192,11 @@ interface AgentAdapter {
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
-  sendsInterruptKey: boolean;
+  /**
+   * tmux key names that interrupt a running turn, sent in order. Empty when
+   * the agent has no interrupt key safe to send (cursor).
+   */
+  interruptKeys: readonly string[];
   waitsForSubmitAck: boolean;
   submitAckWindowMs: number;
   submitAckMaxResends: number;
@@ -436,7 +450,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("claude", launchCommand),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
-    sendsInterruptKey: true,
+    interruptKeys: ["C-c"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -499,7 +513,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("codex", launchCommand),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
-    sendsInterruptKey: true,
+    interruptKeys: ["C-c"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -549,7 +563,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("cursor", launchCommand),
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
-    sendsInterruptKey: false,
+    interruptKeys: [],
     waitsForSubmitAck: true,
     submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
@@ -590,7 +604,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
     stateStrategy: "opencode",
     sendMode: "bracketed_paste",
-    sendsInterruptKey: true,
+    // opencode 1.18 binds ctrl+c to app_exit and session_interrupt to escape,
+    // pressed twice ("esc again to interrupt"; the second press must follow
+    // within ~1s).
+    interruptKeys: ["Escape", "Escape"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -730,8 +747,8 @@ export function agentSendMode(agent: AgentName): AgentSendMode {
   return agentAdapter(agent).sendMode;
 }
 
-export function agentSendsInterruptKey(agent: AgentName): boolean {
-  return agentAdapter(agent).sendsInterruptKey;
+export function agentInterruptKeys(agent: AgentName): readonly string[] {
+  return agentAdapter(agent).interruptKeys;
 }
 
 export function agentProcessMatchers(agent: AgentName, launchCommand: string): string[] {
@@ -744,11 +761,14 @@ export function agentWaitsForSubmitAck(agent: AgentName): boolean {
 
 export function agentSubmitAckPacing(
   agent: AgentName,
-  options?: { freshLaunch?: boolean },
+  options?: { freshLaunch?: boolean; interactive?: boolean },
 ): SubmitAckPacing {
   const adapter = agentAdapter(agent);
   if (options?.freshLaunch === true && adapter.launchSubmitAck) {
     return adapter.launchSubmitAck;
+  }
+  if (options?.interactive === true) {
+    return INTERACTIVE_SUBMIT_ACK_PACING;
   }
   return { windowMs: adapter.submitAckWindowMs, maxResends: adapter.submitAckMaxResends };
 }

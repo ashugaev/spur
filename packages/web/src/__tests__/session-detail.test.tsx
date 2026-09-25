@@ -3337,7 +3337,7 @@ describe("SessionDetail voice input", () => {
           JSON.stringify({
             ...sessionFixture(),
             queuedMessages: {
-              messages: [],
+              messages: ["Queued follow-up"],
               awaitingPrompt: true,
             },
           }),
@@ -3359,7 +3359,7 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByRole("heading", { name: /queued messages/i })).toBeInTheDocument();
     });
     expect(screen.getByText(/queued messages will send automatically/i)).toBeInTheDocument();
-    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
   });
 
   it("hides queued messages when the queue is empty and not awaiting a prompt", async () => {
