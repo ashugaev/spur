@@ -1,6 +1,6 @@
 ---
 name: docs
-description: Governs published docs (README.md, docs/, SETUP/TROUBLESHOOTING/CONTRIBUTING/SECURITY). Load on any published-doc edit — create, change, move, trim, or link fix. Enforces open-source standards: Diataxis mode, granular single-topic files, caveman prose, one source per topic, link don't restate. Not for config/command field semantics (docs/configuration.md + docs/commands.md, owned by the config-doc rule and spur skill) or SKILL.md/agent prose (skill-writer).
+description: "Governs published docs (README.md, docs/, SETUP/TROUBLESHOOTING/CONTRIBUTING/SECURITY). Load on any published-doc edit — create, change, move, trim, or link fix. Enforces open-source standards: Diataxis mode, granular single-topic files, caveman prose, one source per topic, link don't restate. Not for config/command field semantics (docs/configuration.md + docs/commands.md, owned by the config-doc rule and spur skill) or SKILL.md/agent prose (skill-writer)."
 ---
 
 DOCS MANAGEMENT: root README is a minimal hub, Docs section lists every
