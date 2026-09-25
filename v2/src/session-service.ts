@@ -15795,23 +15795,39 @@ export class SessionService {
       let nextMessage: string | undefined;
       try {
         const readySession = await this.ensureSessionReadyForSend(session);
-        const classified = await this.classifySessionRecord(readySession);
         // A live claude server-error wedge behaves like "waiting" for delivery
         // purposes: typing the queued message is exactly what un-wedges Claude
         // (the same mechanism as the reactivation nudge in processScheduledWakes),
         // so an ordinary queued send must not sit for up to 30 minutes waiting
         // for that nudge to fire on its own.
-        if (classified.state !== "waiting" && !classified.serverError) {
+        //
+        // Settle is measured on the agent's own structured artifact, not raw tmux
+        // activity. Raw tmux activity is the session-wide max across every window,
+        // so a user's split running a dev server would stall delivery indefinitely,
+        // and merely attaching the web terminal (which makes the TUI repaint) would
+        // delay it by another full window. The agent's transcript is inherently
+        // scoped to the agent and is untouched by both.
+        const settleRemainingMs = async (): Promise<number | null> => {
+          const classified = await this.classifySessionRecord(readySession);
+          if (classified.state !== "waiting" && !classified.serverError) {
+            return null;
+          }
+          const activityAt = resolveAgentActivityAt(classified);
+          return activityAt === null
+            ? 0
+            : Math.max(0, activityAt.getTime() + QUEUED_MESSAGE_SETTLE_MS - Date.now());
+        };
+        const remainingMs = await settleRemainingMs();
+        if (remainingMs === null) {
           return false;
         }
-        // Gate on the agent's own structured artifact, not raw tmux activity. Raw
-        // tmux activity is the session-wide max across every window, so a user's
-        // split running a dev server would stall delivery indefinitely, and merely
-        // attaching the web terminal (which makes the TUI repaint) would delay it
-        // by another full window. The agent's transcript is inherently scoped to
-        // the agent and is untouched by both.
-        if (!isIdleEnoughToReceive(resolveAgentActivityAt(classified), QUEUED_MESSAGE_SETTLE_MS)) {
-          return false;
+        if (remainingMs > 0) {
+          // Wait out the settle here: a miss hands the message to the delivery
+          // loop, which parks it behind a running pipeline step's ready grace.
+          await sleep(remainingMs);
+          if (this.deliveryStopped || (await settleRemainingMs()) !== 0) {
+            return false;
+          }
         }
 
         const latest = readSession(this.config.dataDir, sessionId);

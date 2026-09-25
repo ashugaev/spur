@@ -7732,7 +7732,7 @@ describe("SessionService", () => {
     });
   });
 
-  it("holds queued message delivery while agent activity is fresher than the settle window", async () => {
+  it("waits out the rest of the settle window in place, then delivers the queued message", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -7759,24 +7759,79 @@ describe("SessionService", () => {
       scan: vi.fn().mockResolvedValue({ found: true, lastScannedFile: null }),
     }));
 
+    mockTimerPromisesSleepWithFakeTimers();
+
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     try {
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued follow up"]);
-      // The settle window is 2s, not the 30s trigger batching window.
-      vi.setSystemTime(new Date("2026-03-18T10:05:02.000Z"));
-      expect(await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1")).toBe(true);
+      await sessionServiceInternals(service).deliveryRuns.get("api-1");
+      // The settle window is 2s, not the 30s trigger batching window. The
+      // attempt sleeps the remaining 1.9s in place; standing down to the loop's
+      // 1s poll instead parks a pipeline session behind its step ready grace.
+      expect(timerPromisesSleepMock.mock.calls[0]).toEqual([1_900]);
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
         agent: "claude",
       });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
       // The drain types into an idle agent: short interactive ack pacing.
       expect(agentSubmitAckPacingMock).toHaveBeenCalledWith("claude", {
         freshLaunch: false,
         interactive: true,
       });
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("keeps a queued message queued when the agent turns busy during the settle wait", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: false,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:59.900Z"));
+    const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+    // The settle sleep flips the agent to working; the loop's later poll
+    // sleeps stay real so the busy agent does not spin the loop.
+    let markSettleSlept: () => void = () => {};
+    const settleSlept = new Promise<void>((resolve) => {
+      markSettleSlept = resolve;
+    });
+    timerPromisesSleepMock.mockReset().mockImplementation(async (ms) => {
+      if (ms === 1_900) {
+        mockClaudeJsonlState("working");
+        await vi.advanceTimersByTimeAsync(ms);
+        markSettleSlept();
+        return;
+      }
+      await realTimers.setTimeout(ms);
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await settleSlept;
+      await realTimers.setTimeout(200);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued follow up"]);
     } finally {
       service.dispose();
     }
