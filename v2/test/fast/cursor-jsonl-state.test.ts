@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { detectCursorRateLimit } from "../../src/rate-limit-detect.js";
 import {
+  captureCursorRestoreBoundary,
   classifyCursorJsonlState,
   CURSOR_JSONL_TOOL_USE_GRACE_MS,
   findCursorAckTranscriptFile,
@@ -499,6 +500,35 @@ describe("findLatestCursorTranscriptFile", () => {
     // last-write time, not "now" — otherwise a long-stale backlog always looks fresh.
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("waiting");
+  });
+
+  it("ignores pre-restore tool activity and reads only appended records", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-restore-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    const transcriptDir = join(
+      homedir(),
+      ".cursor", "projects", toCursorProjectPath(worktreePath),
+      "agent-transcripts", "chat",
+    );
+    await mkdir(transcriptDir, { recursive: true });
+    const transcriptPath = join(transcriptDir, "chat.jsonl");
+    await writeFile(transcriptPath, '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}\n');
+    const oldReader = (await readCursorJsonlState(worktreePath))?.reader;
+    const boundary = await captureCursorRestoreBoundary(worktreePath);
+    expect(boundary).toEqual({ filePath: transcriptPath, offset: (await readFile(transcriptPath)).length });
+
+    const restored = await readCursorJsonlState(worktreePath, oldReader, undefined, { after: boundary ?? undefined });
+    expect(restored?.state).toBe("waiting");
+    expect(restored?.reader.tailRecords).toEqual([]);
+    const coldRestored = await readCursorJsonlState(worktreePath, undefined, undefined, { after: boundary ?? undefined });
+    expect(coldRestored?.state).toBe("waiting");
+    expect(coldRestored?.reader.tailRecords).toEqual([]);
+
+    await writeFile(transcriptPath, (await readFile(transcriptPath, "utf8")) + '{"role":"user","message":{"content":[{"type":"text","text":"follow-up"}]}}\n');
+    const resumed = await readCursorJsonlState(worktreePath, restored?.reader, undefined, { after: boundary ?? undefined });
+    expect(resumed?.state).toBe("working");
+    expect(resumed?.reader.tailRecords).toHaveLength(1);
   });
 
   it("resolves pinned transcripts across symlinked worktree aliases", async () => {

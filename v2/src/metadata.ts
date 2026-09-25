@@ -944,6 +944,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
+    ...(normalizedSession.cursorRestoreBoundary &&
+    typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
+    Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&
+    normalizedSession.cursorRestoreBoundary.offset >= 0
+      ? { cursorRestoreBoundary: normalizedSession.cursorRestoreBoundary }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }

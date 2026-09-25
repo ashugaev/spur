@@ -454,6 +454,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
   type SessionQueuedMessagesView,
@@ -495,7 +496,11 @@ import {
   unfinishedTodo,
 } from "./todo.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
-import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
+import {
+  captureCursorRestoreBoundary,
+  readCursorJsonlState,
+  type CursorJsonlReaderState,
+} from "./cursor-jsonl-state.js";
 import {
   formatNestedSidecarStartError,
   MAX_SIDECAR_DEPTH,
@@ -14945,6 +14950,11 @@ export class SessionService {
       await this.lookupPanePidQuietly(current.tmuxSession),
       request.force === true,
     );
+    const cursorRestoreBoundary: CursorRestoreBoundary | null =
+      current.agent === "cursor"
+        ? await captureCursorRestoreBoundary(current.worktreePath, current.agentSessionId)
+        : null;
+    if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -15232,6 +15242,7 @@ export class SessionService {
             launchCommand: restoredLaunchCommand,
             status: "running",
             updatedAt: nowIso(),
+            ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
           },
           mcpSidecarUpdate,
         );
@@ -15286,6 +15297,7 @@ export class SessionService {
         launchCommand: restoredLaunchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
       },
       mcpSidecarUpdate,
     );
@@ -17859,6 +17871,7 @@ export class SessionService {
             minMtimeMs: session.agentSessionId
               ? undefined
               : Math.max(0, new Date(session.createdAt).getTime() - 60_000),
+            ...(session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {}),
           },
         );
         if (jsonlResult) {
@@ -18221,6 +18234,7 @@ export class SessionService {
       sidecarPorts: _sidecarPorts,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
+      cursorRestoreBoundary: _cursorRestoreBoundary,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -18529,6 +18543,7 @@ export class SessionService {
       originalTaskPrompt: _originalTaskPrompt,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
+      cursorRestoreBoundary: _cursorRestoreBoundary,
       ...sessionWithoutDetailFields
     } = session;
 

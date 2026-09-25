@@ -447,6 +447,7 @@ vi.mock("../../src/claude-accounts.js", () => ({
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
+  captureCursorRestoreBoundary: vi.fn().mockResolvedValue(null),
   readCursorJsonlState: readCursorJsonlStateMock,
 }));
 
@@ -12571,6 +12572,29 @@ describe("SessionService", () => {
         undefined,
         agentSessionId,
         { minMtimeMs: undefined },
+      );
+    });
+
+    it("passes the persisted Cursor restore boundary to structured classification", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const cursorRestoreBoundary = { filePath: "/tmp/cursor-chat.jsonl", offset: 400 };
+      const cursorSession = runningSession({
+        id: "cursor-restored",
+        agent: "cursor",
+        agentSessionId: "pinned-cursor-session-123",
+        cursorRestoreBoundary,
+      });
+      mockCursorJsonlState("waiting");
+
+      const classified = await internals.classifySessionRecord(cursorSession);
+
+      expect(classified.state).toBe("waiting");
+      expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
+        cursorSession.worktreePath,
+        undefined,
+        cursorSession.agentSessionId,
+        { minMtimeMs: undefined, after: cursorRestoreBoundary },
       );
     });
 

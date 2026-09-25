@@ -1037,6 +1037,11 @@ export interface SidecarProcessIdentity {
   starttime: number;
 }
 
+export interface CursorRestoreBoundary {
+  filePath: string;
+  offset: number;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -1064,6 +1069,8 @@ export interface SessionRecord {
   claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
+  /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
+  cursorRestoreBoundary?: CursorRestoreBoundary;
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
@@ -1179,7 +1186,7 @@ export interface SessionSidecarView {
 
 export interface SessionView extends Omit<
   SessionRecord,
-  "queuedMessages" | "tokenUsage" | "preflightTokenUsage"
+  "queuedMessages" | "tokenUsage" | "preflightTokenUsage" | "cursorRestoreBoundary"
 > {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1210,6 +1217,7 @@ export interface SessionView extends Omit<
  */
 export type DashboardOmittedField =
   | "queuedMessages"
+  | "cursorRestoreBoundary"
   | "pipeline"
   | "sidecarNames"
   | "sidecarPorts"
