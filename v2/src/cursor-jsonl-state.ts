@@ -23,6 +23,29 @@ export interface CursorJsonlReaderState {
   tailRecords: CursorParsedRecord[];
   /** Records parsed from the trailing turn_ended lines past lastOffset. */
   trailingRecords: CursorParsedRecord[];
+  /** This transcript has closed a turn with turn_ended at least once. */
+  usesTurnEnded: boolean;
+  /** The file currently ends in a turn_ended line. */
+  turnEnded: boolean;
+}
+
+// A cursor build that closes turns with turn_ended writes no tool records while
+// a shell command runs: the tail is a plain assistant text line for the whole
+// run. Once the transcript is known to use the marker, its absence after the
+// last record is the running-turn signal, bounded by the tool-use grace so a
+// turn cursor never closed cannot pin the session working.
+function cursorReaderState(
+  records: CursorParsedRecord[],
+  reader: Pick<CursorJsonlReaderState, "usesTurnEnded" | "turnEnded">,
+  nowMs: number,
+  fileMtimeMs: number,
+): SessionState {
+  const state = classifyCursorJsonlState(records, nowMs, fileMtimeMs);
+  const turnOpen =
+    reader.usesTurnEnded &&
+    !reader.turnEnded &&
+    nowMs - fileMtimeMs <= CURSOR_JSONL_TOOL_USE_GRACE_MS;
+  return state === "waiting" && turnOpen ? "working" : state;
 }
 
 const TAIL_RECORD_LIMIT = 50;
@@ -379,6 +402,8 @@ export async function readCursorJsonlState(
           lastMtimeMs: 0,
           tailRecords: [],
           trailingRecords: [],
+          usesTurnEnded: false,
+          turnEnded: false,
         };
 
   if (
@@ -387,7 +412,7 @@ export async function readCursorJsonlState(
   ) {
     const cached = [...currentReader.tailRecords, ...currentReader.trailingRecords];
     return {
-      state: classifyCursorJsonlState(cached, Date.now(), fileStat.mtimeMs),
+      state: cursorReaderState(cached, currentReader, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
       rateLimit: detectCursorRateLimit(latestCursorTerminalError(cached)),
     };
@@ -412,6 +437,7 @@ export async function readCursorJsonlState(
   let stableRecords: CursorParsedRecord[];
   let trailingRecords: CursorParsedRecord[];
   let stableBytes: number;
+  let turnEnded: boolean;
 
   let fd: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -423,7 +449,9 @@ export async function readCursorJsonlState(
     stableBytes = cursorStablePrefixBytes(buffer);
     const completeBytes = buffer.lastIndexOf(NEWLINE) + 1;
     stableRecords = parseRecords(buffer.subarray(0, stableBytes));
-    trailingRecords = parseRecords(buffer.subarray(stableBytes, completeBytes));
+    const trailing = buffer.subarray(stableBytes, completeBytes);
+    trailingRecords = parseRecords(trailing);
+    turnEnded = trailing.toString("utf8").trim().length > 0;
   } catch {
     return null;
   } finally {
@@ -438,6 +466,8 @@ export async function readCursorJsonlState(
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords,
     trailingRecords,
+    usesTurnEnded: currentReader.usesTurnEnded || turnEnded,
+    turnEnded,
   };
 
   if (combined.length === 0) {
@@ -445,7 +475,7 @@ export async function readCursorJsonlState(
   }
 
   return {
-    state: classifyCursorJsonlState(combined, nowMs, fileStat.mtimeMs),
+    state: cursorReaderState(combined, nextReader, nowMs, fileStat.mtimeMs),
     reader: nextReader,
     rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
   };

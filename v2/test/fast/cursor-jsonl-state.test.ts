@@ -542,6 +542,32 @@ describe("findLatestCursorTranscriptFile", () => {
       "assistant",
       "user",
     ]);
+
+    // Mid-command cursor writes a plain assistant text line and no tool
+    // record; the open turn (no trailing turn_ended) keeps it working.
+    await writeFile(
+      transcriptPath,
+      [user("first"), assistant, user("second"), assistant].join("\n") + "\n",
+    );
+    const midTurn = new Date(Date.now() + 2_000);
+    await utimes(transcriptPath, midTurn, midTurn);
+    const stillRunning = await readCursorJsonlState(worktreePath, running?.reader, "chat");
+    expect(stillRunning?.state).toBe("working");
+
+    await writeFile(
+      transcriptPath,
+      [
+        user("first"),
+        assistant,
+        user("second"),
+        assistant,
+        '{"type":"turn_ended","status":"success"}',
+      ].join("\n") + "\n",
+    );
+    const ended = new Date(Date.now() + 3_000);
+    await utimes(transcriptPath, ended, ended);
+    const closed = await readCursorJsonlState(worktreePath, stillRunning?.reader, "chat");
+    expect(closed?.state).toBe("waiting");
   });
 
   it("keeps a trailing turn_ended error visible across reads until cursor rewrites it", async () => {
