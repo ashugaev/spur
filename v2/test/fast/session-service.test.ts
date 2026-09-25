@@ -3018,12 +3018,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    // Pre-existing double-gate, out of scope here (issue #896): the human
-    // `todoActor` passes the pre-spawn gate above, but the terminal
-    // `applyManualStatusLocked` call at the end of `handoffLocked` does not
-    // forward `todoActor`, so a successor already exists when this second
-    // gate re-trips. That is why it stays `error`, not `warn`.
-    it("handoff post-spawn gate re-trips on a human actor with an empty ledger", async () => {
+    it("human handoff succeeds with an empty ledger", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       const source = sessionRecord({
@@ -3038,19 +3033,70 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(
-        service.handoff(
-          source.id,
-          { agent: "cursor" },
-          { todoActor: { kind: "human", origin: "ui" } },
-        ),
-      ).rejects.toMatchObject({ code: "todo_ledger_empty" });
+      const spawned = await service.handoff(
+        source.id,
+        { agent: "cursor" },
+        { todoActor: { kind: "human", origin: "ui" } },
+      );
 
+      expect(spawned.id).toBe("api-2");
+      expect(sessions.get(source.id)?.status).toBe("completed");
       expect(logSpurEventMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
         expect.objectContaining({
+          event: "session.handoff.completed",
+          level: "info",
+        }),
+      );
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
           event: "session.handoff.failed",
-          level: "error",
+        }),
+      );
+      service.dispose();
+    });
+
+    it("human handoff succeeds with open work in the ledger", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const source = sessionRecord({
+        id: "api-1",
+        status: "running",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      });
+      sessions.set(source.id, source);
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.mutateTodo(
+        source.id,
+        { action: "add", text: "Incomplete task", reason: "Started" },
+        { kind: "agent", agent: "claude", sessionId: source.id },
+      );
+
+      const spawned = await service.handoff(
+        source.id,
+        { agent: "cursor" },
+        { todoActor: { kind: "human", origin: "cli" } },
+      );
+
+      expect(spawned.id).toBe("api-2");
+      expect(sessions.get(source.id)?.status).toBe("completed");
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.completed",
+          level: "info",
+        }),
+      );
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.handoff.failed",
         }),
       );
       service.dispose();

@@ -545,7 +545,6 @@ Spur ToDo nudge events: `session.todo.nudge_failed` (transient failure; backoff 
 Session lifecycle events: `session.complete.completed`, `session.complete.failed`, `session.pause.completed`, `session.pause.failed`, `session.self_destruct.completed`, `session.self_destruct.failed`, `session.desk_complete.completed`, `session.desk_complete.failed`, `session.handoff.completed`, `session.handoff.failed`.
 
 - A ToDo-gate refusal logs the `.failed` event at `warn` with `details.kind` `todo_ledger_empty` or `todo_open_work`.
-- `session.handoff.failed` after the successor spawned stays `error` with no `details.kind`, ToDo cause or not.
 - Every other failure cause logs `.failed` at `error` with no `details.kind`.
 - Cut note: events written before 2026-09-11 log `self_destruct`, `desk_complete`, and `handoff` under `session.complete.*`; a query over historical `events.jsonl` must union both names.
 
