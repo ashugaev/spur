@@ -60,31 +60,11 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
   return extractTextContent(message);
 }
 
-// A send typed into a busy pane is queued rather than submitted, and claude never
-// writes a `type:"user"` record for it until the turn it is absorbed into ends --
-// which for a long autonomous first turn is well past any ack budget. Both queued
-// shapes below carry the submitted text verbatim and prove it reached claude's
-// input, so the ack scan treats them as delivery.
-
-function extractQueuedCommandText(parsed: Record<string, unknown>): string | null {
-  const attachment = parsed["attachment"];
-  if (!isRecord(attachment) || attachment["type"] !== "queued_command") {
-    return null;
-  }
-  const prompt = attachment["prompt"];
-  return typeof prompt === "string" ? prompt : null;
-}
-
-function extractQueueOperationText(parsed: Record<string, unknown>): string | null {
-  const operation = parsed["operation"];
-  // `enqueue` records the text landing in the queue and `dequeue` records it being
-  // submitted from there; a `remove` only proves delivery when the model absorbed
-  // the entry mid-turn, so a removal for any other reason is not an ack.
-  const delivered =
-    operation === "enqueue" ||
-    operation === "dequeue" ||
-    (operation === "remove" && parsed["reason"] === "absorbed_mid_turn");
-  if (!delivered) {
+// A send typed into a busy pane is queued, and claude writes no `type:"user"`
+// record for it until the turn absorbing it ends. The queue `enqueue` record is
+// written when Enter lands and carries the submitted text, so it is the ack.
+function extractEnqueuedText(parsed: Record<string, unknown>): string | null {
+  if (parsed["operation"] !== "enqueue") {
     return null;
   }
   const content = parsed["content"];
@@ -95,10 +75,8 @@ function extractDeliveredText(parsed: Record<string, unknown>): string | null {
   switch (parsed["type"]) {
     case "user":
       return extractUserMessageText(parsed);
-    case "attachment":
-      return extractQueuedCommandText(parsed);
     case "queue-operation":
-      return extractQueueOperationText(parsed);
+      return extractEnqueuedText(parsed);
     default:
       return null;
   }
