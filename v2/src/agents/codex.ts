@@ -102,8 +102,7 @@ function isExplicitSubagentSessionMeta(line: CodexSessionLine): boolean {
   }
   const source = line.payload?.source ?? line.source;
   return (
-    line.payload?.thread_source === "subagent" ||
-    (isRecord(source) && isRecord(source["subagent"]))
+    line.payload?.thread_source === "subagent" || (isRecord(source) && isRecord(source["subagent"]))
   );
 }
 
