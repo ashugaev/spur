@@ -851,6 +851,7 @@ export interface CodexRolloutStateRecord {
     | "custom_tool_call"
     | "task_complete"
     | "turn_aborted"
+    | "thread_settings_applied"
     | "input_required"
     | "request_user_input";
   turnId?: string;
@@ -942,6 +943,17 @@ function extractCodexRolloutStateLine(
     if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
       const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
       return codexRolloutStateRecord("waiting", timestamp, timestampMs, "turn_aborted", turnId);
+    }
+    // Codex writes this on resume after an externally killed turn. That turn
+    // has no task_complete/turn_aborted record, but the resumed TUI is at its
+    // prompt and can accept the queued message.
+    if (payloadType === "thread_settings_applied") {
+      return codexRolloutStateRecord(
+        "waiting",
+        timestamp,
+        timestampMs,
+        "thread_settings_applied",
+      );
     }
     if (payloadType === "input_required") {
       const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);

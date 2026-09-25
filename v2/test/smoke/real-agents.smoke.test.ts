@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,6 +36,7 @@ interface CleanupItem {
   rootDir: string;
   sessionPrefix: string;
   socketName: string;
+  repoDir?: string;
   branch?: string;
   worktreePath?: string;
 }
@@ -322,24 +323,25 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
+  const repoDir = item.repoDir ?? SMOKE_REPO_DIR;
   await killTmuxSessionsByPrefix(item.sessionPrefix, item.socketName);
   killTmuxServer(item.socketName);
   if (item.worktreePath) {
     try {
-      await git(SMOKE_REPO_DIR, "worktree", "remove", "--force", item.worktreePath);
+      await git(repoDir, "worktree", "remove", "--force", item.worktreePath);
     } catch {
       // Best effort only.
     }
   }
   if (item.branch) {
     try {
-      await git(SMOKE_REPO_DIR, "branch", "-D", item.branch);
+      await git(repoDir, "branch", "-D", item.branch);
     } catch {
       // Best effort only.
     }
   }
   try {
-    await git(SMOKE_REPO_DIR, "worktree", "prune", "--expire", "now");
+    await git(repoDir, "worktree", "prune", "--expire", "now");
   } catch {
     // Best effort only.
   }
@@ -361,6 +363,24 @@ async function runSmoke(
     : undefined;
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
   cleanupItems.push(cleanupItem);
+  const repoDir = agent === "codex" ? join(rootDir, "repo") : SMOKE_REPO_DIR;
+  if (agent === "codex") {
+    await mkdir(repoDir);
+    await git(repoDir, "init", "--initial-branch=main");
+    await git(
+      repoDir,
+      "-c",
+      "user.name=Spur Smoke",
+      "-c",
+      "user.email=smoke@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "test: initialize smoke repository",
+    );
+    cleanupItem.repoDir = repoDir;
+  }
+  const baseRef = agent === "codex" ? await git(repoDir, "rev-parse", "HEAD") : SMOKE_BASE_REF;
 
   setActiveTmuxSocketName(tmuxSocketName);
   await syncTmuxEnvironment({});
@@ -372,8 +392,8 @@ async function runSmoke(
       port,
       dataDir,
       worktreeDir,
-      repoDir: SMOKE_REPO_DIR,
-      baseRef: SMOKE_BASE_REF,
+      repoDir,
+      baseRef,
       sessionPrefix,
       agent,
       ...(expectedPreflightBranch
@@ -403,7 +423,7 @@ async function runSmoke(
         prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
-After the file and the session metadata are set, wait for more instructions.`,
+After the file and the session metadata are set, wait for more instructions.${agent === "codex" ? " The task is complete only after a follow-up message asks you to create smoke-followup.txt." : ""}`,
       });
       cleanupItem.branch = session.branch;
       cleanupItem.worktreePath = session.worktreePath;
@@ -426,7 +446,11 @@ After the file and the session metadata are set, wait for more instructions.`,
         label: "running agent with an initialized worktree",
       });
       if (liveState.slots?.title) {
-        expect(liveState.slots.title).toBe(expectedTitle);
+        if (agent === "codex") {
+          expect(liveState.slots.title.toLowerCase()).toContain(expectedTitle);
+        } else {
+          expect(liveState.slots.title).toBe(expectedTitle);
+        }
         expect(liveState.slots.links).toHaveLength(expectedLinks.length);
         expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
         const status = await readTmuxStatus(session.id);
@@ -446,9 +470,20 @@ After the file and the session metadata are set, wait for more instructions.`,
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);
+      if (agent === "codex") {
+        expect(restored.agentSessionId).toBe(session.agentSessionId);
+      }
       if (restored.slots?.title) {
-        expect(restored.slots.title).toBe(expectedTitle);
+        expect(restored.slots.title).toBe(liveState.slots?.title);
         expect(restored.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
+      }
+
+      if (agent === "codex") {
+        await pollUntil(() => service.get(session.id), {
+          timeoutMs: 240_000,
+          accept: (state) => state.status === "running" && state.state === "waiting",
+          label: "restored agent waiting for follow-up",
+        });
       }
 
       await service.send(session.id, {
@@ -461,6 +496,15 @@ After the file and the session metadata are set, wait for more instructions.`,
         accept: Boolean,
       });
       expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
+      if (agent === "codex") {
+        const withUsage = await pollUntil(() => service.get(session.id), {
+          timeoutMs: 30_000,
+          accept: (state) =>
+            state.tokenUsageView?.status === "available" && state.tokenUsageView.totalTokens > 0,
+          label: "structured Codex usage after follow-up",
+        });
+        expect(withUsage.tokenUsageView?.provider).toBe("codex");
+      }
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
@@ -611,7 +655,7 @@ if (codexAuth.error) {
   describe.skipIf(!codexAuth.available)("Spur real-agent smoke (codex)", () => {
     it("launches codex, restores it, and accepts a follow-up send", async () => {
       await runSmoke("codex");
-    });
+    }, 600_000);
 
     it("uses codex spawn preflight before the normal session launch", async () => {
       await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });

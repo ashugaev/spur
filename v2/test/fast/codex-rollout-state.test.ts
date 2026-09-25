@@ -126,6 +126,42 @@ describe("readCodexRolloutState", () => {
     expect(reader.files.get(filePath)).not.toBe(firstCachedFile);
   });
 
+  it("reads a resumed prompt as waiting after an interrupted turn lacks a completion event", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-09-25T06:39:51.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "interrupted-turn" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-09-25T06:40:26.000Z",
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_id: "root-thread" },
+        }),
+      ].join("\n"),
+    );
+
+    const resumed = await readCodexRolloutState(sessionsDir);
+    expect(resumed.rollout).toMatchObject({
+      state: "waiting",
+      reason: "thread_settings_applied",
+    });
+
+    const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
+    await writeFile(
+      filePath,
+      `${await readFile(filePath, "utf8")}\n${JSON.stringify({
+        timestamp: "2026-09-25T06:41:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "followup-turn" },
+      })}`,
+      "utf8",
+    );
+    const followup = await readCodexRolloutState(sessionsDir);
+    expect(followup.rollout).toMatchObject({ state: "working", reason: "task_started" });
+  });
+
   it("reads working from the current Codex rollout tail after an older interrupted turn", async () => {
     const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-working-current.jsonl");
