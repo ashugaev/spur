@@ -18,6 +18,7 @@ import {
   getAttentionLevel,
   isRestorable,
   isTerminalSession,
+  isTokenBudgetBlocked,
   type DashboardRunningSidecar,
   type DashboardSession,
 } from "@/lib/types";
@@ -227,8 +228,7 @@ export function SessionRow({
   const showRestore =
     (attentionLevel === "stopped" || attentionLevel === "error") &&
     isRestorable(session) &&
-    session.tokenBudgetView?.exhausted !== true &&
-    session.tokenUsageView?.exhausted !== true;
+    !isTokenBudgetBlocked(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
   const trackerLink = session.links.find((l) => isTrackerLinkLabel(l.label));

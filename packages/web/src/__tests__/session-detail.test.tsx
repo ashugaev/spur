@@ -6033,6 +6033,31 @@ describe("SessionDetail token usage", () => {
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
+
+  it("hides Restore and explains unknown pre-flight usage under a budget", async () => {
+    stubFetch({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Unavailable · pre-flight usage unknown")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail document title", () => {

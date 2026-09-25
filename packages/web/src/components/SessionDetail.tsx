@@ -109,6 +109,7 @@ import {
   isOpenPrActionRequiredPayload,
   isRestorable,
   isSessionNotRestorablePayload,
+  isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
@@ -2869,8 +2870,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
-  const tokenBudgetExhausted =
-    session?.tokenBudgetView?.exhausted === true || session?.tokenUsageView?.exhausted === true;
+  const tokenBudgetBlocked = session ? isTokenBudgetBlocked(session) : false;
+  const tokenBudgetMessage =
+    session?.tokenBudgetView?.exhausted === true || session?.tokenUsageView?.exhausted === true
+      ? "Not accepting input. Token budget limit hit."
+      : session?.tokenBudgetView?.enforced === false
+        ? session.tokenBudgetView.reason === "preflight_unknown"
+          ? "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced."
+          : session.tokenBudgetView.reason === "legacy_unknown"
+            ? "Not accepting input. Earlier usage unknown; token budget cannot be enforced."
+            : "Not accepting input. Main usage unavailable; token budget cannot be enforced."
+        : "Not accepting input. Token budget limit hit.";
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
@@ -3127,7 +3137,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
-            {isRestorable(session) && !tokenBudgetExhausted ? (
+            {isRestorable(session) && !tokenBudgetBlocked ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
                 aria-label={busyAction === "restore" ? "Restoring session" : undefined}
@@ -3362,7 +3372,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   Message
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
-                {canSendMessage(session) ? (
+                {canSendMessage(session) && !tokenBudgetBlocked ? (
                   <div className="space-y-2">
                     <FileAttachmentTextarea
                       attachments={attachments}
@@ -3454,8 +3464,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
-                    {tokenBudgetExhausted
-                      ? "Not accepting input. Token budget limit hit."
+                    {tokenBudgetBlocked
+                      ? tokenBudgetMessage
                       : "Not accepting input. Restore to continue."}
                   </p>
                 )}

@@ -520,6 +520,32 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("hides restore when pre-flight usage is unknown under a budget", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
+    render(
+      <SessionRow
+        session={makeSession({
+          status: "stopped",
+          state: "stopped",
+          runtimeAlive: false,
+          tokenBudgetView: {
+            budget: 100,
+            knownTotalTokens: 20,
+            exhausted: false,
+            enforced: false,
+            reason: "preflight_unknown",
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Restore session api-a1" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides restore when the workspace no longer exists", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",

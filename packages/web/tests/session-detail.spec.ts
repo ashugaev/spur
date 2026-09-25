@@ -4062,6 +4062,31 @@ test.describe("S5: Runtime sidebar", () => {
     }
   });
 
+  test("unknown pre-flight usage blocks Restore before the known total reaches the limit", async ({
+    page,
+  }) => {
+    const session = makeStoppedSession({
+      id: "detail-preflight-unknown",
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Unavailable · pre-flight usage unknown")).toBeVisible();
+    await expect(
+      page.getByText(
+        "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+  });
+
   test("copy workspace access entries are visible when configured", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s5-3",

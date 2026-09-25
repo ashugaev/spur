@@ -369,6 +369,16 @@ export interface SpurTokenBudgetView {
   reason?: "legacy_unknown" | "preflight_unknown" | "main_usage_unavailable";
 }
 
+export function isTokenBudgetBlocked(
+  session: Pick<SpurSessionView, "tokenBudgetView" | "tokenUsageView">,
+): boolean {
+  const budget = session.tokenBudgetView;
+  return (
+    (budget?.budget !== undefined && (!budget.enforced || budget.exhausted)) ||
+    session.tokenUsageView?.exhausted === true
+  );
+}
+
 export type SpurSidecarStopReport =
   | { outcome: "reaped" }
   | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
