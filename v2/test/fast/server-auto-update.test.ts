@@ -102,7 +102,8 @@ describe("POST /deploy/auto-update", () => {
 
   it("returns 400 on a non-boolean enabled value", async () => {
     const { server, port } = await startOnFreePort(
-      (_port, configPath) => startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
       (port) => setupConfig(port),
     );
     try {
