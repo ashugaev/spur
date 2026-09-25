@@ -7837,6 +7837,49 @@ describe("SessionService", () => {
     }
   });
 
+  it("types nothing when the service is disposed during the settle wait", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: false,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:59.900Z"));
+    // The agent stays waiting and the settle elapses, so only the dispose
+    // check stands between the sleep and the pane write.
+    let disposeService: () => void = () => {};
+    timerPromisesSleepMock.mockReset().mockImplementation(async (ms) => {
+      if (ms === 1_900) {
+        disposeService();
+      }
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    disposeService = () => service.dispose();
+
+    await sessionServiceInternals(service).deliveryRuns.get("api-1");
+    expect(timerPromisesSleepMock).toHaveBeenCalledWith(1_900);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued follow up"]);
+  });
+
   it("delivers a queued message once tmux activity is older than 30s", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
