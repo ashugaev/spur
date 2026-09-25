@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { startServer } from "../../src/server.js";
-import type { AgentName } from "../../src/types.js";
+import { isRestorableSession } from "../../src/session-service.js";
+import type { AgentName, SessionView } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
   isTmuxAvailable,
@@ -36,6 +37,30 @@ interface CleanupItem {
   socketName: string;
   branch?: string;
   worktreePath?: string;
+}
+
+async function waitForRestorableSession(
+  service: { get(sessionId: string): Promise<SessionView> },
+  sessionId: string,
+): Promise<SessionView> {
+  return pollUntil(() => service.get(sessionId), {
+    timeoutMs: 20_000,
+    intervalMs: 250,
+    accept: isRestorableSession,
+    label: `restorable session ${sessionId}`,
+  });
+}
+
+async function waitForIdleSession(
+  service: { get(sessionId: string): Promise<SessionView> },
+  sessionId: string,
+): Promise<SessionView> {
+  return pollUntil(() => service.get(sessionId), {
+    timeoutMs: 120_000,
+    intervalMs: 500,
+    accept: (session) => session.state === "waiting" || session.state === "needs_input",
+    label: `idle session ${sessionId}`,
+  });
 }
 
 async function binaryPath(name: string): Promise<string | null> {
@@ -424,7 +449,9 @@ After the file and the session metadata are set, wait for more instructions.`,
       }
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
+      await waitForIdleSession(service, session.id);
       await killTmuxSession(session.id);
+      await waitForRestorableSession(service, session.id);
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);
@@ -505,6 +532,7 @@ async function runOpenCodeSmoke(): Promise<void> {
       });
 
       await service.pause(session.id);
+      await waitForRestorableSession(service, session.id);
       const restored = await service.restore(session.id);
       expect(restored.agentSessionId).toBe(nativeSessionId);
       await service.send(session.id, { message: "Reply with exactly SPUR_OPENCODE_SMOKE_TWO" });

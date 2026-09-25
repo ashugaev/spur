@@ -982,6 +982,55 @@ describe("findCodexSessionId", () => {
     expect(result).toBe("session-thread");
     expect(mockCreateInterface).toHaveBeenCalledTimes(1);
   });
+
+  it("ignores newer subagent rollout metadata when choosing a resume id", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockFlatJsonlDir("/custom/sessions", ["parent.jsonl", "child.jsonl"]);
+    mockStat.mockImplementation(async (filePath: unknown) => {
+      if (filePath === "/custom/sessions/parent.jsonl") {
+        return { mtimeMs: 1000 };
+      }
+      if (filePath === "/custom/sessions/child.jsonl") {
+        return { mtimeMs: 2000 };
+      }
+      return { mtimeMs: 0 };
+    });
+    mockStreamsForFiles({
+      "/custom/sessions/parent.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          source: "cli",
+          payload: {
+            id: "parent-thread",
+            cwd: "/worktree/path",
+          },
+        }),
+      ],
+      "/custom/sessions/child.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "child-thread",
+            cwd: "/worktree/path",
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: "parent-thread",
+                },
+              },
+            },
+            thread_source: "subagent",
+          },
+        }),
+      ],
+    });
+
+    const result = await findCodexSessionId("/worktree/path", {
+      sessionRootDir: "/custom/sessions",
+    });
+
+    expect(result).toBe("parent-thread");
+  });
 });
 
 // Helper: create an async iterable of lines, compatible with the mocked createInterface.
