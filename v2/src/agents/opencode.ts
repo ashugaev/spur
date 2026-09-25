@@ -2,7 +2,6 @@ import { execFile, spawn } from "node:child_process";
 import { mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import { resolveTempDir } from "../temp-dir.js";
@@ -483,11 +482,14 @@ export function openCodeDatabasePath(env: NodeJS.ProcessEnv = process.env): stri
 // own SQLite store: ~1ms where `opencode export` costs 2-4s per call, so the
 // submit-ack scan can poll without a subprocess per tick. The schema is
 // opencode-internal, so a read that fails — missing DB, renamed table or
-// column — answers from the CLI export instead.
-export function readOpenCodeUserMessageIdsFromDatabase(
+// column — answers from the CLI export instead. `node:sqlite` loads lazily:
+// Node 22 prints an ExperimentalWarning on import, which must not reach every
+// CLI run that merely loads this module.
+export async function readOpenCodeUserMessageIdsFromDatabase(
   sessionId: string,
   databasePath: string = openCodeDatabasePath(),
-): Set<string> {
+): Promise<Set<string>> {
+  const { DatabaseSync } = await import("node:sqlite");
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
     const rows = database
@@ -507,7 +509,7 @@ export function readOpenCodeUserMessageIdsFromDatabase(
 
 async function readOpenCodeUserMessageIds(sessionId: string): Promise<Set<string>> {
   try {
-    return readOpenCodeUserMessageIdsFromDatabase(sessionId);
+    return await readOpenCodeUserMessageIdsFromDatabase(sessionId);
   } catch {
     return parseOpenCodeUserMessageIds(await exportOpenCodeSession(sessionId));
   }
@@ -535,7 +537,8 @@ export async function scanOpenCodeForNewUserMessage(
   }
 }
 
-// One `opencode export` costs 2-4s on a loaded host, so the launch check needs
+// The scan reads opencode.db, but falls back to `opencode export` (2-4s per
+// call on a loaded host) when the DB is unreadable, so the launch check keeps
 // the same budget as identity binding rather than a few polls' worth.
 const OPENCODE_LAUNCH_MESSAGE_WAIT_MS = 60_000;
 

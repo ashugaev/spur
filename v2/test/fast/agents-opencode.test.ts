@@ -765,12 +765,12 @@ describe("OpenCode adapter", () => {
       insert(database, "msg_u2", "ses_other", "user");
       database.close();
       try {
-        expect(
+        await expect(
           readOpenCodeUserMessageIdsFromDatabase(
             "ses_1",
             openCodeDatabasePath({ XDG_DATA_HOME: dataHome }),
           ),
-        ).toEqual(new Set(["msg_u1"]));
+        ).resolves.toEqual(new Set(["msg_u1"]));
       } finally {
         await rm(dataHome, { recursive: true, force: true });
       }
