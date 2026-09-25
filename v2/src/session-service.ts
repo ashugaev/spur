@@ -11776,8 +11776,8 @@ export class SessionService {
 
   // Explicit re-enable for a session permanently disabled by a not-found PR (see
   // event-sources/github.ts permanentPrNotFound / metadata.ts's poll-disabled
-  // registry). Missing session throws SessionResourceNotFoundError (404). Otherwise
-  // 200-shaped: nothing disabled, or a project with no github sources, yields cleared: [].
+  // registry). Missing session throws SessionResourceNotFoundError (404 per daemon-api.md).
+  // Otherwise 200: unknown/unconfigured project, no github sources, or nothing disabled → cleared: [].
   // Clears both layers per source: the durable disk registry (clearGitHubPollDisabledSession)
   // and, via pollDisabledOverrideClearer, the live handle's in-process
   // pendingPollDisabledOverrides entry a failed disk write would otherwise leave
