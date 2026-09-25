@@ -106,7 +106,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Spur sends the next phase after
 
 Full-access launch: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, `opencode --auto` (>= 1.18.18). Spur resumes `ses_...` ids via `opencode --session`, reads state/conversation via `opencode export`. OpenCode `restrictWrites` (config field, not the flag above) denies edit tools, `git commit`/push.
 
-Preflight (`projects.<id>.preflight`, no `--branch`): Spur asks the agent for one line before worktree creation — a branch name or sentinel `NO_PROJECT_RULES`. Empty/malformed/checked-out results retry 3x, fail spawn. Every provider call contributes to the session token budget. New worktree branches fetch `origin`, branch from freshest remote ref; `--worktree <defaultBranch>` overrides base.
+Preflight (`projects.<id>.preflight`, no `--branch`): Spur asks the agent for one line before worktree creation — a branch name or sentinel `NO_PROJECT_RULES`. Empty/malformed/checked-out results retry 3x, fail spawn. All provider calls contribute to the session token budget. New worktree branches fetch `origin`, branch from freshest remote ref; `--worktree <defaultBranch>` overrides base.
 
 ## shepherd, wake
 
