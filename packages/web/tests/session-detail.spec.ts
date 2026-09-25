@@ -1905,7 +1905,11 @@ test.describe("S2a: Logs modal", () => {
     await page.getByRole("button", { name: /^logs$/i }).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
-    await expect(page.getByText("waiting")).toBeVisible();
+    await expect(
+      page
+        .getByRole("dialog", { name: `Logs ${session.id}` })
+        .getByText("waiting", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
     await expect(page.getByText("User input")).toBeVisible();

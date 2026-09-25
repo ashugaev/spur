@@ -99,6 +99,8 @@ export class PreflightBranchValidationError extends Error {
   }
 }
 
+export class PreflightArtifactError extends Error {}
+
 export interface SpawnPreflightResult {
   noProjectBranchRequirements?: true;
   branch?: string;
@@ -184,9 +186,10 @@ function parseClaudeUsage(value: unknown): TokenUsageTotals | null {
   const nested = record(usage["cache_creation"]);
   const nested5m = optionalToken(nested?.["ephemeral_5m_input_tokens"]);
   const nested1h = optionalToken(nested?.["ephemeral_1h_input_tokens"]);
-  const flatWrite = token(usage["cache_creation_input_tokens"]);
+  const flatWrite = optionalToken(usage["cache_creation_input_tokens"]);
   const output = token(usage["output_tokens"]);
-  const thinking = optionalToken(record(usage["output_tokens_details"])?.["thinking_tokens"]);
+  const outputDetails = record(usage["output_tokens_details"]);
+  const thinking = optionalToken(outputDetails?.["thinking_tokens"]);
   if (
     fresh === null ||
     read === null ||
@@ -194,13 +197,15 @@ function parseClaudeUsage(value: unknown): TokenUsageTotals | null {
     output === null ||
     nested5m === null ||
     nested1h === null ||
-    thinking === null
+    thinking === null ||
+    (usage["cache_creation"] !== undefined && !nested) ||
+    (usage["output_tokens_details"] !== undefined && !outputDetails)
   )
     return null;
   const write =
     nested5m !== undefined || nested1h !== undefined
       ? (nested5m ?? 0) + (nested1h ?? 0)
-      : flatWrite;
+      : (flatWrite ?? 0);
   if ((thinking ?? 0) > output) return null;
   const input = fresh + read + write;
   return {
@@ -229,9 +234,36 @@ export function parseClaudePreflightOutput(raw: string): {
   const parsed = record(decoded);
   if (!parsed || typeof parsed["result"] !== "string") return { text: raw };
   const base = parseClaudeUsage(parsed["usage"]);
-  const advisor = parseClaudeUsage(record(parsed["advisor_message"])?.["usage"]);
-  const iterations = Array.isArray(parsed["messages"]) ? parsed["messages"].length : 1;
-  const usage = base && advisor ? sumUsage([base, advisor]) : (base ?? advisor ?? undefined);
+  const advisors: TokenUsageTotals[] = [];
+  let malformedAdvisor = false;
+  const flatAdvisor = record(parsed["advisor_message"]);
+  if (parsed["advisor_message"] !== undefined) {
+    const sample = parseClaudeUsage(flatAdvisor?.["usage"]);
+    if (sample) advisors.push(sample);
+    else malformedAdvisor = true;
+  }
+  const nestedIterations = record(parsed["usage"])?.["iterations"];
+  if (nestedIterations !== undefined) {
+    if (!Array.isArray(nestedIterations)) {
+      malformedAdvisor = true;
+    } else {
+      for (const iteration of nestedIterations) {
+        const entry = record(iteration);
+        if (entry?.["type"] !== "advisor_message") continue;
+        const sample = parseClaudeUsage(entry);
+        if (typeof entry["model"] !== "string" || !entry["model"] || !sample) {
+          malformedAdvisor = true;
+          break;
+        }
+        advisors.push(sample);
+      }
+    }
+  }
+  const iterations = Math.max(
+    1 + advisors.length,
+    Array.isArray(parsed["messages"]) ? parsed["messages"].length : 1,
+  );
+  const usage = !malformedAdvisor && base ? sumUsage([base, ...advisors]) : undefined;
   return {
     text: parsed["result"],
     ...(usage ? { usage } : {}),
@@ -242,10 +274,14 @@ export function parseClaudePreflightOutput(raw: string): {
 function parseAliasedUsage(value: unknown): TokenUsageTotals | null {
   const usage = record(value);
   if (!usage) return null;
-  const valueFor = (...keys: string[]): unknown =>
-    keys.map((key) => usage[key]).find((v) => v !== undefined);
+  const valueFor = (...keys: string[]): unknown => {
+    const values = keys.map((key) => usage[key]).filter((value) => value !== undefined);
+    if (values.some((value) => value !== values[0])) return null;
+    return values[0];
+  };
   const input = token(valueFor("input", "input_tokens", "inputTokens"));
   const output = token(valueFor("output", "output_tokens", "outputTokens"));
+  const reportedTotal = optionalToken(valueFor("total", "total_tokens", "totalTokens"));
   const cached = optionalToken(valueFor("cached", "cached_input_tokens", "cacheReadTokens"));
   const write = optionalToken(
     valueFor("cache_write", "cache_write_input_tokens", "cacheWriteTokens"),
@@ -253,7 +289,15 @@ function parseAliasedUsage(value: unknown): TokenUsageTotals | null {
   const reasoning = optionalToken(
     valueFor("reasoning", "reasoning_output_tokens", "reasoningTokens"),
   );
-  if (input === null || output === null || cached === null || write === null || reasoning === null)
+  if (
+    input === null ||
+    output === null ||
+    reportedTotal === null ||
+    cached === null ||
+    write === null ||
+    reasoning === null ||
+    (reportedTotal !== undefined && reportedTotal !== input + output)
+  )
     return null;
   if ((cached ?? 0) + (write ?? 0) > input || (reasoning ?? 0) > output) return null;
   return {
@@ -271,10 +315,12 @@ export function parseCodexPreflightUsage(raw: string): TokenUsageTotals | undefi
   for (const line of raw.split("\n")) {
     try {
       const parsed = record(JSON.parse(line) as unknown);
-      const candidate = parseAliasedUsage(
-        parsed?.["usage"] ?? record(parsed?.["payload"])?.["usage"],
-      );
-      if (candidate) usage = candidate;
+      const rawUsage = parsed?.["usage"] ?? record(parsed?.["payload"])?.["usage"];
+      if (rawUsage !== undefined) {
+        const candidate = parseAliasedUsage(rawUsage);
+        if (!candidate) return undefined;
+        usage = candidate;
+      }
     } catch {
       // Codex JSON mode can interleave non-JSON diagnostics on stderr/stdout.
     }
@@ -355,6 +401,14 @@ function rethrowWithUsage(error: unknown, usage: TokenUsageTotals | undefined): 
   throw error instanceof Error ? error : new Error(String(error));
 }
 
+function parseResultWithUsage(text: string, usage?: TokenUsageTotals): SpawnPreflightResult {
+  try {
+    return { ...parseSpawnPreflightResult(text), ...(usage ? { usage } : {}) };
+  } catch (error) {
+    rethrowWithUsage(error, usage);
+  }
+}
+
 async function runClaudePreflight(prompt: string, cwd: string): Promise<SpawnPreflightResult> {
   let raw: string;
   try {
@@ -388,8 +442,7 @@ async function runClaudePreflight(prompt: string, cwd: string): Promise<SpawnPre
   }
   const parsed = parseClaudePreflightOutput(raw);
   return {
-    ...parseSpawnPreflightResult(parsed.text),
-    ...(parsed.usage ? { usage: parsed.usage } : {}),
+    ...parseResultWithUsage(parsed.text, parsed.usage),
     ...(parsed.providerIterationCount !== undefined
       ? { providerIterationCount: parsed.providerIterationCount }
       : {}),
@@ -453,10 +506,10 @@ async function runCodexPreflight(
     try {
       const text = await readFile(outputPath, "utf8");
       const usage = parseCodexPreflightUsage(stdout);
-      return { ...parseSpawnPreflightResult(text), ...(usage ? { usage } : {}) };
+      return parseResultWithUsage(text, usage);
     } catch {
       const usage = parseCodexPreflightUsage(stdout);
-      return { ...parseSpawnPreflightResult(stdout), ...(usage ? { usage } : {}) };
+      return parseResultWithUsage(stdout, usage);
     }
   } finally {
     await rm(tempDir, {
@@ -511,8 +564,7 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<SpawnPre
     }
     const parsed = parseCursorPreflightOutput(raw);
     return {
-      ...parseSpawnPreflightResult(parsed.text),
-      ...(parsed.usage ? { usage: parsed.usage } : {}),
+      ...parseResultWithUsage(parsed.text, parsed.usage),
     };
   } finally {
     await rm(tempDir, {
@@ -525,16 +577,23 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<SpawnPre
 }
 
 async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnPreflightResult> {
-  const raw = await runPreflightExec(
-    "opencode",
-    opencodeCommand(),
-    ["run", "--format", "json", "--agent", "build", prompt],
-    {
-      cwd,
-      timeout: PREFLIGHT_TIMEOUT_MS,
-      maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-    },
-  );
+  let raw: string;
+  let executionError: unknown;
+  try {
+    raw = await runPreflightExec(
+      "opencode",
+      opencodeCommand(),
+      ["run", "--format", "json", "--agent", "build", prompt],
+      {
+        cwd,
+        timeout: PREFLIGHT_TIMEOUT_MS,
+        maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+      },
+    );
+  } catch (error) {
+    executionError = error;
+    raw = error instanceof PreflightExecError ? error.stdout : "";
+  }
   let sessionId: string | undefined;
   let text = "";
   for (const line of raw.split("\n")) {
@@ -551,7 +610,22 @@ async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnP
   let usage: TokenUsageTotals | undefined;
   try {
     if (sessionId) {
-      const sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(sessionId));
+      let sample: ReturnType<typeof parseOpenCodeTokenUsage>;
+      let exportError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(sessionId));
+          exportError = undefined;
+          break;
+        } catch (error) {
+          exportError = error;
+        }
+      }
+      if (exportError) {
+        throw new PreflightArtifactError("OpenCode pre-flight export failed", {
+          cause: exportError,
+        });
+      }
       if (sample) {
         const {
           provider: _provider,
@@ -563,9 +637,29 @@ async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnP
       }
     }
   } finally {
-    if (sessionId) await deleteOpenCodeSession(sessionId).catch(() => {});
+    if (sessionId) {
+      let cleanupError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await deleteOpenCodeSession(sessionId);
+          cleanupError = undefined;
+          break;
+        } catch (error) {
+          cleanupError = error;
+        }
+      }
+      if (cleanupError) {
+        rethrowWithUsage(
+          new PreflightArtifactError("OpenCode pre-flight cleanup failed", {
+            cause: cleanupError,
+          }),
+          usage,
+        );
+      }
+    }
   }
-  return { ...parseSpawnPreflightResult(text), ...(usage ? { usage } : {}) };
+  if (executionError) rethrowWithUsage(executionError, usage);
+  return parseResultWithUsage(text, usage);
 }
 
 export async function runSpawnPreflight(
@@ -583,7 +677,7 @@ export async function runSpawnPreflight(
   if (result.branch && input.project.branchNaming) {
     const regex = input.project.branchNaming.regex;
     if (!compileBranchNamingRegex(regex, "branchNaming").test(result.branch)) {
-      throw new PreflightBranchValidationError(result.branch, regex);
+      rethrowWithUsage(new PreflightBranchValidationError(result.branch, regex), result.usage);
     }
   }
   return result;

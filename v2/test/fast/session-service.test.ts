@@ -521,6 +521,7 @@ vi.mock("../../src/config.js", () => ({
 }));
 
 vi.mock("../../src/preflight.js", () => ({
+  PreflightArtifactError: class PreflightArtifactError extends Error {},
   PreflightBranchValidationError: MockPreflightBranchValidationError,
   runSpawnPreflight: runSpawnPreflightMock,
 }));
@@ -4698,6 +4699,45 @@ describe("SessionService", () => {
           entry.message.includes('branch "feature/api-1" is already checked out'),
       ),
     ).toBe(true);
+  });
+
+  it("blocks explicit-branch background launch after claiming exhausted preview usage", async () => {
+    const config = {
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          preflight: { prompt: "Choose a branch" },
+        },
+      },
+    };
+    loadConfigMock.mockReturnValue(config);
+    runSpawnPreflightMock.mockResolvedValueOnce({
+      branch: "feature/preview",
+      usage: { inputTokens: 45, outputTokens: 5, totalTokens: 50 },
+    });
+    const sessions = createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const preview = await service.preflight({ project: "api", prompt: "hello" });
+    loadConfigMock.mockReturnValue({
+      ...config,
+      projects: { api: { ...config.projects.api, tokenBudget: 50 } },
+    });
+    const budgeted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await expect(
+      budgeted.spawnInBackground({
+        project: "api",
+        prompt: "hello",
+        branch: "feature/preview",
+        preflightBatchId: preview.preflightBatchId,
+      }),
+    ).rejects.toThrow("Pre-flight exhausted the token budget (50 / 50)");
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")).toMatchObject({
+      status: "errored",
+      preflightTokenUsage: { status: "measured", totalTokens: 50 },
+    });
   });
 
   it("does not retry background spawn after sending the initial prompt", async () => {
@@ -16552,6 +16592,58 @@ describe("SessionService", () => {
     expect(readClaudeJsonlStateMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["claude", "codex", "opencode", "cursor"] as const)(
+    "persists the final structured %s sample after confirmed pane exit",
+    async (agent) => {
+      readSessionMock.mockReturnValue(
+        runningSession({ agent, ...(agent === "opencode" ? { agentSessionId: "ses_final" } : {}) }),
+      );
+      tmuxPaneDeadMock.mockResolvedValue(true);
+      const sample = {
+        provider: agent,
+        generationId: `${agent}:final`,
+        inputTokens: 7,
+        outputTokens: 3,
+        totalTokens: 10,
+      };
+      if (agent === "claude")
+        mockClaudeJsonlState("waiting", { tokenUsage: { ...sample, provider: "claude" } });
+      if (agent === "codex") {
+        readCodexRolloutStateMock.mockResolvedValue({
+          rollout: null,
+          rateLimit: null,
+          tokenUsage: sample,
+        });
+      }
+      if (agent === "opencode") {
+        readOpenCodeStructuredStateMock.mockResolvedValue({ state: null, tokenUsage: sample });
+      }
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const resultPromise = service.get("api-1");
+      await vi.advanceTimersByTimeAsync(250);
+      const result = await resultPromise;
+      expect(result.status).toBe("stopped");
+      if (agent === "cursor") {
+        expect(result.tokenUsageView?.status).toBe("unavailable");
+        expect(readCursorJsonlStateMock).not.toHaveBeenCalled();
+      } else {
+        expect(result.tokenUsageView).toMatchObject({ status: "available", totalTokens: 10 });
+        expect(writeSessionMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ tokenUsage: expect.objectContaining({ totalTokens: 10 }) }),
+        );
+      }
+      if (agent === "opencode") {
+        expect(readOpenCodeStructuredStateMock).toHaveBeenCalledWith(
+          "ses_final",
+          expect.any(Number),
+          true,
+        );
+      }
+    },
+  );
+
   it("persists errored when the agent process is missing in a live pane", async () => {
     readSessionMock.mockReturnValue(runningSession());
     isProcessRunningInTmuxMock.mockResolvedValue(false);
@@ -23529,6 +23621,39 @@ describe("SessionService", () => {
       details: expect.objectContaining({
         stage: "tmux.create",
       }),
+    });
+  });
+
+  it("keeps claimed preview usage on a failed foreground spawn", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          preflight: { prompt: "Choose a branch" },
+        },
+      },
+    });
+    runSpawnPreflightMock.mockResolvedValueOnce({
+      branch: "feature/preview",
+      usage: { inputTokens: 9, outputTokens: 1, totalTokens: 10 },
+    });
+    createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+    const sessions = createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const preview = await service.preflight({ project: "api", prompt: "hello" });
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "hello",
+        branch: "feature/preview",
+        preflightBatchId: preview.preflightBatchId,
+      }),
+    ).rejects.toThrow("tmux boom");
+    expect(sessions.get("api-1")).toMatchObject({
+      status: "errored",
+      preflightTokenUsage: { status: "measured", totalTokens: 10 },
     });
   });
 
@@ -42548,6 +42673,41 @@ describe("SessionService", () => {
             .map(([, entry]) => entry)
             .filter((entry) => entry.event === "session.token_budget.exhausted"),
         ).toHaveLength(1);
+      });
+
+      it("stops when pre-flight alone exhausts the budget before main usage exists", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+        });
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            preflightTokenUsage: {
+              status: "measured",
+              attemptCount: 1,
+              unknownAttemptCount: 0,
+              providerIterationCount: 1,
+              byProvider: { claude: { inputTokens: 90, outputTokens: 10, totalTokens: 100 } },
+              inputTokens: 90,
+              outputTokens: 10,
+              totalTokens: 100,
+            },
+          }),
+        );
+        const service = await createDisposedSessionService();
+        const view = await service.get("api-1");
+        expect(view.tokenUsageView?.status).toBe("waiting");
+        expect(view.tokenBudgetView?.exhausted).toBe(true);
+        await staleInternals(service).stopForTokenBudget(view);
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          stopReason: "token_budget",
+          preflightTokenUsage: { totalTokens: 100 },
+        });
+        expect(sessions.get("api-1")?.tokenUsage).toBeUndefined();
       });
 
       it("preserves a newer usage write that lands during stop teardown", async () => {

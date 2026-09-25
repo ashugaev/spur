@@ -2810,6 +2810,61 @@ test.describe("D7: Spawn modal", () => {
 
 // D7b: Silent branch preflight
 test.describe("D7b: Silent branch preflight", () => {
+  test("keeps one paid batch when the first preview is superseded", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    const batchIds: string[] = [];
+    let firstRequest: (() => void) | undefined;
+    const firstPending = new Promise<void>((resolve) => {
+      firstRequest = resolve;
+    });
+    await page.route("**/api/preflight", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId: string };
+      batchIds.push(body.preflightBatchId);
+      if (batchIds.length === 1) await firstPending;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          branch: "feature/preview",
+          preflightBatchId: body.preflightBatchId,
+          preflightTokenUsageView: {
+            status: "measured",
+            attemptCount: batchIds.length,
+            unknownAttemptCount: 0,
+            providerIterationCount: batchIds.length,
+            byProvider: {},
+            inputTokens: batchIds.length,
+            outputTokens: 0,
+            totalTokens: batchIds.length,
+          },
+        }),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const prompt = page.locator("textarea").last();
+    await prompt.fill("First preview");
+    await expect.poll(() => batchIds.length).toBe(1);
+    await prompt.fill("Second preview");
+    await expect.poll(() => batchIds.length).toBe(2);
+    firstRequest?.();
+    expect(batchIds[0]).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(batchIds[1]).toBe(batchIds[0]);
+    let spawnedBatchId: string | undefined;
+    await page.route("**/api/spawn", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId?: string };
+      spawnedBatchId = body.preflightBatchId;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "preview-claimed" })),
+      });
+    });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+    await expect.poll(() => spawnedBatchId).toBe(batchIds[0]);
+  });
+
   test("preflight called and branch input auto-populated", async ({ page }) => {
     await mockSessions(
       page,

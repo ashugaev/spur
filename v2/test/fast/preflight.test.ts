@@ -162,6 +162,77 @@ describe("structured preflight usage", () => {
     });
   });
 
+  it("accepts Claude nested cache writes without a flat duplicate and rejects malformed details", () => {
+    const usage = {
+      input_tokens: 5,
+      cache_read_input_tokens: 2,
+      cache_creation: { ephemeral_5m_input_tokens: 3 },
+      output_tokens: 1,
+    };
+    expect(
+      parseClaudePreflightOutput(JSON.stringify({ result: "feature/x", usage })).usage,
+    ).toMatchObject({
+      inputTokens: 10,
+      cacheWriteInputTokens: 3,
+      totalTokens: 11,
+    });
+    expect(
+      parseClaudePreflightOutput(
+        JSON.stringify({ result: "feature/x", usage: { ...usage, cache_creation: "3" } }),
+      ).usage,
+    ).toBeUndefined();
+  });
+
+  it("counts nested Claude advisor iterations and rejects a malformed nested sample", () => {
+    const payload = {
+      result: "feature/advisor",
+      usage: {
+        input_tokens: 10,
+        cache_creation_input_tokens: 2,
+        cache_read_input_tokens: 3,
+        output_tokens: 4,
+        iterations: [
+          {
+            type: "advisor_message",
+            model: "advisor",
+            input_tokens: 5,
+            cache_creation_input_tokens: 1,
+            cache_read_input_tokens: 1,
+            output_tokens: 2,
+          },
+        ],
+      },
+    };
+    expect(parseClaudePreflightOutput(JSON.stringify(payload))).toMatchObject({
+      providerIterationCount: 2,
+      usage: {
+        inputTokens: 22,
+        outputTokens: 6,
+        totalTokens: 28,
+      },
+    });
+    const iteration = payload.usage.iterations[0];
+    if (!iteration) throw new Error("missing advisor fixture");
+    iteration.input_tokens = -1;
+    expect(parseClaudePreflightOutput(JSON.stringify(payload)).usage).toBeUndefined();
+  });
+
+  it("rejects conflicting Codex aliases instead of choosing the first", () => {
+    expect(
+      parseCodexPreflightUsage(
+        JSON.stringify({ usage: { input: 10, input_tokens: 11, output: 1 } }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseCodexPreflightUsage(
+        [
+          JSON.stringify({ usage: { input: 10, output: 1, total: 11 } }),
+          JSON.stringify({ usage: { input: 12, output: 1, total: 99 } }),
+        ].join("\n"),
+      ),
+    ).toBeUndefined();
+  });
+
   it("reads Codex terminal JSON usage without disabling ephemeral mode", () => {
     const raw = readFileSync(
       new URL("../fixtures/preflight/codex-result.jsonl", import.meta.url),
@@ -773,6 +844,68 @@ describe("runSpawnPreflight", () => {
     });
     expect(mockExportOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
     expect(mockDeleteOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
+  });
+
+  it("exports partial OpenCode usage after a failed run and retries export and cleanup", async () => {
+    const exported = JSON.parse(
+      readFileSync(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("failed"), {
+        code: 1,
+        stdout: JSON.stringify({ sessionID: "partial-session", part: { type: "step_start" } }),
+        stderr: "failed",
+      }),
+    );
+    mockExportOpenCodeSession.mockRejectedValueOnce(new Error("export busy"));
+    mockExportOpenCodeSession.mockResolvedValueOnce(exported);
+    mockDeleteOpenCodeSession.mockRejectedValueOnce(new Error("delete busy"));
+    await expect(
+      runSpawnPreflight({
+        agent: "opencode",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Account for partial preflight tokens",
+      }),
+    ).rejects.toMatchObject({ usage: { totalTokens: 79 } });
+    expect(mockExportOpenCodeSession).toHaveBeenCalledTimes(2);
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledTimes(2);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains measured OpenCode usage when cleanup fails after retries", async () => {
+    const exported = JSON.parse(
+      readFileSync(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: [
+        JSON.stringify({ sessionID: "cleanup-session", part: { type: "step_start" } }),
+        JSON.stringify({ sessionID: "cleanup-session", part: { type: "text", text: "feature/x" } }),
+      ].join("\n"),
+      stderr: "",
+    });
+    mockExportOpenCodeSession.mockResolvedValueOnce(exported);
+    mockDeleteOpenCodeSession.mockRejectedValue(new Error("delete failed"));
+    await expect(
+      runSpawnPreflight({
+        agent: "opencode",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Account for cleanup failure",
+      }),
+    ).rejects.toMatchObject({ usage: { totalTokens: 79 } });
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledTimes(3);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a missing claude binary as command not found", async () => {

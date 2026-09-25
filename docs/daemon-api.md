@@ -52,7 +52,7 @@ Listing (part of the single-session `SessionView`, field `artifacts` — not on 
 
 `SessionView.preflightTokenUsageView` reports pre-flight usage separately as `measured`, `partial`, `unknown`, or `legacy_unknown`, with attempt and provider-iteration counts. Measured views include gross totals and `byProvider`; raw batch, native-session, artifact, and generation ids stay private. `SessionView.tokenBudgetView` reports `knownTotalTokens`, optional `budget`, `exhausted`, `enforced`, and an unenforced reason across pre-flight plus main usage.
 
-`POST /projects/:id/preflight` accepts optional `preflightBatchId` and returns `branch`, `preflightBatchId`, and `preflightTokenUsageView`. Reuse the returned id for later previews and the spawn request. A project change requires a new id. `POST /sessions` and `POST /sessions/background` accept the id, claim it once for the created session, and reject project mismatch or replay by another session.
+`POST /projects/:id/preflight` accepts optional UUID `preflightBatchId` and returns `branch`, `preflightBatchId`, and `preflightTokenUsageView`. A new UUID creates a batch before the first preview; reuse it for later previews and the spawn request. A project change requires a new id. `POST /sessions` and `POST /sessions/background` accept the id, claim it once for the created session, and reject project mismatch or replay by another session.
 
 ## Project routes
 

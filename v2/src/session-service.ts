@@ -222,7 +222,11 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
+import {
+  PreflightArtifactError,
+  runSpawnPreflight,
+  type SpawnPreflightResult,
+} from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
@@ -2545,7 +2549,8 @@ async function runSpawnPreflightForSpawn(args: {
         });
       preflight = args.runAttempt ? await args.runAttempt(execute) : await execute();
     } catch (error) {
-      if (error instanceof PreflightTokenBudgetError) throw error;
+      if (error instanceof PreflightTokenBudgetError || error instanceof PreflightArtifactError)
+        throw error;
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
       feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
@@ -5433,7 +5438,7 @@ export class SessionService {
         const budget = this.resolveTokenBudget(fresh);
         const preflight = fresh.preflightTokenUsage;
         const combined = (preflight?.totalTokens ?? 0) + (usage?.totalTokens ?? 0);
-        if (!usage || budget === undefined || combined < budget) return;
+        if (budget === undefined || combined < budget) return;
         await this.killAgentPaneAndConfirmExit(fresh, { failOnSurvivors: false });
         try {
           await this.teardownSessionSidecars(fresh);
@@ -5448,12 +5453,12 @@ export class SessionService {
         }
         const cleaned = readSession(this.config.dataDir, fresh.id) ?? fresh;
         const finalUsage =
-          cleaned.tokenUsage && cleaned.tokenUsage.totalTokens >= usage.totalTokens
+          cleaned.tokenUsage && (!usage || cleaned.tokenUsage.totalTokens >= usage.totalTokens)
             ? cleaned.tokenUsage
             : usage;
         const stopped: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(cleaned),
-          tokenUsage: finalUsage,
+          ...(finalUsage ? { tokenUsage: finalUsage } : {}),
           status: "stopped",
           stopReason: "token_budget",
           updatedAt: nowIso(),
@@ -5466,8 +5471,8 @@ export class SessionService {
           level: "warn",
           sessionId: stopped.id,
           projectId: stopped.project,
-          message: `Stopped ${stopped.id} after observing ${(preflight?.totalTokens ?? 0) + finalUsage.totalTokens} / ${budget} tokens`,
-          details: { used: (preflight?.totalTokens ?? 0) + finalUsage.totalTokens, budget },
+          message: `Stopped ${stopped.id} after observing ${(preflight?.totalTokens ?? 0) + (finalUsage?.totalTokens ?? 0)} / ${budget} tokens`,
+          details: { used: (preflight?.totalTokens ?? 0) + (finalUsage?.totalTokens ?? 0), budget },
         });
       });
     });
@@ -5689,11 +5694,7 @@ export class SessionService {
             allSessions,
             sidecarProcSnapshot,
           );
-          if (
-            view.status === "running" &&
-            view.tokenUsageView?.status === "available" &&
-            view.tokenUsageView.exhausted
-          ) {
+          if (view.status === "running" && view.tokenBudgetView?.exhausted) {
             await this.stopForTokenBudget(view);
             continue;
           }
@@ -9886,7 +9887,7 @@ export class SessionService {
     let preflightNoProjectBranchRequirements = false;
     let preflightAttempts: number | undefined;
     let preflightBatchId: string | undefined;
-    let preflightTokenUsage: ReturnType<typeof aggregatePreflightAttempts>;
+    let preflightTokenUsage = aggregatePreflightAttempts([]);
     let allocatedNewWorktree = false;
     let reuseCtx: {
       workspaceId: string;
@@ -10518,6 +10519,7 @@ export class SessionService {
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",
+          preflightTokenUsage,
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
@@ -10967,6 +10969,7 @@ export class SessionService {
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
+      assertPreflightTokenBudget(preflightUsageView(preflightTokenUsage), project.tokenBudget);
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
 
@@ -11022,6 +11025,10 @@ export class SessionService {
       const message = error instanceof Error ? error.message : String(error);
       if (sessionId && project && placeholderWritten) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
+        const claimedPreflightUsage = readSession(
+          this.config.dataDir,
+          sessionId,
+        )?.preflightTokenUsage;
         this.removeSessionArtifacts({
           id: sessionId,
           project: request.project,
@@ -11048,6 +11055,7 @@ export class SessionService {
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",
+          ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
@@ -11494,7 +11502,8 @@ export class SessionService {
       return "completed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const terminalPreflightFailure = error instanceof SpawnPreflightError;
+      const terminalPreflightFailure =
+        error instanceof SpawnPreflightError || error instanceof PreflightArtifactError;
       const finalFailure =
         terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
       await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
@@ -11505,7 +11514,7 @@ export class SessionService {
           projectId: request.project,
           message: `Spawn preflight failed for ${request.project}: ${message}`,
           details: {
-            attempts: error.attempts,
+            ...(error instanceof SpawnPreflightError ? { attempts: error.attempts } : {}),
             requestedAgent: request.agent ?? null,
           },
         });
@@ -17737,6 +17746,7 @@ export class SessionService {
           await readOpenCodeStructuredState(
             session.agentSessionId,
             runtime.tmuxActivityAt?.getTime() ?? null,
+            true,
           )
         ).tokenUsage;
       }

@@ -872,6 +872,7 @@ describe("Dashboard project create/delete", () => {
           prompt?: string;
           agent?: string;
           overrides?: { worktree: boolean };
+          preflightBatchId?: string;
         };
         preflightRequests.push(body);
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
@@ -903,12 +904,13 @@ describe("Dashboard project create/delete", () => {
     resolveSpawnDefaults?.(new Response(JSON.stringify({ model: "sonnet", worktree: false })));
     await waitFor(() => {
       expect(preflightRequests).toEqual([
-        {
+        expect.objectContaining({
           projectId: "api",
           prompt: "Do the thing",
           agent: "claude",
           overrides: { worktree: false },
-        },
+          preflightBatchId: expect.any(String),
+        }),
       ]);
     });
   });

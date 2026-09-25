@@ -1596,7 +1596,9 @@ export function Dashboard() {
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     const restoresPreflight = draft?.preflightBatchProjectId === nextProjectId;
-    setSpawnPreflightBatchId(restoresPreflight ? (draft.preflightBatchId ?? null) : null);
+    const restoredBatchId = restoresPreflight ? (draft.preflightBatchId ?? null) : null;
+    spawnPreflightBatchIdRef.current = restoredBatchId;
+    setSpawnPreflightBatchId(restoredBatchId);
     setSpawnPreflightUsage(null);
     setSpawnAttachments([]);
   };
@@ -1624,6 +1626,7 @@ export function Dashboard() {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
     if (normalizedProjectId !== spawnProjectId) {
+      spawnPreflightBatchIdRef.current = null;
       setSpawnPreflightBatchId(null);
       setSpawnPreflightUsage(null);
     }
@@ -1795,16 +1798,22 @@ export function Dashboard() {
 
     let cancelled = false;
     const timer = setTimeout(() => {
+      const batchId = spawnPreflightBatchIdRef.current ?? crypto.randomUUID();
+      spawnPreflightBatchIdRef.current = batchId;
+      setSpawnPreflightBatchId(batchId);
+      writeSpawnDraft({
+        ...spawnDraftRef.current,
+        preflightBatchId: batchId,
+        preflightBatchProjectId: project,
+      });
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
       const payload: Record<string, unknown> = {
         projectId: project,
         prompt,
         agent: spawnAgent,
         overrides,
+        preflightBatchId: batchId,
       };
-      if (spawnPreflightBatchIdRef.current) {
-        payload.preflightBatchId = spawnPreflightBatchIdRef.current;
-      }
 
       fetch("/api/preflight", {
         method: "POST",
@@ -1820,10 +1829,14 @@ export function Dashboard() {
               preflightTokenUsageView?: SpurPreflightTokenUsageView;
             } | null,
           ) => {
-            if (cancelled || !result) return;
-            if (result.preflightBatchId) setSpawnPreflightBatchId(result.preflightBatchId);
-            if (result.preflightTokenUsageView)
-              setSpawnPreflightUsage(result.preflightTokenUsageView);
+            if (!result || batchId !== spawnPreflightBatchIdRef.current) return;
+            const usage = result.preflightTokenUsageView;
+            if (usage) {
+              setSpawnPreflightUsage((current) =>
+                current && current.attemptCount > usage.attemptCount ? current : usage,
+              );
+            }
+            if (cancelled) return;
             if (result.branch && !spawnBranchExplicitRef.current) setSpawnBranch(result.branch);
           },
         )
@@ -1896,7 +1909,7 @@ export function Dashboard() {
         trackerUrl: spawnTrackerUrl,
         workspaceMode: spawnWorkspaceMode,
         defaultBranch: spawnDefaultBranch,
-        preflightBatchId: spawnPreflightBatchId,
+        preflightBatchId: spawnPreflightBatchIdRef.current,
       });
 
       const response = await fetch("/api/spawn", {
@@ -1924,6 +1937,7 @@ export function Dashboard() {
       setSpawnModel(null);
       setSpawnSessionMode(null);
       setSpawnBranch("");
+      spawnPreflightBatchIdRef.current = null;
       setSpawnPreflightBatchId(null);
       setSpawnPreflightUsage(null);
       spawnBranchExplicitRef.current = false;

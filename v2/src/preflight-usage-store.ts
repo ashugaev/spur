@@ -216,11 +216,20 @@ export class PreflightUsageStore {
   }
 
   private async read(id: string): Promise<BatchRecord> {
+    let raw: string;
+    try {
+      raw = await readFile(this.path(id), "utf8");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(`Unknown preflight batch ${id}`, { cause: error });
+      }
+      throw error;
+    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await readFile(this.path(id), "utf8")) as unknown;
+      parsed = JSON.parse(raw) as unknown;
     } catch (error) {
-      throw new Error(`Unknown preflight batch ${id}`, { cause: error });
+      throw new Error(`Corrupt preflight batch ${id}`, { cause: error });
     }
     const batch = parseBatch(parsed);
     if (!batch) throw new Error(`Corrupt preflight batch ${id}`);
@@ -279,8 +288,26 @@ export class PreflightUsageStore {
 
   async resolve(project: string, requested?: string): Promise<string> {
     if (!requested) return this.create(project);
+    this.path(requested);
     await this.withBatchLock(requested, async () => {
-      const batch = await this.read(requested);
+      let batch: BatchRecord;
+      try {
+        batch = await this.read(requested);
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith("Unknown preflight batch")) {
+          throw error;
+        }
+        const now = new Date().toISOString();
+        batch = {
+          version: 1,
+          id: requested,
+          project,
+          createdAt: now,
+          updatedAt: now,
+          attempts: [],
+        };
+        await this.write(batch);
+      }
       if (batch.project !== project) throw new Error("preflight batch project mismatch");
     });
     return requested;
@@ -373,10 +400,15 @@ export class PreflightUsageStore {
         .map(async (name) => {
           const id = name.slice(0, -5);
           try {
-            const batch = await this.read(id);
-            if (now - Date.parse(batch.updatedAt) > RETENTION_MS) {
-              await rm(this.path(id), { force: true });
-            }
+            await this.withBatchLock(id, async () => {
+              const batch = await this.read(id);
+              if (
+                batch.attempts.every((attempt) => attempt.outcome !== "started") &&
+                now - Date.parse(batch.updatedAt) > RETENTION_MS
+              ) {
+                await rm(this.path(id), { force: true });
+              }
+            });
           } catch {
             // Corrupt records stay for operator inspection.
           }

@@ -667,18 +667,20 @@ function shouldServeCachedOpenCodeState(
 export async function readOpenCodeStructuredState(
   sessionId?: string,
   activityAtMs?: number | null,
+  force = false,
 ): Promise<OpenCodeStructuredRead> {
   if (!sessionId) return { state: null };
 
   const now = Date.now();
   const observedActivityAtMs = activityAtMs ?? null;
   const cached = openCodeStateCache.get(sessionId);
-  if (cached && shouldServeCachedOpenCodeState(cached, now, observedActivityAtMs)) {
+  if (!force && cached && shouldServeCachedOpenCodeState(cached, now, observedActivityAtMs)) {
     return cached.result;
   }
   const inFlight = openCodeStateInFlight.get(sessionId);
   if (inFlight) {
-    return inFlight;
+    if (!force) return inFlight;
+    await inFlight;
   }
 
   const pending = (async (): Promise<OpenCodeStructuredRead> => {

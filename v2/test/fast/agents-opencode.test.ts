@@ -470,6 +470,19 @@ describe("OpenCode adapter", () => {
       }
     });
 
+    it("forces one fresh structured export after the agent exits", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        await readOpenCodeStructuredState("ses_a");
+        await readOpenCodeStructuredState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+        await readOpenCodeStructuredState("ses_a", null, true);
+        expect(await spawnCount(countPath)).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it("serves a repeat read from cache and re-exports once the TTL passes", async () => {
       const { dir, countPath } = await stubCountingOpenCode();
       try {
