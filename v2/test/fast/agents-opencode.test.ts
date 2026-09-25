@@ -585,14 +585,26 @@ describe("OpenCode adapter", () => {
             "#!/usr/bin/env node",
             'const fs = require("node:fs");',
             `const log = ${JSON.stringify(logPath)};`,
+            `const limit = ${JSON.stringify(OPENCODE_EXPORT_MAX_CONCURRENCY)};`,
+            "function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }",
+            "function liveCount() {",
+            '  const spans = fs.readFileSync(log, "utf8");',
+            "  let live = 0;",
+            '  for (const mark of spans) live += mark === "+" ? 1 : -1;',
+            "  return live;",
+            "}",
             'fs.appendFileSync(log, "+");',
-            "setTimeout(() => {",
-            '  fs.appendFileSync(log, "-");',
-            '  process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
-            // Held long enough that spawn stagger cannot decide the peak: at an
-            // 80ms hold an early export can finish before the last one starts,
-            // and the exact assertion below false-fails on a loaded host.
-            "}, 500);",
+            // Spawn stagger, not a fixed hold, decides the peak on a loaded
+            // host: wait until the log itself shows `limit` exports in
+            // flight (polling so a narrow gate is caught rather than
+            // trusted), capped so a broken gate fails fast instead of
+            // hanging, then hold an extra fixed window so a gate that is
+            // too wide still has time to show peak > limit.
+            "const deadline = Date.now() + 4_000;",
+            "while (liveCount() < limit && Date.now() < deadline) sleep(10);",
+            "sleep(300);",
+            'fs.appendFileSync(log, "-");',
+            'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
           ].join("\n"),
           "utf8",
         );
