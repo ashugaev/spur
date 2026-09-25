@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as AutoUpdateConfigModule from "../../src/auto-update-config.js";
 import { startServer } from "../../src/server.js";
-import { findFreePort, startOnFreePort } from "../helpers/common.js";
+import { startOnFreePort } from "../helpers/common.js";
 
 async function setupConfig(port: number, autoUpdate?: boolean): Promise<string> {
   return (await setupInstance(port, autoUpdate)).configPath;
@@ -51,9 +51,14 @@ describe("POST /deploy/auto-update", () => {
   });
 
   it("turns the flag on and writes it to disk", async () => {
-    const port = await findFreePort();
-    const configPath = await setupConfig(port);
-    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    let configPath = "";
+    const { server, port } = await startOnFreePort(
+      (_port, path) => startServer(path, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        configPath = await setupConfig(port);
+        return configPath;
+      },
+    );
     try {
       const response = await fetch(`http://127.0.0.1:${port}/deploy/auto-update`, {
         method: "POST",
@@ -71,9 +76,14 @@ describe("POST /deploy/auto-update", () => {
   });
 
   it("turns the flag back off and writes it to disk", async () => {
-    const port = await findFreePort();
-    const configPath = await setupConfig(port, true);
-    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    let configPath = "";
+    const { server, port } = await startOnFreePort(
+      (_port, path) => startServer(path, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        configPath = await setupConfig(port, true);
+        return configPath;
+      },
+    );
     try {
       const response = await fetch(`http://127.0.0.1:${port}/deploy/auto-update`, {
         method: "POST",
@@ -91,9 +101,10 @@ describe("POST /deploy/auto-update", () => {
   });
 
   it("returns 400 on a non-boolean enabled value", async () => {
-    const port = await findFreePort();
-    const configPath = await setupConfig(port);
-    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) => startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      (port) => setupConfig(port),
+    );
     try {
       const response = await fetch(`http://127.0.0.1:${port}/deploy/auto-update`, {
         method: "POST",
@@ -122,15 +133,18 @@ describe("POST /deploy/auto-update", () => {
       enabled: boolean,
       record: unknown,
     ): Promise<{ statePath: string; recordAfter: string | null }> {
-      const port = await findFreePort();
-      const { configPath, dataDir } = await setupInstance(port, !enabled);
-      await mkdir(dataDir, { recursive: true });
-      const statePath = join(dataDir, "deploy-switch.json");
-      await writeFile(statePath, `${JSON.stringify(record)}\n`, "utf8");
-      const server = await startServer(configPath, {
-        info: () => undefined,
-        warn: () => undefined,
-      });
+      let statePath = "";
+      const { server, port } = await startOnFreePort(
+        (_port, configPath) =>
+          startServer(configPath, { info: () => undefined, warn: () => undefined }),
+        async (port) => {
+          const { configPath, dataDir } = await setupInstance(port, !enabled);
+          await mkdir(dataDir, { recursive: true });
+          statePath = join(dataDir, "deploy-switch.json");
+          await writeFile(statePath, `${JSON.stringify(record)}\n`, "utf8");
+          return configPath;
+        },
+      );
       try {
         const response = await fetch(`http://127.0.0.1:${port}/deploy/auto-update`, {
           method: "POST",
