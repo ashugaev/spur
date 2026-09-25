@@ -10,6 +10,15 @@ import { findCursorSessionId } from "./cursor.js";
 export interface CursorSubmitBaseline {
   file: string;
   size: number;
+  // Mutated in place across polls of the same binding (session-service.ts
+  // captures one baseline object and calls scan() repeatedly against it, see
+  // waitForSubmitAck). Records the byte offset a rotated chat-id transcript
+  // was FIRST seen at, so a later poll only scans records written after that
+  // sighting rather than the rotated file's full pre-existing history.
+  // Optional: attached lazily by scanCursorJsonlForMessage the first time a
+  // rotation is observed, so callers that build a baseline literal (tests)
+  // need not know about it up front.
+  rotationOffsets?: Map<string, number>;
 }
 
 export interface CursorSubmitAckScanResult {
@@ -148,7 +157,21 @@ export async function scanCursorJsonlForMessage(
     if (resolvedId && resolvedId !== agentSessionId) {
       const rotated = await findCursorAckTranscriptFile(worktreePath, resolvedId);
       if (rotated) {
-        const found = await scanFileForUserText(rotated, 0, normalizedTarget);
+        // The rotated chat id can carry history from before this send (or
+        // even before the rotation was first detected by this binding): a
+        // full-history scan from 0 lets a short send like "continue" match an
+        // unrelated earlier turn (substring match, see submitAckMatchText).
+        // Baseline against the file's size the FIRST time this binding sees
+        // it, and remember that offset for every later poll of the same
+        // binding, so only records written after that sighting can ack.
+        baseline.rotationOffsets ??= new Map();
+        let offset = baseline.rotationOffsets.get(rotated);
+        if (offset === undefined) {
+          const rotatedStat = await stat(rotated).catch(() => null);
+          offset = rotatedStat ? rotatedStat.size : 0;
+          baseline.rotationOffsets.set(rotated, offset);
+        }
+        const found = await scanFileForUserText(rotated, offset, normalizedTarget);
         return { found, scannedFile: rotated };
       }
     }

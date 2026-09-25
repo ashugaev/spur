@@ -242,12 +242,55 @@ describe("scanCursorJsonlForMessage", () => {
     expect(secondPoll.found).toBe(true);
   });
 
-  // AC5: cursor rotated its chat id mid-session; the pinned transcript stays
-  // stale forever, so re-resolve the current id from the session-private
-  // config dir and scan the rotated transcript from offset 0.
+  // AC5 (true-positive path only — see the false-positive regression test
+  // below): cursor rotated its chat id mid-session; the pinned transcript
+  // stays stale forever, so re-resolve the current id from the
+  // session-private config dir and scan the rotated transcript. The target
+  // text is appended AFTER this binding first observes the rotated file, so
+  // it lands on the second poll of the same binding, never the first.
   it("acks via the re-resolved chat id when the pinned transcript is stale", async () => {
     const pinnedFile = await makeJsonl("pinned.jsonl", [userTurn("earlier turn")]);
-    const rotatedFile = await makeJsonl("rotated-chat.jsonl", [userTurn("ship the task")]);
+    const rotatedFile = await makeJsonl("rotated-chat.jsonl", [userTurn("unrelated prior turn")]);
+    const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
+
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
+    );
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+
+    const firstPoll = await scanCursorJsonlForMessage(
+      baseline,
+      "ship the task",
+      "/tmp/worktree",
+      "pinned-id",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
+    expect(findCursorSessionIdMock).toHaveBeenCalledWith("/tmp/worktree", {
+      configDir: "/tmp/spur-data/cursor/session-1",
+    });
+    expect(firstPoll.found).toBe(false);
+
+    await appendJsonl(rotatedFile, [userTurn("ship the task")]);
+    const secondPoll = await scanCursorJsonlForMessage(
+      baseline,
+      "ship the task",
+      "/tmp/worktree",
+      "pinned-id",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
+    expect(secondPoll.found).toBe(true);
+    expect(secondPoll.scannedFile).toBe(rotatedFile);
+  });
+
+  // Regression (false-positive ack, human review on PR #979): the rotated
+  // transcript already contains an earlier, unrelated turn with the exact
+  // sent text BEFORE this binding ever sees it (e.g. a repeated wake prompt
+  // or a short "continue" from a prior send in the same rotated chat).
+  // Cursor's substring match must not let that pre-existing turn count as
+  // this send's ack.
+  it("does not ack on a pre-existing rotated-chat turn that matches the sent text (PR #979)", async () => {
+    const pinnedFile = await makeJsonl("pinned-preexisting.jsonl", [userTurn("earlier turn")]);
+    const rotatedFile = await makeJsonl("rotated-preexisting.jsonl", [userTurn("continue")]);
     const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
 
     findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
@@ -257,16 +300,13 @@ describe("scanCursorJsonlForMessage", () => {
 
     const result = await scanCursorJsonlForMessage(
       baseline,
-      "ship the task",
+      "continue",
       "/tmp/worktree",
       "pinned-id",
       { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
     );
 
-    expect(findCursorSessionIdMock).toHaveBeenCalledWith("/tmp/worktree", {
-      configDir: "/tmp/spur-data/cursor/session-1",
-    });
-    expect(result.found).toBe(true);
+    expect(result.found).toBe(false);
     expect(result.scannedFile).toBe(rotatedFile);
   });
 
