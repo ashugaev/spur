@@ -2857,6 +2857,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
+  const tokenBudgetExhausted =
+    session?.tokenBudgetView?.exhausted === true || session?.tokenUsageView?.exhausted === true;
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
@@ -3113,7 +3115,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
-            {isRestorable(session) && session.tokenBudgetView?.exhausted !== true ? (
+            {isRestorable(session) && !tokenBudgetExhausted ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
                 aria-label={busyAction === "restore" ? "Restoring session" : undefined}
@@ -3440,7 +3442,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
-                    {session.tokenBudgetView?.exhausted === true
+                    {tokenBudgetExhausted
                       ? "Not accepting input. Token budget limit hit."
                       : "Not accepting input. Restore to continue."}
                   </p>

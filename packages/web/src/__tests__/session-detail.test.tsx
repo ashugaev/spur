@@ -5984,6 +5984,29 @@ describe("SessionDetail token usage", () => {
     expect(screen.queryByText("Not accepting input. Restore to continue.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
+
+  it("keeps Restore blocked when only the main usage view reports exhaustion", async () => {
+    stubFetch({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 75,
+        outputTokens: 25,
+        totalTokens: 100,
+        budget: 100,
+        exhausted: true,
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("100 / 100 · limit hit")).toBeInTheDocument();
+    expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail document title", () => {

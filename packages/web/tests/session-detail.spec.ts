@@ -3966,6 +3966,18 @@ test.describe("S5: Runtime sidebar", () => {
           enforced: true,
         },
       }),
+      makeStoppedSession({
+        id: "detail-s5-main-only-exhausted",
+        tokenUsageView: {
+          status: "available",
+          provider: "codex",
+          inputTokens: 75,
+          outputTokens: 25,
+          totalTokens: 100,
+          budget: 100,
+          exhausted: true,
+        },
+      }),
     ];
     for (const session of sessions) await mockSessionDetail(page, session);
 
@@ -3979,6 +3991,10 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByText("2,000 / 2,000 · limit hit").first()).toBeVisible();
     await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByText("Not accepting input. Restore to continue.")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+    await page.goto("/sessions/detail-s5-main-only-exhausted");
+    await expect(page.getByText("100 / 100 · limit hit")).toBeVisible();
+    await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
   });
 
