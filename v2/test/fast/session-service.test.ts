@@ -17063,6 +17063,7 @@ describe("SessionService", () => {
     const session = runningSession({
       id: "codex-restored",
       agent: "codex",
+      agentSessionId: "root-thread",
       codexRestoreStartedAt: new Date(restoreStartedAtMs).toISOString(),
     });
     readSessionMock.mockReturnValue(session);
@@ -17097,6 +17098,11 @@ describe("SessionService", () => {
       rateLimit: null,
     });
     expect((await internals.classifySessionRecord(session)).state).toBe("working");
+    expect(readCodexRolloutStateMock).toHaveBeenCalledWith(
+      join(TEST_DATA_DIR, "session-tools", session.id, "codex-home", "sessions"),
+      expect.anything(),
+      "root-thread",
+    );
   });
 
   it("detects needs_input for Cursor from AskUserQuestion JSONL", async () => {

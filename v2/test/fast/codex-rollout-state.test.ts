@@ -188,6 +188,34 @@ describe("readCodexRolloutState", () => {
     });
   });
 
+  it("keeps an active root working when a newer same-cwd child completes", async () => {
+    const rootId = "01a09523-8f47-74f1-9004-fb313fa089d7";
+    const childId = "01a09538-0547-7b71-a7f5-8ee2f835f0ef";
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "root.jsonl",
+        content: [
+          JSON.stringify({ type: "session_meta", payload: { id: rootId, cwd: "/same/worktree", source: "cli" } }),
+          JSON.stringify({ timestamp: "2026-09-12T10:22:11.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "root-turn" } }),
+        ].join("\n"),
+        mtimeMs: 1_000,
+      },
+      {
+        filename: "child.jsonl",
+        content: [
+          JSON.stringify({ type: "session_meta", payload: { id: childId, cwd: "/same/worktree", source: { subagent: { thread_spawn: { parent_thread_id: rootId } } } } }),
+          JSON.stringify({ timestamp: "2026-09-12T10:45:57.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "child-turn" } }),
+        ].join("\n"),
+        mtimeMs: 2_000,
+      },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir, undefined, rootId);
+    expect(result.rollout).toMatchObject({ state: "working", reason: "task_started", turnId: "root-turn" });
+    expect(result.threadId).toBe(rootId);
+    expect((await readCodexRolloutState(sessionsDir)).rollout?.state).toBe("working");
+  });
+
   it("reads working from the current Codex rollout tail after an older interrupted turn", async () => {
     const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-working-current.jsonl");

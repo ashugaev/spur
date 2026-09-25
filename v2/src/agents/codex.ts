@@ -871,6 +871,8 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  threadId?: string;
+  isSubagent?: boolean;
   model?: string;
   tokenUsage?: ProviderTokenUsageSample;
 }
@@ -1262,6 +1264,8 @@ function extractCodexLifetimeTokenUsage(
 
 function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
   let generationId: string | undefined;
+  let threadId: string | undefined;
+  let isSubagent = false;
   let replayBeforeMs: number | undefined;
   for (const line of lines) {
     let parsed: unknown;
@@ -1274,10 +1278,12 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
     const payload = parsed["payload"];
     if (!isRecord(payload) || typeof payload["id"] !== "string" || !payload["id"]) continue;
     generationId = `codex:${payload["id"]}`;
+    threadId = payload["id"];
     const source = payload["source"];
     const subagent = isRecord(source) ? source["subagent"] : undefined;
     const threadSpawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
     if (isRecord(threadSpawn) && typeof threadSpawn["parent_thread_id"] === "string") {
+      isSubagent = true;
       const timestamp =
         typeof payload["timestamp"] === "string" ? payload["timestamp"] : parsed["timestamp"];
       const timestampMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
@@ -1321,12 +1327,20 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
       break;
     }
   }
-  return { rollout, rateLimit, ...(model ? { model } : {}), ...(tokenUsage ? { tokenUsage } : {}) };
+  return {
+    rollout,
+    rateLimit,
+    ...(threadId ? { threadId } : {}),
+    ...(isSubagent ? { isSubagent: true } : {}),
+    ...(model ? { model } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
+  };
 }
 
 export async function readCodexRolloutState(
   sessionsDir: string,
   reader?: CodexRolloutReaderState,
+  rootThreadId?: string,
 ): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
@@ -1392,7 +1406,12 @@ export async function readCodexRolloutState(
   // A just-started rollout file can carry a `turn_context` model before it has
   // any state or rate-limit line, so it loses both selections below. Rank the
   // model on its own to keep the live model available from the first turn.
-  const model = existing
+  const rootCandidates = existing.filter((candidate) =>
+    rootThreadId
+      ? candidate.result.threadId === rootThreadId
+      : candidate.result.isSubagent !== true,
+  );
+  const model = rootCandidates
     .filter((candidate) => candidate.result.model)
     .reduce<CodexRolloutCandidate | null>(
       (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
@@ -1408,7 +1427,7 @@ export async function readCodexRolloutState(
         ? right
         : left;
     }, null)?.result.tokenUsage;
-  const stateful = existing.filter(
+  const stateful = rootCandidates.filter(
     (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
   );
   const withRollout = stateful.filter((candidate) => candidate.result.rollout !== null);

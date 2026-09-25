@@ -16773,7 +16773,7 @@ export class SessionService {
   }
 
   private async classifyCodexState(
-    session: Pick<SessionRecord, "id" | "codexRestoreStartedAt">,
+    session: Pick<SessionRecord, "id" | "agentSessionId" | "codexRestoreStartedAt">,
   ): Promise<{
     state: SessionState;
     source: StateSource;
@@ -16790,6 +16790,7 @@ export class SessionService {
     const rolloutRead = await readCodexRolloutState(
       this.codexSessionsDir(session.id),
       rolloutReader,
+      session.agentSessionId,
     );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
