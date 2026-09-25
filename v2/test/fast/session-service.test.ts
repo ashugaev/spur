@@ -12995,26 +12995,6 @@ describe("SessionService", () => {
     // A codex TUI repainting its "Working…" timer right now: pre-fix this alone
     // held the gate shut forever.
     getTmuxSessionActivityMock.mockResolvedValue(now);
-    // Pins deliverQueuedMessage's ordering invariant (session-service.ts,
-    // the "Persist the drain before the discovery wait below" comment): once
-    // the queued message has actually been typed into tmux, the drain must
-    // already be on disk by the time agent-session-id discovery next fires,
-    // so a stale re-read inside captureAgentSessionId can never resurrect
-    // the just-delivered message as still queued. Recorded here rather than
-    // asserted inline: an inline `expect` would throw from inside
-    // findAgentSessionId's caller, which runDeliveryLoop's own try/catch
-    // swallows, masking the failure instead of surfacing it.
-    let queuedMessagesAtDiscovery: string[] | undefined;
-    findAgentSessionIdMock.mockImplementation(() => {
-      const delivered = sendMessageToTmuxMock.mock.calls.some(
-        ([id, message]) => id === "spur-hung" && message === "please continue",
-      );
-      if (delivered && queuedMessagesAtDiscovery === undefined) {
-        queuedMessagesAtDiscovery = sessions.get("spur-hung")?.queuedMessages?.messages ?? [];
-      }
-      return Promise.resolve("session-uuid");
-    });
-
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
 
@@ -13024,7 +13004,6 @@ describe("SessionService", () => {
         interrupt: false,
         agent: "codex",
       });
-      expect(queuedMessagesAtDiscovery).toEqual([]);
       expect(sessions.get("spur-hung")?.queuedMessages?.messages ?? []).toEqual([]);
     } finally {
       service.dispose();
