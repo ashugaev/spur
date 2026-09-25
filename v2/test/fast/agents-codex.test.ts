@@ -1009,6 +1009,34 @@ describe("findCodexSessionId", () => {
     expect(result).toBe("session-thread");
     expect(mockCreateInterface).toHaveBeenCalledTimes(1);
   });
+
+  it("pins the root rollout when a newer child uses the same cwd", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockReaddir.mockImplementation(async (dir: unknown) =>
+      dir === "/session-root" ? ["root.jsonl", "child.jsonl"] : [],
+    );
+    mockLstat.mockResolvedValue({ isDirectory: () => false });
+    mockStat.mockImplementation(async (filePath: unknown) => ({
+      mtimeMs: filePath === "/session-root/child.jsonl" ? 2000 : 1000,
+    }));
+    mockStreamsForFiles({
+      "/session-root/root.jsonl": [JSON.stringify({
+        type: "session_meta",
+        payload: { id: "root-thread", cwd: "/worktree/path", source: "cli" },
+      })],
+      "/session-root/child.jsonl": [JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: "child-thread",
+          cwd: "/worktree/path",
+          source: { subagent: { thread_spawn: { parent_thread_id: "root-thread" } } },
+        },
+      })],
+    });
+
+    expect(await findCodexSessionId("/worktree/path", { sessionRootDir: "/session-root" }))
+      .toBe("root-thread");
+  });
 });
 
 // Helper: create an async iterable of lines, compatible with the mocked createInterface.

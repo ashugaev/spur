@@ -55,6 +55,7 @@ interface CodexSessionLine {
     id?: string;
     phase?: string;
     role?: string;
+    source?: unknown;
     type?: string;
   };
   threadId?: string;
@@ -248,7 +249,7 @@ export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[
 
 async function readSessionMeta(
   filePath: string,
-): Promise<{ cwd: string; threadId: string | null } | null> {
+): Promise<{ cwd: string; threadId: string | null; isSubagent: boolean } | null> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });
     const reader = createInterface({ input, crlfDelay: Infinity });
@@ -269,7 +270,15 @@ async function readSessionMeta(
           threadId = resumeId;
         }
         if (cwd) {
-          return { cwd, threadId };
+          const source = parsed.payload?.source;
+          const subagent = isRecord(source) ? source["subagent"] : undefined;
+          const threadSpawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
+          return {
+            cwd,
+            threadId,
+            isSubagent: isRecord(threadSpawn) &&
+              typeof threadSpawn["parent_thread_id"] === "string",
+          };
         }
       } catch {
         // Ignore malformed lines and keep scanning the file header.
@@ -298,7 +307,7 @@ async function loadSessionIndexForRoot(
 
   for (const filePath of files) {
     const meta = await readSessionMeta(filePath);
-    if (!meta) {
+    if (!meta || meta.isSubagent) {
       continue;
     }
     try {
