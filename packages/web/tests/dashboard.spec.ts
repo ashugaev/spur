@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   test,
   expect,
@@ -2810,6 +2812,58 @@ test.describe("D7: Spawn modal", () => {
 
 // D7b: Silent branch preflight
 test.describe("D7b: Silent branch preflight", () => {
+  test("keeps paid usage visible after failed previews", async ({ page }, testInfo) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    const batchIds: string[] = [];
+    await page.route("**/api/preflight", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId: string };
+      batchIds.push(body.preflightBatchId);
+      const unknown = batchIds.length > 1;
+      await route.fulfill({
+        status: unknown ? 409 : 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: unknown ? "Pre-flight token usage is unknown" : "Provider failed after output",
+          preflightBatchId: body.preflightBatchId,
+          preflightTokenUsageView: unknown
+            ? {
+                status: "unknown",
+                attemptCount: 2,
+                unknownAttemptCount: 1,
+                providerIterationCount: 1,
+              }
+            : {
+                status: "measured",
+                attemptCount: 1,
+                unknownAttemptCount: 0,
+                providerIterationCount: 1,
+                byProvider: { codex: { totalTokens: 12 } },
+                inputTokens: 10,
+                outputTokens: 2,
+                totalTokens: 12,
+              },
+        }),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const prompt = page.locator("textarea").last();
+    await prompt.fill("First paid preview");
+    await expect(page.getByText("Pre-flight tokens: 12")).toBeVisible();
+    await prompt.fill("Second paid preview");
+    await expect(page.getByText("Pre-flight tokens: unavailable")).toBeVisible();
+    expect(batchIds).toHaveLength(2);
+    expect(batchIds[1]).toBe(batchIds[0]);
+    const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+    if (artifacts) {
+      mkdirSync(join(artifacts, "token-ui"), { recursive: true });
+      await page.screenshot({ path: join(artifacts, "token-ui", "preflight-preview-failed.png") });
+    } else {
+      await page.screenshot({ path: testInfo.outputPath("preflight-preview-failed.png") });
+    }
+  });
+
   test("keeps one paid batch when the first preview is superseded", async ({ page }) => {
     await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
     const batchIds: string[] = [];

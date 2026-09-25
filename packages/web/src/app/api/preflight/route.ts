@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { isSpurDaemonError, spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurPreflightTokenUsageView } from "@/lib/types";
@@ -47,6 +47,27 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to run preflight";
+    if (isSpurDaemonError(error)) {
+      const payload = error.payload;
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "preflightBatchId" in payload &&
+        typeof payload.preflightBatchId === "string" &&
+        "preflightTokenUsageView" in payload &&
+        typeof payload.preflightTokenUsageView === "object" &&
+        payload.preflightTokenUsageView !== null
+      ) {
+        return NextResponse.json(
+          {
+            error: message,
+            preflightBatchId: payload.preflightBatchId,
+            preflightTokenUsageView: payload.preflightTokenUsageView,
+          },
+          { status: error.status },
+        );
+      }
+    }
     if (isSilentPreflightFailure(message)) return NextResponse.json({ branch: null });
     return spurErrorResponse(error, "Failed to run preflight");
   }

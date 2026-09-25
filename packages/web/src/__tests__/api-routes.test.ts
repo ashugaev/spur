@@ -5,11 +5,13 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/spur-daemon", () => ({
   SpurDaemonError: class SpurDaemonError extends Error {
     readonly status: number;
+    readonly payload: unknown;
 
-    constructor(message: string, status: number) {
+    constructor(message: string, status: number, payload?: unknown) {
       super(message);
       this.name = "SpurDaemonError";
       this.status = status;
+      this.payload = payload;
     }
   },
   isSpurDaemonError: (error: unknown) =>
@@ -1755,6 +1757,36 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(502);
+  });
+
+  it("POST /api/preflight keeps paid usage on a daemon failure", async () => {
+    const usage = {
+      status: "unknown",
+      attemptCount: 1,
+      unknownAttemptCount: 1,
+      providerIterationCount: 0,
+    };
+    mockedSpurRequestJson.mockRejectedValue(
+      new SpurDaemonError("Pre-flight token usage is unknown", 409, {
+        error: "Pre-flight token usage is unknown",
+        preflightBatchId: "4c39ea91-df66-427f-b4ef-7b44fe7f6479",
+        preflightTokenUsageView: usage,
+      }),
+    );
+
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Fix it" }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "Pre-flight token usage is unknown",
+      preflightBatchId: "4c39ea91-df66-427f-b4ef-7b44fe7f6479",
+      preflightTokenUsageView: usage,
+    });
   });
 
   it("POST /api/preflight treats rejected branch suggestions as no suggestion", async () => {

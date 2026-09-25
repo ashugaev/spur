@@ -5845,6 +5845,61 @@ describe("SessionDetail token usage", () => {
     expect(screen.getByText("100 / 100 · limit hit")).toBeInTheDocument();
   });
 
+  it("shows pre-flight components, unknown fields, and combined-budget Restore gating", async () => {
+    stubFetch({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 60,
+        outputTokens: 20,
+        totalTokens: 80,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "partial",
+        inputTokens: 15,
+        outputTokens: 5,
+        totalTokens: 20,
+        cacheReadInputTokens: 0,
+        cacheWriteInputTokens: 5,
+        reasoningOutputTokens: 2,
+        cacheWrite5mInputTokens: 5,
+        attemptCount: 2,
+        unknownAttemptCount: 1,
+        providerIterationCount: 3,
+        byProvider: { claude: { totalTokens: 20 } },
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 100,
+        exhausted: true,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Pre-flight tokens")).toBeInTheDocument();
+    const row = (label: string) => screen.getByText(label).closest("div");
+    expect(row("Pre-flight input")).toHaveTextContent("15");
+    expect(row("Pre-flight output")).toHaveTextContent("5");
+    expect(row("Pre-flight cache read")).toHaveTextContent("0");
+    expect(row("Pre-flight cache write")).toHaveTextContent("5");
+    expect(row("Pre-flight reasoning")).toHaveTextContent("2");
+    expect(row("Pre-flight cache write 5m")).toHaveTextContent("5");
+    expect(row("Pre-flight cache write 1h")).toHaveTextContent("Not reported");
+    expect(row("Pre-flight Claude")).toHaveTextContent("20");
+    expect(row("Pre-flight attempts")).toHaveTextContent("2");
+    expect(row("Pre-flight unknown attempts")).toHaveTextContent("1");
+    expect(row("Pre-flight iterations")).toHaveTextContent("3");
+    expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
+
   it("marks unsupported live sessions as unenforced", async () => {
     stubFetch({
       agent: "cursor",
@@ -5913,11 +5968,18 @@ describe("SessionDetail token usage", () => {
         budget: 2000,
         exhausted: true,
       },
+      tokenBudgetView: {
+        budget: 2000,
+        knownTotalTokens: 2000,
+        exhausted: true,
+        enforced: true,
+      },
     });
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("2,000 / 2,000 · limit hit")).toBeInTheDocument();
+    expect(await screen.findByText("Combined budget")).toBeInTheDocument();
+    expect(screen.getAllByText("2,000 / 2,000 · limit hit")).toHaveLength(2);
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByText("Not accepting input. Restore to continue.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();

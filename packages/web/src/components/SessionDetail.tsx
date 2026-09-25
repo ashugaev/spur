@@ -161,6 +161,35 @@ function tokenUsageRows(
         ? "Usage unavailable"
         : `${preflight.totalTokens.toLocaleString()}${preflight.status === "partial" ? " · partial" : ""}`,
   ];
+  const component = (tokens: number | undefined): string =>
+    tokens === undefined ? "Not reported" : tokens.toLocaleString();
+  const preflightRows: Array<[string, string]> = [preflightRow];
+  if (preflight) {
+    if ("totalTokens" in preflight) {
+      preflightRows.push(
+        ["Pre-flight input", preflight.inputTokens.toLocaleString()],
+        ["Pre-flight output", preflight.outputTokens.toLocaleString()],
+        ["Pre-flight cache read", component(preflight.cacheReadInputTokens)],
+        ["Pre-flight cache write", component(preflight.cacheWriteInputTokens)],
+        ["Pre-flight reasoning", component(preflight.reasoningOutputTokens)],
+        ["Pre-flight cache write 5m", component(preflight.cacheWrite5mInputTokens)],
+        ["Pre-flight cache write 1h", component(preflight.cacheWrite1hInputTokens)],
+      );
+      for (const provider of ["claude", "codex", "cursor", "opencode"] as const) {
+        const total = preflight.byProvider[provider]?.totalTokens;
+        if (total !== undefined)
+          preflightRows.push([
+            `Pre-flight ${provider === "opencode" ? "OpenCode" : provider[0].toUpperCase() + provider.slice(1)}`,
+            total.toLocaleString(),
+          ]);
+      }
+    }
+    preflightRows.push(
+      ["Pre-flight attempts", preflight.attemptCount.toLocaleString()],
+      ["Pre-flight unknown attempts", preflight.unknownAttemptCount.toLocaleString()],
+      ["Pre-flight iterations", preflight.providerIterationCount.toLocaleString()],
+    );
+  }
   const budget = session.tokenBudgetView;
   const budgetRow: [string, string] | null = budget?.budget
     ? [
@@ -169,7 +198,7 @@ function tokenUsageRows(
       ]
     : null;
   if (!usage)
-    return [["Tokens", "Waiting for usage"], preflightRow, ...(budgetRow ? [budgetRow] : [])];
+    return [["Tokens", "Waiting for usage"], ...preflightRows, ...(budgetRow ? [budgetRow] : [])];
   if (usage.status === "unavailable") {
     return [
       [
@@ -178,20 +207,16 @@ function tokenUsageRows(
           ? "Token usage unavailable · budget unenforced"
           : "Token usage unavailable",
       ],
-      preflightRow,
+      ...preflightRows,
       ...(budgetRow ? [budgetRow] : []),
     ];
   }
   if (usage.status === "waiting")
-    return [["Tokens", "Waiting for usage"], preflightRow, ...(budgetRow ? [budgetRow] : [])];
+    return [["Tokens", "Waiting for usage"], ...preflightRows, ...(budgetRow ? [budgetRow] : [])];
   const used = usage.totalTokens.toLocaleString();
   const value = usage.budget === undefined ? used : `${used} / ${usage.budget.toLocaleString()}`;
-  const component = (tokens: number | undefined): string =>
-    tokens === undefined ? "Not reported" : tokens.toLocaleString();
   const rows: Array<[string, string]> = [
     ["Tokens", usage.exhausted ? `${value} · limit hit` : value],
-    preflightRow,
-    ...(budgetRow ? [budgetRow] : []),
     ["Input", usage.inputTokens.toLocaleString()],
     ["Output", usage.outputTokens.toLocaleString()],
     ["Cache read", component(usage.cacheReadInputTokens)],
@@ -204,6 +229,7 @@ function tokenUsageRows(
       ["Cache write 1h", component(usage.cacheWrite1hInputTokens)],
     );
   }
+  rows.push(...preflightRows, ...(budgetRow ? [budgetRow] : []));
   return rows;
 }
 
@@ -3087,7 +3113,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
-            {isRestorable(session) && session.tokenUsageView?.exhausted !== true ? (
+            {isRestorable(session) && session.tokenBudgetView?.exhausted !== true ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
                 aria-label={busyAction === "restore" ? "Restoring session" : undefined}
@@ -3414,7 +3440,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
-                    {session.tokenUsageView?.exhausted === true
+                    {session.tokenBudgetView?.exhausted === true
                       ? "Not accepting input. Token budget limit hit."
                       : "Not accepting input. Restore to continue."}
                   </p>

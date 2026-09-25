@@ -48,6 +48,7 @@ import {
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  PreflightPreviewError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
   SessionNotReopenableError,
@@ -1967,6 +1968,18 @@ export async function startServer(
           method,
           path,
           payload: { error: { code: error.code, message } },
+        });
+        return;
+      }
+      if (error instanceof PreflightPreviewError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            error: message,
+            preflightBatchId: error.preflightBatchId,
+            preflightTokenUsageView: error.preflightTokenUsageView,
+          },
         });
         return;
       }

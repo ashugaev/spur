@@ -34032,7 +34032,12 @@ describe("SessionService", () => {
           prompt: "second",
           preflightBatchId: first.preflightBatchId,
         }),
-      ).rejects.toThrow("Pre-flight exhausted the token budget (100 / 100)");
+      ).rejects.toMatchObject({
+        message: "Pre-flight exhausted the token budget (100 / 100)",
+        statusCode: 409,
+        preflightBatchId: first.preflightBatchId,
+        preflightTokenUsageView: { status: "measured", totalTokens: 100, attemptCount: 2 },
+      });
       await expect(
         service.preflight({
           project: "api",
@@ -34041,6 +34046,32 @@ describe("SessionService", () => {
         }),
       ).rejects.toThrow("Pre-flight exhausted the token budget (100 / 100)");
       expect(runSpawnPreflightMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns the paid batch and unknown usage when preview execution fails", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            preflight: { prompt: "Suggest a branch name from the task context." },
+          },
+        },
+      });
+      runSpawnPreflightMock.mockRejectedValueOnce(new Error("provider unavailable"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.preflight({ project: "api", prompt: "preview" })).rejects.toMatchObject({
+        message: "provider unavailable",
+        statusCode: 500,
+        preflightBatchId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+        preflightTokenUsageView: {
+          status: "unknown",
+          attemptCount: 1,
+          unknownAttemptCount: 1,
+        },
+      });
     });
 
     it("returns null when worktree is disabled", async () => {

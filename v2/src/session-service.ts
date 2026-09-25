@@ -1018,6 +1018,20 @@ export class SpawnPreflightError extends Error {
 
 class PreflightTokenBudgetError extends Error {}
 
+export class PreflightPreviewError extends Error {
+  readonly statusCode: number;
+
+  constructor(
+    error: unknown,
+    readonly preflightBatchId: string,
+    readonly preflightTokenUsageView: PreflightTokenUsageView,
+  ) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "PreflightPreviewError";
+    this.statusCode = error instanceof PreflightTokenBudgetError ? 409 : 500;
+  }
+}
+
 function assertPreflightTokenBudget(
   usage: PreflightTokenUsageView,
   budget: number | undefined,
@@ -9677,60 +9691,68 @@ export class SessionService {
         ),
       };
     }
-    assertPreflightTokenBudget(
-      await this.preflightUsageStore.view(preflightBatchId, request.project),
-      project.tokenBudget,
-    );
-    let result: SpawnPreflightResult;
     try {
-      result = await this.preflightUsageStore.runAttempt(
-        preflightBatchId,
-        request.project,
-        agent,
-        () =>
-          runSpawnPreflight({
-            agent,
-            projectId: request.project,
-            project,
-            baseBranch: defaultBranch,
-            worktree,
-            prompt: request.prompt,
-          }),
-      );
       assertPreflightTokenBudget(
         await this.preflightUsageStore.view(preflightBatchId, request.project),
         project.tokenBudget,
       );
-    } catch (error) {
-      if (project.tokenBudget !== undefined) {
+      let result: SpawnPreflightResult;
+      try {
+        result = await this.preflightUsageStore.runAttempt(
+          preflightBatchId,
+          request.project,
+          agent,
+          () =>
+            runSpawnPreflight({
+              agent,
+              projectId: request.project,
+              project,
+              baseBranch: defaultBranch,
+              worktree,
+              prompt: request.prompt,
+            }),
+        );
         assertPreflightTokenBudget(
           await this.preflightUsageStore.view(preflightBatchId, request.project),
           project.tokenBudget,
         );
+      } catch (error) {
+        if (project.tokenBudget !== undefined) {
+          assertPreflightTokenBudget(
+            await this.preflightUsageStore.view(preflightBatchId, request.project),
+            project.tokenBudget,
+          );
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          !message.startsWith("preflight branch ") &&
+          !message.startsWith("Spawn preflight must return exactly one branch name")
+        )
+          throw error;
+        return {
+          branch: null,
+          preflightBatchId,
+          preflightTokenUsageView: await this.preflightUsageStore.view(
+            preflightBatchId,
+            request.project,
+          ),
+        };
       }
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        !message.startsWith("preflight branch ") &&
-        !message.startsWith("Spawn preflight must return exactly one branch name")
-      )
-        throw error;
       return {
-        branch: null,
+        branch: result.branch ?? null,
         preflightBatchId,
         preflightTokenUsageView: await this.preflightUsageStore.view(
           preflightBatchId,
           request.project,
         ),
       };
-    }
-    return {
-      branch: result.branch ?? null,
-      preflightBatchId,
-      preflightTokenUsageView: await this.preflightUsageStore.view(
+    } catch (error) {
+      throw new PreflightPreviewError(
+        error,
         preflightBatchId,
-        request.project,
-      ),
-    };
+        await this.preflightUsageStore.view(preflightBatchId, request.project),
+      );
+    }
   }
 
   // Shared by resolveSpawnTarget's three branches. "strict" (default) is the

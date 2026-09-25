@@ -3959,6 +3959,12 @@ test.describe("S5: Runtime sidebar", () => {
           budget: 2_000,
           exhausted: true,
         },
+        tokenBudgetView: {
+          budget: 2_000,
+          knownTotalTokens: 2_000,
+          exhausted: true,
+          enforced: true,
+        },
       }),
     ];
     for (const session of sessions) await mockSessionDetail(page, session);
@@ -3970,10 +3976,73 @@ test.describe("S5: Runtime sidebar", () => {
     await page.goto("/sessions/detail-s5-token-unavailable");
     await expect(page.getByText("Token usage unavailable · budget unenforced")).toBeVisible();
     await page.goto("/sessions/detail-s5-token-exhausted");
-    await expect(page.getByText("2,000 / 2,000 · limit hit")).toBeVisible();
+    await expect(page.getByText("2,000 / 2,000 · limit hit").first()).toBeVisible();
     await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByText("Not accepting input. Restore to continue.")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+  });
+
+  test("pre-flight components stay separate from main usage and exhaust Restore", async ({
+    page,
+  }, testInfo) => {
+    const session = makeStoppedSession({
+      id: "detail-preflight-exhausted",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 60,
+        outputTokens: 20,
+        totalTokens: 80,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "partial",
+        inputTokens: 15,
+        outputTokens: 5,
+        totalTokens: 20,
+        cacheReadInputTokens: 0,
+        cacheWriteInputTokens: 5,
+        reasoningOutputTokens: 2,
+        cacheWrite5mInputTokens: 5,
+        attemptCount: 2,
+        unknownAttemptCount: 1,
+        providerIterationCount: 3,
+        byProvider: { claude: { totalTokens: 20 } },
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 100,
+        exhausted: true,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const runtime = page.getByRole("heading", { name: "Runtime" }).locator("..");
+    await expect(runtime.getByText("80", { exact: true })).toBeVisible();
+    await expect(runtime.getByText("20 · partial")).toBeVisible();
+    await expect(runtime.getByText("Pre-flight cache read").locator("..")).toContainText("0");
+    await expect(runtime.getByText("Pre-flight cache write 1h").locator("..")).toContainText(
+      "Not reported",
+    );
+    await expect(runtime.getByText("Pre-flight Claude")).toBeVisible();
+    await expect(runtime.getByText("Pre-flight attempts")).toBeVisible();
+    await expect(runtime.getByText("Pre-flight iterations")).toBeVisible();
+    await expect(runtime.getByText("100 / 100 · limit hit")).toBeVisible();
+    await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+    const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+    if (artifacts) {
+      mkdirSync(join(artifacts, "token-ui"), { recursive: true });
+      await page.screenshot({
+        path: join(artifacts, "token-ui", "preflight-detail.png"),
+        fullPage: true,
+      });
+    } else {
+      await page.screenshot({ path: testInfo.outputPath("preflight-detail.png"), fullPage: true });
+    }
   });
 
   test("copy workspace access entries are visible when configured", async ({ page }) => {

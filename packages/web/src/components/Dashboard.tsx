@@ -1820,16 +1820,18 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => r.json().catch(() => null))
         .then(
           (
             result: {
-              branch: string | null;
+              branch?: string | null;
+              error?: string;
               preflightBatchId?: string;
               preflightTokenUsageView?: SpurPreflightTokenUsageView;
             } | null,
           ) => {
             if (!result || batchId !== spawnPreflightBatchIdRef.current) return;
+            if (result.preflightBatchId && result.preflightBatchId !== batchId) return;
             const usage = result.preflightTokenUsageView;
             if (usage) {
               setSpawnPreflightUsage((current) =>
@@ -1837,7 +1839,8 @@ export function Dashboard() {
               );
             }
             if (cancelled) return;
-            if (result.branch && !spawnBranchExplicitRef.current) setSpawnBranch(result.branch);
+            if (!result.error && result.branch && !spawnBranchExplicitRef.current)
+              setSpawnBranch(result.branch);
           },
         )
         .catch(() => {});
