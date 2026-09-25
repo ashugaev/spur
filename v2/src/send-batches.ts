@@ -540,7 +540,7 @@ class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
   }
 }
 
-export function isReviewEventData(value: unknown): value is ReviewEventData {
+function isReviewEventData(value: unknown): value is ReviewEventData {
   if (!value || typeof value !== "object") return false;
   const data = value as Record<string, unknown>;
   return (

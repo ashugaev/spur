@@ -154,7 +154,7 @@ Suppressions start empty and persist across daemon restart and config reload. Ex
 
 Handles are session credentials. Do not log, persist, or share them. `grant_not_ready` means activation is still finishing; retry the same command with the same handle.
 
-Controls belong to the send recipient. Spawn triggers issue no auto-ping controls; no suppression stops a spawn trigger. Handoff and respawn do not transfer control ownership.
+Controls belong to the send recipient. Spawn triggers issue no auto-ping controls; no suppression stops a spawn trigger. Handles from spawn-trigger prompts are not recognized: `unsubscribe` returns 404 `grant_not_found`. Handoff and respawn do not transfer control ownership.
 
 `--event` suppresses one emitted source occurrence for this trigger route and destination.
 `--thread` suppresses one supported provider thread for this trigger route and destination.
