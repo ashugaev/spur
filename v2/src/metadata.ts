@@ -26,15 +26,19 @@ import {
   type ServiceSourceState,
   type SessionPipelineState,
   type SessionRecord,
+  type SessionTokenUsageRecord,
   type SessionStateSubscription,
   type SidecarProcessIdentity,
   type TelegramBinding,
   type TelegramReplyTarget,
+  type TokenUsageTotals,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 import { workspaceIdOf } from "./session-desk.js";
+import { aggregateTokenUsage } from "./token-usage.js";
+import { normalizePreflightTotals } from "./preflight-usage-store.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -768,10 +772,148 @@ function normalizeStateSubscriptions(
   return normalized.length > 0 ? normalized : undefined;
 }
 
+const OPTIONAL_TOKEN_COMPONENTS = [
+  "cacheReadInputTokens",
+  "cacheWriteInputTokens",
+  "reasoningOutputTokens",
+  "cacheWrite5mInputTokens",
+  "cacheWrite1hInputTokens",
+] as const;
+
+function normalizeTokenTotals(value: unknown): TokenUsageTotals | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const totals = value as Record<string, unknown>;
+  const values = [totals["inputTokens"], totals["outputTokens"], totals["totalTokens"]];
+  if (!values.every((token) => Number.isSafeInteger(token) && (token as number) >= 0)) return null;
+  const normalized = {
+    inputTokens: totals["inputTokens"] as number,
+    outputTokens: totals["outputTokens"] as number,
+    totalTokens: totals["totalTokens"] as number,
+  } as TokenUsageTotals;
+  if (normalized.totalTokens !== normalized.inputTokens + normalized.outputTokens) return null;
+  for (const component of OPTIONAL_TOKEN_COMPONENTS) {
+    const token = totals[component];
+    if (token === undefined) continue;
+    if (!Number.isSafeInteger(token) || (token as number) < 0) return null;
+    normalized[component] = token as number;
+  }
+  if (
+    (normalized.cacheReadInputTokens ?? 0) + (normalized.cacheWriteInputTokens ?? 0) >
+      normalized.inputTokens ||
+    (normalized.reasoningOutputTokens ?? 0) > normalized.outputTokens ||
+    (normalized.cacheWrite5mInputTokens ?? 0) + (normalized.cacheWrite1hInputTokens ?? 0) >
+      (normalized.cacheWriteInputTokens ?? 0)
+  )
+    return null;
+  return normalized;
+}
+
+function normalizeTokenUsage(value: unknown): SessionTokenUsageRecord | undefined {
+  const totals = normalizeTokenTotals(value);
+  if (!totals || typeof value !== "object" || value === null) return undefined;
+  const usage = value as Record<string, unknown>;
+  const provider = usage["provider"];
+  if (provider !== "claude" && provider !== "codex" && provider !== "opencode") return undefined;
+  const rawGenerations = usage["generations"] ?? usage["sources"];
+  if (
+    typeof rawGenerations !== "object" ||
+    rawGenerations === null ||
+    Array.isArray(rawGenerations)
+  ) {
+    return undefined;
+  }
+  const generations: Record<string, TokenUsageTotals> = {};
+  for (const [generationId, rawGeneration] of Object.entries(rawGenerations)) {
+    const generation = normalizeTokenTotals(rawGeneration);
+    if (!generationId || !generation) return undefined;
+    generations[generationId] = generation;
+  }
+  if (Object.keys(generations).length === 0) return undefined;
+  const aggregate = aggregateTokenUsage(provider, generations);
+  if (usage["generations"] === undefined) {
+    if (
+      aggregate.inputTokens > totals.inputTokens ||
+      aggregate.outputTokens > totals.outputTokens ||
+      aggregate.totalTokens > totals.totalTokens
+    )
+      return undefined;
+    if (aggregate.totalTokens < totals.totalTokens) {
+      generations[`legacy:${provider}`] = {
+        inputTokens: totals.inputTokens - aggregate.inputTokens,
+        outputTokens: totals.outputTokens - aggregate.outputTokens,
+        totalTokens: totals.totalTokens - aggregate.totalTokens,
+      };
+    }
+    return aggregateTokenUsage(provider, generations);
+  }
+  for (const component of [
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    ...OPTIONAL_TOKEN_COMPONENTS,
+  ] as const) {
+    if (aggregate[component] !== totals[component]) return undefined;
+  }
+  return aggregate;
+}
+
+function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightTokenUsage"] {
+  const totals = normalizePreflightTotals(value);
+  if (!totals || !isRecord(value)) return undefined;
+  const status = value["status"];
+  const attemptCount = value["attemptCount"];
+  const unknownAttemptCount = value["unknownAttemptCount"];
+  const providerIterationCount = value["providerIterationCount"];
+  const rawByProvider = value["byProvider"];
+  if (
+    (status !== "measured" && status !== "partial" && status !== "unknown") ||
+    !Number.isSafeInteger(attemptCount) ||
+    (attemptCount as number) < 0 ||
+    !Number.isSafeInteger(unknownAttemptCount) ||
+    (unknownAttemptCount as number) < 0 ||
+    (unknownAttemptCount as number) > (attemptCount as number) ||
+    !Number.isSafeInteger(providerIterationCount) ||
+    (providerIterationCount as number) < 0 ||
+    !isRecord(rawByProvider)
+  )
+    return undefined;
+  const byProvider: NonNullable<SessionRecord["preflightTokenUsage"]>["byProvider"] = {};
+  for (const provider of ["claude", "codex", "cursor", "opencode"] as const) {
+    if (rawByProvider[provider] === undefined) continue;
+    const providerTotals = normalizeTokenTotals(rawByProvider[provider]);
+    if (!providerTotals) return undefined;
+    byProvider[provider] = providerTotals;
+  }
+  const aggregate = Object.values(byProvider).reduce(
+    (sum, provider) => ({
+      inputTokens: sum.inputTokens + provider.inputTokens,
+      outputTokens: sum.outputTokens + provider.outputTokens,
+      totalTokens: sum.totalTokens + provider.totalTokens,
+    }),
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  );
+  if (
+    aggregate.inputTokens !== totals.inputTokens ||
+    aggregate.outputTokens !== totals.outputTokens ||
+    aggregate.totalTokens !== totals.totalTokens
+  )
+    return undefined;
+  return {
+    ...totals,
+    status,
+    attemptCount: attemptCount as number,
+    unknownAttemptCount: unknownAttemptCount as number,
+    providerIterationCount: providerIterationCount as number,
+    byProvider,
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
+  const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   const workspaceId = workspaceIdOf(normalizedSession);
   const closeoutOwner =
     typeof normalizedSession.closeoutOwner === "boolean"
@@ -802,6 +944,16 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
+    ...(normalizedSession.cursorRestoreBoundary &&
+    typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
+    Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&
+    normalizedSession.cursorRestoreBoundary.offset >= 0
+      ? { cursorRestoreBoundary: normalizedSession.cursorRestoreBoundary }
+      : {}),
+    ...(typeof normalizedSession.codexRestoreStartedAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
+      ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
@@ -818,6 +970,8 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     launchCommand: normalizedSession.launchCommand,
     status: normalizedSession.status,
     ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
+    ...(preflightTokenUsage ? { preflightTokenUsage } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.lastOpenedAt ? { lastOpenedAt: normalizedSession.lastOpenedAt } : {}),

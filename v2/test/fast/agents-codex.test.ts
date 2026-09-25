@@ -1,3 +1,4 @@
+import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
@@ -56,6 +57,7 @@ import {
   linkCodexAuth,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
+  readCodexRolloutState,
 } from "../../src/agents/codex.js";
 
 const mockCreateReadStream = createReadStream as unknown as Mock;
@@ -109,6 +111,31 @@ afterEach(() => {
 });
 
 describe("codexCommand", () => {
+  it("extracts cumulative structured components from a sanitized rollout fixture", async () => {
+    const actualFs = await vi.importActual<typeof FsPromises>("node:fs/promises");
+    const fixture = await actualFs.readFile(
+      new URL("../fixtures/agent-history/codex/token-components.jsonl", import.meta.url),
+      "utf8",
+    );
+    mockReaddir.mockResolvedValue(["token-components.jsonl"]);
+    mockReadFile.mockResolvedValue(fixture);
+    mockStat.mockResolvedValue({ ino: 1, mtimeMs: 1, size: fixture.length });
+
+    const result = await readCodexRolloutState("/sessions");
+
+    expect(result.tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:thread-sanitized",
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      cacheReadInputTokens: 40,
+      cacheWriteInputTokens: 10,
+      reasoningOutputTokens: 20,
+      observedAtMs: Date.parse("2026-09-24T10:00:01.000Z"),
+    });
+  });
+
   it("returns 'codex' by default", () => {
     expect(codexCommand()).toBe("codex");
   });
@@ -981,6 +1008,39 @@ describe("findCodexSessionId", () => {
 
     expect(result).toBe("session-thread");
     expect(mockCreateInterface).toHaveBeenCalledTimes(1);
+  });
+
+  it("pins the root rollout when a newer child uses the same cwd", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockReaddir.mockImplementation(async (dir: unknown) =>
+      dir === "/session-root" ? ["root.jsonl", "child.jsonl"] : [],
+    );
+    mockLstat.mockResolvedValue({ isDirectory: () => false });
+    mockStat.mockImplementation(async (filePath: unknown) => ({
+      mtimeMs: filePath === "/session-root/child.jsonl" ? 2000 : 1000,
+    }));
+    mockStreamsForFiles({
+      "/session-root/root.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "root-thread", cwd: "/worktree/path", source: "cli" },
+        }),
+      ],
+      "/session-root/child.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "child-thread",
+            cwd: "/worktree/path",
+            source: { subagent: { thread_spawn: { parent_thread_id: "root-thread" } } },
+          },
+        }),
+      ],
+    });
+
+    expect(await findCodexSessionId("/worktree/path", { sessionRootDir: "/session-root" })).toBe(
+      "root-thread",
+    );
   });
 });
 

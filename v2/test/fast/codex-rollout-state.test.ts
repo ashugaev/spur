@@ -8,6 +8,7 @@ import {
   readCodexTranscriptEntries,
   type CodexRolloutReaderState,
 } from "../../src/agents/codex.js";
+import { reconcileTokenUsage } from "../../src/token-usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STALE_WORKING_FIXTURE = join(
@@ -29,6 +30,14 @@ const IDLE_FIXTURE_SESSION_FIXTURE = join(
 const WORKING_UNMATCHED_TOOL_CALL_FIXTURE = join(
   __dirname,
   "../fixtures/agent-history/codex/working-unmatched-tool-call-tail.jsonl",
+);
+const TOKEN_RESET_ALIASES_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/token-reset-aliases.jsonl",
+);
+const CHILD_PREFIX_REPLAY_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/child-prefix-replay.jsonl",
 );
 
 const tempDirs: string[] = [];
@@ -55,6 +64,14 @@ interface SessionFile {
   filename: string;
   content: string;
   mtimeMs: number;
+}
+
+function sessionMeta(id: string): string {
+  return JSON.stringify({
+    timestamp: "2026-06-28T08:00:00.000Z",
+    type: "session_meta",
+    payload: { id },
+  });
 }
 
 // Writes multiple rollout files into one sessions dir and pins each file's mtime
@@ -107,6 +124,137 @@ describe("readCodexRolloutState", () => {
 
     expect(changed.rollout?.state).toBe("waiting");
     expect(reader.files.get(filePath)).not.toBe(firstCachedFile);
+  });
+
+  it("keeps thread settings inside an active turn working until restore is verified", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-09-25T06:39:51.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "interrupted-turn" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-09-25T06:40:26.000Z",
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_id: "root-thread" },
+        }),
+      ].join("\n"),
+    );
+
+    const resumed = await readCodexRolloutState(sessionsDir);
+    expect(resumed.rollout).toMatchObject({
+      state: "working",
+      reason: "thread_settings_applied",
+      precedingState: {
+        state: "working",
+        timestampMs: Date.parse("2026-09-25T06:39:51.000Z"),
+      },
+    });
+
+    const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
+    await writeFile(
+      filePath,
+      `${await readFile(filePath, "utf8")}\n${JSON.stringify({
+        timestamp: "2026-09-25T06:41:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "followup-turn" },
+      })}`,
+      "utf8",
+    );
+    const followup = await readCodexRolloutState(sessionsDir);
+    expect(followup.rollout).toMatchObject({ state: "working", reason: "task_started" });
+  });
+
+  it("keeps the real in-turn settings sequence working before turn_aborted", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        {
+          timestamp: "2026-08-11T11:33:40.389Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn" },
+        },
+        {
+          timestamp: "2026-08-11T11:42:28.000Z",
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_id: "root" },
+        },
+        {
+          timestamp: "2026-08-11T11:42:40.000Z",
+          type: "event_msg",
+          payload: { type: "token_count", info: {} },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n"),
+    );
+    expect((await readCodexRolloutState(sessionsDir)).rollout).toMatchObject({
+      state: "working",
+      reason: "thread_settings_applied",
+    });
+    const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
+    await writeFile(
+      filePath,
+      `${await readFile(filePath, "utf8")}\n${JSON.stringify({
+        timestamp: "2026-08-11T11:42:40.100Z",
+        type: "event_msg",
+        payload: { type: "turn_aborted", reason: "interrupted", turn_id: "turn" },
+      })}`,
+    );
+    expect((await readCodexRolloutState(sessionsDir)).rollout).toMatchObject({
+      state: "waiting",
+      reason: "turn_aborted",
+    });
+  });
+
+  it("keeps an active root working when a newer same-cwd child completes", async () => {
+    const rootId = "01a09523-8f47-74f1-9004-fb313fa089d7";
+    const childId = "01a09538-0547-7b71-a7f5-8ee2f835f0ef";
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "root.jsonl",
+        content: [
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: rootId, cwd: "/same/worktree", source: "cli" },
+          }),
+          JSON.stringify({
+            timestamp: "2026-09-12T10:22:11.000Z",
+            type: "event_msg",
+            payload: { type: "task_started", turn_id: "root-turn" },
+          }),
+        ].join("\n"),
+        mtimeMs: 1_000,
+      },
+      {
+        filename: "child.jsonl",
+        content: [
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: childId,
+              cwd: "/same/worktree",
+              source: { subagent: { thread_spawn: { parent_thread_id: rootId } } },
+            },
+          }),
+          JSON.stringify({
+            timestamp: "2026-09-12T10:45:57.000Z",
+            type: "event_msg",
+            payload: { type: "task_complete", turn_id: "child-turn" },
+          }),
+        ].join("\n"),
+        mtimeMs: 2_000,
+      },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir, undefined, rootId);
+    expect(result.rollout).toMatchObject({
+      state: "working",
+      reason: "task_started",
+      turnId: "root-turn",
+    });
+    expect(result.threadId).toBe(rootId);
+    expect((await readCodexRolloutState(sessionsDir)).rollout?.state).toBe("working");
   });
 
   it("reads working from the current Codex rollout tail after an older interrupted turn", async () => {
@@ -227,6 +375,333 @@ describe("readCodexRolloutState", () => {
       reason: "task_complete",
       turnId: "019f0d77-0a2a-77a0-ac7c-d71c20ef3b76",
     });
+  });
+
+  it("uses provider total_tokens without adding cached or reasoning subsets", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        sessionMeta("usage-session"),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                cached_input_tokens: 50,
+                output_tokens: 30,
+                reasoning_output_tokens: 20,
+                total_tokens: 120,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+      "rollout-usage.jsonl",
+    );
+    expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toMatchObject({
+      inputTokens: 90,
+      outputTokens: 30,
+      totalTokens: 120,
+    });
+  });
+
+  it("normalizes aliases and preserves usage across cumulative resets", async () => {
+    const content = await readFile(TOKEN_RESET_ALIASES_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-token-reset-aliases.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const first = await readCodexRolloutState(sessionsDir, reader);
+    const reread = await readCodexRolloutState(sessionsDir, reader);
+
+    expect(first.tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:codex-reset-sanitized",
+      inputTokens: 148,
+      outputTokens: 32,
+      totalTokens: 180,
+      cacheReadInputTokens: 62,
+      cacheWriteInputTokens: 18,
+      reasoningOutputTokens: 13,
+      observedAtMs: Date.parse("2026-09-24T10:00:04.000Z"),
+    });
+    expect(reread.tokenUsage).toEqual(first.tokenUsage);
+    if (!first.tokenUsage || !reread.tokenUsage) throw new Error("expected token usage");
+    const persisted = reconcileTokenUsage(undefined, first.tokenUsage);
+    expect(reconcileTokenUsage(persisted, reread.tokenUsage).totalTokens).toBe(180);
+  });
+
+  it("removes a child rollout's copied parent prefix", async () => {
+    const content = await readFile(CHILD_PREFIX_REPLAY_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-child-prefix.jsonl");
+
+    expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:codex-child-sanitized",
+      inputTokens: 24,
+      outputTokens: 6,
+      totalTokens: 30,
+      cacheReadInputTokens: 8,
+      reasoningOutputTokens: 2,
+      observedAtMs: Date.parse("2026-09-24T11:00:05.000Z"),
+    });
+  });
+
+  it("rejects token samples with conflicting canonical and alias fields", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        sessionMeta("usage-conflict"),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                prompt_tokens: 91,
+                output_tokens: 30,
+                total_tokens: 120,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+      "rollout-usage-conflict.jsonl",
+    );
+
+    expect(await readCodexRolloutState(sessionsDir)).not.toHaveProperty("tokenUsage");
+  });
+
+  it("rejects samples whose cache subsets exceed inclusive input", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        sessionMeta("usage-invalid-subsets"),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                cached_input_tokens: 60,
+                cache_write_input_tokens: 40,
+                output_tokens: 30,
+                total_tokens: 120,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+      "rollout-usage-invalid-subsets.jsonl",
+    );
+
+    expect(await readCodexRolloutState(sessionsDir)).not.toHaveProperty("tokenUsage");
+  });
+
+  it("distinguishes absent optional components from measured zero", async () => {
+    const tokenLine = (sessionId: string, optional: Record<string, number>) =>
+      [
+        sessionMeta(sessionId),
+        JSON.stringify({
+          timestamp: "2026-06-28T09:03:41.314Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                output_tokens: 30,
+                total_tokens: 120,
+                ...optional,
+              },
+            },
+          },
+        }),
+      ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "unknown.jsonl",
+        content: tokenLine("unknown", {}),
+        mtimeMs: 1_000_000_000_000,
+      },
+      {
+        filename: "zero.jsonl",
+        content: tokenLine("zero", { cached_input_tokens: 0 }),
+        mtimeMs: 2_000_000_000_000,
+      },
+    ]);
+
+    const measured = await readCodexRolloutState(sessionsDir);
+    expect(measured.tokenUsage?.cacheReadInputTokens).toBe(0);
+    expect(measured.tokenUsage).not.toHaveProperty("cacheWriteInputTokens");
+  });
+
+  it("selects token-only files by the token event timestamp, not file mtime", async () => {
+    const tokenLine = (timestamp: string, totalTokens: number, sessionId: string) =>
+      [
+        sessionMeta(sessionId),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: totalTokens - 10,
+                output_tokens: 10,
+                total_tokens: totalTokens,
+              },
+            },
+          },
+        }),
+      ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "newer-mtime.jsonl",
+        content: tokenLine("2026-06-28T09:00:00.000Z", 100, "older-event"),
+        mtimeMs: 2_000_000_000_000,
+      },
+      {
+        filename: "newer-event.jsonl",
+        content: tokenLine("2026-06-28T10:00:00.000Z", 200, "newer-event"),
+        mtimeMs: 1_000_000_000_000,
+      },
+    ]);
+
+    expect((await readCodexRolloutState(sessionsDir)).tokenUsage).toMatchObject({
+      generationId: "codex:newer-event",
+      totalTokens: 200,
+      observedAtMs: Date.parse("2026-06-28T10:00:00.000Z"),
+    });
+  });
+
+  it("returns root and short-lived child generations from one sweep", async () => {
+    const tokenCount = (timestamp: string, totalTokens: number) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: totalTokens - 10,
+              output_tokens: 10,
+              total_tokens: totalTokens,
+            },
+          },
+        },
+      });
+    const rootId = "root-thread";
+    const childMeta = (id: string, timestamp: string) =>
+      JSON.stringify({
+        timestamp,
+        type: "session_meta",
+        payload: {
+          id,
+          cwd: "/same/worktree",
+          timestamp,
+          source: { subagent: { thread_spawn: { parent_thread_id: rootId } } },
+        },
+      });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "root.jsonl",
+        content: [
+          sessionMeta(rootId),
+          JSON.stringify({
+            timestamp: "2026-09-12T09:59:00.000Z",
+            type: "event_msg",
+            payload: { type: "task_started", turn_id: "root-turn" },
+          }),
+          tokenCount("2026-09-12T10:00:00.000Z", 100),
+        ].join("\n"),
+        mtimeMs: 1_000,
+      },
+    ]);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader, rootId)).tokenUsages).toMatchObject([
+      { generationId: "codex:root-thread", totalTokens: 100 },
+    ]);
+    const rolloutsDir = join(sessionsDir, "2026", "04", "19");
+    await writeFile(
+      join(rolloutsDir, "child-a.jsonl"),
+      [
+        childMeta("child-a", "2026-09-12T10:01:00.000Z"),
+        tokenCount("2026-09-12T10:00:59.000Z", 10),
+        tokenCount("2026-09-12T10:01:05.000Z", 30),
+        JSON.stringify({
+          timestamp: "2026-09-12T10:01:06.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "child-a-turn" },
+        }),
+      ].join("\n"),
+    );
+    await writeFile(
+      join(rolloutsDir, "child-b.jsonl"),
+      [
+        childMeta("child-b", "2026-09-12T10:02:00.000Z"),
+        tokenCount("2026-09-12T10:02:05.000Z", 50),
+        JSON.stringify({
+          timestamp: "2026-09-12T10:02:06.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "child-b-turn" },
+        }),
+      ].join("\n"),
+    );
+
+    const result = await readCodexRolloutState(sessionsDir, reader, rootId);
+    expect(result.rollout).toMatchObject({ state: "working", turnId: "root-turn" });
+    expect(result.tokenUsage?.generationId).toBe("codex:root-thread");
+    expect(
+      result.tokenUsages?.map((sample) => [sample.generationId, sample.totalTokens]).sort(),
+    ).toEqual([
+      ["codex:child-a", 20],
+      ["codex:child-b", 50],
+      ["codex:root-thread", 100],
+    ]);
+  });
+
+  it("keeps token usage bound to the selected active rollout", async () => {
+    const tokenLine = (timestamp: string, totalTokens: number, sessionId: string) =>
+      [
+        sessionMeta(sessionId),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: totalTokens - 10,
+                output_tokens: 10,
+                total_tokens: totalTokens,
+              },
+            },
+          },
+        }),
+      ].join("\n");
+    const active = [
+      tokenLine("2026-06-28T09:00:00.000Z", 100, "active"),
+      JSON.stringify({
+        timestamp: "2026-06-28T11:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "active-turn" },
+      }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "active.jsonl", content: active, mtimeMs: 1_000_000_000_000 },
+      {
+        filename: "sibling.jsonl",
+        content: tokenLine("2026-06-28T10:00:00.000Z", 200, "sibling"),
+        mtimeMs: 2_000_000_000_000,
+      },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+    expect(result.rollout?.turnId).toBe("active-turn");
+    expect(result.tokenUsage).toMatchObject({ totalTokens: 100 });
   });
 
   it("reads waiting from a real interrupted turn_aborted tail", async () => {

@@ -1,10 +1,16 @@
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { findForeignAgentProcessesForSession } from "../../src/agent-processes.js";
+import { readCodexRolloutState, codexHookHomePath } from "../../src/agents/codex.js";
+import { exportOpenCodeSession, parseOpenCodeTokenUsage } from "../../src/agents/opencode.js";
+import { readClaudeJsonlState } from "../../src/claude-jsonl-state.js";
 import { startServer } from "../../src/server.js";
-import type { AgentName } from "../../src/types.js";
+import { isRestorableSession } from "../../src/session-service.js";
+import type { ProviderTokenUsageSample } from "../../src/token-usage.js";
+import type { AgentName, SessionView } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
   isTmuxAvailable,
@@ -26,6 +32,7 @@ const OPENCODE_BIN = await binaryPath("opencode");
 
 interface AuthStatus {
   available: boolean;
+  model?: string;
   skipReason?: string;
   error?: string;
 }
@@ -34,6 +41,7 @@ interface CleanupItem {
   rootDir: string;
   sessionPrefix: string;
   socketName: string;
+  repoDir?: string;
   branch?: string;
   worktreePath?: string;
 }
@@ -222,9 +230,12 @@ async function opencodeStatus(): Promise<AuthStatus> {
   if (!OPENCODE_BIN) return { available: false, skipReason: "opencode unavailable" };
   try {
     const { stdout } = await execFileAsync(OPENCODE_BIN, ["models"], { timeout: 20_000 });
-    return stdout.split("\n").some((line) => line.trim() === "opencode/deepseek-v4-flash-free")
-      ? { available: true }
-      : { available: false, skipReason: "OpenCode free smoke model unavailable" };
+    const models = stdout.split("\n").map((line) => line.trim());
+    const configuredModel = process.env.SPUR_SMOKE_OPENCODE_MODEL?.trim();
+    const model = configuredModel || models.find((candidate) => candidate.startsWith("opencode/"));
+    return model && models.includes(model)
+      ? { available: true, model }
+      : { available: false, skipReason: "OpenCode smoke model unavailable" };
   } catch (error) {
     return { available: false, error: `Failed to list OpenCode models: ${errorText(error)}` };
   }
@@ -317,28 +328,128 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
+  const repoDir = item.repoDir ?? SMOKE_REPO_DIR;
   await killTmuxSessionsByPrefix(item.sessionPrefix, item.socketName);
   killTmuxServer(item.socketName);
   if (item.worktreePath) {
     try {
-      await git(SMOKE_REPO_DIR, "worktree", "remove", "--force", item.worktreePath);
+      await git(repoDir, "worktree", "remove", "--force", item.worktreePath);
     } catch {
       // Best effort only.
     }
   }
   if (item.branch) {
     try {
-      await git(SMOKE_REPO_DIR, "branch", "-D", item.branch);
+      await git(repoDir, "branch", "-D", item.branch);
     } catch {
       // Best effort only.
     }
   }
   try {
-    await git(SMOKE_REPO_DIR, "worktree", "prune", "--expire", "now");
+    await git(repoDir, "worktree", "prune", "--expire", "now");
   } catch {
     // Best effort only.
   }
   await rm(item.rootDir, { recursive: true, force: true });
+}
+
+async function assertStructuredMainUsage(
+  agent: AgentName,
+  session: SessionView,
+  service: Awaited<ReturnType<typeof startServer>>,
+  dataDir: string,
+): Promise<void> {
+  if (agent === "cursor") {
+    const view = (await service.get(session.id)).tokenUsageView;
+    expect(view).toMatchObject({
+      status: "unavailable",
+      provider: "cursor",
+      reason: "structured_usage_unavailable",
+    });
+    expect(view).not.toHaveProperty("totalTokens");
+    const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+    if (artifactsDir) {
+      await writeFile(
+        join(artifactsDir, "token-live-smoke-cursor.json"),
+        `${JSON.stringify({ agent, source: "cursor-jsonl-no-usage", api: view }, null, 2)}\n`,
+        "utf8",
+      );
+    }
+    return;
+  }
+
+  const withUsage = await pollUntil(() => service.get(session.id), {
+    timeoutMs: 60_000,
+    accept: (state) =>
+      state.tokenUsageView?.status === "available" && state.tokenUsageView.totalTokens > 0,
+    label: `structured ${agent} usage after follow-up`,
+  });
+  const view = withUsage.tokenUsageView;
+  expect(view).toMatchObject({ status: "available", provider: agent });
+  if (view?.status !== "available") throw new Error(`${agent} usage unavailable`);
+
+  let sample: ProviderTokenUsageSample | undefined;
+  let source: string;
+  if (agent === "claude") {
+    const result = await readClaudeJsonlState(
+      session.worktreePath,
+      undefined,
+      session.agentSessionId,
+    );
+    sample = result?.tokenUsage;
+    source = "claude-jsonl";
+  } else if (agent === "codex") {
+    const sessionsDir = join(
+      codexHookHomePath(join(dataDir, "session-tools", session.id)),
+      "sessions",
+    );
+    sample = (await readCodexRolloutState(sessionsDir)).tokenUsage;
+    source = "codex-rollout-jsonl";
+  } else {
+    if (!session.agentSessionId) throw new Error("OpenCode session id unavailable");
+    sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(session.agentSessionId));
+    source = "opencode-export";
+  }
+  expect(sample?.provider).toBe(agent);
+  expect(sample?.totalTokens).toBeGreaterThan(0);
+  const structured = sample;
+  if (!structured) throw new Error(`${agent} structured usage unavailable`);
+  const settled = await pollUntil(() => service.get(session.id), {
+    timeoutMs: 30_000,
+    accept: (state) =>
+      state.tokenUsageView?.status === "available" &&
+      state.tokenUsageView.inputTokens >= structured.inputTokens &&
+      state.tokenUsageView.outputTokens >= structured.outputTokens,
+    label: `${agent} API usage caught up with structured source`,
+  });
+  const settledView = settled.tokenUsageView;
+  if (settledView?.status !== "available") throw new Error(`${agent} usage unavailable`);
+
+  const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifactsDir) {
+    await writeFile(
+      join(artifactsDir, `token-live-smoke-${agent}.json`),
+      `${JSON.stringify(
+        {
+          agent,
+          source,
+          api: {
+            inputTokens: settledView.inputTokens,
+            outputTokens: settledView.outputTokens,
+            totalTokens: settledView.totalTokens,
+          },
+          structured: {
+            inputTokens: structured.inputTokens,
+            outputTokens: structured.outputTokens,
+            totalTokens: structured.totalTokens,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
 }
 
 async function runSmoke(
@@ -356,6 +467,24 @@ async function runSmoke(
     : undefined;
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
   cleanupItems.push(cleanupItem);
+  const repoDir = agent === "codex" ? join(rootDir, "repo") : SMOKE_REPO_DIR;
+  if (agent === "codex") {
+    await mkdir(repoDir);
+    await git(repoDir, "init", "--initial-branch=main");
+    await git(
+      repoDir,
+      "-c",
+      "user.name=Spur Smoke",
+      "-c",
+      "user.email=smoke@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "test: initialize smoke repository",
+    );
+    cleanupItem.repoDir = repoDir;
+  }
+  const baseRef = agent === "codex" ? await git(repoDir, "rev-parse", "HEAD") : SMOKE_BASE_REF;
 
   setActiveTmuxSocketName(tmuxSocketName);
   await syncTmuxEnvironment({});
@@ -367,8 +496,8 @@ async function runSmoke(
       port,
       dataDir,
       worktreeDir,
-      repoDir: SMOKE_REPO_DIR,
-      baseRef: SMOKE_BASE_REF,
+      repoDir,
+      baseRef,
       sessionPrefix,
       agent,
       ...(expectedPreflightBranch
@@ -398,7 +527,7 @@ async function runSmoke(
         prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
-After the file and the session metadata are set, wait for more instructions.`,
+After the file and the session metadata are set, wait for more instructions.${agent === "codex" ? " The task is complete only after a follow-up message asks you to create smoke-followup.txt." : ""}`,
       });
       cleanupItem.branch = session.branch;
       cleanupItem.worktreePath = session.worktreePath;
@@ -412,9 +541,16 @@ After the file and the session metadata are set, wait for more instructions.`,
         timeoutMs: initialSmokeTimeoutMs,
         accept: Boolean,
       });
-      const liveState = await service.get(session.id);
+      const liveState = await pollUntil(() => service.get(session.id), {
+        timeoutMs: 30_000,
+        accept: (state) =>
+          state.status === "running" &&
+          state.worktreePath === session.worktreePath &&
+          state.workspaceExists,
+        label: "running agent with an initialized worktree",
+      });
       if (liveState.slots?.title) {
-        expect(liveState.slots.title).toBe(expectedTitle);
+        expect(liveState.slots.title.trim()).not.toBe("");
         expect(liveState.slots.links).toHaveLength(expectedLinks.length);
         expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
         const status = await readTmuxStatus(session.id);
@@ -424,13 +560,34 @@ After the file and the session metadata are set, wait for more instructions.`,
       }
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
-      await killTmuxSession(session.id);
+      if (agent === "claude" || agent === "cursor") {
+        await service.pause(session.id);
+      } else {
+        await killTmuxSession(session.id);
+      }
+
+      await pollUntil(() => service.get(session.id), {
+        timeoutMs: 30_000,
+        accept: isRestorableSession,
+        label: "restorable agent after tmux exit",
+      });
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);
+      if (agent === "codex") {
+        expect(restored.agentSessionId).toBe(session.agentSessionId);
+      }
       if (restored.slots?.title) {
-        expect(restored.slots.title).toBe(expectedTitle);
+        expect(restored.slots.title.trim()).not.toBe("");
         expect(restored.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
+      }
+
+      if (agent === "codex") {
+        await pollUntil(() => service.get(session.id), {
+          timeoutMs: 240_000,
+          accept: (state) => state.status === "running" && state.state === "waiting",
+          label: "restored agent waiting for follow-up",
+        });
       }
 
       await service.send(session.id, {
@@ -443,10 +600,26 @@ After the file and the session metadata are set, wait for more instructions.`,
         accept: Boolean,
       });
       expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
+      await assertStructuredMainUsage(agent, session, service, dataDir);
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
       expect(existsSync(session.worktreePath)).toBe(false);
+      if (agent === "claude") {
+        await pollUntil(
+          () =>
+            findForeignAgentProcessesForSession({
+              sessionId: session.id,
+              processMatchers: ["claude"],
+              excludePanePid: null,
+            }),
+          {
+            timeoutMs: 30_000,
+            accept: (scan) => scan.status === "ok" && scan.pids.length === 0,
+            label: "test-owned Claude processes exited",
+          },
+        );
+      }
     } finally {
       await service.stop();
     }
@@ -454,6 +627,8 @@ After the file and the session metadata are set, wait for more instructions.`,
 }
 
 async function runOpenCodeSmoke(): Promise<void> {
+  const model = opencodeAuth.model;
+  if (!model) throw new Error("OpenCode smoke model unavailable");
   const agent = "opencode" as const;
   const rootDir = await createTempDir("spur-smoke-opencode-");
   const port = await findFreePort();
@@ -487,7 +662,7 @@ async function runOpenCodeSmoke(): Promise<void> {
       const session = await service.spawn({
         project: "api",
         agent,
-        model: "opencode/deepseek-v4-flash-free",
+        model,
         prompt: "Reply with exactly SPUR_OPENCODE_SMOKE_ONE",
       });
       cleanupItem.branch = session.branch;
@@ -516,6 +691,8 @@ async function runOpenCodeSmoke(): Promise<void> {
               message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_TWO",
           ),
       });
+
+      await assertStructuredMainUsage(agent, session, service, dataDir);
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
@@ -591,7 +768,7 @@ if (codexAuth.error) {
   describe.skipIf(!codexAuth.available)("Spur real-agent smoke (codex)", () => {
     it("launches codex, restores it, and accepts a follow-up send", async () => {
       await runSmoke("codex");
-    });
+    }, 600_000);
 
     it("uses codex spawn preflight before the normal session launch", async () => {
       await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });

@@ -106,7 +106,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Spur sends the next phase after
 
 Full-access launch: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, `opencode --auto` (>= 1.18.18). Spur resumes `ses_...` ids via `opencode --session`, reads state/conversation via `opencode export`. OpenCode `restrictWrites` (config field, not the flag above) denies edit tools, `git commit`/push.
 
-Preflight (`projects.<id>.preflight`, no `--branch`): Spur asks the agent for one line before worktree creation — a branch name or sentinel `NO_PROJECT_RULES`. Empty/malformed/checked-out results retry 3x, fail spawn. New worktree branches fetch `origin`, branch from freshest remote ref; `--worktree <defaultBranch>` overrides base.
+Preflight (`projects.<id>.preflight`, no `--branch`): Spur asks the agent for one line before worktree creation — a branch name or sentinel `NO_PROJECT_RULES`. Empty/malformed/checked-out results retry 3x, fail spawn. All provider calls contribute to the session token budget. New worktree branches fetch `origin`, branch from freshest remote ref; `--worktree <defaultBranch>` overrides base.
 
 ## shepherd, wake
 
@@ -120,13 +120,15 @@ Fires only while status is restorable (`running`, `stopped`, `paused`); dropped 
 
 ## list
 
+Stopped sessions whose observed usage reached `projects.<id>.tokenBudget` show `stopped by token budget`.
+
 TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit, `Ctrl+G` back. The selected session's details pane shows a `queued <N>` field when it holds real queued messages, never a per-row column. Non-TTY prints a one-shot summary, hides `completed`/`killed` by default, and adds a `queued <N>` fact beside the sidecar-age fact for a session holding real queued messages. Neither surface counts a pipeline's own auto-steps. A resolvable-age sidecar shows `sidecar <name> <age>` (oldest, `+N more`); `!` marks one past [`sidecarGc.maxAgeWarnMinutes`](configuration.md#sidecar-reaping).
 
 `spur list --json` (and the non-TTY list row set) comes from `GET /sessions` — the projected list item ([daemon-api.md](daemon-api.md#session-routes)). The interactive selector's details pane (`prompt`/`launch` rows) fetches the full record from `GET /sessions/:id` for the currently selected session, on selection change and on each 2s refresh tick — the pane shows a loading line until that fetch resolves.
 
 `pause` keeps the worktree; `complete`/`kill` tear down the pane, remove an owned worktree (`kill` needs `--force` on dirty/unpushed). Both check for an open PR first: `--pr-action leave_open|close` answers it, `--skip-pr-check` skips it; a failed check fails with retry hint. Shared-workspace sessions keep the project path on `kill`.
 
-`spur restore <sessionId> [--force] [--json]` needs an existing workspace plus: `running`+state `stopped`; `stopped`+state `stopped`/`error`/`stale`; `paused`+state `stopped`/`error`; `errored`+state `error` (`killed`/`completed` never restore). `restore`/`reopen` refuse over a live agent process still carrying the id, or an unreadable process table (skipped off Linux); a first `r` surfaces refusal, a second `r`/`--force` bypasses only the foreign-process refusal. `restore` resumes the session's existing conversation.
+`spur restore <sessionId> [--force] [--json]` needs an existing workspace plus: `running`+state `stopped`; `stopped`+state `stopped`/`error`/`stale`; `paused`+state `stopped`/`error`; `errored`+state `error` (`killed`/`completed` never restore). `restore`/`reopen` refuse over a live agent process still carrying the id, or an unreadable process table (skipped off Linux); a first `r` surfaces refusal, a second `r`/`--force` bypasses only the foreign-process refusal. Token-budget refusal: [configuration](configuration.md#field-reference). `restore` resumes the session's existing conversation.
 
 `spur reopen <sessionId> [--force] [--json]` restarts a `completed` session in place — same id/worktree, native conversation resumed, prompt not resent. Refuses if branch is gone (use `respawn`), worktree isn't the session's own or its rebuild fails, or a reopen for that session is already running; skips Telegram binding and artifacts; MCP sidecars restart through restore. `respawn <sessionId>` starts a fresh session with a new id instead — the conversation is not carried over.
 
@@ -176,7 +178,7 @@ Routes and status codes: [daemon-api.md](daemon-api.md#session-routes). Source s
 
 ## send, queue
 
-`spur send <sessionId> <message>`. While an agent is busy, `send` queues per session, flushes on return to prompt, ahead of the next auto-step. Prints `Delivered message to <id>.` when the response carries no real queued messages, `Queued message for <id> (<N> pending).` otherwise; N counts real queued messages, never a pipeline's own auto-steps. A `stopped`/`paused` session with an existing workspace: `send` tries native resume first, then a fresh launch.
+`spur send <sessionId> <message>`. While an agent is busy, `send` queues per session, flushes on return to prompt, ahead of the next auto-step. Prints `Delivered message to <id>.` when the response carries no real queued messages, `Queued message for <id> (<N> pending).` otherwise; N counts real queued messages, never a pipeline's own auto-steps. A `stopped`/`paused` session with an existing workspace: `send` tries native resume first, then a fresh launch. Token-budget refusal: [configuration](configuration.md#field-reference).
 
 `spur queue <sessionId> list|remove|flush [index]`. `list` numbers real queued messages from `1`; a pipeline's own future steps print unnumbered, never a target. `remove`/`flush` resolve that number to exact text just before acting; `remove` drops it unsent, `flush` sends it immediately, ahead of the queue. `flush` fails `409` while any pane write for that session is in flight. `remove` fails `409` only when the target is the queue head and its delivery is in flight; any other position always succeeds. Wire: [daemon-api.md](daemon-api.md#session-routes).
 

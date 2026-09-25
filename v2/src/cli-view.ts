@@ -234,6 +234,8 @@ export function describeSession(session: SessionListItemView): string {
     facts.push("stopped by user");
   } else if (session.stopReason === "stale_timeout") {
     facts.push("parked by idle timeout");
+  } else if (session.stopReason === "token_budget") {
+    facts.push("stopped by token budget");
   } else if (session.status === "paused") {
     facts.push("paused by user");
   } else if (session.status === "completed") {

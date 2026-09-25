@@ -1,0 +1,24 @@
+{
+  "type": "result",
+  "result": "feature/token-ledger",
+  "usage": {
+    "input_tokens": 100,
+    "cache_creation_input_tokens": 30,
+    "cache_read_input_tokens": 20,
+    "cache_creation": {
+      "ephemeral_5m_input_tokens": 10,
+      "ephemeral_1h_input_tokens": 20
+    },
+    "output_tokens": 40,
+    "output_tokens_details": { "thinking_tokens": 8 }
+  },
+  "advisor_message": {
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 3
+    }
+  },
+  "messages": [{ "role": "assistant" }, { "role": "assistant" }]
+}

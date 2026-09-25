@@ -1,7 +1,7 @@
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SessionState, TranscriptEntry } from "./types.js";
+import type { CursorRestoreBoundary, SessionState, TranscriptEntry } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
 import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
@@ -20,6 +20,19 @@ export interface CursorJsonlReaderState {
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: CursorParsedRecord[];
+}
+
+export async function captureCursorRestoreBoundary(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<CursorRestoreBoundary | null> {
+  const filePath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+  if (!filePath) return null;
+  try {
+    return { filePath, offset: (await stat(filePath)).size };
+  } catch {
+    return null;
+  }
 }
 
 const TAIL_RECORD_LIMIT = 50;
@@ -298,7 +311,7 @@ export async function readCursorJsonlState(
   worktreePath: string,
   reader?: CursorJsonlReaderState,
   agentSessionId?: string,
-  options?: { minMtimeMs?: number | undefined },
+  options?: { minMtimeMs?: number | undefined; after?: CursorRestoreBoundary | undefined },
 ): Promise<{
   state: SessionState;
   reader: CursorJsonlReaderState;
@@ -329,17 +342,27 @@ export async function readCursorJsonlState(
     return null;
   }
 
+  const boundaryOffset =
+    options?.after?.filePath === filePath && fileStat.size >= options.after.offset
+      ? options.after.offset
+      : 0;
   const currentReader: CursorJsonlReaderState =
-    reader && reader.filePath === filePath
+    reader &&
+    reader.filePath === filePath &&
+    (boundaryOffset === 0 || reader.lastOffset > boundaryOffset || reader.tailRecords.length === 0)
       ? reader
       : {
           filePath,
-          lastOffset: 0,
+          lastOffset: boundaryOffset,
           lastMtimeMs: 0,
           tailRecords: [],
         };
 
-  if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
+  if (
+    fileStat.mtimeMs === currentReader.lastMtimeMs &&
+    fileStat.size === currentReader.lastOffset &&
+    currentReader.tailRecords.length > 0
+  ) {
     return {
       state: classifyCursorJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
@@ -383,6 +406,9 @@ export async function readCursorJsonlState(
   };
 
   if (combined.length === 0) {
+    if (options?.after) {
+      return { state: "waiting", reader: nextReader, rateLimit: null };
+    }
     return null;
   }
 

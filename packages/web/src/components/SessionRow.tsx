@@ -18,6 +18,7 @@ import {
   getAttentionLevel,
   isRestorable,
   isTerminalSession,
+  isTokenBudgetBlocked,
   type DashboardRunningSidecar,
   type DashboardSession,
 } from "@/lib/types";
@@ -225,7 +226,9 @@ export function SessionRow({
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
   const attentionLevel = getAttentionLevel(session);
   const showRestore =
-    (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
+    (attentionLevel === "stopped" || attentionLevel === "error") &&
+    isRestorable(session) &&
+    !isTokenBudgetBlocked(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
   const trackerLink = session.links.find((l) => isTrackerLinkLabel(l.label));
