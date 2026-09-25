@@ -14955,6 +14955,7 @@ export class SessionService {
         ? await captureCursorRestoreBoundary(current.worktreePath, current.agentSessionId)
         : null;
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
+    const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -15243,6 +15244,7 @@ export class SessionService {
             status: "running",
             updatedAt: nowIso(),
             ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
+            ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
           },
           mcpSidecarUpdate,
         );
@@ -15298,6 +15300,7 @@ export class SessionService {
         status: "running",
         updatedAt: nowIso(),
         ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
+        ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
       },
       mcpSidecarUpdate,
     );
@@ -16769,7 +16772,9 @@ export class SessionService {
     );
   }
 
-  private async classifyCodexState(sessionId: string): Promise<{
+  private async classifyCodexState(
+    session: Pick<SessionRecord, "id" | "codexRestoreStartedAt">,
+  ): Promise<{
     state: SessionState;
     source: StateSource;
     hookState: ReturnType<typeof readAgentHookState>;
@@ -16779,18 +16784,32 @@ export class SessionService {
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
   }> {
-    const hookState = readAgentHookState(this.config.dataDir, sessionId);
-    const rolloutReader = this.codexRolloutReaders.get(sessionId) ?? { files: new Map() };
-    this.codexRolloutReaders.set(sessionId, rolloutReader);
+    const hookState = readAgentHookState(this.config.dataDir, session.id);
+    const rolloutReader = this.codexRolloutReaders.get(session.id) ?? { files: new Map() };
+    this.codexRolloutReaders.set(session.id, rolloutReader);
     const rolloutRead = await readCodexRolloutState(
-      this.codexSessionsDir(sessionId),
+      this.codexSessionsDir(session.id),
       rolloutReader,
     );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
 
-    if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
+    const restoreStartedAtMs = session.codexRestoreStartedAt
+      ? Date.parse(session.codexRestoreStartedAt)
+      : NaN;
+    const restoreMarkerReady =
+      rolloutState?.reason === "thread_settings_applied" &&
+      Number.isFinite(restoreStartedAtMs) &&
+      rolloutState.timestampMs >= restoreStartedAtMs &&
+      (rolloutState.precedingState?.timestampMs ?? 0) < restoreStartedAtMs &&
+      (!hookState ||
+        hookState.state === "waiting" ||
+        new Date(hookState.updatedAt).getTime() < restoreStartedAtMs);
+    if (restoreMarkerReady) {
+      state = "waiting";
+      source = "jsonl";
+    } else if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
       state = rolloutState.state;
       source = "jsonl";
     }
@@ -17777,7 +17796,7 @@ export class SessionService {
           tokenUsage = finalState.tokenUsage;
         }
       } else if (session.agent === "codex") {
-        tokenUsage = (await this.classifyCodexState(session.id)).tokenUsage;
+        tokenUsage = (await this.classifyCodexState(session)).tokenUsage;
       } else if (session.agent === "opencode") {
         tokenUsage = (
           await readOpenCodeStructuredState(
@@ -17843,7 +17862,7 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no claude status/jsonl)`;
         }
       } else if (strategy === "hook") {
-        const codexState = await this.classifyCodexState(session.id);
+        const codexState = await this.classifyCodexState(session);
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
@@ -18235,6 +18254,7 @@ export class SessionService {
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
+      codexRestoreStartedAt: _codexRestoreStartedAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -18544,6 +18564,7 @@ export class SessionService {
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
+      codexRestoreStartedAt: _codexRestoreStartedAt,
       ...sessionWithoutDetailFields
     } = session;
 

@@ -865,6 +865,7 @@ export interface CodexRolloutStateRecord {
     | "request_user_input";
   turnId?: string;
   callId?: string;
+  precedingState?: { state: "working" | "waiting" | "needs_input"; timestampMs: number };
 }
 
 export interface CodexRolloutReadResult {
@@ -953,12 +954,11 @@ function extractCodexRolloutStateLine(
       const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
       return codexRolloutStateRecord("waiting", timestamp, timestampMs, "turn_aborted", turnId);
     }
-    // Codex writes this on resume after an externally killed turn. That turn
-    // has no task_complete/turn_aborted record, but the resumed TUI is at its
-    // prompt and can accept the queued message.
+    // This event also occurs inside active turns. The caller may treat it as
+    // resume-ready only when it crosses the recorded restore generation.
     if (payloadType === "thread_settings_applied") {
       return codexRolloutStateRecord(
-        "waiting",
+        "working",
         timestamp,
         timestampMs,
         "thread_settings_applied",
@@ -1002,6 +1002,25 @@ function extractCodexRolloutStateLine(
   }
 
   return null;
+}
+
+function updateCodexRolloutState(
+  current: CodexRolloutStateRecord | null,
+  state: Omit<CodexRolloutStateRecord, "filePath"> | null,
+  filePath: string,
+): CodexRolloutStateRecord | null {
+  if (!state) return current;
+  if (!current) return { ...state, filePath };
+  if (
+    current.reason !== "thread_settings_applied" ||
+    current.precedingState ||
+    state.reason === "thread_settings_applied"
+  ) return current;
+  return {
+    ...current,
+    state: state.state,
+    precedingState: { state: state.state, timestampMs: state.timestampMs },
+  };
 }
 
 function readMatchedToolCallIds(lines: string[]): Set<string> {
@@ -1288,19 +1307,17 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
         rateLimit = detection;
       }
     }
-    if (rollout === null) {
-      const state = extractCodexRolloutStateLine(parsed);
-      if (state && !(state.callId && matchedCallIds.has(state.callId))) {
-        rollout = {
-          ...state,
-          filePath,
-        };
-      }
+    const state = extractCodexRolloutStateLine(parsed);
+    if (state && !(state.callId && matchedCallIds.has(state.callId))) {
+      rollout = updateCodexRolloutState(rollout, state, filePath);
     }
     if (model === undefined) {
       model = extractCodexTurnContextModel(parsed);
     }
-    if (rollout && rateLimit && model !== undefined && tokenUsage) {
+    if (
+      rollout && rateLimit && model !== undefined && tokenUsage &&
+      (rollout.reason !== "thread_settings_applied" || rollout.precedingState)
+    ) {
       break;
     }
   }

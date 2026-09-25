@@ -126,7 +126,7 @@ describe("readCodexRolloutState", () => {
     expect(reader.files.get(filePath)).not.toBe(firstCachedFile);
   });
 
-  it("reads a resumed prompt as waiting after an interrupted turn lacks a completion event", async () => {
+  it("keeps thread settings inside an active turn working until restore is verified", async () => {
     const sessionsDir = await makeSessionsDir(
       [
         JSON.stringify({
@@ -144,8 +144,12 @@ describe("readCodexRolloutState", () => {
 
     const resumed = await readCodexRolloutState(sessionsDir);
     expect(resumed.rollout).toMatchObject({
-      state: "waiting",
+      state: "working",
       reason: "thread_settings_applied",
+      precedingState: {
+        state: "working",
+        timestampMs: Date.parse("2026-09-25T06:39:51.000Z"),
+      },
     });
 
     const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
@@ -160,6 +164,28 @@ describe("readCodexRolloutState", () => {
     );
     const followup = await readCodexRolloutState(sessionsDir);
     expect(followup.rollout).toMatchObject({ state: "working", reason: "task_started" });
+  });
+
+  it("keeps the real in-turn settings sequence working before turn_aborted", async () => {
+    const sessionsDir = await makeSessionsDir([
+      { timestamp: "2026-08-11T11:33:40.389Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+      { timestamp: "2026-08-11T11:42:28.000Z", type: "event_msg", payload: { type: "thread_settings_applied", thread_id: "root" } },
+      { timestamp: "2026-08-11T11:42:40.000Z", type: "event_msg", payload: { type: "token_count", info: {} } },
+    ].map((line) => JSON.stringify(line)).join("\n"));
+    expect((await readCodexRolloutState(sessionsDir)).rollout).toMatchObject({
+      state: "working",
+      reason: "thread_settings_applied",
+    });
+    const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
+    await writeFile(filePath, `${await readFile(filePath, "utf8")}\n${JSON.stringify({
+      timestamp: "2026-08-11T11:42:40.100Z",
+      type: "event_msg",
+      payload: { type: "turn_aborted", reason: "interrupted", turn_id: "turn" },
+    })}`);
+    expect((await readCodexRolloutState(sessionsDir)).rollout).toMatchObject({
+      state: "waiting",
+      reason: "turn_aborted",
+    });
   });
 
   it("reads working from the current Codex rollout tail after an older interrupted turn", async () => {

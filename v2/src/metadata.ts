@@ -950,6 +950,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     normalizedSession.cursorRestoreBoundary.offset >= 0
       ? { cursorRestoreBoundary: normalizedSession.cursorRestoreBoundary }
       : {}),
+    ...(typeof normalizedSession.codexRestoreStartedAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
+      ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }

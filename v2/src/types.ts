@@ -1071,6 +1071,8 @@ export interface SessionRecord {
   agentSessionId?: string;
   /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
   cursorRestoreBoundary?: CursorRestoreBoundary;
+  /** Start of the latest Codex restore generation for rollout state classification. */
+  codexRestoreStartedAt?: string;
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
@@ -1186,7 +1188,7 @@ export interface SessionSidecarView {
 
 export interface SessionView extends Omit<
   SessionRecord,
-  "queuedMessages" | "tokenUsage" | "preflightTokenUsage" | "cursorRestoreBoundary"
+  "queuedMessages" | "tokenUsage" | "preflightTokenUsage" | "cursorRestoreBoundary" | "codexRestoreStartedAt"
 > {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -1218,6 +1220,7 @@ export interface SessionView extends Omit<
 export type DashboardOmittedField =
   | "queuedMessages"
   | "cursorRestoreBoundary"
+  | "codexRestoreStartedAt"
   | "pipeline"
   | "sidecarNames"
   | "sidecarPorts"

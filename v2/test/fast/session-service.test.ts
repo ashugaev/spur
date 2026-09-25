@@ -17055,6 +17055,50 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
+  it("uses a Codex settings marker only across the persisted restore generation", async () => {
+    const nowMs = Date.now();
+    const taskStartedAtMs = nowMs - 8_000;
+    const restoreStartedAtMs = nowMs - 5_000;
+    const markerAtMs = nowMs - 2_000;
+    const session = runningSession({
+      id: "codex-restored",
+      agent: "codex",
+      codexRestoreStartedAt: new Date(restoreStartedAtMs).toISOString(),
+    });
+    readSessionMock.mockReturnValue(session);
+    readAgentHookStateMock.mockReturnValue(null);
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(markerAtMs).toISOString(),
+        timestampMs: markerAtMs,
+        filePath: "/tmp/codex-rollout.jsonl",
+        reason: "thread_settings_applied",
+        precedingState: { state: "working", timestampMs: taskStartedAtMs },
+      },
+      rateLimit: null,
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", new Date(nowMs).toISOString());
+    const internals = sessionServiceInternals(service);
+
+    expect((await internals.classifySessionRecord(session)).state).toBe("waiting");
+    const { codexRestoreStartedAt: _restoreAt, ...withoutRestore } = session;
+    expect((await internals.classifySessionRecord(withoutRestore)).state).toBe("working");
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(markerAtMs).toISOString(),
+        timestampMs: markerAtMs,
+        filePath: "/tmp/codex-rollout.jsonl",
+        reason: "thread_settings_applied",
+        precedingState: { state: "working", timestampMs: restoreStartedAtMs + 1_000 },
+      },
+      rateLimit: null,
+    });
+    expect((await internals.classifySessionRecord(session)).state).toBe("working");
+  });
+
   it("detects needs_input for Cursor from AskUserQuestion JSONL", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
