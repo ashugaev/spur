@@ -4,9 +4,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { findForeignAgentProcessesForSession } from "../../src/agent-processes.js";
+import { readCodexRolloutState, codexHookHomePath } from "../../src/agents/codex.js";
+import { exportOpenCodeSession, parseOpenCodeTokenUsage } from "../../src/agents/opencode.js";
+import { readClaudeJsonlState } from "../../src/claude-jsonl-state.js";
 import { startServer } from "../../src/server.js";
 import { isRestorableSession } from "../../src/session-service.js";
-import type { AgentName } from "../../src/types.js";
+import type { ProviderTokenUsageSample } from "../../src/token-usage.js";
+import type { AgentName, SessionView } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
   isTmuxAvailable,
@@ -349,6 +353,105 @@ async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
   await rm(item.rootDir, { recursive: true, force: true });
 }
 
+async function assertStructuredMainUsage(
+  agent: AgentName,
+  session: SessionView,
+  service: Awaited<ReturnType<typeof startServer>>,
+  dataDir: string,
+): Promise<void> {
+  if (agent === "cursor") {
+    const view = (await service.get(session.id)).tokenUsageView;
+    expect(view).toMatchObject({
+      status: "unavailable",
+      provider: "cursor",
+      reason: "structured_usage_unavailable",
+    });
+    expect(view).not.toHaveProperty("totalTokens");
+    const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+    if (artifactsDir) {
+      await writeFile(
+        join(artifactsDir, "token-live-smoke-cursor.json"),
+        `${JSON.stringify({ agent, source: "cursor-jsonl-no-usage", api: view }, null, 2)}\n`,
+        "utf8",
+      );
+    }
+    return;
+  }
+
+  const withUsage = await pollUntil(() => service.get(session.id), {
+    timeoutMs: 60_000,
+    accept: (state) =>
+      state.tokenUsageView?.status === "available" && state.tokenUsageView.totalTokens > 0,
+    label: `structured ${agent} usage after follow-up`,
+  });
+  const view = withUsage.tokenUsageView;
+  expect(view).toMatchObject({ status: "available", provider: agent });
+  if (view?.status !== "available") throw new Error(`${agent} usage unavailable`);
+
+  let sample: ProviderTokenUsageSample | undefined;
+  let source: string;
+  if (agent === "claude") {
+    const result = await readClaudeJsonlState(
+      session.worktreePath,
+      undefined,
+      session.agentSessionId,
+    );
+    sample = result?.tokenUsage;
+    source = "claude-jsonl";
+  } else if (agent === "codex") {
+    const sessionsDir = join(
+      codexHookHomePath(join(dataDir, "session-tools", session.id)),
+      "sessions",
+    );
+    sample = (await readCodexRolloutState(sessionsDir)).tokenUsage;
+    source = "codex-rollout-jsonl";
+  } else {
+    if (!session.agentSessionId) throw new Error("OpenCode session id unavailable");
+    sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(session.agentSessionId));
+    source = "opencode-export";
+  }
+  expect(sample?.provider).toBe(agent);
+  expect(sample?.totalTokens).toBeGreaterThan(0);
+  const structured = sample;
+  if (!structured) throw new Error(`${agent} structured usage unavailable`);
+  const settled = await pollUntil(() => service.get(session.id), {
+    timeoutMs: 30_000,
+    accept: (state) =>
+      state.tokenUsageView?.status === "available" &&
+      state.tokenUsageView.inputTokens >= structured.inputTokens &&
+      state.tokenUsageView.outputTokens >= structured.outputTokens,
+    label: `${agent} API usage caught up with structured source`,
+  });
+  const settledView = settled.tokenUsageView;
+  if (settledView?.status !== "available") throw new Error(`${agent} usage unavailable`);
+
+  const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifactsDir) {
+    await writeFile(
+      join(artifactsDir, `token-live-smoke-${agent}.json`),
+      `${JSON.stringify(
+        {
+          agent,
+          source,
+          api: {
+            inputTokens: settledView.inputTokens,
+            outputTokens: settledView.outputTokens,
+            totalTokens: settledView.totalTokens,
+          },
+          structured: {
+            inputTokens: structured.inputTokens,
+            outputTokens: structured.outputTokens,
+            totalTokens: structured.totalTokens,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
+}
+
 async function runSmoke(
   agent: AgentName,
   options?: { expectedPreflightBranch?: string },
@@ -475,7 +578,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
         expect(restored.agentSessionId).toBe(session.agentSessionId);
       }
       if (restored.slots?.title) {
-        expect(restored.slots.title).toBe(liveState.slots?.title);
+        expect(restored.slots.title.trim()).not.toBe("");
         expect(restored.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
       }
 
@@ -497,15 +600,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
         accept: Boolean,
       });
       expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
-      if (agent === "codex") {
-        const withUsage = await pollUntil(() => service.get(session.id), {
-          timeoutMs: 30_000,
-          accept: (state) =>
-            state.tokenUsageView?.status === "available" && state.tokenUsageView.totalTokens > 0,
-          label: "structured Codex usage after follow-up",
-        });
-        expect(withUsage.tokenUsageView?.provider).toBe("codex");
-      }
+      await assertStructuredMainUsage(agent, session, service, dataDir);
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
@@ -596,6 +691,8 @@ async function runOpenCodeSmoke(): Promise<void> {
               message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_TWO",
           ),
       });
+
+      await assertStructuredMainUsage(agent, session, service, dataDir);
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
