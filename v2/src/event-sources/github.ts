@@ -950,6 +950,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           },
         }
       : {}),
+    clearPollDisabledOverride(sessionId: string): number | null {
+      const pending = pendingPollDisabledOverrides.get(sessionId) ?? null;
+      pendingPollDisabledOverrides.delete(sessionId);
+      // Also drop the live gate, not just the override that would have
+      // reapplied it on the next refresh — otherwise the session stays
+      // gated for one more tick (until refreshPollDisabled rebuilds the
+      // cache from disk, which no longer holds this session either).
+      permanentPrNotFound.delete(sessionId);
+      return pending;
+    },
   };
 }
 

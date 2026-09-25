@@ -6292,6 +6292,56 @@ describe("SessionService", () => {
     expect(result).toEqual({ ok: true, sessionId: "api-1", projectId: "api", cleared: [] });
   });
 
+  it("enableSourcePoll reports a clear sourced only from the live handle's in-process override when disk is already empty", async () => {
+    // Reproduces a session whose recordGitHubPollDisabledSession disk write
+    // previously failed: the disk-side clear is a no-op (nothing to clear),
+    // but the source handle still had the session gated via
+    // pendingPollDisabledOverrides. enableSourcePoll must still report it as
+    // cleared, not silently return an empty list while the caller believes
+    // polling resumed.
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { "pr-watch": { type: "github" } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    clearGitHubPollDisabledSessionMock.mockReturnValue(null);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const overrideClearer = vi.fn(
+      (_projectId: string, sourceId: string, sessionId: string): number | null =>
+        sourceId === "pr-watch" && sessionId === "api-1" ? 42 : null,
+    );
+    service.setPollDisabledOverrideClearer(overrideClearer);
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result).toEqual({
+      ok: true,
+      sessionId: "api-1",
+      projectId: "api",
+      cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+    });
+    expect(overrideClearer).toHaveBeenCalledWith("api", "pr-watch", "api-1");
+  });
+
   it("enableSourcePoll throws SessionResourceNotFoundError for an unknown session", async () => {
     loadConfigMock.mockReturnValue(baseConfig());
     readSessionMock.mockReturnValue(null);

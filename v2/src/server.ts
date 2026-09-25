@@ -684,6 +684,13 @@ export async function startServer(
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  // Closure over the reassignable `sources` above, so this stays correct
+  // across reloadAutomation recreating sources — registered once, not
+  // re-registered per (re)start.
+  service.setPollDisabledOverrideClearer(
+    (projectId, sourceId, sessionId) =>
+      sources?.clearPollDisabledOverride(projectId, sourceId, sessionId) ?? null,
+  );
   let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {

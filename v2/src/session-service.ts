@@ -2885,6 +2885,15 @@ export class SessionService {
   // remove. Never set outside a test; a production `startServer` never
   // passes it.
   private readonly sidecarSnapshotOverride: (() => Promise<ProcSnapshot>) | undefined;
+  // Set once by server.ts after startConfiguredSources returns (see
+  // setPollDisabledOverrideClearer). SessionService is constructed before any
+  // source handle exists, so this can't be a constructor option; unset here
+  // means enableSourcePoll falls back to the disk-only clear it always did.
+  // Kept as this narrow closure, not a reference to SourceGroupController
+  // itself, so session-service.ts never imports event-sources types.
+  private pollDisabledOverrideClearer:
+    | ((projectId: string, sourceId: string, sessionId: string) => number | null)
+    | undefined;
 
   constructor(
     configPath?: string,
@@ -2942,6 +2951,14 @@ export class SessionService {
     this.config = bootstrap.config;
     this.applyConfig(scan.config, scan.configPaths);
     if (!options.deferBackgroundLoops) this.startBackgroundLoops();
+  }
+
+  // Called once by server.ts's startAutomation, after startConfiguredSources
+  // returns a SourceGroupController. See pollDisabledOverrideClearer above.
+  setPollDisabledOverrideClearer(
+    clearer: (projectId: string, sourceId: string, sessionId: string) => number | null,
+  ): void {
+    this.pollDisabledOverrideClearer = clearer;
   }
 
   startBackgroundLoops(): void {
@@ -11761,6 +11778,11 @@ export class SessionService {
   // event-sources/github.ts permanentPrNotFound / metadata.ts's poll-disabled
   // registry). Missing session throws SessionResourceNotFoundError (404). Otherwise
   // 200-shaped: nothing disabled, or a project with no github sources, yields cleared: [].
+  // Clears both layers per source: the durable disk registry (clearGitHubPollDisabledSession)
+  // and, via pollDisabledOverrideClearer, the live handle's in-process
+  // pendingPollDisabledOverrides entry a failed disk write would otherwise leave
+  // gating the session indefinitely. Reports a source as cleared if either layer had
+  // something to clear, even when the disk side alone is a no-op.
   async enableSourcePoll(sessionId: string): Promise<SourcePollEnableResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -11771,12 +11793,21 @@ export class SessionService {
     const cleared: { sourceId: string; prNumber: number }[] = [];
     for (const [sourceId, source] of Object.entries(sources)) {
       if (source.type !== "github") continue;
-      const prNumber = clearGitHubPollDisabledSession(
+      const diskPrNumber = clearGitHubPollDisabledSession(
         this.config.dataDir,
         projectId,
         sourceId,
         sessionId,
       );
+      // Also drops the session's entry from the live handle's in-process
+      // override, if any — otherwise a session whose disk write previously
+      // failed stays gated (disk already empty, so diskPrNumber is null)
+      // until a rebind, the sweep, or handle recreation. See
+      // pollDisabledOverrideClearer and github.ts's
+      // clearPollDisabledOverride/pendingPollDisabledOverrides.
+      const overridePrNumber =
+        this.pollDisabledOverrideClearer?.(projectId, sourceId, sessionId) ?? null;
+      const prNumber = diskPrNumber ?? overridePrNumber;
       if (prNumber !== null) {
         cleared.push({ sourceId, prNumber });
       }

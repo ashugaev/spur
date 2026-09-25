@@ -3709,6 +3709,55 @@ describe("github source", () => {
       handle.stop();
     });
 
+    it("clearPollDisabledOverride re-arms a session gated only by a failed-write override, without a handle restart", async () => {
+      // Same failure mode as the previous case (record* always throws, so the
+      // gate lives entirely in pendingPollDisabledOverrides, never on disk),
+      // but here the override is dropped via the handle's
+      // clearPollDisabledOverride rather than a restart, mirroring what
+      // SessionService.enableSourcePoll now calls in addition to the disk
+      // clear (which is a no-op here since disk never held the entry).
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(notFoundEnvelope(42, { withPath: true }));
+      recordGitHubPollDisabledSessionMock.mockImplementation(() => {
+        throw new Error("disk full");
+      });
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+      expect(disabledEvents()).toHaveLength(1);
+
+      // Still gated one more cycle without the clear.
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+      mockLifecyclePoll(prView({ number: 42 }));
+      const cleared = handle.clearPollDisabledOverride?.("api-a1b2");
+      expect(cleared).toBe(42);
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+      // MUTATION CHECK (manual, run while iterating): commenting out the
+      // clearPollDisabledOverride call above must leave this at 1, not 2 —
+      // confirmed while writing this test.
+      expect(ghTransportMock).toHaveBeenCalledTimes(2);
+
+      handle.stop();
+    });
+
     it("survives a poll-disabled clear failure during the self-heal rebind", async () => {
       readReviewSourceSnapshotsMock.mockReturnValue(new Map());
       // Session rebound to PR 43 while the registry (seeded below) still names the
