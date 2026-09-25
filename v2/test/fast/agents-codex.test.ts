@@ -1020,22 +1020,27 @@ describe("findCodexSessionId", () => {
       mtimeMs: filePath === "/session-root/child.jsonl" ? 2000 : 1000,
     }));
     mockStreamsForFiles({
-      "/session-root/root.jsonl": [JSON.stringify({
-        type: "session_meta",
-        payload: { id: "root-thread", cwd: "/worktree/path", source: "cli" },
-      })],
-      "/session-root/child.jsonl": [JSON.stringify({
-        type: "session_meta",
-        payload: {
-          id: "child-thread",
-          cwd: "/worktree/path",
-          source: { subagent: { thread_spawn: { parent_thread_id: "root-thread" } } },
-        },
-      })],
+      "/session-root/root.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "root-thread", cwd: "/worktree/path", source: "cli" },
+        }),
+      ],
+      "/session-root/child.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "child-thread",
+            cwd: "/worktree/path",
+            source: { subagent: { thread_spawn: { parent_thread_id: "root-thread" } } },
+          },
+        }),
+      ],
     });
 
-    expect(await findCodexSessionId("/worktree/path", { sessionRootDir: "/session-root" }))
-      .toBe("root-thread");
+    expect(await findCodexSessionId("/worktree/path", { sessionRootDir: "/session-root" })).toBe(
+      "root-thread",
+    );
   });
 });
 

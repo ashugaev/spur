@@ -18342,7 +18342,8 @@ export class SessionService {
     previous: SessionRecord["tokenUsage"],
     classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
   ): SessionRecord["tokenUsage"] {
-    const samples = classified.tokenUsages ?? (classified.tokenUsage ? [classified.tokenUsage] : []);
+    const samples =
+      classified.tokenUsages ?? (classified.tokenUsage ? [classified.tokenUsage] : []);
     return samples.reduce((usage, sample) => reconcileTokenUsage(usage, sample), previous);
   }
 

@@ -16702,14 +16702,16 @@ describe("SessionService", () => {
     expect(result.tokenUsageView).not.toHaveProperty("generations");
     expect(writeSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
-      expect.objectContaining({ tokenUsage: expect.objectContaining({
-        totalTokens: 170,
-        generations: expect.objectContaining({
-          "codex:root-thread": expect.objectContaining({ totalTokens: 100 }),
-          "codex:child-a": expect.objectContaining({ totalTokens: 20 }),
-          "codex:child-b": expect.objectContaining({ totalTokens: 50 }),
+      expect.objectContaining({
+        tokenUsage: expect.objectContaining({
+          totalTokens: 170,
+          generations: expect.objectContaining({
+            "codex:root-thread": expect.objectContaining({ totalTokens: 100 }),
+            "codex:child-a": expect.objectContaining({ totalTokens: 20 }),
+            "codex:child-b": expect.objectContaining({ totalTokens: 50 }),
+          }),
         }),
-      }) }),
+      }),
     );
   });
 
@@ -42877,19 +42879,41 @@ describe("SessionService", () => {
           rollout: null,
           rateLimit: null,
           tokenUsage: {
-            provider: "codex", generationId: "codex:child", inputTokens: 60,
-            outputTokens: 10, totalTokens: 70,
+            provider: "codex",
+            generationId: "codex:child",
+            inputTokens: 60,
+            outputTokens: 10,
+            totalTokens: 70,
           },
           tokenUsages: [
-            { provider: "codex", generationId: "codex:root", inputTokens: 90, outputTokens: 10, totalTokens: 100 },
-            { provider: "codex", generationId: "codex:child", inputTokens: 60, outputTokens: 10, totalTokens: 70 },
+            {
+              provider: "codex",
+              generationId: "codex:root",
+              inputTokens: 90,
+              outputTokens: 10,
+              totalTokens: 100,
+            },
+            {
+              provider: "codex",
+              generationId: "codex:child",
+              inputTokens: 60,
+              outputTokens: 10,
+              totalTokens: 70,
+            },
           ],
         });
         const sessions = createSessionStore();
-        sessions.set("api-1", runningSession({ id: "api-1", agent: "codex", agentSessionId: "root" }));
+        sessions.set(
+          "api-1",
+          runningSession({ id: "api-1", agent: "codex", agentSessionId: "root" }),
+        );
         const service = await createDisposedSessionService();
         const view = await service.get("api-1");
-        expect(view.tokenUsageView).toMatchObject({ budget: 150, totalTokens: 170, exhausted: true });
+        expect(view.tokenUsageView).toMatchObject({
+          budget: 150,
+          totalTokens: 170,
+          exhausted: true,
+        });
 
         await staleInternals(service).stopForTokenBudget(view);
 

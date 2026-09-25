@@ -276,8 +276,8 @@ async function readSessionMeta(
           return {
             cwd,
             threadId,
-            isSubagent: isRecord(threadSpawn) &&
-              typeof threadSpawn["parent_thread_id"] === "string",
+            isSubagent:
+              isRecord(threadSpawn) && typeof threadSpawn["parent_thread_id"] === "string",
           };
         }
       } catch {
@@ -960,12 +960,7 @@ function extractCodexRolloutStateLine(
     // This event also occurs inside active turns. The caller may treat it as
     // resume-ready only when it crosses the recorded restore generation.
     if (payloadType === "thread_settings_applied") {
-      return codexRolloutStateRecord(
-        "working",
-        timestamp,
-        timestampMs,
-        "thread_settings_applied",
-      );
+      return codexRolloutStateRecord("working", timestamp, timestampMs, "thread_settings_applied");
     }
     if (payloadType === "input_required") {
       const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
@@ -1018,7 +1013,8 @@ function updateCodexRolloutState(
     current.reason !== "thread_settings_applied" ||
     current.precedingState ||
     state.reason === "thread_settings_applied"
-  ) return current;
+  )
+    return current;
   return {
     ...current,
     state: state.state,
@@ -1322,7 +1318,10 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
       model = extractCodexTurnContextModel(parsed);
     }
     if (
-      rollout && rateLimit && model !== undefined && tokenUsage &&
+      rollout &&
+      rateLimit &&
+      model !== undefined &&
+      tokenUsage &&
       (rollout.reason !== "thread_settings_applied" || rollout.precedingState)
     ) {
       break;

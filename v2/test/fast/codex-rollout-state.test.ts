@@ -167,21 +167,40 @@ describe("readCodexRolloutState", () => {
   });
 
   it("keeps the real in-turn settings sequence working before turn_aborted", async () => {
-    const sessionsDir = await makeSessionsDir([
-      { timestamp: "2026-08-11T11:33:40.389Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
-      { timestamp: "2026-08-11T11:42:28.000Z", type: "event_msg", payload: { type: "thread_settings_applied", thread_id: "root" } },
-      { timestamp: "2026-08-11T11:42:40.000Z", type: "event_msg", payload: { type: "token_count", info: {} } },
-    ].map((line) => JSON.stringify(line)).join("\n"));
+    const sessionsDir = await makeSessionsDir(
+      [
+        {
+          timestamp: "2026-08-11T11:33:40.389Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn" },
+        },
+        {
+          timestamp: "2026-08-11T11:42:28.000Z",
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_id: "root" },
+        },
+        {
+          timestamp: "2026-08-11T11:42:40.000Z",
+          type: "event_msg",
+          payload: { type: "token_count", info: {} },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n"),
+    );
     expect((await readCodexRolloutState(sessionsDir)).rollout).toMatchObject({
       state: "working",
       reason: "thread_settings_applied",
     });
     const filePath = join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl");
-    await writeFile(filePath, `${await readFile(filePath, "utf8")}\n${JSON.stringify({
-      timestamp: "2026-08-11T11:42:40.100Z",
-      type: "event_msg",
-      payload: { type: "turn_aborted", reason: "interrupted", turn_id: "turn" },
-    })}`);
+    await writeFile(
+      filePath,
+      `${await readFile(filePath, "utf8")}\n${JSON.stringify({
+        timestamp: "2026-08-11T11:42:40.100Z",
+        type: "event_msg",
+        payload: { type: "turn_aborted", reason: "interrupted", turn_id: "turn" },
+      })}`,
+    );
     expect((await readCodexRolloutState(sessionsDir)).rollout).toMatchObject({
       state: "waiting",
       reason: "turn_aborted",
@@ -195,23 +214,45 @@ describe("readCodexRolloutState", () => {
       {
         filename: "root.jsonl",
         content: [
-          JSON.stringify({ type: "session_meta", payload: { id: rootId, cwd: "/same/worktree", source: "cli" } }),
-          JSON.stringify({ timestamp: "2026-09-12T10:22:11.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "root-turn" } }),
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: rootId, cwd: "/same/worktree", source: "cli" },
+          }),
+          JSON.stringify({
+            timestamp: "2026-09-12T10:22:11.000Z",
+            type: "event_msg",
+            payload: { type: "task_started", turn_id: "root-turn" },
+          }),
         ].join("\n"),
         mtimeMs: 1_000,
       },
       {
         filename: "child.jsonl",
         content: [
-          JSON.stringify({ type: "session_meta", payload: { id: childId, cwd: "/same/worktree", source: { subagent: { thread_spawn: { parent_thread_id: rootId } } } } }),
-          JSON.stringify({ timestamp: "2026-09-12T10:45:57.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "child-turn" } }),
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: childId,
+              cwd: "/same/worktree",
+              source: { subagent: { thread_spawn: { parent_thread_id: rootId } } },
+            },
+          }),
+          JSON.stringify({
+            timestamp: "2026-09-12T10:45:57.000Z",
+            type: "event_msg",
+            payload: { type: "task_complete", turn_id: "child-turn" },
+          }),
         ].join("\n"),
         mtimeMs: 2_000,
       },
     ]);
 
     const result = await readCodexRolloutState(sessionsDir, undefined, rootId);
-    expect(result.rollout).toMatchObject({ state: "working", reason: "task_started", turnId: "root-turn" });
+    expect(result.rollout).toMatchObject({
+      state: "working",
+      reason: "task_started",
+      turnId: "root-turn",
+    });
     expect(result.threadId).toBe(rootId);
     expect((await readCodexRolloutState(sessionsDir)).rollout?.state).toBe("working");
   });
@@ -537,63 +578,89 @@ describe("readCodexRolloutState", () => {
   });
 
   it("returns root and short-lived child generations from one sweep", async () => {
-    const tokenCount = (timestamp: string, totalTokens: number) => JSON.stringify({
-      timestamp,
-      type: "event_msg",
-      payload: {
-        type: "token_count",
-        info: { total_token_usage: {
-          input_tokens: totalTokens - 10,
-          output_tokens: 10,
-          total_tokens: totalTokens,
-        } },
-      },
-    });
-    const rootId = "root-thread";
-    const childMeta = (id: string, timestamp: string) => JSON.stringify({
-      timestamp,
-      type: "session_meta",
-      payload: {
-        id,
-        cwd: "/same/worktree",
+    const tokenCount = (timestamp: string, totalTokens: number) =>
+      JSON.stringify({
         timestamp,
-        source: { subagent: { thread_spawn: { parent_thread_id: rootId } } },
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: totalTokens - 10,
+              output_tokens: 10,
+              total_tokens: totalTokens,
+            },
+          },
+        },
+      });
+    const rootId = "root-thread";
+    const childMeta = (id: string, timestamp: string) =>
+      JSON.stringify({
+        timestamp,
+        type: "session_meta",
+        payload: {
+          id,
+          cwd: "/same/worktree",
+          timestamp,
+          source: { subagent: { thread_spawn: { parent_thread_id: rootId } } },
+        },
+      });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      {
+        filename: "root.jsonl",
+        content: [
+          sessionMeta(rootId),
+          JSON.stringify({
+            timestamp: "2026-09-12T09:59:00.000Z",
+            type: "event_msg",
+            payload: { type: "task_started", turn_id: "root-turn" },
+          }),
+          tokenCount("2026-09-12T10:00:00.000Z", 100),
+        ].join("\n"),
+        mtimeMs: 1_000,
       },
-    });
-    const sessionsDir = await makeMultiFileSessionsDir([{
-      filename: "root.jsonl",
-      content: [
-        sessionMeta(rootId),
-        JSON.stringify({ timestamp: "2026-09-12T09:59:00.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "root-turn" } }),
-        tokenCount("2026-09-12T10:00:00.000Z", 100),
-      ].join("\n"),
-      mtimeMs: 1_000,
-    }]);
+    ]);
     const reader: CodexRolloutReaderState = { files: new Map() };
-    expect((await readCodexRolloutState(sessionsDir, reader, rootId)).tokenUsages)
-      .toMatchObject([{ generationId: "codex:root-thread", totalTokens: 100 }]);
+    expect((await readCodexRolloutState(sessionsDir, reader, rootId)).tokenUsages).toMatchObject([
+      { generationId: "codex:root-thread", totalTokens: 100 },
+    ]);
     const rolloutsDir = join(sessionsDir, "2026", "04", "19");
-    await writeFile(join(rolloutsDir, "child-a.jsonl"), [
-      childMeta("child-a", "2026-09-12T10:01:00.000Z"),
-      tokenCount("2026-09-12T10:00:59.000Z", 10),
-      tokenCount("2026-09-12T10:01:05.000Z", 30),
-      JSON.stringify({ timestamp: "2026-09-12T10:01:06.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "child-a-turn" } }),
-    ].join("\n"));
-    await writeFile(join(rolloutsDir, "child-b.jsonl"), [
-      childMeta("child-b", "2026-09-12T10:02:00.000Z"),
-      tokenCount("2026-09-12T10:02:05.000Z", 50),
-      JSON.stringify({ timestamp: "2026-09-12T10:02:06.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "child-b-turn" } }),
-    ].join("\n"));
+    await writeFile(
+      join(rolloutsDir, "child-a.jsonl"),
+      [
+        childMeta("child-a", "2026-09-12T10:01:00.000Z"),
+        tokenCount("2026-09-12T10:00:59.000Z", 10),
+        tokenCount("2026-09-12T10:01:05.000Z", 30),
+        JSON.stringify({
+          timestamp: "2026-09-12T10:01:06.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "child-a-turn" },
+        }),
+      ].join("\n"),
+    );
+    await writeFile(
+      join(rolloutsDir, "child-b.jsonl"),
+      [
+        childMeta("child-b", "2026-09-12T10:02:00.000Z"),
+        tokenCount("2026-09-12T10:02:05.000Z", 50),
+        JSON.stringify({
+          timestamp: "2026-09-12T10:02:06.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "child-b-turn" },
+        }),
+      ].join("\n"),
+    );
 
     const result = await readCodexRolloutState(sessionsDir, reader, rootId);
     expect(result.rollout).toMatchObject({ state: "working", turnId: "root-turn" });
     expect(result.tokenUsage?.generationId).toBe("codex:root-thread");
-    expect(result.tokenUsages?.map((sample) => [sample.generationId, sample.totalTokens]).sort())
-      .toEqual([
-        ["codex:child-a", 20],
-        ["codex:child-b", 50],
-        ["codex:root-thread", 100],
-      ]);
+    expect(
+      result.tokenUsages?.map((sample) => [sample.generationId, sample.totalTokens]).sort(),
+    ).toEqual([
+      ["codex:child-a", 20],
+      ["codex:child-b", 50],
+      ["codex:root-thread", 100],
+    ]);
   });
 
   it("keeps token usage bound to the selected active rollout", async () => {

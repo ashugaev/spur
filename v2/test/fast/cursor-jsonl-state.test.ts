@@ -508,25 +508,44 @@ describe("findLatestCursorTranscriptFile", () => {
     tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
     const transcriptDir = join(
       homedir(),
-      ".cursor", "projects", toCursorProjectPath(worktreePath),
-      "agent-transcripts", "chat",
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+      "chat",
     );
     await mkdir(transcriptDir, { recursive: true });
     const transcriptPath = join(transcriptDir, "chat.jsonl");
-    await writeFile(transcriptPath, '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}\n');
+    await writeFile(
+      transcriptPath,
+      '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}\n',
+    );
     const oldReader = (await readCursorJsonlState(worktreePath))?.reader;
     const boundary = await captureCursorRestoreBoundary(worktreePath);
-    expect(boundary).toEqual({ filePath: transcriptPath, offset: (await readFile(transcriptPath)).length });
+    expect(boundary).toEqual({
+      filePath: transcriptPath,
+      offset: (await readFile(transcriptPath)).length,
+    });
 
-    const restored = await readCursorJsonlState(worktreePath, oldReader, undefined, { after: boundary ?? undefined });
+    const restored = await readCursorJsonlState(worktreePath, oldReader, undefined, {
+      after: boundary ?? undefined,
+    });
     expect(restored?.state).toBe("waiting");
     expect(restored?.reader.tailRecords).toEqual([]);
-    const coldRestored = await readCursorJsonlState(worktreePath, undefined, undefined, { after: boundary ?? undefined });
+    const coldRestored = await readCursorJsonlState(worktreePath, undefined, undefined, {
+      after: boundary ?? undefined,
+    });
     expect(coldRestored?.state).toBe("waiting");
     expect(coldRestored?.reader.tailRecords).toEqual([]);
 
-    await writeFile(transcriptPath, (await readFile(transcriptPath, "utf8")) + '{"role":"user","message":{"content":[{"type":"text","text":"follow-up"}]}}\n');
-    const resumed = await readCursorJsonlState(worktreePath, restored?.reader, undefined, { after: boundary ?? undefined });
+    await writeFile(
+      transcriptPath,
+      (await readFile(transcriptPath, "utf8")) +
+        '{"role":"user","message":{"content":[{"type":"text","text":"follow-up"}]}}\n',
+    );
+    const resumed = await readCursorJsonlState(worktreePath, restored?.reader, undefined, {
+      after: boundary ?? undefined,
+    });
     expect(resumed?.state).toBe("working");
     expect(resumed?.reader.tailRecords).toHaveLength(1);
   });

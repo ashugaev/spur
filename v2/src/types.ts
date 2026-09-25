@@ -1188,7 +1188,11 @@ export interface SessionSidecarView {
 
 export interface SessionView extends Omit<
   SessionRecord,
-  "queuedMessages" | "tokenUsage" | "preflightTokenUsage" | "cursorRestoreBoundary" | "codexRestoreStartedAt"
+  | "queuedMessages"
+  | "tokenUsage"
+  | "preflightTokenUsage"
+  | "cursorRestoreBoundary"
+  | "codexRestoreStartedAt"
 > {
   runtimeAlive: boolean;
   workspaceExists: boolean;
