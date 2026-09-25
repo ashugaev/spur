@@ -2354,6 +2354,8 @@ describe("SessionService", () => {
       await useRealTodoLedger();
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
+      // Disposed only to stop its own timers; the reminder path needs it live.
+      (internals as unknown as { deliveryStopped: boolean }).deliveryStopped = false;
       let releaseSend: () => void = () => {};
       const send = vi.spyOn(internals, "writeAgentMessage").mockImplementation(
         () =>
@@ -2388,6 +2390,49 @@ describe("SessionService", () => {
       expect(send).toHaveBeenCalledTimes(1);
       releaseSend();
       await vi.advanceTimersByTimeAsync(0);
+    });
+
+    it("stands a ToDo reminder down while another write holds the pane", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      (internals as unknown as { deliveryStopped: boolean }).deliveryStopped = false;
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      internals.paneWriteLocks.set(session.tmuxSession, new Promise<void>(() => {}));
+
+      internals.scheduleTodoNudge(session);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(send).not.toHaveBeenCalled();
+      // Stood down, not parked behind the pane lock.
+      expect(
+        (internals as unknown as { todoNudgesInFlight: Set<string> }).todoNudgesInFlight.has(
+          session.id,
+        ),
+      ).toBe(false);
+      internals.paneWriteLocks.delete(session.tmuxSession);
+    });
+
+    it("drops a scheduled ToDo reminder when the service is disposed before it types", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      listSessionsMock.mockReturnValue([]);
+      await useRealTodoLedger();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+
+      internals.scheduleTodoNudge(session);
+      service.dispose();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(send).not.toHaveBeenCalled();
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
     });
 
     it("finishes the attention sweep while a ToDo reminder's ack is outstanding", async () => {
@@ -7665,6 +7710,17 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
 
     expect((await service.get("api-1")).queuedMessages).toBeUndefined();
+
+    // Pipeline steps alone: shown, but nothing queued waits on the prompt.
+    sessions.set("api-1", {
+      ...base,
+      queuedMessages: { messages: [], awaitingPrompt: true },
+      pipeline: { steps: ["research", "test"], nextStepIndex: 1, status: "running" },
+    });
+    const pipelineView = (await service.get("api-1")).queuedMessages;
+    expect(pipelineView?.awaitingPrompt).toBe(false);
+    expect(pipelineView?.messages).toEqual([]);
+    expect(pipelineView?.pipelineMessages).toHaveLength(1);
 
     sessions.set("api-1", {
       ...base,

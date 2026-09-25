@@ -6725,18 +6725,26 @@ export class SessionService {
       return;
     }
     this.todoNudgesInFlight.add(session.id);
-    void this.maybeNudgeTodo(session)
+    void this.maybeNudgeTodo(session, { detached: true })
       .catch(() => {})
       .finally(() => {
         this.todoNudgesInFlight.delete(session.id);
       });
   }
 
-  private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
-    return this.withWorkspaceLifecycleLocks(session.id, () => this.maybeNudgeTodoLocked(session));
+  private async maybeNudgeTodo(
+    session: SessionRecord,
+    options?: { detached?: boolean },
+  ): Promise<void> {
+    return this.withWorkspaceLifecycleLocks(session.id, () =>
+      this.maybeNudgeTodoLocked(session, options),
+    );
   }
 
-  private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
+  private async maybeNudgeTodoLocked(
+    session: SessionRecord,
+    options?: { detached?: boolean },
+  ): Promise<void> {
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
@@ -6836,6 +6844,9 @@ export class SessionService {
         const attempts =
           session.todoNudge?.fingerprint === fingerprint ? session.todoNudge.attempts : 0;
         if (attempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return;
+        // A detached reminder outlives the sweep that scheduled it; after
+        // dispose() it must neither spend an attempt nor type into the pane.
+        if (options?.detached === true && this.deliveryStopped) return;
         writeSession(this.config.dataDir, {
           ...session,
           todoNudge: { fingerprint, attempts: attempts + 1 },
