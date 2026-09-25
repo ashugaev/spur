@@ -27,6 +27,7 @@ const OPENCODE_BIN = await binaryPath("opencode");
 
 interface AuthStatus {
   available: boolean;
+  model?: string;
   skipReason?: string;
   error?: string;
 }
@@ -223,9 +224,12 @@ async function opencodeStatus(): Promise<AuthStatus> {
   if (!OPENCODE_BIN) return { available: false, skipReason: "opencode unavailable" };
   try {
     const { stdout } = await execFileAsync(OPENCODE_BIN, ["models"], { timeout: 20_000 });
-    return stdout.split("\n").some((line) => line.trim() === "opencode/deepseek-v4-flash-free")
-      ? { available: true }
-      : { available: false, skipReason: "OpenCode free smoke model unavailable" };
+    const models = stdout.split("\n").map((line) => line.trim());
+    const configuredModel = process.env.SPUR_SMOKE_OPENCODE_MODEL?.trim();
+    const model = configuredModel || models.find((candidate) => candidate.startsWith("opencode/"));
+    return model && models.includes(model)
+      ? { available: true, model }
+      : { available: false, skipReason: "OpenCode smoke model unavailable" };
   } catch (error) {
     return { available: false, error: `Failed to list OpenCode models: ${errorText(error)}` };
   }
@@ -468,6 +472,8 @@ After the file and the session metadata are set, wait for more instructions.`,
 }
 
 async function runOpenCodeSmoke(): Promise<void> {
+  const model = opencodeAuth.model;
+  if (!model) throw new Error("OpenCode smoke model unavailable");
   const agent = "opencode" as const;
   const rootDir = await createTempDir("spur-smoke-opencode-");
   const port = await findFreePort();
@@ -501,7 +507,7 @@ async function runOpenCodeSmoke(): Promise<void> {
       const session = await service.spawn({
         project: "api",
         agent,
-        model: "opencode/deepseek-v4-flash-free",
+        model,
         prompt: "Reply with exactly SPUR_OPENCODE_SMOKE_ONE",
       });
       cleanupItem.branch = session.branch;
