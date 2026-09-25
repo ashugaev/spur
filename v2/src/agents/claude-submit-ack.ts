@@ -63,6 +63,18 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
   return extractTextContent(message);
 }
 
+// Claude records a submit that gets absorbed mid-turn only as a
+// type:"queue-operation" record (operation enqueue/remove/popAll/...), never
+// as a type:"user" turn. The content is written verbatim at submit time, so
+// it is delivery evidence of the same strength as a user turn.
+function extractQueuedMessageText(parsed: Record<string, unknown>): string | null {
+  if (parsed["type"] !== "queue-operation") {
+    return null;
+  }
+  const content = parsed["content"];
+  return typeof content === "string" ? content : null;
+}
+
 const CTRL_U = String.fromCharCode(0x15);
 
 function stripLeadingCtrlU(value: string): string {
@@ -76,7 +88,7 @@ function stripLeadingCtrlU(value: string): string {
 const normalize = (s: string) =>
   stripLeadingCtrlU(s).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 
-async function scanFileForUserText(
+async function scanFileForSubmittedText(
   filePath: string,
   startOffset: number,
   normalizedTarget: string,
@@ -90,7 +102,7 @@ async function scanFileForUserText(
         if (!trimmed) continue;
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
-        const text = extractUserMessageText(parsed);
+        const text = extractUserMessageText(parsed) ?? extractQueuedMessageText(parsed);
         if (text !== null && normalize(text) === normalizedTarget) {
           reader.close();
           return true;
@@ -113,7 +125,7 @@ export async function scanClaudeJsonlForMessage(
 ): Promise<boolean> {
   const normalizedTarget = normalize(text);
 
-  if (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget)) {
+  if (await scanFileForSubmittedText(baseline.file, baseline.size, normalizedTarget)) {
     return true;
   }
 
@@ -125,5 +137,5 @@ export async function scanClaudeJsonlForMessage(
   if (!latest || latest === baseline.file) {
     return false;
   }
-  return scanFileForUserText(latest, 0, normalizedTarget);
+  return scanFileForSubmittedText(latest, 0, normalizedTarget);
 }

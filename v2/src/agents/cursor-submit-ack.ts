@@ -5,6 +5,7 @@ import {
   findCursorAckTranscriptFile,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
+import { findCursorSessionId } from "./cursor.js";
 
 export interface CursorSubmitBaseline {
   file: string;
@@ -126,6 +127,7 @@ export async function scanCursorJsonlForMessage(
   text: string,
   worktreePath: string,
   agentSessionId?: string,
+  options?: { cursorConfigDir?: string },
 ): Promise<CursorSubmitAckScanResult> {
   const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
@@ -134,6 +136,23 @@ export async function scanCursorJsonlForMessage(
 
   if (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget)) {
     return { found: true, scannedFile: baseline.file };
+  }
+
+  if (agentSessionId && options?.cursorConfigDir) {
+    // Cursor rotates its chat id mid-session; a pinned id's transcript never
+    // rotates, so re-resolve the current chat id from the session-private
+    // config dir (never the shared project transcripts dir — see #889/#890).
+    const resolvedId = await findCursorSessionId(worktreePath, {
+      configDir: options.cursorConfigDir,
+    });
+    if (resolvedId && resolvedId !== agentSessionId) {
+      const rotated = await findCursorAckTranscriptFile(worktreePath, resolvedId);
+      if (rotated) {
+        const found = await scanFileForUserText(rotated, 0, normalizedTarget);
+        return { found, scannedFile: rotated };
+      }
+    }
+    return { found: false, scannedFile: baseline.file };
   }
 
   const latest = await findCursorAckTranscriptFile(worktreePath, agentSessionId);

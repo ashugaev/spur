@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -294,5 +294,96 @@ describe("scanClaudeJsonlForMessage", () => {
       "/tmp/worktree",
     );
     expect(found).toBe(true);
+  });
+
+  // AC1: claude records a send that gets absorbed mid-turn only as a
+  // type:"queue-operation" record, never as a type:"user" turn.
+  it("acks an enqueued send recorded only as a queue-operation", async () => {
+    const filePath = await makeJsonl("queue-enqueue.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [
+      { type: "queue-operation", operation: "enqueue", content: "ship the task" },
+    ]);
+    const found = await scanClaudeJsonlForMessage(
+      { file: filePath, size: 0 },
+      "ship the task",
+      "/tmp/worktree",
+    );
+    expect(found).toBe(true);
+  });
+
+  // AC2: the absorbed removal shape acks too.
+  it("acks an absorbed_mid_turn removal carrying the sent text", async () => {
+    const filePath = await makeJsonl("queue-remove.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [
+      {
+        type: "queue-operation",
+        operation: "remove",
+        reason: "absorbed_mid_turn",
+        content: "ship the task",
+      },
+    ]);
+    const found = await scanClaudeJsonlForMessage(
+      { file: filePath, size: 0 },
+      "ship the task",
+      "/tmp/worktree",
+    );
+    expect(found).toBe(true);
+  });
+
+  // AC3: a contentless queue-operation (the real host dequeue shape) never
+  // matches, nor does a queue-operation whose content differs.
+  it("ignores a contentless dequeue and a non-matching queued content", async () => {
+    const fixturePath =
+      "test/fixtures/agent-history/claude/servererror-trailing-system-record-38ce.jsonl";
+    const fixtureBody = await readFile(fixturePath, "utf8");
+    const root = await mkdtemp(join(tmpdir(), "claude-submit-ack-"));
+    tempDirs.push(root);
+    const filePath = join(root, "dequeue.jsonl");
+    await writeFile(filePath, fixtureBody, { encoding: "utf8", flag: "w" });
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [
+      { type: "queue-operation", operation: "enqueue", content: "a different message" },
+    ]);
+    const found = await scanClaudeJsonlForMessage(
+      { file: filePath, size: 0 },
+      "ship the task",
+      "/tmp/worktree",
+    );
+    expect(found).toBe(false);
+  });
+
+  // AC3b: the predicate is operation-agnostic — any queue-operation carrying
+  // the sent text acks, regardless of the operation name.
+  it("acks any queue-operation carrying the sent text regardless of operation", async () => {
+    const popAllPath = await makeJsonl("queue-popall.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(popAllPath);
+    await appendJsonl(popAllPath, [
+      { type: "queue-operation", operation: "popAll", content: "ship the task" },
+    ]);
+    const popAllFound = await scanClaudeJsonlForMessage(
+      { file: popAllPath, size: 0 },
+      "ship the task",
+      "/tmp/worktree",
+    );
+    expect(popAllFound).toBe(true);
+
+    const deliveredPath = await makeJsonl("queue-delivered.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(deliveredPath);
+    await appendJsonl(deliveredPath, [
+      {
+        type: "queue-operation",
+        operation: "remove",
+        reason: "delivered_to_agent",
+        content: "ship the task",
+      },
+    ]);
+    const deliveredFound = await scanClaudeJsonlForMessage(
+      { file: deliveredPath, size: 0 },
+      "ship the task",
+      "/tmp/worktree",
+    );
+    expect(deliveredFound).toBe(true);
   });
 });

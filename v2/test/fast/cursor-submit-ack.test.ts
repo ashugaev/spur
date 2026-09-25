@@ -3,18 +3,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { findCursorAckTranscriptFileMock, resolveCursorPinnedTranscriptPathMock } = vi.hoisted(
-  () => ({
-    findCursorAckTranscriptFileMock:
-      vi.fn<(worktreePath: string, agentSessionId?: string) => Promise<string | null>>(),
-    resolveCursorPinnedTranscriptPathMock:
-      vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string>>(),
-  }),
-);
+const {
+  findCursorAckTranscriptFileMock,
+  resolveCursorPinnedTranscriptPathMock,
+  findCursorSessionIdMock,
+} = vi.hoisted(() => ({
+  findCursorAckTranscriptFileMock:
+    vi.fn<(worktreePath: string, agentSessionId?: string) => Promise<string | null>>(),
+  resolveCursorPinnedTranscriptPathMock:
+    vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string>>(),
+  findCursorSessionIdMock:
+    vi.fn<(worktreePath: string, options?: { configDir?: string }) => Promise<string | null>>(),
+}));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
   findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
   resolveCursorPinnedTranscriptPath: resolveCursorPinnedTranscriptPathMock,
+}));
+
+vi.mock("../../src/agents/cursor.js", () => ({
+  findCursorSessionId: findCursorSessionIdMock,
 }));
 
 import {
@@ -27,6 +35,7 @@ const tempDirs: string[] = [];
 beforeEach(() => {
   findCursorAckTranscriptFileMock.mockReset();
   resolveCursorPinnedTranscriptPathMock.mockReset();
+  findCursorSessionIdMock.mockReset();
 });
 
 afterEach(async () => {
@@ -231,5 +240,62 @@ describe("scanCursorJsonlForMessage", () => {
     });
     const secondPoll = await scanCursorJsonlForMessage(baseline, "pending turn", "/tmp/worktree");
     expect(secondPoll.found).toBe(true);
+  });
+
+  // AC5: cursor rotated its chat id mid-session; the pinned transcript stays
+  // stale forever, so re-resolve the current id from the session-private
+  // config dir and scan the rotated transcript from offset 0.
+  it("acks via the re-resolved chat id when the pinned transcript is stale", async () => {
+    const pinnedFile = await makeJsonl("pinned.jsonl", [userTurn("earlier turn")]);
+    const rotatedFile = await makeJsonl("rotated-chat.jsonl", [userTurn("ship the task")]);
+    const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
+
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
+    );
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+
+    const result = await scanCursorJsonlForMessage(
+      baseline,
+      "ship the task",
+      "/tmp/worktree",
+      "pinned-id",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
+
+    expect(findCursorSessionIdMock).toHaveBeenCalledWith("/tmp/worktree", {
+      configDir: "/tmp/spur-data/cursor/session-1",
+    });
+    expect(result.found).toBe(true);
+    expect(result.scannedFile).toBe(rotatedFile);
+  });
+
+  // AC6: the re-resolved id equals the pin, or resolves to nothing — no extra
+  // file is scanned, result stays bound to the baseline file.
+  it("does not rescan when the re-resolved chat id equals the pin or is unavailable", async () => {
+    const pinnedFile = await makeJsonl("pinned-2.jsonl", [userTurn("earlier turn")]);
+    const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
+
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+    const sameIdResult = await scanCursorJsonlForMessage(
+      baseline,
+      "never appears",
+      "/tmp/worktree",
+      "pinned-id",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
+    expect(sameIdResult).toEqual({ found: false, scannedFile: pinnedFile });
+    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
+
+    findCursorSessionIdMock.mockResolvedValue(null);
+    const noIdResult = await scanCursorJsonlForMessage(
+      baseline,
+      "never appears",
+      "/tmp/worktree",
+      "pinned-id",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
+    expect(noIdResult).toEqual({ found: false, scannedFile: pinnedFile });
+    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
   });
 });
