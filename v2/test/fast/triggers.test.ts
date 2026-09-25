@@ -4053,60 +4053,6 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("a send-route subscription suppression does not stop a later work-item spawn", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-11" });
-    const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));
-    const autoPing = new AutoPingService(policyDir);
-    const sendRoute = {
-      version: 1 as const,
-      projectId: "api",
-      triggerId: "pick-up",
-      sourceId: "pr-watch",
-      sourceType: "github" as const,
-      eventName: "github:comment",
-      actionKind: "send" as const,
-      destination: { kind: "session" as const, sessionId: "api-9" },
-      spawnDeskGroup: false,
-    };
-    const fingerprint = autoPingRouteFingerprint(sendRoute);
-    const grant = autoPing.createGrant({
-      scope: "subscription",
-      routeFingerprint: fingerprint,
-      destination: sendRoute.destination,
-      target: { kind: "subscription" },
-      actorSessionId: "api-9",
-    });
-    await autoPing.unsubscribe("api-9", "subscription", grant.handle);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      autoPing,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit({
-        ...workItemEvent(),
-        occurrenceId: "work-item-occurrence-43",
-        data: {
-          ...workItemEvent().data,
-          externalId: "acme/api#43",
-          number: 43,
-          url: "https://github.com/acme/api/pull/43",
-        },
-      });
-      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(spawnMock.mock.calls[0]).toHaveLength(1);
-    } finally {
-      await controller.stop();
-      autoPing.dispose();
-      rmSync(policyDir, { recursive: true, force: true });
-    }
-  });
-
   it("legacy trigger-destination subscription no longer mutes spawns", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));

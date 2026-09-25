@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -446,10 +454,11 @@ describe("AutoPingService", () => {
     expect(persisted.grants).toEqual([sendGrant]);
     expect(persisted.suppressions).toEqual([sendSuppression]);
 
-    const contentBeforeReload = readFileSync(path, "utf8");
+    const pinnedMtime = new Date("2020-01-01T00:00:00.000Z");
+    utimesSync(path, pinnedMtime, pinnedMtime);
     const restored = new AutoPingService(dir);
     restored.dispose();
-    expect(readFileSync(path, "utf8")).toBe(contentBeforeReload);
+    expect(statSync(path).mtime.getTime()).toBe(pinnedMtime.getTime());
   });
 
   it("clears its GC timer once across repeated disposal", () => {
