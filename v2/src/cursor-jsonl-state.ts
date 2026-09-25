@@ -17,9 +17,12 @@ export interface CursorParsedRecord {
 
 export interface CursorJsonlReaderState {
   filePath: string;
+  /** End of the stable prefix: complete lines, trailing turn_ended excluded. */
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: CursorParsedRecord[];
+  /** Records parsed from the trailing turn_ended lines past lastOffset. */
+  trailingRecords: CursorParsedRecord[];
 }
 
 const TAIL_RECORD_LIMIT = 50;
@@ -31,6 +34,44 @@ function tryParseJson(line: string): Record<string, unknown> | null {
     return JSON.parse(line) as Record<string, unknown>;
   } catch {
     return null;
+  }
+}
+
+const NEWLINE = 0x0a;
+
+// Cursor rewrites its transcript on every submit and drops the trailing
+// `turn_ended` lines (none sit mid-file across 244 host transcripts), so an
+// offset past them lands inside the next record and that record never parses.
+// Returns the byte length of the prefix a later read can resume from: complete
+// lines only, trailing turn_ended (and blank) lines excluded.
+export function cursorStablePrefixBytes(buffer: Buffer): number {
+  let end = buffer.lastIndexOf(NEWLINE) + 1;
+  while (end > 0) {
+    const start = end >= 2 ? buffer.lastIndexOf(NEWLINE, end - 2) + 1 : 0;
+    const line = buffer.subarray(start, end).toString("utf8").trim();
+    if (line && tryParseJson(line)?.["type"] !== "turn_ended") {
+      break;
+    }
+    end = start;
+  }
+  return end;
+}
+
+const STABLE_OFFSET_TAIL_BYTES = 65_536;
+
+/** File offset where a read survives cursor's next rewrite; see cursorStablePrefixBytes. */
+export async function readCursorStableOffset(filePath: string): Promise<number> {
+  const fd = await open(filePath, "r");
+  try {
+    const { size } = await fd.stat();
+    const start = Math.max(0, size - STABLE_OFFSET_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    if (buffer.length > 0) {
+      await fd.read(buffer, 0, buffer.length, start);
+    }
+    return start + cursorStablePrefixBytes(buffer);
+  } finally {
+    await fd.close();
   }
 }
 
@@ -337,19 +378,40 @@ export async function readCursorJsonlState(
           lastOffset: 0,
           lastMtimeMs: 0,
           tailRecords: [],
+          trailingRecords: [],
         };
 
-  if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
+  if (
+    fileStat.mtimeMs === currentReader.lastMtimeMs &&
+    currentReader.tailRecords.length + currentReader.trailingRecords.length > 0
+  ) {
+    const cached = [...currentReader.tailRecords, ...currentReader.trailingRecords];
     return {
-      state: classifyCursorJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
+      state: classifyCursorJsonlState(cached, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
-      rateLimit: detectCursorRateLimit(latestCursorTerminalError(currentReader.tailRecords)),
+      rateLimit: detectCursorRateLimit(latestCursorTerminalError(cached)),
     };
   }
 
   const readOffset = Math.min(currentReader.lastOffset, fileStat.size);
   const nowMs = Date.now();
-  const newRecords: CursorParsedRecord[] = [];
+  const parseRecords = (chunk: Buffer): CursorParsedRecord[] => {
+    const records: CursorParsedRecord[] = [];
+    for (const line of chunk.toString("utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
+      if (record) {
+        records.push(record);
+      }
+    }
+    return records;
+  };
+  let stableRecords: CursorParsedRecord[];
+  let trailingRecords: CursorParsedRecord[];
+  let stableBytes: number;
 
   let fd: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -358,28 +420,24 @@ export async function readCursorJsonlState(
     if (buffer.length > 0) {
       await fd.read(buffer, 0, buffer.length, readOffset);
     }
-    for (const line of buffer.toString("utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
-      if (record) {
-        newRecords.push(record);
-      }
-    }
+    stableBytes = cursorStablePrefixBytes(buffer);
+    const completeBytes = buffer.lastIndexOf(NEWLINE) + 1;
+    stableRecords = parseRecords(buffer.subarray(0, stableBytes));
+    trailingRecords = parseRecords(buffer.subarray(stableBytes, completeBytes));
   } catch {
     return null;
   } finally {
     await fd?.close();
   }
 
-  const combined = [...currentReader.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
+  const tailRecords = [...currentReader.tailRecords, ...stableRecords].slice(-TAIL_RECORD_LIMIT);
+  const combined = [...tailRecords, ...trailingRecords].slice(-TAIL_RECORD_LIMIT);
   const nextReader: CursorJsonlReaderState = {
     filePath,
-    lastOffset: fileStat.size,
+    lastOffset: readOffset + stableBytes,
     lastMtimeMs: fileStat.mtimeMs,
-    tailRecords: combined,
+    tailRecords,
+    trailingRecords,
   };
 
   if (combined.length === 0) {

@@ -2,6 +2,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
 
 const { findCursorAckTranscriptFileMock, resolveCursorPinnedTranscriptPathMock } = vi.hoisted(
   () => ({
@@ -12,10 +13,14 @@ const { findCursorAckTranscriptFileMock, resolveCursorPinnedTranscriptPathMock }
   }),
 );
 
-vi.mock("../../src/cursor-jsonl-state.js", () => ({
-  findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
-  resolveCursorPinnedTranscriptPath: resolveCursorPinnedTranscriptPathMock,
-}));
+vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof CursorJsonlStateModule>();
+  return {
+    findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
+    resolveCursorPinnedTranscriptPath: resolveCursorPinnedTranscriptPathMock,
+    readCursorStableOffset: actual.readCursorStableOffset,
+  };
+});
 
 import {
   captureCursorSubmitBaseline,
@@ -152,6 +157,34 @@ describe("scanCursorJsonlForMessage", () => {
     const result = await scanCursorJsonlForMessage(baseline, "new turn", "/tmp/worktree");
     expect(result.found).toBe(true);
     expect(result.scannedFile).toBe(filePath);
+  });
+
+  // Cursor rewrites the transcript on submit: the trailing turn_ended line is
+  // dropped and the new user turn appended, so the new turn starts before the
+  // pre-send file size.
+  it("acks a turn cursor wrote by rewriting away the trailing turn_ended line", async () => {
+    const turnEnded = { type: "turn_ended", status: "success" };
+    const assistantOk = { role: "assistant", message: { content: [{ type: "text", text: "ok" }] } };
+    const filePath = await makeJsonl("rewrite.jsonl", [
+      userTurn("old turn"),
+      assistantOk,
+      turnEnded,
+    ]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    const baseline = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
+    if (!baseline) throw new Error("expected a baseline");
+    await writeFile(
+      filePath,
+      [userTurn("old turn"), assistantOk, userTurn("new turn")]
+        .map((line) => JSON.stringify(line))
+        .join("\n") + "\n",
+      "utf8",
+    );
+
+    const result = await scanCursorJsonlForMessage(baseline, "new turn", "/tmp/worktree");
+    expect(result.found).toBe(true);
+    const stale = await scanCursorJsonlForMessage(baseline, "old turn", "/tmp/worktree");
+    expect(stale.found).toBe(false);
   });
 
   it("scans a freshly rotated transcript from offset 0 when latest differs", async () => {

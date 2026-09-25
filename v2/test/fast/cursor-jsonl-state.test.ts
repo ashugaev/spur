@@ -501,6 +501,78 @@ describe("findLatestCursorTranscriptFile", () => {
     expect(state?.state).toBe("waiting");
   });
 
+  // Cursor drops the trailing turn_ended line and appends the next user turn
+  // in one rewrite; an incremental offset past turn_ended lands mid-record.
+  it("sees a new running turn after cursor rewrites away the trailing turn_ended line", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-rewrite-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    const chatDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+      "chat",
+    );
+    await mkdir(chatDir, { recursive: true });
+    const transcriptPath = join(chatDir, "chat.jsonl");
+    const user = (text: string) =>
+      JSON.stringify({ role: "user", message: { content: [{ type: "text", text }] } });
+    const assistant = JSON.stringify({
+      role: "assistant",
+      message: { content: [{ type: "text", text: "ok" }] },
+    });
+    await writeFile(
+      transcriptPath,
+      [user("first"), assistant, '{"type":"turn_ended","status":"success"}'].join("\n") + "\n",
+    );
+
+    const idle = await readCursorJsonlState(worktreePath, undefined, "chat");
+    expect(idle?.state).toBe("waiting");
+
+    await writeFile(transcriptPath, [user("first"), assistant, user("second")].join("\n") + "\n");
+    const later = new Date(Date.now() + 1_000);
+    await utimes(transcriptPath, later, later);
+
+    const running = await readCursorJsonlState(worktreePath, idle?.reader, "chat");
+    expect(running?.state).toBe("working");
+    expect(running?.reader.tailRecords.map((record) => record.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+    ]);
+  });
+
+  it("keeps a trailing turn_ended error visible across reads until cursor rewrites it", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-trailing-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    const chatDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+      "chat",
+    );
+    await mkdir(chatDir, { recursive: true });
+    const transcriptPath = join(chatDir, "chat.jsonl");
+    await writeFile(
+      transcriptPath,
+      [
+        JSON.stringify({ role: "user", message: { content: [{ type: "text", text: "go" }] } }),
+        '{"type":"turn_ended","status":"error","error":"boom"}',
+      ].join("\n") + "\n",
+    );
+
+    const first = await readCursorJsonlState(worktreePath, undefined, "chat");
+    expect(first?.state).toBe("error");
+    const again = await readCursorJsonlState(worktreePath, first?.reader, "chat");
+    expect(again?.state).toBe("error");
+    expect(again?.reader.trailingRecords).toHaveLength(1);
+  });
+
   it("resolves pinned transcripts across symlinked worktree aliases", async () => {
     const root = await mkdtemp(join(homedir(), "spur-cursor-jsonl-alias-"));
     tempRoots.push(root);
