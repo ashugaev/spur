@@ -875,6 +875,7 @@ export interface CodexRolloutReadResult {
   isSubagent?: boolean;
   model?: string;
   tokenUsage?: ProviderTokenUsageSample;
+  tokenUsages?: ProviderTokenUsageSample[];
 }
 
 interface CodexRolloutCandidate {
@@ -1427,6 +1428,9 @@ export async function readCodexRolloutState(
         ? right
         : left;
     }, null)?.result.tokenUsage;
+  const tokenUsages = existing.flatMap((candidate) =>
+    candidate.result.tokenUsage ? [candidate.result.tokenUsage] : [],
+  );
   const stateful = rootCandidates.filter(
     (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
   );
@@ -1441,7 +1445,12 @@ export async function readCodexRolloutState(
       return right.mtimeMs > left.mtimeMs ? right : left;
     });
     const tokenUsage = best.result.tokenUsage ?? newestTokenUsage;
-    return { ...best.result, ...(model ? { model } : {}), ...(tokenUsage ? { tokenUsage } : {}) };
+    return {
+      ...best.result,
+      ...(model ? { model } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
+      ...(tokenUsages.length > 0 ? { tokenUsages } : {}),
+    };
   }
   const newestByMtime = stateful.reduce<CodexRolloutCandidate | null>(
     (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
@@ -1452,6 +1461,7 @@ export async function readCodexRolloutState(
     rateLimit: newestByMtime?.result.rateLimit ?? null,
     ...(model ? { model } : {}),
     ...(newestTokenUsage ? { tokenUsage: newestTokenUsage } : {}),
+    ...(tokenUsages.length > 0 ? { tokenUsages } : {}),
   };
 }
 

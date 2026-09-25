@@ -16672,6 +16672,47 @@ describe("SessionService", () => {
     },
   );
 
+  it("persists every Codex generation discovered between sweeps", async () => {
+    const session = runningSession({ agent: "codex", agentSessionId: "root-thread" });
+    readSessionMock.mockReturnValue(session);
+    const sample = (generationId: string, totalTokens: number) => ({
+      provider: "codex",
+      generationId,
+      inputTokens: totalTokens - 10,
+      outputTokens: 10,
+      totalTokens,
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: null,
+      tokenUsage: sample("codex:child-b", 50),
+      tokenUsages: [
+        sample("codex:root-thread", 100),
+        sample("codex:child-a", 20),
+        sample("codex:child-b", 50),
+      ],
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get(session.id);
+
+    expect(result.tokenUsageView).toMatchObject({ status: "available", totalTokens: 170 });
+    expect(result).not.toHaveProperty("tokenUsages");
+    expect(result.tokenUsageView).not.toHaveProperty("generations");
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ tokenUsage: expect.objectContaining({
+        totalTokens: 170,
+        generations: expect.objectContaining({
+          "codex:root-thread": expect.objectContaining({ totalTokens: 100 }),
+          "codex:child-a": expect.objectContaining({ totalTokens: 20 }),
+          "codex:child-b": expect.objectContaining({ totalTokens: 50 }),
+        }),
+      }) }),
+    );
+  });
+
   it("persists errored when the agent process is missing in a live pane", async () => {
     readSessionMock.mockReturnValue(runningSession());
     isProcessRunningInTmuxMock.mockResolvedValue(false);
@@ -42825,6 +42866,38 @@ describe("SessionService", () => {
             .map(([, entry]) => entry)
             .filter((entry) => entry.event === "session.token_budget.exhausted"),
         ).toHaveLength(1);
+      });
+
+      it("stops Codex when root and completed child generations exceed the budget", async () => {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          projects: { api: { ...baseConfig().projects.api, tokenBudget: 150 } },
+        });
+        readCodexRolloutStateMock.mockResolvedValue({
+          rollout: null,
+          rateLimit: null,
+          tokenUsage: {
+            provider: "codex", generationId: "codex:child", inputTokens: 60,
+            outputTokens: 10, totalTokens: 70,
+          },
+          tokenUsages: [
+            { provider: "codex", generationId: "codex:root", inputTokens: 90, outputTokens: 10, totalTokens: 100 },
+            { provider: "codex", generationId: "codex:child", inputTokens: 60, outputTokens: 10, totalTokens: 70 },
+          ],
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1", agent: "codex", agentSessionId: "root" }));
+        const service = await createDisposedSessionService();
+        const view = await service.get("api-1");
+        expect(view.tokenUsageView).toMatchObject({ budget: 150, totalTokens: 170, exhausted: true });
+
+        await staleInternals(service).stopForTokenBudget(view);
+
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          stopReason: "token_budget",
+          tokenUsage: { totalTokens: 170 },
+        });
       });
 
       it("stops when pre-flight alone exhausts the budget before main usage exists", async () => {

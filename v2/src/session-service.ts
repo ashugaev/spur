@@ -1081,6 +1081,7 @@ interface SessionStateResult {
   agentActivityAt: Date | null;
   liveModel?: string;
   tokenUsage?: ProviderTokenUsageSample;
+  tokenUsages?: ProviderTokenUsageSample[];
   // Epoch ms of the parsed claude rate-limit reset instant, set on every
   // classify call for as long as the expired detection stays in the tail
   // (see the expired arm below) — level-triggered, not edge-triggered. Safe
@@ -5452,8 +5453,7 @@ export class SessionService {
         const classified = await this.classifySessionRecord(latest);
         const fresh = readSession(this.config.dataDir, latest.id) ?? classified.session;
         if (fresh.status !== "running") return;
-        const sample = classified.tokenUsage;
-        const usage = sample ? reconcileTokenUsage(fresh.tokenUsage, sample) : fresh.tokenUsage;
+        const usage = this.reconcileClassifiedTokenUsage(fresh.tokenUsage, classified);
         const budget = this.resolveTokenBudget(fresh);
         const preflight = fresh.preflightTokenUsage;
         const combined = (preflight?.totalTokens ?? 0) + (usage?.totalTokens ?? 0);
@@ -16783,6 +16783,7 @@ export class SessionService {
     activityMs: number;
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
+    tokenUsages?: ProviderTokenUsageSample[];
   }> {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     const rolloutReader = this.codexRolloutReaders.get(session.id) ?? { files: new Map() };
@@ -16841,6 +16842,7 @@ export class SessionService {
       activityMs,
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
+      ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
     };
   }
 
@@ -17755,6 +17757,7 @@ export class SessionService {
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
     let tokenUsage: ProviderTokenUsageSample | undefined;
+    let tokenUsages: ProviderTokenUsageSample[] | undefined;
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
       const reconciled = await this.reconcileUnexpectedStop(
         effectiveSession,
@@ -17797,7 +17800,9 @@ export class SessionService {
           tokenUsage = finalState.tokenUsage;
         }
       } else if (session.agent === "codex") {
-        tokenUsage = (await this.classifyCodexState(session)).tokenUsage;
+        const codexState = await this.classifyCodexState(session);
+        tokenUsage = codexState.tokenUsage;
+        tokenUsages = codexState.tokenUsages;
       } else if (session.agent === "opencode") {
         tokenUsage = (
           await readOpenCodeStructuredState(
@@ -17870,6 +17875,7 @@ export class SessionService {
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
         tokenUsage = codexState.tokenUsage;
+        tokenUsages = codexState.tokenUsages;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
@@ -18237,6 +18243,7 @@ export class SessionService {
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
       ...(liveModel ? { liveModel } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
+      ...(tokenUsages ? { tokenUsages } : {}),
     };
   }
 
@@ -18246,7 +18253,7 @@ export class SessionService {
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
     const classified = await this.classifySessionRecord(session, { scanPane: false });
-    session = this.persistClassifiedTokenUsage(classified.session, classified.tokenUsage);
+    session = this.persistClassifiedTokenUsage(classified.session, classified);
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -18321,14 +18328,22 @@ export class SessionService {
 
   private persistClassifiedTokenUsage(
     session: SessionRecord,
-    sample: ProviderTokenUsageSample | undefined,
+    classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
   ): SessionRecord {
-    if (!sample) return session;
-    const tokenUsage = reconcileTokenUsage(session.tokenUsage, sample);
+    const tokenUsage = this.reconcileClassifiedTokenUsage(session.tokenUsage, classified);
+    if (!tokenUsage) return session;
     if (JSON.stringify(tokenUsage) === JSON.stringify(session.tokenUsage)) return session;
     const updated = { ...session, tokenUsage };
     writeSession(this.config.dataDir, updated);
     return updated;
+  }
+
+  private reconcileClassifiedTokenUsage(
+    previous: SessionRecord["tokenUsage"],
+    classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
+  ): SessionRecord["tokenUsage"] {
+    const samples = classified.tokenUsages ?? (classified.tokenUsage ? [classified.tokenUsage] : []);
+    return samples.reduce((usage, sample) => reconcileTokenUsage(usage, sample), previous);
   }
 
   private deriveTokenUsageView(session: SessionRecord): SessionTokenUsageView {
@@ -18478,7 +18493,7 @@ export class SessionService {
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<{ view: SessionListItemView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
-    session = this.persistClassifiedTokenUsage(classified.session, classified.tokenUsage);
+    session = this.persistClassifiedTokenUsage(classified.session, classified);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
