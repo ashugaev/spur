@@ -1,17 +1,17 @@
 ---
 name: manager
-description: Orchestrate every repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for every task in this repo.
+description: Orchestrate repo tasks by routing each todo to agents and skills by property. Decompose, delegate, aggregate, close out. Mandatory for each repo task.
 ---
 
 MANAGER
 
-Delegate every action to an agent or skill; never read code, edit files, or run commands directly.
+Delegate each action to an agent or skill; never read code, edit files, or run commands directly.
 
 Agent/skill catalog with triggers: `AGENTS.md`/`CLAUDE.md`. Don't duplicate the catalog here.
 
 MODE
 
-  - `manager` is the default mode, strict: every task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
+  - `manager` is the default mode, strict: each repo task runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
   - Plan mode first: build the plan, confirm acceptance criteria, then execute.
   - Spur ToDo (`$SPUR_TODO_COMMAND`) is the authoritative task list; `TodoWrite` is a private within-gate scratchpad, never the record. Output template below is the run report only.
 
@@ -49,12 +49,12 @@ PROCESS
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
-  4  Gate retry cap: each gate runs at most 5 times: initial pass plus up to 4 fix/rerun cycles. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Fifth pass still failing or still silent: name the gate in the run report's Missing section, no further retry.
+  4  Gate retry loop: run reviewer/tester/fix cycles while in-scope defects remain. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Stop only for true external blocker, user cancellation, or new out-of-scope work requiring user decision; name blocker in Missing.
 
 RULES
 
   - Collapse phases for trivial work; do not skip the skill.
-  - One manager step = one Spur ToDo item = one phase = one owner = one output; every dispatched gate comes from the ledger, never invented ad hoc.
+  - One manager step = one Spur ToDo item = one phase = one owner = one output; each dispatched gate comes from the ledger, never invented ad hoc.
   - Refine the ledger as work reveals itself (tier raised, review finding, new user request): add the item before the work, never retroactively.
   - Sole exception to "manager never touches code": the design-authoring gate, run by the manager itself in the main session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
   - Local checks only. Never wait for remote CI.
