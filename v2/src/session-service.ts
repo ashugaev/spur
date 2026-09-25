@@ -6848,7 +6848,13 @@ export class SessionService {
             message: `Spur ToDo reminder budget exhausted for ${session.id}`,
           });
         }
-        await this.writeAgentMessage(session, message, { interrupt: false, interactive: true });
+        try {
+          await this.writeAgentMessage(session, message, { interrupt: false, interactive: true });
+        } catch (error) {
+          // Live agent past the ack budget: the text landed, same policy as
+          // send/flush/drain. Counting it failed would resend the reminder.
+          if (!isRecoveredSubmitAckTimeout(error)) throw error;
+        }
         this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
         this.todoNudgeBackoff.delete(session.id);
       });

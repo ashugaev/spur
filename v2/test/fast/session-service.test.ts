@@ -2316,6 +2316,37 @@ describe("SessionService", () => {
       });
     });
 
+    it("counts a reminder whose ack timed out on a live agent as sent, never resending it", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession();
+      sessions.set(session.id, session);
+      await useRealTodoLedger();
+      const module = await loadSessionServiceModule();
+      const service = new module.SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      service.dispose();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockRejectedValue(
+        new module.SubmitAckTimeoutError({
+          sessionId: session.id,
+          agent: "claude",
+          lastScannedFile: null,
+          elapsedMs: 20_000,
+          processAlive: true,
+        }),
+      );
+
+      await internals.maybeNudgeTodo(session);
+      vi.setSystemTime(new Date("2026-03-18T10:05:30.000Z"));
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.todo.nudge_failed",
+        ),
+      ).toHaveLength(0);
+    });
+
     it("never runs a ToDo reminder inside the sweep or behind a busy session", async () => {
       const sessions = createSessionStore();
       const session = runningSession();
