@@ -708,8 +708,74 @@ export interface ProjectConfig {
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
+  tokenBudget?: number;
   staleAfterMinutes?: number;
 }
+
+export interface TokenUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+  cacheWrite5mInputTokens?: number;
+  cacheWrite1hInputTokens?: number;
+}
+
+export interface SessionTokenUsageRecord extends TokenUsageTotals {
+  provider: "claude" | "codex" | "opencode";
+  generations: Record<string, TokenUsageTotals>;
+}
+
+export type PreflightUsageProvider = "claude" | "codex" | "cursor" | "opencode";
+
+export interface PreflightTokenUsageRecord extends TokenUsageTotals {
+  status: "measured" | "partial" | "unknown";
+  attemptCount: number;
+  unknownAttemptCount: number;
+  providerIterationCount: number;
+  byProvider: Partial<Record<PreflightUsageProvider, TokenUsageTotals>>;
+}
+
+export type PreflightTokenUsageView =
+  | (PreflightTokenUsageRecord & { status: "measured" | "partial" })
+  | {
+      status: "unknown" | "legacy_unknown";
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+    };
+
+export interface TokenBudgetView {
+  budget?: number;
+  knownTotalTokens: number;
+  exhausted: boolean;
+  enforced: boolean;
+  reason?: "legacy_unknown" | "preflight_unknown" | "main_usage_unavailable";
+}
+
+export type SessionTokenUsageView =
+  | ({
+      status: "available";
+      provider: "claude" | "codex" | "opencode";
+      budget?: number;
+      exhausted: boolean;
+    } & TokenUsageTotals)
+  | {
+      status: "waiting";
+      provider: "claude" | "codex" | "opencode";
+      budget?: number;
+      exhausted: false;
+    }
+  | {
+      status: "unavailable";
+      provider: "cursor";
+      budget?: number;
+      exhausted: false;
+      unenforced: boolean;
+      reason: "structured_usage_unavailable";
+    };
 
 export type ProviderReasoningEffort = "low" | "medium" | "high";
 export type AgentReasoningEffortConfig = Partial<
@@ -1009,7 +1075,9 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
-  stopReason?: "manual_pause" | "stale_timeout";
+  stopReason?: "manual_pause" | "stale_timeout" | "token_budget";
+  tokenUsage?: SessionTokenUsageRecord;
+  preflightTokenUsage?: PreflightTokenUsageRecord;
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;
@@ -1109,7 +1177,10 @@ export interface SessionSidecarView {
   deadPane?: boolean;
 }
 
-export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
+export interface SessionView extends Omit<
+  SessionRecord,
+  "queuedMessages" | "tokenUsage" | "preflightTokenUsage"
+> {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -1126,6 +1197,9 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
   queuedMessages?: SessionQueuedMessagesView;
+  tokenUsageView?: SessionTokenUsageView;
+  preflightTokenUsageView?: PreflightTokenUsageView;
+  tokenBudgetView?: TokenBudgetView;
 }
 
 /**
@@ -1143,7 +1217,9 @@ export type DashboardOmittedField =
   | "stateSubscriptions"
   | "allowedTriggers"
   | "agentSessionId"
-  | "branchSource";
+  | "branchSource"
+  | "tokenUsage"
+  | "preflightTokenUsage";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   runtimeAlive: boolean;
@@ -1155,6 +1231,9 @@ export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmitt
   hasServiceIssues?: boolean;
   runningSidecarNames?: string[];
   deskGroupMembers?: SessionDeskMember[];
+  tokenUsageView?: SessionTokenUsageView;
+  preflightTokenUsageView?: PreflightTokenUsageView;
+  tokenBudgetView?: TokenBudgetView;
 }
 
 export type SidecarStopReport =
@@ -1205,10 +1284,13 @@ export interface PreflightRequest {
   prompt: string;
   agent?: AgentName;
   overrides?: SpawnOverrides;
+  preflightBatchId?: string;
 }
 
 export interface PreflightResponse {
   branch: string | null;
+  preflightBatchId: string;
+  preflightTokenUsageView: PreflightTokenUsageView;
 }
 
 export interface BranchExistsResponse {
@@ -1234,6 +1316,7 @@ export interface SpawnSessionRequest {
   originalTaskPrompt?: string;
   bareSpawnMessage?: boolean;
   configPath?: string;
+  preflightBatchId?: string;
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;

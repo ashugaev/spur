@@ -31,6 +31,7 @@ SAFETY
   Never run `disk-gc --execute` (or `--browser-revisions`) on a host running agents you do not own; a bare `disk-gc` is the dry run.
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, or Jira runs arbitrary commands as the daemon user.
+  Token budgets include spawn pre-flight and main usage. Unknown pre-flight usage blocks budgeted launch. Cursor main usage lacks enforcement; see docs/configuration.md.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
   Read a sidecar's port with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`, never by grepping `/proc` or session state.
 

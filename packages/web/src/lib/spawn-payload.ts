@@ -32,6 +32,7 @@ export interface SpawnPayloadFields extends ComposerFields {
   steps: SpawnStep[];
   trackerUrl: string | null;
   workspaceMode: WorkspaceMode;
+  preflightBatchId: string | null;
 }
 
 export interface RespawnPayloadFields extends ComposerFields {
@@ -60,6 +61,7 @@ export interface SpawnSessionPayload {
   steps?: string[];
   overrides: SpawnOverrides;
   slots?: { links: [{ label: "tracker"; url: string }] };
+  preflightBatchId?: string;
 }
 
 export interface RespawnSessionPayload {
@@ -113,6 +115,7 @@ export function buildSpawnSessionPayload(fields: SpawnPayloadFields): SpawnSessi
     overrides: buildSpawnOverrides(fields.workspaceMode, fields.defaultBranch),
   };
   if (fields.model !== null) payload.model = fields.model;
+  if (fields.preflightBatchId) payload.preflightBatchId = fields.preflightBatchId;
   if (fields.mode) payload.mode = fields.mode;
 
   const attachments = encodedAttachments(fields.attachments);

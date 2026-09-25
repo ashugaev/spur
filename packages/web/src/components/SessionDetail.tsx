@@ -109,6 +109,7 @@ import {
   isOpenPrActionRequiredPayload,
   isRestorable,
   isSessionNotRestorablePayload,
+  isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
@@ -146,6 +147,103 @@ function displayLinkLabel(label: string, url: string): string {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
   }
   return label;
+}
+
+function tokenUsageRows(
+  session: Pick<SpurSessionView, "tokenUsageView" | "preflightTokenUsageView" | "tokenBudgetView">,
+): Array<[string, string]> {
+  const usage = session.tokenUsageView;
+  const preflight = session.preflightTokenUsageView;
+  const preflightRow: [string, string] = [
+    "Pre-flight tokens",
+    !preflight || preflight.status === "legacy_unknown"
+      ? "Legacy usage unknown"
+      : !("totalTokens" in preflight)
+        ? "Usage unavailable"
+        : `${preflight.totalTokens.toLocaleString()}${preflight.status === "partial" ? " · partial" : ""}`,
+  ];
+  const component = (tokens: number | undefined): string =>
+    tokens === undefined ? "Not reported" : tokens.toLocaleString();
+  const preflightRows: Array<[string, string]> = [preflightRow];
+  if (preflight) {
+    if ("totalTokens" in preflight) {
+      preflightRows.push(
+        ["Pre-flight input", preflight.inputTokens.toLocaleString()],
+        ["Pre-flight output", preflight.outputTokens.toLocaleString()],
+        ["Pre-flight cache read", component(preflight.cacheReadInputTokens)],
+        ["Pre-flight cache write", component(preflight.cacheWriteInputTokens)],
+        ["Pre-flight reasoning", component(preflight.reasoningOutputTokens)],
+        ["Pre-flight cache write 5m", component(preflight.cacheWrite5mInputTokens)],
+        ["Pre-flight cache write 1h", component(preflight.cacheWrite1hInputTokens)],
+      );
+      for (const provider of ["claude", "codex", "cursor", "opencode"] as const) {
+        const total = preflight.byProvider[provider]?.totalTokens;
+        if (total !== undefined)
+          preflightRows.push([
+            `Pre-flight ${provider === "opencode" ? "OpenCode" : provider[0].toUpperCase() + provider.slice(1)}`,
+            total.toLocaleString(),
+          ]);
+      }
+    }
+    preflightRows.push(
+      ["Pre-flight attempts", preflight.attemptCount.toLocaleString()],
+      ["Pre-flight unknown attempts", preflight.unknownAttemptCount.toLocaleString()],
+      ["Pre-flight iterations", preflight.providerIterationCount.toLocaleString()],
+    );
+  }
+  const budget = session.tokenBudgetView;
+  const budgetReason =
+    budget?.reason === "preflight_unknown"
+      ? "pre-flight usage unknown"
+      : budget?.reason === "legacy_unknown"
+        ? "earlier usage unknown"
+        : budget?.reason === "main_usage_unavailable"
+          ? "main usage unavailable"
+          : "usage unavailable";
+  const budgetRows: Array<[string, string]> = budget?.budget
+    ? [
+        [
+          "Combined budget",
+          `${budget.enforced ? "" : "At least "}${budget.knownTotalTokens.toLocaleString()} / ${budget.budget.toLocaleString()}${budget.exhausted ? " · limit hit" : ""}`,
+        ],
+        ...(budget.enforced
+          ? []
+          : ([["Budget enforcement", `Unavailable · ${budgetReason}`]] as Array<[string, string]>)),
+      ]
+    : [];
+  if (!usage) return [["Tokens", "Waiting for usage"], ...preflightRows, ...budgetRows];
+  if (usage.status === "unavailable") {
+    return [
+      [
+        "Tokens",
+        usage.unenforced
+          ? "Token usage unavailable · budget unenforced"
+          : "Token usage unavailable",
+      ],
+      ...preflightRows,
+      ...budgetRows,
+    ];
+  }
+  if (usage.status === "waiting")
+    return [["Tokens", "Waiting for usage"], ...preflightRows, ...budgetRows];
+  const used = usage.totalTokens.toLocaleString();
+  const value = usage.budget === undefined ? used : `${used} / ${usage.budget.toLocaleString()}`;
+  const rows: Array<[string, string]> = [
+    ["Tokens", usage.exhausted ? `${value} · limit hit` : value],
+    ["Input", usage.inputTokens.toLocaleString()],
+    ["Output", usage.outputTokens.toLocaleString()],
+    ["Cache read", component(usage.cacheReadInputTokens)],
+    ["Cache write", component(usage.cacheWriteInputTokens)],
+    ["Reasoning", component(usage.reasoningOutputTokens)],
+  ];
+  if (usage.provider === "claude") {
+    rows.push(
+      ["Cache write 5m", component(usage.cacheWrite5mInputTokens)],
+      ["Cache write 1h", component(usage.cacheWrite1hInputTokens)],
+    );
+  }
+  rows.push(...preflightRows, ...budgetRows);
+  return rows;
 }
 
 // Two failing portIds can share an overlapping declared range and both name
@@ -2772,6 +2870,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
+  const tokenBudgetBlocked = session ? isTokenBudgetBlocked(session) : false;
+  const tokenBudgetMessage =
+    session?.tokenBudgetView?.exhausted === true || session?.tokenUsageView?.exhausted === true
+      ? "Not accepting input. Token budget limit hit."
+      : session?.tokenBudgetView?.enforced === false
+        ? session.tokenBudgetView.reason === "preflight_unknown"
+          ? "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced."
+          : session.tokenBudgetView.reason === "legacy_unknown"
+            ? "Not accepting input. Earlier usage unknown; token budget cannot be enforced."
+            : "Not accepting input. Main usage unavailable; token budget cannot be enforced."
+        : "Not accepting input. Token budget limit hit.";
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
@@ -3028,7 +3137,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
-            {isRestorable(session) ? (
+            {isRestorable(session) && !tokenBudgetBlocked ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
                 aria-label={busyAction === "restore" ? "Restoring session" : undefined}
@@ -3263,7 +3372,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   Message
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
-                {canSendMessage(session) ? (
+                {canSendMessage(session) && !tokenBudgetBlocked ? (
                   <div className="space-y-2">
                     <FileAttachmentTextarea
                       attachments={attachments}
@@ -3355,7 +3464,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
-                    Not accepting input. Restore to continue.
+                    {tokenBudgetBlocked
+                      ? tokenBudgetMessage
+                      : "Not accepting input. Restore to continue."}
                   </p>
                 )}
               </section>
@@ -3548,6 +3659,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
+                  ...tokenUsageRows(session),
                   ...(wakeSummary && wakeCountdown
                     ? ([
                         ["Wake", wakeSummary.label],

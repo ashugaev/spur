@@ -7,6 +7,7 @@ import {
   findOpenCodeSessionId,
   readOpenCodeJson,
   readOpenCodeState,
+  readOpenCodeStructuredState,
   resetOpenCodeExportState,
   buildOpenCodePlan,
   buildOpenCodeConfig,
@@ -19,12 +20,33 @@ import {
   parseOpenCodeExport,
   parseOpenCodeSessionListOutput,
   parseOpenCodeState,
+  parseOpenCodeTokenUsage,
   waitForOpenCodeLaunchMessage,
   parseOpenCodeUserMessageIds,
   withOpenCodeLaunchIdentityLock,
 } from "../../src/agents/opencode.js";
 
 describe("OpenCode adapter", () => {
+  it("extracts deduped structured components from a sanitized export fixture", async () => {
+    const fixture = JSON.parse(
+      await readFile(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+
+    expect(parseOpenCodeTokenUsage(fixture)).toEqual({
+      provider: "opencode",
+      generationId: "opencode:session-sanitized:msg-assistant-1",
+      inputTokens: 50,
+      outputTokens: 29,
+      totalTokens: 79,
+      cacheReadInputTokens: 34,
+      cacheWriteInputTokens: 4,
+      reasoningOutputTokens: 6,
+    });
+  });
+
   it("keeps deferred controls out of the launch command", () => {
     const handle = `ap1_${"a".repeat(43)}`;
     const plan = buildAgentLaunchPlan("opencode", "ordinary prompt", undefined, {
@@ -347,6 +369,7 @@ describe("OpenCode adapter", () => {
     // bookkeeping.
     async function stubCountingOpenCode(options?: {
       exitCode?: number;
+      output?: unknown;
     }): Promise<{ dir: string; countPath: string }> {
       const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
       const countPath = join(dir, "calls.log");
@@ -358,7 +381,13 @@ describe("OpenCode adapter", () => {
           ...(options?.exitCode
             ? [`process.exit(${options.exitCode});`]
             : [
-                'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+                `process.stdout.write(${JSON.stringify(
+                  JSON.stringify(
+                    options?.output ?? {
+                      messages: [{ info: { role: "assistant", time: { completed: 1 } } }],
+                    },
+                  ),
+                )});`,
               ]),
         ].join("\n"),
         "utf8",
@@ -399,6 +428,56 @@ describe("OpenCode adapter", () => {
           { state: "waiting", reason: "assistant completed" },
         ]);
         expect(await spawnCount(countPath)).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("shares one cached export between state and token usage", async () => {
+      const { dir, countPath } = await stubCountingOpenCode({
+        output: {
+          info: { id: "ses_a" },
+          messages: [
+            {
+              info: {
+                id: "msg_a",
+                role: "assistant",
+                time: { completed: 1 },
+                tokens: {
+                  input: 10,
+                  output: 5,
+                  reasoning: 2,
+                  cache: { read: 3, write: 1 },
+                },
+              },
+            },
+          ],
+        },
+      });
+      try {
+        const structured = await readOpenCodeStructuredState("ses_a");
+        const state = await readOpenCodeState("ses_a");
+
+        expect(structured.tokenUsage).toMatchObject({
+          inputTokens: 14,
+          outputTokens: 7,
+          totalTokens: 21,
+        });
+        expect(state).toEqual({ state: "waiting", reason: "assistant completed" });
+        expect(await spawnCount(countPath)).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("forces one fresh structured export after the agent exits", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        await readOpenCodeStructuredState("ses_a");
+        await readOpenCodeStructuredState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+        await readOpenCodeStructuredState("ses_a", null, true);
+        expect(await spawnCount(countPath)).toBe(2);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

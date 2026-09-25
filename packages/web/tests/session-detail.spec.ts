@@ -954,6 +954,15 @@ test.describe("S1: Session detail header", () => {
 });
 
 test.describe("Spur ToDo audit", () => {
+  test("default empty projection is available", async ({ page }) => {
+    const session = makeStoppedSession({ id: "detail-todo-empty" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("No ToDo items yet.")).toBeVisible();
+    await expect(page.getByText(/ToDo unavailable/)).toHaveCount(0);
+  });
+
   test("renders delayed loading then a resolved expandable projection", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const session = makeCompletedSession({ id: "detail-todo-resolved" });
@@ -1905,7 +1914,11 @@ test.describe("S2a: Logs modal", () => {
     await page.getByRole("button", { name: /^logs$/i }).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
-    await expect(page.getByText("waiting")).toBeVisible();
+    await expect(
+      page
+        .getByRole("dialog", { name: `Logs ${session.id}` })
+        .getByText("waiting", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
     await expect(page.getByText("User input")).toBeVisible();
@@ -3901,6 +3914,186 @@ test.describe("S5: Runtime sidebar", () => {
 
     await expect(page.getByText("Worktree path")).toBeVisible();
     await expect(page.getByText(/worktrees\/detail-s5-2/)).toBeVisible();
+  });
+
+  test("token usage states render and an exhausted session cannot restore", async ({ page }) => {
+    const sessions = [
+      makeWorkingSession({
+        id: "detail-s5-token-waiting",
+        tokenUsageView: {
+          status: "waiting",
+          provider: "claude",
+          budget: 2_000,
+          exhausted: false,
+        },
+      }),
+      makeWorkingSession({
+        id: "detail-s5-token-available",
+        tokenUsageView: {
+          status: "available",
+          provider: "claude",
+          inputTokens: 1_000,
+          outputTokens: 234,
+          totalTokens: 1_234,
+          cacheReadInputTokens: 300,
+          cacheWriteInputTokens: 200,
+          reasoningOutputTokens: 34,
+          cacheWrite5mInputTokens: 50,
+          cacheWrite1hInputTokens: 150,
+          budget: 2_000,
+          exhausted: false,
+        },
+      }),
+      makeWorkingSession({
+        id: "detail-s5-token-unavailable",
+        agent: "cursor",
+        tokenUsageView: {
+          status: "unavailable",
+          provider: "cursor",
+          reason: "structured_usage_unavailable",
+          budget: 2_000,
+          exhausted: false,
+          unenforced: true,
+        },
+      }),
+      makeStoppedSession({
+        id: "detail-s5-token-exhausted",
+        stopReason: "token_budget",
+        tokenUsageView: {
+          status: "available",
+          provider: "codex",
+          inputTokens: 1_700,
+          outputTokens: 300,
+          totalTokens: 2_000,
+          budget: 2_000,
+          exhausted: true,
+        },
+        tokenBudgetView: {
+          budget: 2_000,
+          knownTotalTokens: 2_000,
+          exhausted: true,
+          enforced: true,
+        },
+      }),
+      makeStoppedSession({
+        id: "detail-s5-main-only-exhausted",
+        tokenUsageView: {
+          status: "available",
+          provider: "codex",
+          inputTokens: 75,
+          outputTokens: 25,
+          totalTokens: 100,
+          budget: 100,
+          exhausted: true,
+        },
+      }),
+    ];
+    for (const session of sessions) await mockSessionDetail(page, session);
+
+    await page.goto("/sessions/detail-s5-token-waiting");
+    await expect(page.getByText("Waiting for usage")).toBeVisible();
+    await page.goto("/sessions/detail-s5-token-available");
+    await expect(page.getByText("1,234 / 2,000")).toBeVisible();
+    await page.goto("/sessions/detail-s5-token-unavailable");
+    await expect(page.getByText("Token usage unavailable · budget unenforced")).toBeVisible();
+    await page.goto("/sessions/detail-s5-token-exhausted");
+    await expect(page.getByText("2,000 / 2,000 · limit hit").first()).toBeVisible();
+    await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
+    await expect(page.getByText("Not accepting input. Restore to continue.")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+    await page.goto("/sessions/detail-s5-main-only-exhausted");
+    await expect(page.getByText("100 / 100 · limit hit")).toBeVisible();
+    await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+  });
+
+  test("pre-flight components stay separate from main usage and exhaust Restore", async ({
+    page,
+  }, testInfo) => {
+    const session = makeStoppedSession({
+      id: "detail-preflight-exhausted",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 60,
+        outputTokens: 20,
+        totalTokens: 80,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "partial",
+        inputTokens: 15,
+        outputTokens: 5,
+        totalTokens: 20,
+        cacheReadInputTokens: 0,
+        cacheWriteInputTokens: 5,
+        reasoningOutputTokens: 2,
+        cacheWrite5mInputTokens: 5,
+        attemptCount: 2,
+        unknownAttemptCount: 1,
+        providerIterationCount: 3,
+        byProvider: { claude: { totalTokens: 20 } },
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 100,
+        exhausted: true,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const runtime = page.getByRole("heading", { name: "Runtime" }).locator("..");
+    await expect(runtime.getByText("80", { exact: true })).toBeVisible();
+    await expect(runtime.getByText("20 · partial")).toBeVisible();
+    await expect(runtime.getByText("Pre-flight cache read").locator("..")).toContainText("0");
+    await expect(runtime.getByText("Pre-flight cache write 1h").locator("..")).toContainText(
+      "Not reported",
+    );
+    await expect(runtime.getByText("Pre-flight Claude")).toBeVisible();
+    await expect(runtime.getByText("Pre-flight attempts")).toBeVisible();
+    await expect(runtime.getByText("Pre-flight iterations")).toBeVisible();
+    await expect(runtime.getByText("At least 100 / 100 · limit hit")).toBeVisible();
+    await expect(runtime.getByText("Unavailable · pre-flight usage unknown")).toBeVisible();
+    await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+    const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+    if (artifacts) {
+      mkdirSync(join(artifacts, "token-ui"), { recursive: true });
+      await page.screenshot({
+        path: join(artifacts, "token-ui", "preflight-detail.png"),
+        fullPage: true,
+      });
+    } else {
+      await page.screenshot({ path: testInfo.outputPath("preflight-detail.png"), fullPage: true });
+    }
+  });
+
+  test("unknown pre-flight usage blocks Restore before the known total reaches the limit", async ({
+    page,
+  }) => {
+    const session = makeStoppedSession({
+      id: "detail-preflight-unknown",
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Unavailable · pre-flight usage unknown")).toBeVisible();
+    await expect(
+      page.getByText(
+        "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
   });
 
   test("copy workspace access entries are visible when configured", async ({ page }) => {
