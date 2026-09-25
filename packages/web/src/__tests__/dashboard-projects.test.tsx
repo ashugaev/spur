@@ -915,6 +915,75 @@ describe("Dashboard project create/delete", () => {
     });
   });
 
+  it("shows preview loading and failure beside recorded token usage", async () => {
+    let resolvePreview: ((response: Response) => void) | undefined;
+    let previewRequested = false;
+    const pendingPreview = new Promise<Response>((resolve) => {
+      resolvePreview = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions")
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            sessions: [],
+          }),
+        );
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: "sonnet", worktree: true }));
+      if (url === "/api/preflight") {
+        previewRequested = true;
+        return pendingPreview;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "Spawn Session" }))[0]!);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Check the branch" },
+    });
+
+    expect(await within(dialog).findByText("Checking branch preview…")).toHaveAttribute(
+      "role",
+      "status",
+    );
+    await waitFor(() => expect(previewRequested).toBe(true));
+    resolvePreview?.(
+      new Response(
+        JSON.stringify({
+          error: "provider failed after output",
+          preflightTokenUsageView: {
+            status: "measured",
+            inputTokens: 10,
+            outputTokens: 2,
+            totalTokens: 12,
+            attemptCount: 1,
+            unknownAttemptCount: 0,
+            providerIterationCount: 1,
+            byProvider: { codex: { totalTokens: 12 } },
+          },
+        }),
+        { status: 500 },
+      ),
+    );
+    expect(
+      await within(dialog).findByText("Branch preview failed. Token usage may still count."),
+    ).toHaveAttribute("role", "alert");
+    expect(within(dialog).getByText("Pre-flight tokens: 12")).toBeInTheDocument();
+    expect(within(dialog).queryByText("Checking branch preview…")).not.toBeInTheDocument();
+  });
+
   it("unblocks submit when the user confirms the already-selected workspace mode after a spawn-defaults failure", async () => {
     let spawnInit: RequestInit | undefined;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {

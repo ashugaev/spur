@@ -2815,9 +2815,21 @@ test.describe("D7b: Silent branch preflight", () => {
   test("keeps paid usage visible after failed previews", async ({ page }, testInfo) => {
     await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
     const batchIds: string[] = [];
+    let finishFirstPreview: (() => void) | undefined;
+    const firstPreviewPending = new Promise<void>((resolve) => {
+      finishFirstPreview = resolve;
+    });
+    const capture = async (name: string) => {
+      const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+      if (artifacts) mkdirSync(join(artifacts, "token-ui"), { recursive: true });
+      await page.screenshot({
+        path: artifacts ? join(artifacts, "token-ui", name) : testInfo.outputPath(name),
+      });
+    };
     await page.route("**/api/preflight", async (route) => {
       const body = route.request().postDataJSON() as { preflightBatchId: string };
       batchIds.push(body.preflightBatchId);
+      if (batchIds.length === 1) await firstPreviewPending;
       const unknown = batchIds.length > 1;
       await route.fulfill({
         status: unknown ? 409 : 500,
@@ -2850,18 +2862,26 @@ test.describe("D7b: Silent branch preflight", () => {
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
     const prompt = page.locator("textarea").last();
     await prompt.fill("First paid preview");
+    await expect.poll(() => batchIds.length).toBe(1);
+    await expect(
+      page.getByRole("status").filter({ hasText: "Checking branch preview" }),
+    ).toBeVisible();
+    await capture("preflight-preview-loading.png");
+    finishFirstPreview?.();
     await expect(page.getByText("Pre-flight tokens: 12")).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Branch preview failed" }),
+    ).toBeVisible();
+    await expect(page.getByText("Provider failed after output")).toHaveCount(0);
+    await capture("preflight-preview-error-measured.png");
     await prompt.fill("Second paid preview");
     await expect(page.getByText("Pre-flight tokens: unavailable")).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Branch preview failed" }),
+    ).toBeVisible();
     expect(batchIds).toHaveLength(2);
     expect(batchIds[1]).toBe(batchIds[0]);
-    const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
-    if (artifacts) {
-      mkdirSync(join(artifacts, "token-ui"), { recursive: true });
-      await page.screenshot({ path: join(artifacts, "token-ui", "preflight-preview-failed.png") });
-    } else {
-      await page.screenshot({ path: testInfo.outputPath("preflight-preview-failed.png") });
-    }
+    await capture("preflight-preview-failed.png");
   });
 
   test("keeps one paid batch when the first preview is superseded", async ({ page }) => {

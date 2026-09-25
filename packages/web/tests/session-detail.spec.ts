@@ -4046,7 +4046,8 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(runtime.getByText("Pre-flight Claude")).toBeVisible();
     await expect(runtime.getByText("Pre-flight attempts")).toBeVisible();
     await expect(runtime.getByText("Pre-flight iterations")).toBeVisible();
-    await expect(runtime.getByText("100 / 100 · limit hit")).toBeVisible();
+    await expect(runtime.getByText("At least 100 / 100 · limit hit")).toBeVisible();
+    await expect(runtime.getByText("Unavailable · pre-flight usage unknown")).toBeVisible();
     await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
     const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;

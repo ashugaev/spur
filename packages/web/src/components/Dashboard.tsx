@@ -1090,6 +1090,9 @@ export function Dashboard() {
   const spawnPreflightBatchIdRef = useRef<string | null>(null);
   const [spawnPreflightUsage, setSpawnPreflightUsage] =
     useState<SpurPreflightTokenUsageView | null>(null);
+  const [spawnPreflightStatus, setSpawnPreflightStatus] = useState<"idle" | "pending" | "error">(
+    "idle",
+  );
   useEffect(() => {
     spawnPreflightBatchIdRef.current = spawnPreflightBatchId;
   }, [spawnPreflightBatchId]);
@@ -1600,6 +1603,7 @@ export function Dashboard() {
     spawnPreflightBatchIdRef.current = restoredBatchId;
     setSpawnPreflightBatchId(restoredBatchId);
     setSpawnPreflightUsage(null);
+    setSpawnPreflightStatus("idle");
     setSpawnAttachments([]);
   };
 
@@ -1629,6 +1633,7 @@ export function Dashboard() {
       spawnPreflightBatchIdRef.current = null;
       setSpawnPreflightBatchId(null);
       setSpawnPreflightUsage(null);
+      setSpawnPreflightStatus("idle");
     }
     // No explicit reset needed here: spawnWorkspaceModeAuto is derived from
     // spawnWorkspaceModeConfirmedFor !== spawnProjectId, so switching the
@@ -1788,14 +1793,21 @@ export function Dashboard() {
   useEffect(() => {
     const project = spawnProjectId.trim();
     const prompt = spawnPrompt.trim();
-    if (!project || !prompt) return;
+    if (!project || !prompt) {
+      setSpawnPreflightStatus("idle");
+      return;
+    }
     // Same gate as submit: while still on the auto-derived workspace mode,
     // an in-flight or failed spawn-defaults request means spawnWorkspaceMode
     // is still the hardcoded "worktree" fallback, not the project's real
     // default. Firing preflight against it would compute a branch suggestion
     // for the wrong mode. Re-runs (and re-debounces) once the defaults settle.
-    if (spawnWorkspaceModeUnresolved) return;
+    if (spawnWorkspaceModeUnresolved) {
+      setSpawnPreflightStatus("idle");
+      return;
+    }
 
+    setSpawnPreflightStatus("pending");
     let cancelled = false;
     const timer = setTimeout(() => {
       const batchId = spawnPreflightBatchIdRef.current ?? crypto.randomUUID();
@@ -1820,30 +1832,37 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       })
-        .then((r) => r.json().catch(() => null))
-        .then(
-          (
-            result: {
-              branch?: string | null;
-              error?: string;
-              preflightBatchId?: string;
-              preflightTokenUsageView?: SpurPreflightTokenUsageView;
-            } | null,
-          ) => {
-            if (!result || batchId !== spawnPreflightBatchIdRef.current) return;
-            if (result.preflightBatchId && result.preflightBatchId !== batchId) return;
-            const usage = result.preflightTokenUsageView;
-            if (usage) {
-              setSpawnPreflightUsage((current) =>
-                current && current.attemptCount > usage.attemptCount ? current : usage,
-              );
-            }
-            if (cancelled) return;
-            if (!result.error && result.branch && !spawnBranchExplicitRef.current)
-              setSpawnBranch(result.branch);
-          },
-        )
-        .catch(() => {});
+        .then(async (response) => ({
+          ok: response.ok,
+          result: (await response.json().catch(() => null)) as {
+            branch?: string | null;
+            error?: string;
+            preflightBatchId?: string;
+            preflightTokenUsageView?: SpurPreflightTokenUsageView;
+          } | null,
+        }))
+        .then(({ ok, result }) => {
+          if (batchId !== spawnPreflightBatchIdRef.current) return;
+          if (!result) {
+            if (!cancelled) setSpawnPreflightStatus("error");
+            return;
+          }
+          if (result.preflightBatchId && result.preflightBatchId !== batchId) return;
+          const usage = result.preflightTokenUsageView;
+          if (usage) {
+            setSpawnPreflightUsage((current) =>
+              current && current.attemptCount > usage.attemptCount ? current : usage,
+            );
+          }
+          if (cancelled) return;
+          setSpawnPreflightStatus(ok && !result.error ? "idle" : "error");
+          if (ok && !result.error && result.branch && !spawnBranchExplicitRef.current)
+            setSpawnBranch(result.branch);
+        })
+        .catch(() => {
+          if (!cancelled && batchId === spawnPreflightBatchIdRef.current)
+            setSpawnPreflightStatus("error");
+        });
     }, 500);
 
     return () => {
@@ -1943,6 +1962,7 @@ export function Dashboard() {
       spawnPreflightBatchIdRef.current = null;
       setSpawnPreflightBatchId(null);
       setSpawnPreflightUsage(null);
+      setSpawnPreflightStatus("idle");
       spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
@@ -2798,15 +2818,29 @@ export function Dashboard() {
                 },
                 branchNotesSlot: (
                   <>
-                    {spawnPreflightUsage ? (
-                      <p className="text-[var(--color-text-tertiary)]">
-                        Pre-flight tokens:{" "}
-                        {spawnPreflightUsage.status === "measured" ||
-                        spawnPreflightUsage.status === "partial"
-                          ? spawnPreflightUsage.totalTokens.toLocaleString()
-                          : "unavailable"}
-                        {spawnPreflightUsage.status === "partial" ? " · partial" : ""}
-                      </p>
+                    {spawnPreflightUsage || spawnPreflightStatus !== "idle" ? (
+                      <div aria-live="polite" className="space-y-1">
+                        {spawnPreflightUsage ? (
+                          <p className="text-[var(--color-text-tertiary)]">
+                            Pre-flight tokens:{" "}
+                            {spawnPreflightUsage.status === "measured" ||
+                            spawnPreflightUsage.status === "partial"
+                              ? spawnPreflightUsage.totalTokens.toLocaleString()
+                              : "unavailable"}
+                            {spawnPreflightUsage.status === "partial" ? " · partial" : ""}
+                          </p>
+                        ) : null}
+                        {spawnPreflightStatus === "pending" ? (
+                          <p role="status" className="text-[var(--color-text-secondary)]">
+                            Checking branch preview…
+                          </p>
+                        ) : null}
+                        {spawnPreflightStatus === "error" ? (
+                          <p role="alert" className="text-[var(--color-status-error)]">
+                            Branch preview failed. Token usage may still count.
+                          </p>
+                        ) : null}
+                      </div>
                     ) : null}
                     {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
                       <p className="text-xs text-[var(--color-text-tertiary)]">

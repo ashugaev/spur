@@ -191,14 +191,26 @@ function tokenUsageRows(
     );
   }
   const budget = session.tokenBudgetView;
-  const budgetRow: [string, string] | null = budget?.budget
+  const budgetReason =
+    budget?.reason === "preflight_unknown"
+      ? "pre-flight usage unknown"
+      : budget?.reason === "legacy_unknown"
+        ? "earlier usage unknown"
+        : budget?.reason === "main_usage_unavailable"
+          ? "main usage unavailable"
+          : "usage unavailable";
+  const budgetRows: Array<[string, string]> = budget?.budget
     ? [
-        "Combined budget",
-        `${budget.knownTotalTokens.toLocaleString()} / ${budget.budget.toLocaleString()}${budget.exhausted ? " · limit hit" : budget.enforced ? "" : " · unenforced"}`,
+        [
+          "Combined budget",
+          `${budget.enforced ? "" : "At least "}${budget.knownTotalTokens.toLocaleString()} / ${budget.budget.toLocaleString()}${budget.exhausted ? " · limit hit" : ""}`,
+        ],
+        ...(budget.enforced
+          ? []
+          : ([["Budget enforcement", `Unavailable · ${budgetReason}`]] as Array<[string, string]>)),
       ]
-    : null;
-  if (!usage)
-    return [["Tokens", "Waiting for usage"], ...preflightRows, ...(budgetRow ? [budgetRow] : [])];
+    : [];
+  if (!usage) return [["Tokens", "Waiting for usage"], ...preflightRows, ...budgetRows];
   if (usage.status === "unavailable") {
     return [
       [
@@ -208,11 +220,11 @@ function tokenUsageRows(
           : "Token usage unavailable",
       ],
       ...preflightRows,
-      ...(budgetRow ? [budgetRow] : []),
+      ...budgetRows,
     ];
   }
   if (usage.status === "waiting")
-    return [["Tokens", "Waiting for usage"], ...preflightRows, ...(budgetRow ? [budgetRow] : [])];
+    return [["Tokens", "Waiting for usage"], ...preflightRows, ...budgetRows];
   const used = usage.totalTokens.toLocaleString();
   const value = usage.budget === undefined ? used : `${used} / ${usage.budget.toLocaleString()}`;
   const rows: Array<[string, string]> = [
@@ -229,7 +241,7 @@ function tokenUsageRows(
       ["Cache write 1h", component(usage.cacheWrite1hInputTokens)],
     );
   }
-  rows.push(...preflightRows, ...(budgetRow ? [budgetRow] : []));
+  rows.push(...preflightRows, ...budgetRows);
   return rows;
 }
 

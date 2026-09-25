@@ -5842,7 +5842,8 @@ describe("SessionDetail token usage", () => {
     expect(await screen.findByText("Pre-flight tokens")).toBeInTheDocument();
     expect(screen.getByText("20 · partial")).toBeInTheDocument();
     expect(screen.getByText("Combined budget")).toBeInTheDocument();
-    expect(screen.getByText("100 / 100 · limit hit")).toBeInTheDocument();
+    expect(screen.getByText("At least 100 / 100 · limit hit")).toBeInTheDocument();
+    expect(screen.getByText("Unavailable · pre-flight usage unknown")).toBeInTheDocument();
   });
 
   it("shows pre-flight components, unknown fields, and combined-budget Restore gating", async () => {
@@ -5898,6 +5899,31 @@ describe("SessionDetail token usage", () => {
     expect(row("Pre-flight iterations")).toHaveTextContent("3");
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
+
+  it("marks the combined budget as a known minimum when main usage is unavailable", async () => {
+    stubFetch({
+      agent: "cursor",
+      tokenUsageView: {
+        status: "unavailable",
+        provider: "cursor",
+        reason: "structured_usage_unavailable",
+        exhausted: false,
+        unenforced: true,
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        reason: "main_usage_unavailable",
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
+    expect(screen.getByText("Unavailable · main usage unavailable")).toBeInTheDocument();
   });
 
   it("marks unsupported live sessions as unenforced", async () => {
