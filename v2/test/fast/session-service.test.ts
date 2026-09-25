@@ -29718,16 +29718,11 @@ describe("SessionService", () => {
       }
     });
 
-    it("schedules the same URL-ready probe on the own-identity no-op path as the pane-alive early return", async () => {
-      // Invariant 10 ("a no-op success publishes the link exactly as the
-      // pane-alive return") holds at the CALL level — see the source
-      // comment at the own-identity no-op's scheduleSidecarUrlReadyAndPublish
-      // call site for why the actual link write is separately gated and the
-      // narrow case (github.com/ashugaev/spur/issues/912) where that
-      // matters. Asserting a published slots.links here would assert
-      // something this path never actually produces (sidecarTmuxAliveMock
-      // stays false throughout) — fetch invocation is the honest,
-      // falsifiable check for "the same probe was scheduled".
+    it("re-links an unlinked slot on the own-identity no-op path with tmux gone (#912)", async () => {
+      // Invariant 10: a no-op success publishes the link exactly as the
+      // pane-alive return. sidecarTmuxAliveMock stays false throughout, so
+      // this passes only because the path carries the recorded identity as
+      // its liveness proof instead of the tmux supervisor.
       vi.useRealTimers();
       const child = spawnDisposableChild();
       try {
@@ -29769,23 +29764,95 @@ describe("SessionService", () => {
           ]),
           byPgid: new Map(),
         });
-        const fetchMock = vi
-          .spyOn(globalThis, "fetch")
-          .mockResolvedValue(new Response("ok", { status: 200 }));
+        vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
 
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-        await service.startSidecar("api-1", "dev");
+        try {
+          await service.startSidecar("api-1", "dev");
 
-        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+          expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+          // Fire-and-forget probe chain behind a 1s-per-retry sleep:
+          // waitFor's 1s default cannot absorb even one retry under load.
+          await vi.waitFor(
+            () => {
+              expect(sessions.get("api-1")?.slots?.links).toEqual([
+                { label: "dev", url: "https://preview.example.com/3000" },
+              ]);
+            },
+            { timeout: 5_000 },
+          );
+        } finally {
+          service.dispose();
+        }
+      } finally {
+        child.kill();
+      }
+    });
+
+    it("stops probing on the no-op path once the recorded identity dies", async () => {
+      vi.useRealTimers();
+      const child = spawnDisposableChild();
+      const sessions = createSessionStore();
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: {
+              dev: {
+                command: "pnpm dev",
+                autoStart: false,
+                ports: {
+                  http: {
+                    env: "SPUR_RESERVED_PORT_DEV",
+                    start: 3000,
+                    end: 3000,
+                    url: "https://preview.example.com/{port}",
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      const starttime = await realStarttime(child.pid);
+      sessions.set("api-1", ownIdentitySession({ pid: child.pid, pgid: child.pid, starttime }));
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      isHostPortFreeMock.mockResolvedValue(false);
+      findListenerPidsMock.mockResolvedValue([child.pid]);
+      snapshotProcessesMock.mockResolvedValue({
+        ok: true,
+        byPid: new Map([
+          [
+            child.pid,
+            { pid: child.pid, ppid: 1, pgid: child.pid, rssKb: 10, etimes: 1, args: "x" },
+          ],
+        ]),
+        byPgid: new Map(),
+      });
+      // Never ready, so every iteration falls through to the liveness gate.
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await service.startSidecar("api-1", "dev");
+        child.kill();
+
         await vi.waitFor(
           () => {
-            expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:3000/", expect.anything());
+            expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+              "session.sidecar.link_probe.failed",
+            );
           },
-          { timeout: 5_000 },
+          { timeout: 10_000 },
         );
+        expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
       } finally {
+        service.dispose();
         child.kill();
       }
     });
