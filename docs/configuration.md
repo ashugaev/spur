@@ -494,15 +494,14 @@ Auto-ping scopes and controls: [commands.md#auto-ping](commands.md#auto-ping).
 
 Source support:
 
-- `cron`: event and subscription for spawn triggers; no thread.
-- `github`: event and subscription for review send/spawn and work-item spawn; inline review comments add thread; issue comments, review bodies, lifecycle items, and work items have no thread.
-- `github-ci`: event and subscription for spawn triggers; no thread.
-- `gitlab`: event and subscription for review send/spawn; non-individual discussion notes add thread; individual notes have no thread.
-- `sentry`: event and subscription for spawn triggers; no thread.
-- `telegram`: event and subscription for send/spawn; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
+- `cron`: no controls; spawn triggers only.
+- `github`: event and subscription for review send; inline review comments add thread; issue comments, review bodies, and lifecycle items have no thread.
+- `github-ci`: no controls; spawn triggers only.
+- `gitlab`: event and subscription for review send; non-individual discussion notes add thread; individual notes have no thread.
+- `sentry`: no controls; spawn triggers only.
+- `telegram`: event and subscription for send; topic messages add thread; main-chat messages have no thread. `/spawn`, `/watch`, bindings, and replies stay outside suppression.
 - `service`: no live automatic events.
-- `jira`: event and subscription for work-item spawn when `query` is set; connection only without `query`; no thread or send triggers.
-- Cron, Sentry, and GitHub CI send triggers stay unsupported.
+- `jira`: no controls; work-item spawn when `query` is set; connection only without `query`; no send triggers.
 
 - `cron`: `cron:tick`.
 - `github`: `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:review_requested`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set. `github:review_requested` fires when the PR lists the authenticated `gh` account as a pending reviewer, and again on each re-request after that reviewer submits a review. Only a request naming that user counts; a request routed through a team is not matched.
@@ -516,6 +515,8 @@ Source support:
 `github` polls running sessions, matches each to a PR branch, emits changed signals only; state persists under `dataDir`. With `query` set it also runs `gh search prs <query>` on the same interval, emits `github:work_item.new` per unseen PR, and persists seen `<owner>/<repo>#<n>` ids. GitHub PR URLs seed the native `session.pr` binding; other review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, `{{externalId}}`.
 
 `jira` with `query` set polls that JQL on `intervalMs`, fetching at most `maxResults` matches per poll, emits `jira:work_item.new` per unseen issue among those returned, and persists seen `<PROJECT>#<KEY>` ids (e.g. `WEBDEV#WEBDEV-5236`) — an id already in that registry never re-emits, even if the issue later leaves and re-enters the JQL result set. An issue that never falls inside the `maxResults` window is never recorded; if it later rotates into the window (a JQL ordering change, other issues resolving), it emits as new, uncapped by the first-poll backlog cap, which only applies before a project has any seen entries at all. Spawn prompts reference work-item fields with `{{key}}`, `{{title}}`, `{{url}}`, `{{externalId}}`, plus the inherited `{{number}}` (trailing digits of the key) and `{{repo}}` (the key's project prefix). `spawn.autoComplete` is supported on a `jira:work_item.new` trigger; it completes the Spur session only — no Jira issue transition is made.
+
+A work-item spawn trigger skipped because another session already owns that item logs `trigger.spawn.suppressed` (`details.reason`, optional `sessionId` of the owner, level `warn` only for `owner_load_failed` else `info`): `work_item_pending` (a pending claim exists, no session spawned yet), `work_item_completed` (the item's lifecycle already completed), `owner_completed` (the owning session finished since last check), `owner_active` (the owning session is still working it), `owner_not_replaceable` (the owning session is alive in a state that blocks respawn), `owner_load_failed` (the owning session record could not be read; `details.error`).
 
 `github:ci_failed`: retry every 10 minutes, stop after 3 attempts for an unchanged item. `github:merge_conflict`: at most 3 automatic delivery attempts per unchanged conflict and destination, including restore replay and daemon restart. A confirmed clear, changed conflict, or another PR permits a new budget. Comments observed alongside replay still emit. Terminal events (`merged`/`closed`) fire only while the owning session runs; after one, polling pauses while that session stays bound to the same PR — sticky across daemon restarts — and resumes on rebinding to a different PR. That first poll re-baselines, absorbing signals already true on the new PR. A session with no PR binding is never subject to this terminal-signal pause or the permanent not-found stop below (both require a bound PR number) — it can still be gated by the transient poll-failure backoff described next.
 

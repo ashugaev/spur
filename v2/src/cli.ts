@@ -739,11 +739,12 @@ function resolveAutoPingUnsubscribe(args: {
 }
 
 function renderAutoPingSuppression(record: AutoPingSuppressionView): string {
-  const destination =
-    record.destination.kind === "session" ? record.destination.sessionId : record.destination.kind;
-  const parts = [record.suppressionId, record.scope, destination, record.createdAt].filter(
-    (part): part is string => typeof part === "string" && part.length > 0,
-  );
+  const parts = [
+    record.suppressionId,
+    record.scope,
+    record.destination.sessionId,
+    record.createdAt,
+  ].filter((part): part is string => typeof part === "string" && part.length > 0);
   return parts.join("\t");
 }
 

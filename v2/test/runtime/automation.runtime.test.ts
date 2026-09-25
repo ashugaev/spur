@@ -40,7 +40,6 @@ function startConfiguredTriggers(
     deps.sessionService.deliver(sessionId, message, {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-  sessionService.spawn = async (request) => deps.sessionService.spawn(request);
   const controller = startTriggerController({ ...deps, sessionService, autoPing });
   return {
     async stop(): Promise<void> {
