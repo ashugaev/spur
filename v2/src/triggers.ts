@@ -41,6 +41,7 @@ import type { EventBus } from "./event-bus.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
+  LaunchPromptPendingError,
   SessionAdmissionDeniedError,
   SessionRateLimitedError,
   type SessionService,
@@ -1048,6 +1049,26 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             sourceId: batch.sourceId,
             triggerId: batch.triggerId,
             message: `Suppressed queued trigger update to ${batch.batch.sessionId} while rate limited`,
+            details: {
+              interrupt,
+              attempt: null,
+            },
+          });
+          batch.retryAccounting = beforeAttempt;
+          persistResult();
+          return { status: "suppressed" };
+        }
+        // Same shape as a rate limit: the session is alive and takes the batch
+        // once its launch prompt is confirmed, so no attempt is spent.
+        if (error instanceof LaunchPromptPendingError) {
+          if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
+          logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_launch_pending", {
+            level: "info",
+            sessionId: batch.batch.sessionId,
+            projectId: batch.projectId,
+            sourceId: batch.sourceId,
+            triggerId: batch.triggerId,
+            message: `Suppressed queued trigger update to ${batch.batch.sessionId}: launch prompt not confirmed`,
             details: {
               interrupt,
               attempt: null,

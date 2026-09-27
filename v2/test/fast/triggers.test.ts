@@ -4797,6 +4797,46 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("suppresses a delivery refused over a pending launch prompt without spending an attempt", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const { LaunchPromptPendingError } = await import("../../src/session-service.js");
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValue(new LaunchPromptPendingError("Agent has not confirmed the launch prompt"));
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+      const events = logSpurEventMock.mock.calls.map(([, entry]) => entry.event);
+      expect(events).toContain("trigger.send.suppressed_launch_pending");
+      expect(events).not.toContain("trigger.send.failed");
+      const record = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(record.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(true);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("leaves the pending batch intact and logs a suppression event when delivery is rate limited", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
