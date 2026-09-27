@@ -956,6 +956,12 @@ export class SessionEndedError extends Error {
   readonly statusCode = 409;
 }
 
+// An immediate send (user, trigger, or automated) reached a session whose
+// launch prompt may still sit unsubmitted; typing would erase it.
+export class LaunchPromptPendingError extends Error {
+  readonly statusCode = 409;
+}
+
 export class WakeTargetMissingError extends Error {
   readonly statusCode = 409;
 }
@@ -1090,6 +1096,13 @@ class SidecarUrlProbeSidecarExitedError extends Error {
 
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
+}
+
+// A launch send never confirmed: the task prompt may still sit unsubmitted in
+// the composer, and any typed send (its line clear) would erase it. Every
+// path that types into the pane checks this one predicate.
+function launchPromptPending(session: Pick<SessionRecord, "launchUnconfirmedAt">): boolean {
+  return session.launchUnconfirmedAt !== undefined;
 }
 
 // Status gate for the user send paths (send, flush, answer). A restorable
@@ -6795,7 +6808,8 @@ export class SessionService {
     if (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
-      session.pipeline?.status === "running"
+      session.pipeline?.status === "running" ||
+      launchPromptPending(session)
     ) {
       return;
     }
@@ -6811,7 +6825,8 @@ export class SessionService {
           current.status !== "running" ||
           hasQueuedMessages(current) ||
           current.queuedMessages?.awaitingPrompt ||
-          current.pipeline?.status === "running"
+          current.pipeline?.status === "running" ||
+          launchPromptPending(current)
         )
           return;
         if (
@@ -9761,6 +9776,35 @@ export class SessionService {
     return { ...next, launchUnconfirmedAt: new Date(sentAt).toISOString() };
   }
 
+  // Clears launchUnconfirmedAt once the agent's transcript shows activity at
+  // or after the launch send: the prompt reached the agent. Called from the
+  // classification path, so any enrich, tick, or queue wait confirms it.
+  private confirmLaunchOnActivity(
+    session: SessionRecord,
+    agentActivityAt: Date | null,
+  ): SessionRecord {
+    if (
+      !session.launchUnconfirmedAt ||
+      !agentActivityAt ||
+      agentActivityAt.getTime() < Date.parse(session.launchUnconfirmedAt)
+    ) {
+      return session;
+    }
+    const latest = readSession(this.config.dataDir, session.id);
+    if (latest?.launchUnconfirmedAt !== session.launchUnconfirmedAt) {
+      return latest ?? session;
+    }
+    const { launchUnconfirmedAt: _confirmed, ...confirmed } = latest;
+    writeSession(this.config.dataDir, confirmed);
+    this.logEvent("session.spawn.launch_confirmed", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Launch prompt for ${session.id} confirmed by agent activity`,
+    });
+    return confirmed;
+  }
+
   // The one path for every spawn write after the placeholder: a kill that
   // landed since stops the spawn instead of being overwritten, and queued
   // messages carry over. Check, read, and write run in one synchronous span.
@@ -11984,7 +12028,7 @@ export class SessionService {
       finalMessage,
       readySession.queuedMessages?.awaitingPrompt === true ||
         sendState !== "waiting" ||
-        readySession.launchUnconfirmedAt !== undefined,
+        launchPromptPending(readySession),
     );
     if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
       await this.tryDeliverQueuedMessageLocked(sessionId);
@@ -12270,6 +12314,15 @@ export class SessionService {
         });
         throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
       }
+      // Classification clears the marker when the agent already took the prompt.
+      if (
+        launchPromptPending(initialSession) &&
+        launchPromptPending((await this.classifySessionRecord(initialSession)).session)
+      ) {
+        throw new LaunchPromptPendingError(
+          `Agent has not confirmed the launch prompt: ${sessionId}. Submit it first.`,
+        );
+      }
       const readySession = await this.ensureSessionReadyForSend(initialSession);
       let interrupt = options.interrupt === true;
       if (interrupt) {
@@ -12319,6 +12372,7 @@ export class SessionService {
       if (
         error instanceof SessionRateLimitedError ||
         error instanceof QueueDeliveryInFlightError ||
+        error instanceof LaunchPromptPendingError ||
         (error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard")
       ) {
         throw error;
@@ -14107,7 +14161,8 @@ export class SessionService {
     }
 
     const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
-    // A killed session never runs again, so its undelivered queue goes with it.
+    // A killed session never runs again, so its undelivered queue and any
+    // pending-launch marker go with it.
     const record: SessionRecord = withQueuedMessages(
       {
         ...this.sessionWithReleasedSidecarPorts(cleanedSession),
@@ -14118,6 +14173,7 @@ export class SessionService {
       false,
     );
     delete record.retainInList;
+    delete record.launchUnconfirmedAt;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -14688,7 +14744,13 @@ export class SessionService {
       // id in readClaudeJsonlState's fallback lookup.
       this.claudeJsonlReaders.delete(session.id);
     }
-    const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
+    // launchUnconfirmedAt dropped: the relaunch replaced the pane the old
+    // launch prompt was pending in.
+    const {
+      error: _ignoredError,
+      launchUnconfirmedAt: _replacedLaunch,
+      ...recoveredBase
+    } = sessionWithAgentId;
     // finishStaleWake runs after the agent process check above confirmed the
     // new pane is live, and before any caller (send/deliverPrepared/
     // tryDeliverQueuedMessage/switchAuth, all downstream of
@@ -15077,6 +15139,7 @@ export class SessionService {
           mcpSidecarUpdate,
         );
         delete recovered.stopReason;
+        delete recovered.launchUnconfirmedAt;
         const persistedRecovered = await this.captureAgentSessionId(
           recovered,
           AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -15132,6 +15195,9 @@ export class SessionService {
     );
     restored = await this.finishStaleWake(restored, this.getProject(current.project));
     delete restored.stopReason;
+    // The restore relaunched the agent with its own prompt; an old launch's
+    // pending marker no longer describes the composer.
+    delete restored.launchUnconfirmedAt;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -16459,6 +16525,11 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
+      // Classification above clears the marker on agent activity.
+      if (launchPromptPending(readSession(this.config.dataDir, sessionId) ?? session)) {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
       if (agentState === "waiting" && !isFresh(stepUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
@@ -16502,17 +16573,9 @@ export class SessionService {
       // An unconfirmed launch prompt can still sit in the composer, where the
       // queued send's line clear would erase it. Hold until the transcript
       // shows the agent took something after the launch send.
-      if (session.launchUnconfirmedAt) {
-        const transcriptAt = classified.agentActivityAt;
-        if (!transcriptAt || transcriptAt.getTime() < Date.parse(session.launchUnconfirmedAt)) {
-          await sleep(PIPELINE_POLL_INTERVAL_MS);
-          continue;
-        }
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (latest?.launchUnconfirmedAt) {
-          const { launchUnconfirmedAt: _confirmed, ...confirmed } = latest;
-          writeSession(this.config.dataDir, confirmed);
-        }
+      if (launchPromptPending(classified.session)) {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
       }
       // A confirmed ack plus a transcript write after it means the agent took
       // the delivered message and closed that turn: no grace needed. Without
@@ -18065,6 +18128,7 @@ export class SessionService {
       }
       this.lastClassifiedLogStates.set(session.id, state);
     }
+    effectiveSession = this.confirmLaunchOnActivity(effectiveSession, agentActivityAt);
 
     return {
       session: effectiveSession,

@@ -48,6 +48,7 @@ import {
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
+  LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
@@ -1990,7 +1991,8 @@ export async function startServer(
         error instanceof QueueDeliveryInFlightError ||
         error instanceof AgentExitedBeforeSendError ||
         error instanceof SessionStartingError ||
-        error instanceof SessionEndedError
+        error instanceof SessionEndedError ||
+        error instanceof LaunchPromptPendingError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;

@@ -46613,6 +46613,134 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    const PENDING_LAUNCH_AT = "2026-03-18T10:04:00.000Z";
+
+    it("refuses every immediate send path while the launch prompt is pending, typing nothing", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          launchUnconfirmedAt: PENDING_LAUNCH_AT,
+          queuedMessages: { messages: ["held"], awaitingPrompt: true },
+          scheduledWake: { dueAt: "2026-03-18T11:00:00.000Z", message: "wake up" },
+        }),
+      );
+      const { SessionService, LaunchPromptPendingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.deliver("api-1", "trigger event")).rejects.toBeInstanceOf(
+        LaunchPromptPendingError,
+      );
+      await expect(
+        service.send("api-1", { message: "now", queue: false, interrupt: true }),
+      ).rejects.toBeInstanceOf(LaunchPromptPendingError);
+      await expect(service.flushQueuedMessage("api-1", "held")).rejects.toBeInstanceOf(
+        LaunchPromptPendingError,
+      );
+      await expect(
+        service.dispatchWake("api-1", { target: "scheduled", dispatch: true }),
+      ).rejects.toBeInstanceOf(LaunchPromptPendingError);
+
+      expect(tmuxTexts()).toEqual([]);
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+      service.dispose();
+    });
+
+    it("sends no ToDo nudge while the launch prompt is pending", async () => {
+      const sessions = createSessionStore();
+      const session = runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT });
+      sessions.set(session.id, session);
+      mockClaudeJsonlState("waiting");
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      vi.setSystemTime(Date.now() + 3_600_000);
+      await internals.maybeNudgeTodo(session);
+      await internals.maybeNudgeTodo(sessions.get(session.id) ?? session);
+
+      expect(
+        sendMessageToTmuxMock.mock.calls.filter(([, message]) =>
+          String(message).includes("Spur ToDo is empty"),
+        ),
+      ).toHaveLength(0);
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+    });
+
+    it("holds the next pipeline step while the launch prompt is pending", async () => {
+      mockTimerPromisesSleepWithFakeTimers();
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          launchUnconfirmedAt: PENDING_LAUNCH_AT,
+          updatedAt: "2026-03-18T10:00:00.000Z",
+          pipeline: {
+            steps: ["research", "test"],
+            nextStepIndex: 1,
+            awaitingStepIndex: 0,
+            status: "running",
+          },
+        }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(tmuxTexts()).toEqual([]);
+
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() });
+      await vi.waitFor(() => {
+        expect(tmuxTexts().some((text) => text.includes("test"))).toBe(true);
+      });
+      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("clears the pending-launch marker on the first transcript activity seen by any enrich", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT }));
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse(PENDING_LAUNCH_AT) - 1_000 });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      expect((await service.get("api-1")).launchUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse(PENDING_LAUNCH_AT) + 1_000 });
+      const view = await service.get("api-1");
+      expect(view.launchUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
+      expect(eventsNamed("session.spawn.launch_confirmed")).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("drops the pending-launch marker on kill and on restore", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT }));
+      sessions.set(
+        "api-2",
+        runningSession({ id: "api-2", status: "stopped", launchUnconfirmedAt: PENDING_LAUNCH_AT }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.kill("api-1", { skipPrCheck: true, force: true });
+      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
+
+      tmuxSessionExistsMock.mockResolvedValueOnce(false);
+      await service.restore("api-2");
+      expect(sessions.get("api-2")?.status).toBe("running");
+      expect(sessions.get("api-2")?.launchUnconfirmedAt).toBeUndefined();
+      service.dispose();
+    });
+
     it("stops resending Enter for a launch send once the pane is gone", async () => {
       mockTimerPromisesSleepWithFakeTimers();
       mockClaudeJsonlState("waiting");
