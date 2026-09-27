@@ -539,7 +539,7 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("hides restore when pre-flight usage is unknown under a budget", () => {
+  it("allows restore when pre-flight usage is unknown under a budget", () => {
     useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
     render(
       <SessionRow
@@ -560,9 +560,7 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(
-      screen.queryByRole("button", { name: "Restore session api-a1" }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore session api-a1" })).toBeInTheDocument();
   });
 
   it("hides restore when the workspace no longer exists", () => {

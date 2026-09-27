@@ -6099,30 +6099,53 @@ describe("SessionDetail token usage", () => {
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
 
-  it("hides Restore and explains unknown pre-flight usage under a budget", async () => {
-    stubFetch({
-      status: "stopped",
-      state: "stopped",
-      runtimeAlive: false,
-      tokenBudgetView: {
-        budget: 100,
-        knownTotalTokens: 20,
-        exhausted: false,
-        enforced: false,
-        reason: "preflight_unknown",
-      },
-    });
+  it.each(["legacy_unknown", "preflight_unknown"] as const)(
+    "allows normal Restore for paused %s usage",
+    async (reason) => {
+      stubFetch({
+        status: "paused",
+        state: "stopped",
+        runtimeAlive: false,
+        tokenBudgetView: {
+          budget: 100,
+          knownTotalTokens: 20,
+          exhausted: false,
+          enforced: false,
+          reason,
+        },
+      });
 
-    render(<SessionDetail sessionId="api-a1" />);
+      render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("Unavailable · pre-flight usage unknown")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
-  });
+      expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Restore" })).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Approve / ignore limit" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["legacy_unknown", "preflight_unknown", "main_usage_unavailable"] as const)(
+    "keeps active input enabled for %s usage",
+    async (reason) => {
+      stubFetch({
+        tokenBudgetView: {
+          budget: 100,
+          knownTotalTokens: 20,
+          exhausted: false,
+          enforced: false,
+          reason,
+        },
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Message...")).toBeEnabled();
+      expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Approve / ignore limit" }),
+      ).not.toBeInTheDocument();
+    },
+  );
 });
 
 describe("SessionDetail document title", () => {

@@ -4159,29 +4159,35 @@ test.describe("S5: Runtime sidebar", () => {
     });
   });
 
-  test("unknown pre-flight usage blocks Restore before the known total reaches the limit", async ({
-    page,
-  }) => {
+  test("unknown usage preserves normal Restore and active input", async ({ page }) => {
     const session = makeStoppedSession({
       id: "detail-preflight-unknown",
+      status: "paused",
       tokenBudgetView: {
         budget: 100,
         knownTotalTokens: 20,
         exhausted: false,
         enforced: false,
-        reason: "preflight_unknown",
+        reason: "legacy_unknown",
       },
     });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByText("Unavailable · pre-flight usage unknown")).toBeVisible();
-    await expect(
-      page.getByText(
-        "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced.",
-      ),
-    ).toBeVisible();
-    await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+    await expect(page.getByText("Unavailable · earlier usage unknown")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Approve / ignore limit" })).toHaveCount(0);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      expect(route.request().postData()).toBeNull();
+      session.status = "running";
+      session.state = "working";
+      session.runtimeAlive = true;
+      await route.fulfill({ status: 200, json: { ok: true } });
+    });
+    await page.getByRole("button", { name: "Restore" }).click();
+    await expect(page.getByPlaceholder("Message...")).toBeEnabled();
+    await expect(page.getByText("At least 20 / 100")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Approve / ignore limit" })).toHaveCount(0);
   });
 
   test("copy workspace access entries are visible when configured", async ({ page }) => {

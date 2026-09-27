@@ -2872,16 +2872,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
   const tokenBudgetBlocked = session ? isTokenBudgetBlocked(session) : false;
-  const tokenBudgetMessage =
-    session?.tokenBudgetView?.exhausted === true || session?.tokenUsageView?.exhausted === true
-      ? "Not accepting input. Token budget limit hit."
-      : session?.tokenBudgetView?.enforced === false
-        ? session.tokenBudgetView.reason === "preflight_unknown"
-          ? "Not accepting input. Pre-flight usage unknown; token budget cannot be enforced."
-          : session.tokenBudgetView.reason === "legacy_unknown"
-            ? "Not accepting input. Earlier usage unknown; token budget cannot be enforced."
-            : "Not accepting input. Main usage unavailable; token budget cannot be enforced."
-        : "Not accepting input. Token budget limit hit.";
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
@@ -3481,7 +3471,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
                     {tokenBudgetBlocked
-                      ? tokenBudgetMessage
+                      ? "Not accepting input. Token budget limit hit."
                       : "Not accepting input. Restore to continue."}
                   </p>
                 )}
