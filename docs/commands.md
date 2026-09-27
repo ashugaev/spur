@@ -38,6 +38,7 @@ Read-only: checks host install, config, daemon/web health; exits non-zero only o
 - `opencode-executable` (warn) — missing from PATH/`SPUR_OPENCODE_BIN`; fix: install `opencode-ai` or set [override](configuration.md#field-reference).
 - `skills-symlinks` (warn) — skill link state under `~/.claude/skills`/`~/.codex/skills`; never creates a dir/link; `fix` names a conflicting path before `spur reinit`.
 - `agent-process-ownership` (warn, Linux) — live agent processes their record doesn't own: `duplicate_for_session`, `terminal_record`, `unknown_session`, `foreign_instance` (info). Prints pid/agent/session/reason/rss/age.
+- `github-poll-disabled` (warn) — sessions whose bound PR was permanently not found and are still awaiting their next [recheck window](configuration.md#field-reference); one line per pair (`project/source session PR# since <date>`), `fix` names `spur source poll-enable --session <id>`.
 
 ## gc
 
@@ -126,9 +127,9 @@ TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r`
 
 `pause` keeps the worktree; `complete`/`kill` tear down the pane, remove an owned worktree (`kill` needs `--force` on dirty/unpushed). Both check for an open PR first: `--pr-action leave_open|close` answers it, `--skip-pr-check` skips it; a failed check fails with retry hint. Shared-workspace sessions keep the project path on `kill`.
 
-`spur restore <sessionId> [--force] [--json]` needs an existing workspace plus: `running`+state `stopped`; `stopped`+state `stopped`/`error`/`stale`; `paused`+state `stopped`/`error`; `errored`+state `error` (`killed`/`completed` never restore). `restore`/`reopen` refuse over a live agent process still carrying the id, or an unreadable process table (skipped off Linux); a first `r` surfaces refusal, a second `r`/`--force` bypasses only the foreign-process refusal. `restore` resumes the session's existing conversation.
+`spur restore <sessionId> [--force] [--json]` needs an existing workspace plus: `running`+state `stopped`; `stopped`+state `stopped`/`error`/`stale`; `paused`+state `stopped`/`error`; `errored`+state `error` (`killed`/`completed` never restore). `restore`/`reopen` refuse over a live agent process still carrying the id, or an unreadable process table (skipped off Linux); a first `r` surfaces refusal, a second `r`/`--force` bypasses only the foreign-process refusal. `restore` resumes the session's existing conversation. It also clears the GitHub poll-disable registry for that session in every `github` source of its project, so the next poll cycle re-probes its PR immediately instead of waiting on the recheck window — a swallowed clear failure never fails the restore itself.
 
-`spur reopen <sessionId> [--force] [--json]` restarts a `completed` session in place — same id/worktree, native conversation resumed, prompt not resent. Refuses if branch is gone (use `respawn`), worktree isn't the session's own or its rebuild fails, or a reopen for that session is already running; skips Telegram binding and artifacts; MCP sidecars restart through restore. `respawn <sessionId>` starts a fresh session with a new id instead — the conversation is not carried over.
+`spur reopen <sessionId> [--force] [--json]` restarts a `completed` session in place — same id/worktree, native conversation resumed, prompt not resent. Refuses if branch is gone (use `respawn`), worktree isn't the session's own or its rebuild fails, or a reopen for that session is already running; skips Telegram binding and artifacts; MCP sidecars restart through restore. Funnels through the same restore path, so it clears the GitHub poll-disable registry too. `respawn <sessionId>` starts a fresh session with a new id instead — the conversation is not carried over.
 
 ## todo
 
@@ -194,7 +195,7 @@ On each live session's `PATH`. Updates the tmux status-line title and named link
 
 `spur source poll-enable --session <id>` re-enables GitHub signal polling for a session a not-found PR permanently disabled (see [source.poll.disabled](configuration.md#events)). `--session` defaults to `SPUR_SESSION`. `--json` prints raw JSON.
 
-Clears the disable in every `github`-type source of the session's project. No-op, `cleared: []`, when nothing was disabled for that session — never an error. Polling resumes on the next poll tick.
+Clears the disable in every `github`-type source of the session's project. No-op, `cleared: []`, when nothing was disabled for that session — never an error. Polling resumes on the next poll tick. `spur restore`/`spur reopen` also clear the disable as a side effect of resuming the session (see [`## list`](#list)) — use `poll-enable` for the case where you want polling back without resuming the session itself.
 
 ## service
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import {
+  checkGitHubPollDisabled,
   collectHostInstallChecks,
   hasErrorSeverity,
   renderHostInstallChecks,
@@ -2721,6 +2722,7 @@ export function createProgram(cliEntrypoint: string): Command {
           );
           if (instanceConfig.status === "ok") {
             collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+            collectedChecks.push(checkGitHubPollDisabled(instanceConfig.config.dataDir));
           }
           // `configRegistryPaths` rides on the "config-registry" check purely
           // as an internal carrier from `collectHostInstallChecks` to here
