@@ -65,7 +65,8 @@ test("token counts preserve exhaustion, rounding, and meaningful keyboard stops"
   await expect(count).toHaveText("1M");
   await expect(count).toHaveAttribute("style", "color: var(--color-status-error);");
   await count.focus();
-  await expect(page.getByRole("tooltip")).toContainText("Stopped by token budget");
+  await expect(page.getByRole("tooltip")).toContainText("Token budget reached");
+  await expect(page.getByRole("tooltip")).not.toContainText("Stopped by token budget");
   await page.screenshot({ path: testInfo.outputPath("conflicting-exhaustion.png") });
   const dashes = page.getByLabel("Tokens: unavailable", { exact: true });
   await expect(dashes).toHaveCount(2);
@@ -75,6 +76,14 @@ test("token counts preserve exhaustion, rounding, and meaningful keyboard stops"
   await expect(page.getByRole("tooltip")).toContainText("Unknown attempts");
   await page.screenshot({ path: testInfo.outputPath("unknown-preflight-focus.png") });
   await expect(page.locator('[aria-label="Tokens: unavailable"]:not([tabindex])')).toHaveCount(1);
+  for (const status of ["stopped", "budget_limited"] as const) {
+    await mockSessions(page, [{ ...measured, status, state: status }]);
+    await page.reload();
+    await count.focus();
+    await expect(page.getByRole("tooltip")).toContainText(
+      status === "budget_limited" ? "Stopped by token budget" : "Token budget reached",
+    );
+  }
   await mockSessions(page, [
     {
       ...measured,

@@ -19,6 +19,7 @@ describe("TokenCount", () => {
     render(
       <TokenCount
         session={{
+          status: "running",
           preflightTokenUsageView: {
             status: "unknown",
             attemptCount: 2,
@@ -39,6 +40,7 @@ describe("TokenCount", () => {
       <TokenCount
         sidebar
         session={{
+          status: "running",
           tokenUsageView: usage,
           tokenBudgetView: {
             budget: 1000,
@@ -62,6 +64,7 @@ describe("TokenCount", () => {
       <TokenCount
         sidebar
         session={{
+          status: "running",
           tokenUsageView: { ...usage, totalTokens: 184200 },
           tokenBudgetView: {
             budget: 500000,
@@ -87,7 +90,10 @@ describe("TokenCount", () => {
     render(
       <TokenCount
         sidebar
-        session={{ tokenUsageView: { ...usage, totalTokens, budget: totalTokens } }}
+        session={{
+          status: "running",
+          tokenUsageView: { ...usage, totalTokens, budget: totalTokens },
+        }}
       />,
     );
     expect(screen.getByLabelText(`Tokens: ${totalTokens.toLocaleString()}`)).toHaveTextContent(
@@ -95,10 +101,23 @@ describe("TokenCount", () => {
     );
   });
 
+  it.each([
+    ["running", "Token budget reached"],
+    ["stopped", "Token budget reached"],
+    ["budget_limited", "Stopped by token budget"],
+  ] as const)("reports lifecycle truth for %s", (status, footer) => {
+    render(<TokenCount session={{ status, tokenUsageView: { ...usage, exhausted: true } }} />);
+    fireEvent.focus(screen.getByLabelText("Tokens: 800"));
+    expect(screen.getByRole("tooltip")).toHaveTextContent(footer);
+    if (footer === "Token budget reached")
+      expect(screen.getByRole("tooltip")).not.toHaveTextContent("Stopped by token budget");
+  });
+
   it.each([false, true])("uses either exhaustion signal unless overridden=%s", (overridden) => {
     render(
       <TokenCount
         session={{
+          status: "running",
           tokenUsageView: { ...usage, exhausted: true },
           tokenBudgetView: {
             budget: 1000,
@@ -118,7 +137,7 @@ describe("TokenCount", () => {
     expect(count.classList.contains("font-bold")).toBe(!overridden);
     fireEvent.focus(count);
     expect(
-      screen.getByText(overridden ? "Limit ignored" : "Stopped by token budget"),
+      screen.getByText(overridden ? "Limit ignored" : "Token budget reached"),
     ).toBeInTheDocument();
   });
 
@@ -133,7 +152,7 @@ describe("TokenCount", () => {
       unenforced: false,
     } as const,
   ])("renders missing usage without a card %#", (tokenUsageView) => {
-    render(<TokenCount session={{ tokenUsageView }} />);
+    render(<TokenCount session={{ status: "running", tokenUsageView }} />);
     const count = screen.getByLabelText("Tokens: unavailable");
     expect(count).toHaveTextContent("—");
     expect(count).not.toHaveAttribute("tabindex");
@@ -145,6 +164,7 @@ describe("TokenCount", () => {
     render(
       <TokenCount
         session={{
+          status: "running",
           tokenUsageView: usage,
           preflightTokenUsageView: {
             status: "measured",
@@ -185,6 +205,7 @@ describe("TokenCount", () => {
       <TokenCount
         sidebar
         session={{
+          status: "budget_limited",
           tokenUsageView: { ...usage, totalTokens: total },
           tokenBudgetView: {
             budget: 1000,

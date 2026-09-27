@@ -5,7 +5,7 @@ import { isTokenBudgetBlocked, type SpurSessionView } from "@/lib/types";
 
 type TokenSession = Pick<
   SpurSessionView,
-  "tokenUsageView" | "preflightTokenUsageView" | "tokenBudgetView"
+  "status" | "tokenUsageView" | "preflightTokenUsageView" | "tokenBudgetView"
 >;
 
 function compact(value: number, precise = false): string {
@@ -179,7 +179,9 @@ export function TokenCount({
                 className={`mt-2 block border-t border-[var(--color-border-subtle)] pt-2 text-left ${hit ? "text-[var(--color-status-error)]" : unenforced ? "text-[var(--color-chip-warn-text)]" : "text-[var(--color-text-tertiary)]"}`}
               >
                 {hit
-                  ? "Stopped by token budget"
+                  ? session.status === "budget_limited"
+                    ? "Stopped by token budget"
+                    : "Token budget reached"
                   : budget?.overridden
                     ? `Limit ignored${budget.reason ? ` · ${reason}` : ""}`
                     : unenforced

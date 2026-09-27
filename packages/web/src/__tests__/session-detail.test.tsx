@@ -5843,7 +5843,7 @@ describe("SessionDetail token usage", () => {
     fireEvent.focus(await screen.findByLabelText("Tokens: at least 100"));
     expect(screen.getByText("≥100 / 100")).toBeInTheDocument();
     expect(screen.getByRole("tooltip")).toHaveTextContent("Total2080");
-    expect(screen.getByText("Stopped by token budget")).toBeInTheDocument();
+    expect(screen.getByText("Token budget reached")).toBeInTheDocument();
   });
 
   it("shows pre-flight components, unknown fields, and combined-budget Restore gating", async () => {
