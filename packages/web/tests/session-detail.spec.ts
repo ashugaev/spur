@@ -4134,7 +4134,7 @@ test.describe("S5: Runtime sidebar", () => {
       await expect(page.getByText("BUDGET LIMITED", { exact: true })).toBeVisible();
       await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
       await capture("limited");
-      await page.getByRole("button", { name: "Approve / ignore limit" }).click();
+      await page.getByRole("button", { name: "Continue anyway" }).click();
       await expect(
         page.getByRole("button", { name: "Approving and restoring session" }),
       ).toBeDisabled();
@@ -4144,11 +4144,11 @@ test.describe("S5: Runtime sidebar", () => {
       await expect(page.getByText("Approval failed; retry")).toBeVisible();
       await capture("error");
       release = undefined;
-      await page.getByRole("button", { name: "Approve / ignore limit" }).click();
+      await page.getByRole("button", { name: "Continue anyway" }).click();
       await expect.poll(() => Boolean(release)).toBe(true);
       release?.();
       await expect(page.getByText("100 / 100 · limit ignored")).toBeVisible();
-      await expect(page.getByRole("button", { name: "Approve / ignore limit" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
       await capture("resumed");
       const video = page.video();
       const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
@@ -4176,7 +4176,7 @@ test.describe("S5: Runtime sidebar", () => {
 
     await expect(page.getByText("Unavailable · earlier usage unknown")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Approve / ignore limit" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
     await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
       expect(route.request().postData()).toBeNull();
       session.status = "running";
@@ -4187,7 +4187,7 @@ test.describe("S5: Runtime sidebar", () => {
     await page.getByRole("button", { name: "Restore" }).click();
     await expect(page.getByPlaceholder("Message...")).toBeEnabled();
     await expect(page.getByText("At least 20 / 100")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Approve / ignore limit" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
   });
 
   test("copy workspace access entries are visible when configured", async ({ page }) => {

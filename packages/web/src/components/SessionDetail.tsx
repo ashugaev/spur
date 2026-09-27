@@ -3152,7 +3152,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 title="Ignore the token budget for this session and resume work"
                 className="border border-[var(--color-status-attention)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                <BusyContent busy={busyAction === "restore"}>Approve / ignore limit</BusyContent>
+                <BusyContent busy={busyAction === "restore"}>Continue anyway</BusyContent>
               </button>
             ) : null}
             {canReopen(session) ? (

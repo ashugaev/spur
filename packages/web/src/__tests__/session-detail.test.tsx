@@ -6020,7 +6020,7 @@ describe("SessionDetail token usage", () => {
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByText("Not accepting input. Restore to continue.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Approve / ignore limit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue anyway" })).toBeInTheDocument();
   });
 
   it("approves a budget-limited session and forwards the explicit override", async () => {
@@ -6034,7 +6034,7 @@ describe("SessionDetail token usage", () => {
     expect(await screen.findByText("BUDGET LIMITED")).toBeInTheDocument();
     const fetchMock = vi.mocked(global.fetch);
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
-    fireEvent.click(screen.getByRole("button", { name: "Approve / ignore limit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue anyway" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/api/sessions/api-a1/restore",
@@ -6055,9 +6055,7 @@ describe("SessionDetail token usage", () => {
     });
     render(<SessionDetail sessionId="api-a1" />);
     expect(await screen.findByText("110 / 100 · limit ignored")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Approve / ignore limit" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
   });
 
@@ -6119,9 +6117,7 @@ describe("SessionDetail token usage", () => {
 
       expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Restore" })).toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Approve / ignore limit" }),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     },
   );
 
@@ -6141,9 +6137,7 @@ describe("SessionDetail token usage", () => {
       expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
       expect(screen.getByPlaceholderText("Message...")).toBeEnabled();
       expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Approve / ignore limit" }),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     },
   );
 });
