@@ -23037,6 +23037,34 @@ describe("SessionService", () => {
     expect(createWorktreeMock).not.toHaveBeenCalled();
   });
 
+  it("keeps a server-allocated healthy preview batch measured across previews", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: { api: { ...baseConfig().projects.api, preflight: { prompt: "Choose a branch" } } },
+    });
+    const service = await createDisposedSessionService();
+    const { preflightBatchId } = await service.createPreflightBatch("api");
+    expect(runSpawnPreflightMock).not.toHaveBeenCalled();
+    runSpawnPreflightMock.mockResolvedValue({
+      branch: "feature/preview",
+      usage: { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+    });
+    const request = { project: "api", prompt: "hello", preflightBatchId };
+    const first = await service.preflight(request);
+    expect(first.preflightTokenUsageView).toMatchObject({
+      status: "measured",
+      totalTokens: 5,
+      attemptCount: 1,
+    });
+    const second = await service.preflight(request);
+    expect(second.preflightBatchId).toBe(preflightBatchId);
+    expect(second.preflightTokenUsageView).toMatchObject({
+      status: "measured",
+      totalTokens: 10,
+      attemptCount: 2,
+    });
+  });
+
   it("uses a configured spawn preflight branch before creating the worktree", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

@@ -1276,6 +1276,12 @@ export async function startServer(
         return;
       }
 
+      const preflightBatchProjectId = path.match(/^\/projects\/([^/]+)\/preflight-batches$/)?.[1];
+      if (method === "POST" && preflightBatchProjectId) {
+        sendJson(response, 200, await service.createPreflightBatch(preflightBatchProjectId));
+        return;
+      }
+
       const preflightProjectId = path.match(/^\/projects\/([^/]+)\/preflight$/)?.[1];
       if (method === "POST" && preflightProjectId) {
         const body = await readJsonBody<PreflightRequest>(request);

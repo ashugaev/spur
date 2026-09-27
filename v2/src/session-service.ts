@@ -9667,6 +9667,11 @@ export class SessionService {
     }
   }
 
+  async createPreflightBatch(projectId: string): Promise<{ preflightBatchId: string }> {
+    this.getProject(projectId);
+    return { preflightBatchId: await this.preflightUsageStore.create(projectId) };
+  }
+
   async preflight(request: PreflightRequest): Promise<PreflightResponse> {
     if (typeof request.prompt !== "string" || !request.prompt.trim()) {
       throw new Error("prompt must be a non-empty string");

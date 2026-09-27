@@ -38,7 +38,11 @@ describe("PreflightUsageStore", () => {
     const path = join(directory, "preflight-batches", `${id}.json`);
     await mkdir(join(directory, "preflight-batches"));
     await writeFile(path, "{corrupt", "utf8");
-    const replacement = await ledger.resolve("api", id);
+    const [replacement, concurrentReplacement] = await Promise.all([
+      ledger.resolve("api", id),
+      ledger.resolve("api", id),
+    ]);
+    expect(concurrentReplacement).toBe(replacement);
     expect(replacement).not.toBe(id);
     await expect(ledger.view(replacement, "api")).resolves.toMatchObject({ status: "unknown" });
     await ledger.runAttempt(replacement, "api", "claude", async () => ({
@@ -48,6 +52,9 @@ describe("PreflightUsageStore", () => {
       status: "partial",
       totalTokens: 5,
     });
+    await expect(ledger.resolve("other", id)).rejects.toThrow("project mismatch");
+    const replayId = await ledger.resolve("api", id);
+    await expect(ledger.claim(replayId, "api", "session-2")).rejects.toThrow("another session");
     const restarted = new PreflightUsageStore(directory);
     await expect(restarted.view(replacement, "api")).resolves.toMatchObject({
       status: "partial",

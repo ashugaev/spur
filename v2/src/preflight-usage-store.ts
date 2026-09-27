@@ -215,6 +215,7 @@ export class PreflightUsageStore {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly createdIds = new Set<string>();
   private readonly memory = new Map<string, BatchRecord>();
+  private readonly replacements = new Map<string, string>();
   private collisionSequence = 0;
 
   constructor(dataDir: string) {
@@ -334,9 +335,10 @@ export class PreflightUsageStore {
     if (!requested) return this.create(project);
     this.path(requested);
     return this.withBatchLock(requested, async () => {
+      const resolvedId = this.replacements.get(requested) ?? requested;
       let batch: BatchRecord;
       try {
-        batch = await this.read(requested);
+        batch = await this.read(resolvedId);
       } catch (error) {
         if (error instanceof UnavailableBatchError) {
           if (error.identity?.project !== undefined && error.identity.project !== project) {
@@ -344,7 +346,9 @@ export class PreflightUsageStore {
           }
           if (error.identity?.claimedBy)
             throw new Error("preflight batch is already claimed", { cause: error });
-          return this.create(project, true);
+          const replacement = await this.create(project, true);
+          this.replacements.set(requested, replacement);
+          return replacement;
         }
         if (!(error instanceof Error) || !error.message.startsWith("Unknown preflight batch")) {
           throw error;
@@ -352,7 +356,7 @@ export class PreflightUsageStore {
         const now = new Date().toISOString();
         batch = {
           version: 1,
-          id: requested,
+          id: resolvedId,
           project,
           createdAt: now,
           updatedAt: now,
@@ -362,7 +366,7 @@ export class PreflightUsageStore {
         await this.write(batch);
       }
       if (batch.project !== project) throw new Error("preflight batch project mismatch");
-      return requested;
+      return batch.id;
     });
   }
 
