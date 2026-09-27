@@ -8,6 +8,7 @@ export type SessionStatus =
   | "spawning"
   | "running"
   | "stopped"
+  | "budget_limited"
   | "paused"
   | "errored"
   | "completed"
@@ -724,7 +725,7 @@ export interface TokenUsageTotals {
 }
 
 export interface SessionTokenUsageRecord extends TokenUsageTotals {
-  provider: "claude" | "codex" | "opencode";
+  provider: "claude" | "codex" | "cursor" | "opencode";
   generations: Record<string, TokenUsageTotals>;
 }
 
@@ -749,6 +750,7 @@ export type PreflightTokenUsageView =
 
 export interface TokenBudgetView {
   budget?: number;
+  overridden?: boolean;
   knownTotalTokens: number;
   exhausted: boolean;
   enforced: boolean;
@@ -758,13 +760,13 @@ export interface TokenBudgetView {
 export type SessionTokenUsageView =
   | ({
       status: "available";
-      provider: "claude" | "codex" | "opencode";
+      provider: "claude" | "codex" | "cursor" | "opencode";
       budget?: number;
       exhausted: boolean;
     } & TokenUsageTotals)
   | {
       status: "waiting";
-      provider: "claude" | "codex" | "opencode";
+      provider: "claude" | "codex" | "cursor" | "opencode";
       budget?: number;
       exhausted: false;
     }
@@ -1085,6 +1087,7 @@ export interface SessionRecord {
   launchCommand: string;
   status: SessionStatus;
   stopReason?: "manual_pause" | "stale_timeout" | "token_budget";
+  tokenBudgetOverride?: boolean;
   tokenUsage?: SessionTokenUsageRecord;
   preflightTokenUsage?: PreflightTokenUsageRecord;
   createdAt: string;
@@ -1525,6 +1528,7 @@ export interface KillSessionRequest {
 // (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
 export interface RestoreSessionRequest {
   force?: boolean;
+  overrideTokenBudget?: boolean;
 }
 
 export interface OpenPrActionRequiredPayload {

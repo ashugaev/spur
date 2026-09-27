@@ -626,6 +626,33 @@ describe("staleSidecars", () => {
 });
 
 describe("tokenUsage", () => {
+  it("persists budget approval through disk reload", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "budget_limited",
+      stopReason: "token_budget",
+      tokenBudgetOverride: true,
+    });
+    expect(readSession(dataDir, "api-1")).toMatchObject({
+      status: "budget_limited",
+      tokenBudgetOverride: true,
+    });
+  });
+
+  it("normalizes legacy token budget stops to budget_limited", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      stopReason: "token_budget",
+    });
+    expect(readSession(dataDir, "api-1")?.status).toBe("budget_limited");
+  });
+
   const base = {
     project: "api",
     agent: "claude" as const,

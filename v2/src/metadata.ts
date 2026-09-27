@@ -813,7 +813,13 @@ function normalizeTokenUsage(value: unknown): SessionTokenUsageRecord | undefine
   if (!totals || typeof value !== "object" || value === null) return undefined;
   const usage = value as Record<string, unknown>;
   const provider = usage["provider"];
-  if (provider !== "claude" && provider !== "codex" && provider !== "opencode") return undefined;
+  if (
+    provider !== "claude" &&
+    provider !== "codex" &&
+    provider !== "cursor" &&
+    provider !== "opencode"
+  )
+    return undefined;
   const rawGenerations = usage["generations"] ?? usage["sources"];
   if (
     typeof rawGenerations !== "object" ||
@@ -968,8 +974,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     worktreePath: normalizedSession.worktreePath,
     tmuxSession: normalizedSession.tmuxSession,
     launchCommand: normalizedSession.launchCommand,
-    status: normalizedSession.status,
+    status:
+      normalizedSession.status === "stopped" && normalizedSession.stopReason === "token_budget"
+        ? "budget_limited"
+        : normalizedSession.status,
     ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
+    ...(normalizedSession.tokenBudgetOverride === true ? { tokenBudgetOverride: true } : {}),
     ...(tokenUsage ? { tokenUsage } : {}),
     ...(preflightTokenUsage ? { preflightTokenUsage } : {}),
     createdAt: normalizedSession.createdAt,

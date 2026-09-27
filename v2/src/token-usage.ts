@@ -1,7 +1,7 @@
 import type { SessionTokenUsageRecord, TokenUsageTotals } from "./types.js";
 
 export interface ProviderTokenUsageSample extends TokenUsageTotals {
-  provider: "claude" | "codex" | "opencode";
+  provider: "claude" | "codex" | "cursor" | "opencode";
   generationId: string;
   observedAtMs?: number;
 }
