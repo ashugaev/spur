@@ -1882,9 +1882,14 @@ export function Dashboard() {
                 if (!cancelled) setSpawnPreflightStatus("error");
                 return;
               }
+              const batchChanged =
+                result.preflightBatchId !== undefined &&
+                result.preflightBatchId !== spawnPreflightBatchIdRef.current;
               if (result.preflightBatchId) persistBatchId(result.preflightBatchId);
               const usage = result.preflightTokenUsageView;
-              if (usage) {
+              if (batchChanged) {
+                setSpawnPreflightUsage(usage ?? null);
+              } else if (usage) {
                 setSpawnPreflightUsage((current) =>
                   current && current.attemptCount > usage.attemptCount ? current : usage,
                 );

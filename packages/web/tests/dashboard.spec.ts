@@ -2925,15 +2925,18 @@ test.describe("D7b: Silent branch preflight", () => {
       const body = route.request().postDataJSON() as { preflightBatchId: string };
       batchIds.push(body.preflightBatchId);
       if (batchIds.length === 2) await firstPending;
+      const replacement = batchIds.length === 4;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           branch: "feature/preview",
-          preflightBatchId: body.preflightBatchId,
+          preflightBatchId: replacement
+            ? "30000000-0000-4000-8000-000000000001"
+            : body.preflightBatchId,
           preflightTokenUsageView: {
-            status: "measured",
-            attemptCount: batchIds.length,
+            status: replacement ? "partial" : "measured",
+            attemptCount: replacement ? 1 : batchIds.length,
             unknownAttemptCount: 0,
             providerIterationCount: batchIds.length,
             byProvider: {},
@@ -2961,6 +2964,8 @@ test.describe("D7b: Silent branch preflight", () => {
     expect(batchIds[2]).toBe(batchIds[0]);
     expect(allocations).toBe(1);
     await expect(page.getByText("Pre-flight tokens: 3", { exact: true })).toBeVisible();
+    await prompt.fill("Recover corrupted batch");
+    await expect(page.getByText("Pre-flight tokens: 4 · partial", { exact: true })).toBeVisible();
     let spawnedBatchId: string | undefined;
     await page.route("**/api/spawn", async (route) => {
       const body = route.request().postDataJSON() as { preflightBatchId?: string };
@@ -2972,7 +2977,7 @@ test.describe("D7b: Silent branch preflight", () => {
       });
     });
     await page.getByRole("button", { name: /^spawn$/i }).click();
-    await expect.poll(() => spawnedBatchId).toBe(batchIds[0]);
+    await expect.poll(() => spawnedBatchId).toBe("30000000-0000-4000-8000-000000000001");
   });
 
   test("preflight called and branch input auto-populated", async ({ page }) => {

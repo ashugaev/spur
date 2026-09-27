@@ -2475,12 +2475,13 @@ describe("Dashboard", () => {
           return new Response(
             JSON.stringify({
               branch: "feature/result",
+              ...(previewBodies.length === 3 ? { preflightBatchId: "recovered-batch" } : {}),
               preflightTokenUsageView: {
-                status: "measured",
+                status: previewBodies.length === 3 ? "partial" : "measured",
                 inputTokens: 80,
                 outputTokens: 20,
                 totalTokens: 100,
-                attemptCount: 2,
+                attemptCount: previewBodies.length === 3 ? 1 : 3,
                 unknownAttemptCount: 0,
                 providerIterationCount: 2,
                 byProvider: { claude: { totalTokens: 100 } },
@@ -2524,6 +2525,9 @@ describe("Dashboard", () => {
       expect(allocations).toBe(outcome === "lost-allocation" ? 2 : 1);
       expect(await screen.findByText("100", { exact: false })).toBeInTheDocument();
       expect(screen.getByLabelText("branch name")).toHaveValue("feature/result");
+      fireEvent.change(prompt, { target: { value: "Recover corrupted batch" } });
+      expect(await screen.findByText("Pre-flight tokens: 100 · partial")).toBeInTheDocument();
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("recovered-batch");
     },
   );
 
