@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -948,12 +948,21 @@ export async function createTmuxSession(input: {
 // The launch lives in a file, not on the tmux command line: tmux refuses a
 // new-session command past about 16KB, and opencode carries the whole task
 // prompt in its launch. Owner-only: the launch can carry env assignments
-// with credentials.
+// with credentials. A relaunch replaces the script with a fresh 0600 inode
+// (exclusive-create temp, then rename), never rewrites the old one in place:
+// an open handle or hard link to the previous file never sees the new launch.
 function writeAgentLaunchScript(dir: string, launchCommand: string): string {
   mkdirSync(dir, { recursive: true });
   const scriptPath = join(dir, AGENT_LAUNCH_SCRIPT_NAME);
-  writeFileSync(scriptPath, `${launchCommand}\n`, { encoding: "utf-8", mode: 0o600 });
-  chmodSync(scriptPath, 0o600);
+  const tempPath = join(dir, `.${AGENT_LAUNCH_SCRIPT_NAME}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tempPath, `${launchCommand}\n`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, scriptPath);
+  } catch (error) {
+    rmSync(tempPath, { force: true });
+    throw error;
+  }
   return scriptPath;
 }
 

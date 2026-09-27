@@ -1,6 +1,14 @@
 import type * as childProcessModule from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  linkSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -259,6 +267,36 @@ describe("runtime-tmux", () => {
     expect(readFileSync(join(launchScriptDir, "agent-launch.sh"), "utf8")).toBe(
       `${launchCommand}\n`,
     );
+  });
+
+  it("replaces an existing launch script with a fresh owner-only inode, never rewriting it in place", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+    const launchScriptDir = mkdtempSync(join(tmpdir(), "spur-launch-replace-"));
+    const scriptPath = join(launchScriptDir, "agent-launch.sh");
+    writeFileSync(scriptPath, "old launch\n", { mode: 0o644 });
+    chmodSync(scriptPath, 0o644);
+    // A second name on the old inode: an in-place rewrite would change it.
+    const oldInodeLink = join(launchScriptDir, "old-inode");
+    linkSync(scriptPath, oldInodeLink);
+    const oldInode = statSync(scriptPath).ino;
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --resume abc",
+      launchScriptDir,
+    });
+
+    expect(readFileSync(scriptPath, "utf8")).toBe("claude --resume abc\n");
+    expect(statSync(scriptPath).ino).not.toBe(oldInode);
+    expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
+    expect(readFileSync(oldInodeLink, "utf8")).toBe("old launch\n");
+    expect(statSync(oldInodeLink).mode & 0o777).toBe(0o644);
+    expect(readdirSync(launchScriptDir).sort()).toEqual(["agent-launch.sh", "old-inode"]);
   });
 
   it("runs the launch script's quotes, $, backticks, and newlines exactly as written", async () => {
