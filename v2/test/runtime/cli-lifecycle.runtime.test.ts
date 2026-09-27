@@ -1972,6 +1972,7 @@ projects:
     ) as SessionView;
     expect(spawned.branch).toBe(occupiedBranch);
 
+    await waitForCleanTodoLedger(context, spawned.id);
     await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
 
     const occupiedWorktreePath = join(context.rootDir, "occupied-respawn-branch");
@@ -3165,6 +3166,7 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
+    await waitForCleanTodoLedger(context, spawned.id);
     await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
     expect(existsSync(artifactDir)).toBe(false);
 
