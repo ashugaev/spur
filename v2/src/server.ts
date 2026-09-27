@@ -499,7 +499,10 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   if (!isRecord(raw)) {
     return {};
   }
-  return raw["force"] === true ? { force: true } : {};
+  return {
+    ...(raw["force"] === true ? { force: true } : {}),
+    ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
+  };
 }
 
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
