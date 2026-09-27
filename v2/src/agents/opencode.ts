@@ -596,8 +596,9 @@ export async function waitForOpenCodeLaunchMessage(
 
 // Every other agent classifies from an incremental file read; opencode has no
 // per-session file to stat — all sessions share one multi-gigabyte SQLite DB —
-// so its only state source is `opencode export`, a subprocess that queries that
-// DB and serializes the whole transcript. Left ungated, the 2s dashboard tick
+// so the state comes from that DB's last message row (readOpenCodeStateFromDatabase),
+// with `opencode export` — a subprocess that queries that DB and serializes the
+// whole transcript — only when the DB is unreadable. Left ungated, the 2s dashboard tick
 // spawned one per live opencode session faster than they finished: a
 // 15-session fleet sampled at mean 4 and peak 17 concurrent exports, 3.7 GB
 // resident at the peak, with 40% of the daemon's own CPU in system time.
@@ -666,6 +667,33 @@ function shouldServeCachedOpenCodeState(
   );
 }
 
+// Same store and fallback contract as readOpenCodeLatestUserMessageFromDatabase.
+// The state depends on the session's last message alone, so one indexed row
+// replaces a whole-transcript export; its `data` is the export's `info`, so the
+// export parser classifies both.
+export async function readOpenCodeStateFromDatabase(
+  sessionId: string,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<OpenCodeStructuredState | null> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const row = database
+      .prepare(
+        "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
+      )
+      .get(sessionId);
+    if (!row) return parseOpenCodeState({ messages: [] });
+    const data = row["data"];
+    if (typeof data !== "string") {
+      throw new Error(`Unexpected opencode message row for ${sessionId}`);
+    }
+    return parseOpenCodeState({ messages: [{ info: JSON.parse(data) as unknown }] });
+  } finally {
+    database.close();
+  }
+}
+
 export async function readOpenCodeState(
   sessionId?: string,
   activityAtMs?: number | null,
@@ -685,9 +713,13 @@ export async function readOpenCodeState(
 
   const pending = (async (): Promise<OpenCodeStructuredState | null> => {
     try {
-      return parseOpenCodeState(await exportOpenCodeSession(sessionId));
+      return await readOpenCodeStateFromDatabase(sessionId);
     } catch {
-      return null;
+      try {
+        return parseOpenCodeState(await exportOpenCodeSession(sessionId));
+      } catch {
+        return null;
+      }
     }
   })();
   openCodeStateInFlight.set(sessionId, pending);

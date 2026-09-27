@@ -373,6 +373,8 @@ describe("OpenCode adapter", () => {
       );
       await chmod(join(dir, "opencode"), 0o755);
       vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+      // No opencode.db here: these reads take the export fallback.
+      vi.stubEnv("XDG_DATA_HOME", join(dir, "no-data"));
       return { dir, countPath };
     }
 
@@ -631,6 +633,7 @@ describe("OpenCode adapter", () => {
         );
         await chmod(join(dir, "opencode"), 0o755);
         vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+        vi.stubEnv("XDG_DATA_HOME", join(dir, "no-data"));
 
         const ids = Array.from({ length: CONCURRENT_READS }, (_, i) => `ses_${i}`);
         await Promise.all(ids.map((id) => readOpenCodeState(id)));
@@ -668,6 +671,7 @@ describe("OpenCode adapter", () => {
         );
         await chmod(join(failDir, "opencode"), 0o755);
         vi.stubEnv("SPUR_OPENCODE_BIN", join(failDir, "opencode"));
+        vi.stubEnv("XDG_DATA_HOME", join(failDir, "no-data"));
 
         for (let i = 0; i <= OPENCODE_EXPORT_MAX_CONCURRENCY; i += 1) {
           expect(await readOpenCodeState(`ses_fail_${i}`)).toBeNull();
@@ -826,6 +830,73 @@ describe("OpenCode adapter", () => {
       } finally {
         database.close();
         vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("state from opencode.db", () => {
+    afterEach(() => {
+      resetOpenCodeExportState();
+      vi.unstubAllEnvs();
+    });
+
+    it("classifies from the session's last message row without spawning the CLI", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const insert = database.prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)");
+      insert.run(
+        "msg_1",
+        "ses_busy",
+        100,
+        JSON.stringify({ role: "assistant", time: { completed: 1 } }),
+      );
+      insert.run(
+        "msg_2",
+        "ses_busy",
+        200,
+        JSON.stringify({ role: "user", time: { created: 200 } }),
+      );
+      insert.run(
+        "msg_3",
+        "ses_idle",
+        100,
+        JSON.stringify({ role: "user", time: { created: 100 } }),
+      );
+      // Same millisecond as the user turn: the id orders it last.
+      insert.run(
+        "msg_4",
+        "ses_idle",
+        100,
+        JSON.stringify({ role: "assistant", time: { created: 100, completed: 150 } }),
+      );
+      database.close();
+      const binPath = join(dataHome, "opencode-bin");
+      const spawnedMarker = join(dataHome, "spawned");
+      await writeFile(
+        binPath,
+        `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(spawnedMarker)}, "1");\nprocess.stdout.write("{}");\n`,
+        "utf8",
+      );
+      await chmod(binPath, 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        await expect(readOpenCodeState("ses_busy")).resolves.toEqual({
+          state: "working",
+          reason: "last role=user",
+        });
+        await expect(readOpenCodeState("ses_idle")).resolves.toEqual({
+          state: "waiting",
+          reason: "assistant completed",
+        });
+        await expect(readOpenCodeState("ses_none")).resolves.toBeNull();
+        await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
+      } finally {
         await rm(dataHome, { recursive: true, force: true });
       }
     });
