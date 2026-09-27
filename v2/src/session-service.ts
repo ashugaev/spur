@@ -16095,9 +16095,6 @@ export class SessionService {
 
         // Same synchronous span as the re-read above: a removal that landed
         // before it is already gone from `latest`; one after it sees the claim.
-        if (this.queueDeliveryInFlight.has(sessionId)) {
-          return false;
-        }
         this.queueDeliveryInFlight.add(sessionId);
         claimed = true;
         await this.deliverQueuedMessage(latest, nextMessage);
