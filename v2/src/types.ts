@@ -1029,6 +1029,11 @@ export interface SessionRecord {
   sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
+  /**
+   * ISO time of a launch send whose submit never confirmed. Queued delivery
+   * holds while set; cleared on the first transcript activity after it.
+   */
+  launchUnconfirmedAt?: string;
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;

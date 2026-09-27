@@ -46541,7 +46541,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("holds spawn-time queued messages over an unconfirmed launch until the transcript shows activity", async () => {
+    it("holds spawn-time queued messages over an unconfirmed launch across a restart until the transcript shows activity", async () => {
       mockTimerPromisesSleepWithFakeTimers();
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
@@ -46563,10 +46563,18 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(120_000);
 
       expect(tmuxTexts().filter((text) => text === "follow up")).toEqual([]);
-      expect(eventsNamed("session.message.held_unconfirmed_launch")).toHaveLength(1);
+      expect(eventsNamed("session.spawn.launch_unconfirmed")).toHaveLength(1);
+      expect(sessions.get("api-1")?.launchUnconfirmedAt).toEqual(expect.any(String));
       const later = await service.send("api-1", { message: "sent later", queue: true });
       expect(later.queuedMessages?.messages).toEqual(["follow up", "sent later"]);
       expect(tmuxTexts().filter((text) => text === "sent later")).toEqual([]);
+
+      // Daemon restart: a fresh service over the same records.
+      service.dispose();
+      const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(tmuxTexts().filter((text) => text === "follow up")).toEqual([]);
+      expect(sessions.get("api-1")?.launchUnconfirmedAt).toEqual(expect.any(String));
 
       mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() });
       readAgentHookStateMock.mockReturnValue({
@@ -46574,9 +46582,13 @@ describe("SessionService", () => {
         updatedAt: new Date().toISOString(),
       });
       await vi.waitFor(() => {
-        expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+        expect(tmuxTexts().filter((text) => text === "sent later")).toHaveLength(1);
       });
-      service.dispose();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+      expect(tmuxTexts().filter((text) => text === "sent later")).toHaveLength(1);
+      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
+      restarted.dispose();
     });
 
     it("holds a send queued after an unconfirmed launch instead of typing it over the prompt", async () => {

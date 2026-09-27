@@ -2684,10 +2684,6 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
-  // Launch sends that returned submit_unconfirmed: epoch ms of the send, and
-  // whether queued delivery logged its hold. Cleared once the agent's
-  // transcript shows activity after the send (waitForQueuedMessage).
-  private readonly launchUnconfirmed = new Map<string, { sentAt: number; holdLogged: boolean }>();
   private readonly todoNudgesInFlight = new Set<string>();
   // Log-once-per-episode plus a retention bound for the rate-limit
   // reactivation guard's pane-unavailable skip: keyed by session id, value
@@ -5790,11 +5786,6 @@ export class SessionService {
     for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
       if (!liveIds.has(sessionId)) {
         this.queuedMessageDeliveryLastFailure.delete(sessionId);
-      }
-    }
-    for (const sessionId of this.launchUnconfirmed.keys()) {
-      if (!liveIds.has(sessionId)) {
-        this.launchUnconfirmed.delete(sessionId);
       }
     }
     for (const sessionId of this.lastHumanHeldNudgeRevisions.keys()) {
@@ -9747,13 +9738,27 @@ export class SessionService {
   }
 
   // A launch send whose submit never confirmed may still sit unsubmitted in
-  // the composer; queued delivery holds until the transcript shows activity.
-  private trackLaunchSubmit(sessionId: string, outcome: AgentSendOutcome, sentAt: number): void {
-    if (outcome === "submit_unconfirmed") {
-      this.launchUnconfirmed.set(sessionId, { sentAt, holdLogged: false });
-    } else {
-      this.launchUnconfirmed.delete(sessionId);
+  // the composer. The spawn persists the marker on its running record so
+  // queued delivery holds across a restart until the transcript shows
+  // activity after it (waitForQueuedMessage).
+  private withLaunchSubmitOutcome(
+    record: SessionRecord,
+    outcome: AgentSendOutcome,
+    sentAt: number,
+  ): SessionRecord {
+    const next = { ...record };
+    delete next.launchUnconfirmedAt;
+    if (outcome !== "submit_unconfirmed") {
+      return next;
     }
+    this.logEvent("session.spawn.launch_unconfirmed", {
+      level: "warn",
+      sessionId: record.id,
+      projectId: record.project,
+      message: `Launch prompt submit for ${record.id} not confirmed; queued messages hold until the agent shows activity`,
+      details: { agent: record.agent },
+    });
+    return { ...next, launchUnconfirmedAt: new Date(sentAt).toISOString() };
   }
 
   // The one path for every spawn write after the placeholder: a kill that
@@ -10239,7 +10244,7 @@ export class SessionService {
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
-        this.trackLaunchSubmit(sessionId, sendOutcome, launchSentAt);
+        runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -11260,7 +11265,7 @@ export class SessionService {
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
-        this.trackLaunchSubmit(sessionId, sendOutcome, launchSentAt);
+        runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         initialPromptSent = true;
         firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
@@ -11979,7 +11984,7 @@ export class SessionService {
       finalMessage,
       readySession.queuedMessages?.awaitingPrompt === true ||
         sendState !== "waiting" ||
-        this.launchUnconfirmed.has(sessionId),
+        readySession.launchUnconfirmedAt !== undefined,
     );
     if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
       await this.tryDeliverQueuedMessageLocked(sessionId);
@@ -16497,24 +16502,17 @@ export class SessionService {
       // An unconfirmed launch prompt can still sit in the composer, where the
       // queued send's line clear would erase it. Hold until the transcript
       // shows the agent took something after the launch send.
-      const launch = this.launchUnconfirmed.get(sessionId);
-      if (launch) {
+      if (session.launchUnconfirmedAt) {
         const transcriptAt = classified.agentActivityAt;
-        if (!transcriptAt || transcriptAt.getTime() < launch.sentAt) {
-          if (!launch.holdLogged) {
-            launch.holdLogged = true;
-            this.logEvent("session.message.held_unconfirmed_launch", {
-              level: "warn",
-              sessionId,
-              projectId: session.project,
-              message: `Holding queued messages for ${sessionId}: launch prompt submit not confirmed`,
-              details: { queuedCount: queuedMessages(session).length },
-            });
-          }
+        if (!transcriptAt || transcriptAt.getTime() < Date.parse(session.launchUnconfirmedAt)) {
           await sleep(PIPELINE_POLL_INTERVAL_MS);
           continue;
         }
-        this.launchUnconfirmed.delete(sessionId);
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (latest?.launchUnconfirmedAt) {
+          const { launchUnconfirmedAt: _confirmed, ...confirmed } = latest;
+          writeSession(this.config.dataDir, confirmed);
+        }
       }
       // A confirmed ack plus a transcript write after it means the agent took
       // the delivered message and closed that turn: no grace needed. Without
