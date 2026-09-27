@@ -9456,6 +9456,15 @@ export class SessionService {
         probeWorkspace(session.worktreePath).missing,
       );
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
+        const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
+        const latest = readSession(this.config.dataDir, session.id);
+        if (
+          latest?.status === reconciled.session.status &&
+          latest.agent === session.agent &&
+          latest.agentSessionId === session.agentSessionId
+        ) {
+          this.persistClassifiedTokenUsage(latest, usage);
+        }
         drifted += 1;
         if (reconciled.session.status === "stopped") {
           driftedSessions.push({ id: session.id, project: session.project });
@@ -17646,6 +17655,44 @@ export class SessionService {
     return updated;
   }
 
+  private async readFinalTokenUsage(
+    session: SessionRecord,
+    runtime: SessionRuntimeSnapshot,
+  ): Promise<Pick<SessionStateResult, "tokenUsage" | "tokenUsages">> {
+    if (session.agent === "claude") {
+      const result = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaders.get(session.id),
+        session.agentSessionId,
+      ).catch(() => null);
+      if (result) this.claudeJsonlReaders.set(session.id, result.reader);
+      return result?.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
+    }
+    if (session.agent === "codex") {
+      const result = await this.classifyCodexState(session).catch(() => null);
+      if (!result) return {};
+      return {
+        ...(result.tokenUsage ? { tokenUsage: result.tokenUsage } : {}),
+        ...(result.tokenUsages ? { tokenUsages: result.tokenUsages } : {}),
+      };
+    }
+    if (session.agent === "opencode") {
+      const result = await readOpenCodeStructuredState(
+        session.agentSessionId,
+        runtime.tmuxActivityAt?.getTime() ?? null,
+        true,
+      ).catch<Awaited<ReturnType<typeof readOpenCodeStructuredState>>>(() => ({ state: null }));
+      return result.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
+    }
+    const usage = await readCursorTokenUsage(
+      cursorConfigDirForSession(this.config.dataDir, session.id),
+      session.agentSessionId,
+    ).catch(() => undefined);
+    return usage && session.agentSessionId
+      ? { tokenUsage: { ...usage, provider: "cursor", generationId: session.agentSessionId } }
+      : {};
+  }
+
   private async classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
@@ -17745,28 +17792,10 @@ export class SessionService {
     // exit. Read it once after death is confirmed; terminal text is never an
     // accounting source. Cursor's hook snapshot is read above for every state.
     if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
-      if (session.agent === "claude") {
-        const finalState = await readClaudeJsonlState(
-          session.worktreePath,
-          this.claudeJsonlReaders.get(session.id),
-          session.agentSessionId,
-        ).catch(() => null);
-        if (finalState) {
-          this.claudeJsonlReaders.set(session.id, finalState.reader);
-          tokenUsage = finalState.tokenUsage;
-        }
-      } else if (session.agent === "codex") {
-        const codexState = await this.classifyCodexState(session);
-        tokenUsage = codexState.tokenUsage;
-        tokenUsages = codexState.tokenUsages;
-      } else if (session.agent === "opencode") {
-        tokenUsage = (
-          await readOpenCodeStructuredState(
-            session.agentSessionId,
-            runtime.tmuxActivityAt?.getTime() ?? null,
-            true,
-          ).catch<Awaited<ReturnType<typeof readOpenCodeStructuredState>>>(() => ({ state: null }))
-        ).tokenUsage;
+      if (session.agent !== "cursor") {
+        const usage = await this.readFinalTokenUsage(session, runtime);
+        tokenUsage = usage.tokenUsage;
+        tokenUsages = usage.tokenUsages;
       }
     }
     if (effectiveSession.status !== "running") {

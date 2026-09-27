@@ -13734,6 +13734,81 @@ describe("SessionService", () => {
     expect(result.driftedSessions).toEqual([]);
   });
 
+  it.each(["claude", "codex", "opencode", "cursor"] as const)(
+    "retains final %s usage when boot reconciliation runs before the first get",
+    async (agent) => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agent, agentSessionId: "native-final" }));
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const sample = {
+        provider: agent,
+        generationId: "native-final",
+        inputTokens: 7,
+        outputTokens: 3,
+        totalTokens: 10,
+      };
+      if (agent === "claude") {
+        mockClaudeJsonlState("waiting", { tokenUsage: { ...sample, provider: "claude" } });
+      }
+      if (agent === "codex") {
+        readCodexRolloutStateMock.mockResolvedValue({
+          rollout: null,
+          rateLimit: null,
+          tokenUsage: sample,
+        });
+      }
+      if (agent === "opencode") {
+        readOpenCodeStructuredStateMock.mockResolvedValue({ state: null, tokenUsage: sample });
+      }
+      if (agent === "cursor") readCursorTokenUsageMock.mockResolvedValue(sample);
+      const service = await createDisposedSessionService();
+      const reconcile = service.reconcileStoppedSessions();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await reconcile).toMatchObject({ drifted: 1 });
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "stopped",
+        tokenUsage: { totalTokens: 10 },
+      });
+      const finalReadCounts = [
+        readClaudeJsonlStateMock.mock.calls.length,
+        readCodexRolloutStateMock.mock.calls.length,
+        readOpenCodeStructuredStateMock.mock.calls.length,
+      ];
+      for (let count = 0; count < 2; count += 1) {
+        expect((await service.get("api-1")).tokenUsageView).toMatchObject({
+          status: "available",
+          totalTokens: 10,
+        });
+      }
+      expect(await service.reconcileStoppedSessions()).toMatchObject({ scanned: 0 });
+      expect([
+        readClaudeJsonlStateMock.mock.calls.length,
+        readCodexRolloutStateMock.mock.calls.length,
+        readOpenCodeStructuredStateMock.mock.calls.length,
+      ]).toEqual(finalReadCounts);
+    },
+  );
+
+  it.each(["claude", "codex", "opencode", "cursor"] as const)(
+    "continues boot reconciliation when final %s accounting cannot be read",
+    async (agent) => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agent, agentSessionId: "native-final" }));
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const failure = new Error("accounting unavailable");
+      if (agent === "claude") readClaudeJsonlStateMock.mockRejectedValue(failure);
+      if (agent === "codex") readCodexRolloutStateMock.mockRejectedValue(failure);
+      if (agent === "opencode") readOpenCodeStructuredStateMock.mockRejectedValue(failure);
+      if (agent === "cursor") readCursorTokenUsageMock.mockRejectedValue(failure);
+      const service = await createDisposedSessionService();
+      const reconcile = service.reconcileStoppedSessions();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await reconcile).toMatchObject({ drifted: 1 });
+      expect((await service.get("api-1")).status).toBe("stopped");
+      expect(sessions.get("api-1")?.tokenUsage).toBeUndefined();
+    },
+  );
+
   it("arms the pane-child fallback for a session launched through a wrapper binary", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession());
