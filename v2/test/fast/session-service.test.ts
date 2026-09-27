@@ -2019,7 +2019,6 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --dangerously-skip-permissions",
-      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -5639,7 +5638,6 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
-        agent: "claude",
       }),
     );
     expect(writeSessionMock.mock.calls[0]?.[1]).toEqual(
@@ -5713,7 +5711,6 @@ describe("SessionService", () => {
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        agent: "cursor",
         env: expect.objectContaining({
           SPUR_CURSOR_RESTRICT_WRITES: "1",
         }),
@@ -5735,7 +5732,10 @@ describe("SessionService", () => {
       "cursor",
       expect.objectContaining({ restrictWrites: false }),
     );
-    const cursorCall = createTmuxSessionMock.mock.calls.find((call) => call[0]?.agent === "cursor");
+    const cursorCall = createTmuxSessionMock.mock.calls.find(
+      (call) => call[0]?.env?.SPUR_AGENT === "cursor",
+    );
+    expect(cursorCall?.[0]?.env).toBeDefined();
     expect(cursorCall?.[0]?.env).not.toHaveProperty("SPUR_CURSOR_RESTRICT_WRITES");
   });
 
@@ -5769,7 +5769,6 @@ describe("SessionService", () => {
       expect.objectContaining({
         launchCommand:
           "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
-        agent: "codex",
       }),
     );
     expect(result.planMode).toBe(true);
@@ -6202,7 +6201,6 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/repo/api",
       launchCommand: "claude --dangerously-skip-permissions",
-      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -22657,7 +22655,6 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
-      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -22766,7 +22763,6 @@ describe("SessionService", () => {
       expect.objectContaining({
         launchCommand:
           "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
-        agent: "claude",
       }),
     );
   });
@@ -27708,7 +27704,6 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
-      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -27792,7 +27787,6 @@ describe("SessionService", () => {
     expect(findAgentSessionIdMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        agent: "opencode",
         launchCommand: `opencode --auto --session ${nativeSessionId}`,
       }),
     );
@@ -27883,7 +27877,6 @@ describe("SessionService", () => {
       expect.objectContaining({
         launchCommand:
           "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
-        agent: "claude",
       }),
     );
   });
@@ -27934,7 +27927,6 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
-        agent: "claude",
       }),
     );
     expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
@@ -28018,7 +28010,6 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --dangerously-skip-permissions",
-      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -28990,7 +28981,6 @@ describe("SessionService", () => {
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand:
         "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
-      agent: "codex",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",

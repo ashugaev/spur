@@ -922,12 +922,8 @@ export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
   launchCommand: string;
-  agent?: AgentName;
   env?: Record<string, string>;
 }): Promise<void> {
-  const sessionTarget = exactSessionTarget(input.sessionName);
-  const envArgs = buildEnvArgs(input.env);
-
   await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
     "-f",
@@ -938,25 +934,25 @@ export async function createTmuxSession(input: {
     input.sessionName,
     "-c",
     input.cwd,
-    ...envArgs,
+    ...buildEnvArgs(input.env),
+    buildAgentPaneShellCommand(input.launchCommand),
   ]);
   invalidateFleetProbeCaches();
-  await sleep(300);
+}
 
-  try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand, {
-      ...(input.agent ? { agent: input.agent } : {}),
-    });
-  } catch (error) {
-    try {
-      await tmux("kill-session", "-t", sessionTarget);
-    } catch {
-      // Best effort only.
-    } finally {
-      invalidateFleetProbeCaches();
-    }
-    throw error;
-  }
+// The agent pane runs the launch command as its shell's own command, never
+// as keystrokes typed into a shell that may not be reading yet: an rc-file
+// prompt (oh-my-zsh's "update? [Y/n]") ate the first typed character, so
+// codex started as `ODEX_HOME=...` on the default home and Spur never saw
+// its rollout. The login+interactive shell keeps the user's rc environment
+// (PATH, nvm, exported keys) exactly as a typed launch had; an rc prompt now
+// waits visibly in the pane instead of corrupting the command. The agent
+// stays a direct child of the pane shell, and the pane drops to the same
+// login shell when the agent exits.
+export function buildAgentPaneShellCommand(launchCommand: string): string {
+  // tmux sets SHELL in every pane's environment to the shell it starts.
+  const shell = '"$SHELL"';
+  return `exec ${shell} -lic ${shellEscape(`${launchCommand}; exec ${shell} -l`)}`;
 }
 
 // Non-agent panes (sidecars, project services, the Claude OAuth login pane)
