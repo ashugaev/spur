@@ -99,8 +99,6 @@ export class PreflightBranchValidationError extends Error {
   }
 }
 
-export class PreflightArtifactError extends Error {}
-
 export interface SpawnPreflightResult {
   noProjectBranchRequirements?: true;
   branch?: string;
@@ -622,9 +620,7 @@ async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnP
         }
       }
       if (exportError) {
-        throw new PreflightArtifactError("OpenCode pre-flight export failed", {
-          cause: exportError,
-        });
+        process.stderr.write("OpenCode pre-flight export failed; token usage unavailable\n");
       }
       if (sample) {
         const {
@@ -649,12 +645,7 @@ async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnP
         }
       }
       if (cleanupError) {
-        rethrowWithUsage(
-          new PreflightArtifactError("OpenCode pre-flight cleanup failed", {
-            cause: cleanupError,
-          }),
-          usage,
-        );
+        process.stderr.write("OpenCode pre-flight cleanup failed; retaining pre-flight result\n");
       }
     }
   }

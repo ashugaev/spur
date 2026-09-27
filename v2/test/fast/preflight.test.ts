@@ -312,6 +312,7 @@ describe("runSpawnPreflight", () => {
 
   afterEach(() => {
     delete process.env.CLAUDECODE;
+    vi.restoreAllMocks();
   });
 
   it("runs claude in print mode and parses a branch suggestion", async () => {
@@ -879,6 +880,7 @@ describe("runSpawnPreflight", () => {
   });
 
   it("retains measured OpenCode usage when cleanup fails after retries", async () => {
+    const warning = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     const exported = JSON.parse(
       readFileSync(
         new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
@@ -903,9 +905,41 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Account for cleanup failure",
       }),
-    ).rejects.toMatchObject({ usage: { totalTokens: 79 } });
+    ).resolves.toMatchObject({ branch: "feature/x", usage: { totalTokens: 79 } });
+    expect(warning).toHaveBeenCalledWith(
+      "OpenCode pre-flight cleanup failed; retaining pre-flight result\n",
+    );
     expect(mockDeleteOpenCodeSession).toHaveBeenCalledTimes(3);
     expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a valid OpenCode branch when usage export and cleanup both fail", async () => {
+    const warning = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        sessionID: "unreadable-usage",
+        part: { type: "text", text: "feature/x" },
+      }),
+      stderr: "",
+    });
+    mockExportOpenCodeSession.mockRejectedValue(new Error("export failed"));
+    mockDeleteOpenCodeSession.mockRejectedValue(new Error("delete failed"));
+    await expect(
+      runSpawnPreflight({
+        agent: "opencode",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Continue after meter failure",
+      }),
+    ).resolves.toEqual({ branch: "feature/x" });
+    expect(mockExportOpenCodeSession).toHaveBeenCalledTimes(3);
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledTimes(3);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledWith(
+      "OpenCode pre-flight export failed; token usage unavailable\n",
+    );
   });
 
   it("surfaces a missing claude binary as command not found", async () => {
