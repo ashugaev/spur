@@ -102,20 +102,30 @@ describe("resumeAgentSubmitAckBinding", () => {
     mkdirSync(join(dataHome, "opencode"), { recursive: true });
     process.env["XDG_DATA_HOME"] = dataHome;
     const db = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
-    db.exec("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT)");
-    const insert = db.prepare("INSERT INTO message (id, session_id, data) VALUES (?, ?, ?)");
+    db.exec("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+    const insert = db.prepare(
+      "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+    );
     const userData = (text: string) => JSON.stringify({ role: "user", text });
-    insert.run("msg_1", "ses_1", userData("go"));
-    insert.run("msg_2", "ses_1", userData("/review x"));
+    // A long history: the persisted baseline must not grow with it.
+    for (let n = 0; n < 500; n += 1) {
+      insert.run(`msg_${String(n).padStart(4, "0")}`, "ses_1", 1_000 + n, userData("go"));
+    }
+    insert.run("msg_0500", "ses_1", 2_000, userData("/review x"));
     const live = await createAgentSubmitAckBinding("opencode", ctx("ses_1"));
     if (!live) throw new Error("opencode binding missing");
     const baseline = persisted(live.baseline);
+    expect(baseline).toEqual({
+      agent: "opencode",
+      sessionId: "ses_1",
+      after: { createdMs: 2_000, id: "msg_0500" },
+    });
 
     const before = await resumeAgentSubmitAckBinding("opencode", ctx("ses_1"), baseline);
     expect((await before?.scan("/review x"))?.found).toBe(false);
 
     // Stored expanded: the text never equals what was typed.
-    insert.run("msg_3", "ses_1", userData("Review the following change set: x"));
+    insert.run("msg_0501", "ses_1", 2_500, userData("Review the following change set: x"));
     const after = await resumeAgentSubmitAckBinding("opencode", ctx("ses_1"), baseline);
     expect((await after?.scan("/review x"))?.found).toBe(true);
     db.close();

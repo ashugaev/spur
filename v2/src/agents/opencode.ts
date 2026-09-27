@@ -448,29 +448,63 @@ async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
   }
 }
 
+/** A user message's position in the session: creation time, id as tiebreak. */
+export interface OpenCodeUserMessageMark {
+  createdMs: number;
+  id: string;
+}
+
+/**
+ * The session's newest user message at send time, null when it had none.
+ * O(1) whatever the session's length, so it can be persisted.
+ */
 export interface OpenCodeSubmitBaseline {
   sessionId: string;
-  userMessageIds: Set<string>;
+  after: OpenCodeUserMessageMark | null;
+}
+
+function isAfterMark(
+  mark: OpenCodeUserMessageMark,
+  watermark: OpenCodeUserMessageMark | null,
+): boolean {
+  if (!watermark) return true;
+  return (
+    mark.createdMs > watermark.createdMs ||
+    (mark.createdMs === watermark.createdMs && mark.id > watermark.id)
+  );
+}
+
+function newerMark(
+  a: OpenCodeUserMessageMark | null,
+  b: OpenCodeUserMessageMark,
+): OpenCodeUserMessageMark {
+  return a && !isAfterMark(b, a) ? a : b;
 }
 
 // OpenCode rewrites what it persists: a prompt that opens with a slash command
 // is stored expanded, so the delivered text never equals the text Spur sent.
-// Delivery is confirmed by a new user message id, never by matching text.
-export function parseOpenCodeUserMessageIds(value: unknown): Set<string> {
-  const ids = new Set<string>();
+// Delivery is confirmed by a user message newer than the send's watermark,
+// never by matching text. Export form: messages without a numeric
+// `info.time.created` carry no position and never count.
+export function parseOpenCodeLatestUserMessage(value: unknown): OpenCodeUserMessageMark | null {
+  let latest: OpenCodeUserMessageMark | null = null;
   for (const message of openCodeMessages(value)) {
     const info = messageInfo(message);
     const id = info?.["id"];
-    if (info?.["role"] === "user" && typeof id === "string") ids.add(id);
+    const time = info?.["time"];
+    const createdMs = isRecord(time) ? time["created"] : undefined;
+    if (info?.["role"] === "user" && typeof id === "string" && typeof createdMs === "number") {
+      latest = newerMark(latest, { createdMs, id });
+    }
   }
-  return ids;
+  return latest;
 }
 
-export function hasNewOpenCodeUserMessage(
+export function hasOpenCodeUserMessageAfter(
   baseline: OpenCodeSubmitBaseline,
-  current: Set<string>,
+  latest: OpenCodeUserMessageMark | null,
 ): boolean {
-  return [...current].some((id) => !baseline.userMessageIds.has(id));
+  return latest !== null && isAfterMark(latest, baseline.after);
 }
 
 export function openCodeDatabasePath(env: NodeJS.ProcessEnv = process.env): string {
@@ -485,33 +519,38 @@ export function openCodeDatabasePath(env: NodeJS.ProcessEnv = process.env): stri
 // column — answers from the CLI export instead. `node:sqlite` loads lazily:
 // Node 22 prints an ExperimentalWarning on import, which must not reach every
 // CLI run that merely loads this module.
-export async function readOpenCodeUserMessageIdsFromDatabase(
+export async function readOpenCodeLatestUserMessageFromDatabase(
   sessionId: string,
   databasePath: string = openCodeDatabasePath(),
-): Promise<Set<string>> {
+): Promise<OpenCodeUserMessageMark | null> {
   const { DatabaseSync } = await import("node:sqlite");
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    const rows = database
+    const row = database
       .prepare(
-        "SELECT id FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user'",
+        `SELECT id, time_created AS createdMs FROM message
+         WHERE session_id = ? AND json_extract(data, '$.role') = 'user'
+         ORDER BY time_created DESC, id DESC LIMIT 1`,
       )
-      .all(sessionId);
-    const ids = new Set<string>();
-    for (const row of rows) {
-      if (typeof row["id"] === "string") ids.add(row["id"]);
+      .get(sessionId);
+    if (!row) return null;
+    const { id, createdMs } = row;
+    if (typeof id !== "string" || typeof createdMs !== "number") {
+      throw new Error(`Unexpected opencode message row for ${sessionId}`);
     }
-    return ids;
+    return { createdMs, id };
   } finally {
     database.close();
   }
 }
 
-async function readOpenCodeUserMessageIds(sessionId: string): Promise<Set<string>> {
+async function readOpenCodeLatestUserMessage(
+  sessionId: string,
+): Promise<OpenCodeUserMessageMark | null> {
   try {
-    return await readOpenCodeUserMessageIdsFromDatabase(sessionId);
+    return await readOpenCodeLatestUserMessageFromDatabase(sessionId);
   } catch {
-    return parseOpenCodeUserMessageIds(await exportOpenCodeSession(sessionId));
+    return parseOpenCodeLatestUserMessage(await exportOpenCodeSession(sessionId));
   }
 }
 
@@ -520,7 +559,7 @@ export async function captureOpenCodeSubmitBaseline(
 ): Promise<OpenCodeSubmitBaseline | null> {
   if (!sessionId) return null;
   try {
-    return { sessionId, userMessageIds: await readOpenCodeUserMessageIds(sessionId) };
+    return { sessionId, after: await readOpenCodeLatestUserMessage(sessionId) };
   } catch {
     return null;
   }
@@ -530,8 +569,8 @@ export async function scanOpenCodeForNewUserMessage(
   baseline: OpenCodeSubmitBaseline,
 ): Promise<boolean> {
   try {
-    const current = await readOpenCodeUserMessageIds(baseline.sessionId);
-    return hasNewOpenCodeUserMessage(baseline, current);
+    const latest = await readOpenCodeLatestUserMessage(baseline.sessionId);
+    return hasOpenCodeUserMessageAfter(baseline, latest);
   } catch {
     return false;
   }
@@ -546,7 +585,7 @@ export async function waitForOpenCodeLaunchMessage(
   sessionId: string,
   timeoutMs = OPENCODE_LAUNCH_MESSAGE_WAIT_MS,
 ): Promise<boolean> {
-  const baseline: OpenCodeSubmitBaseline = { sessionId, userMessageIds: new Set() };
+  const baseline: OpenCodeSubmitBaseline = { sessionId, after: null };
   const deadline = Date.now() + timeoutMs;
   do {
     if (await scanOpenCodeForNewUserMessage(baseline)) return true;
@@ -677,7 +716,7 @@ export async function readOpenCodeState(
   }
 }
 
-// Same store and fallback contract as readOpenCodeUserMessageIdsFromDatabase:
+// Same store and fallback contract as readOpenCodeLatestUserMessageFromDatabase:
 // the agent page polls the conversation every few seconds, and a per-poll
 // `opencode export` piles up behind the export gate. Only text parts are
 // selected; rows are shaped like the export so one parser serves both paths.

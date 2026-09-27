@@ -740,13 +740,17 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
     );
     return { agent, offsets: Object.fromEntries(entries) };
   }
-  const ids = record["userMessageIds"];
-  if (agent === "opencode" && typeof record["sessionId"] === "string" && Array.isArray(ids)) {
-    return {
-      agent,
-      sessionId: record["sessionId"],
-      userMessageIds: ids.filter((id): id is string => typeof id === "string"),
-    };
+  const after = record["after"];
+  if (agent === "opencode" && typeof record["sessionId"] === "string") {
+    if (after === null) {
+      return { agent, sessionId: record["sessionId"], after: null };
+    }
+    if (typeof after === "object") {
+      const { createdMs, id } = after as Record<string, unknown>;
+      if (typeof createdMs === "number" && typeof id === "string") {
+        return { agent, sessionId: record["sessionId"], after: { createdMs, id } };
+      }
+    }
   }
   return undefined;
 }

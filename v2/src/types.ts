@@ -1632,7 +1632,12 @@ export type SubmitAckBaseline =
   | { agent: "claude"; file: string; size: number }
   | { agent: "codex"; offsets: Record<string, number> }
   | { agent: "cursor"; file: string; size: number }
-  | { agent: "opencode"; sessionId: string; userMessageIds: string[] };
+  | {
+      agent: "opencode";
+      sessionId: string;
+      /** Newest user message at send time; null when the session had none. */
+      after: { createdMs: number; id: string } | null;
+    };
 
 export type TranscriptEntry =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }

@@ -644,7 +644,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     submitAck: async (ctx, persisted) => {
       const baseline =
         persisted?.agent === "opencode"
-          ? { sessionId: persisted.sessionId, userMessageIds: new Set(persisted.userMessageIds) }
+          ? { sessionId: persisted.sessionId, after: persisted.after }
           : await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
       if (!baseline) {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
@@ -653,7 +653,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         baseline: {
           agent: "opencode",
           sessionId: baseline.sessionId,
-          userMessageIds: [...baseline.userMessageIds],
+          after: baseline.after,
         },
         async scan() {
           return {

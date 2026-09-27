@@ -14,7 +14,7 @@ import {
   buildOpenCodeResumePlan,
   captureOpenCodeSubmitBaseline,
   diffOpenCodeSessionIds,
-  hasNewOpenCodeUserMessage,
+  hasOpenCodeUserMessageAfter,
   isSupportedOpenCodeVersion,
   openCodeDatabasePath,
   OPENCODE_EXPORT_MAX_CONCURRENCY,
@@ -22,10 +22,10 @@ import {
   parseOpenCodeExport,
   parseOpenCodeSessionListOutput,
   parseOpenCodeState,
-  readOpenCodeUserMessageIdsFromDatabase,
+  readOpenCodeLatestUserMessageFromDatabase,
   scanOpenCodeForNewUserMessage,
   waitForOpenCodeLaunchMessage,
-  parseOpenCodeUserMessageIds,
+  parseOpenCodeLatestUserMessage,
   withOpenCodeLaunchIdentityLock,
 } from "../../src/agents/opencode.js";
 
@@ -145,23 +145,38 @@ describe("OpenCode adapter", () => {
     ]);
   });
 
-  it("confirms delivery by user message id, not by the text OpenCode persisted", () => {
+  it("confirms delivery by a user message past the watermark, not by the text OpenCode persisted", () => {
     // OpenCode stores a slash-command prompt expanded, so the persisted text
-    // never equals what Spur sent; only the new id proves the prompt landed.
+    // never equals what Spur sent; only a newer user message proves it landed.
     const exported = {
       messages: [
-        { info: { role: "user", id: "msg_1" }, parts: [{ type: "text", text: "EXPANDED SKILL" }] },
-        { info: { role: "assistant", id: "msg_2" }, parts: [] },
+        { info: { role: "user", id: "msg_0" }, parts: [] },
+        {
+          info: { role: "user", id: "msg_1", time: { created: 200 } },
+          parts: [{ type: "text", text: "EXPANDED SKILL" }],
+        },
+        { info: { role: "user", id: "msg_a", time: { created: 100 } }, parts: [] },
+        { info: { role: "assistant", id: "msg_2", time: { created: 300 } }, parts: [] },
       ],
     };
-    const ids = parseOpenCodeUserMessageIds(exported);
-    expect([...ids]).toEqual(["msg_1"]);
-    expect(hasNewOpenCodeUserMessage({ sessionId: "ses_1", userMessageIds: new Set() }, ids)).toBe(
-      true,
-    );
+    // Newest user message by time; a user message with no time never counts.
+    const latest = parseOpenCodeLatestUserMessage(exported);
+    expect(latest).toEqual({ createdMs: 200, id: "msg_1" });
+    expect(hasOpenCodeUserMessageAfter({ sessionId: "ses_1", after: null }, latest)).toBe(true);
     expect(
-      hasNewOpenCodeUserMessage({ sessionId: "ses_1", userMessageIds: new Set(["msg_1"]) }, ids),
+      hasOpenCodeUserMessageAfter(
+        { sessionId: "ses_1", after: { createdMs: 200, id: "msg_1" } },
+        latest,
+      ),
     ).toBe(false);
+    // Same millisecond: the id breaks the tie.
+    expect(
+      hasOpenCodeUserMessageAfter(
+        { sessionId: "ses_1", after: { createdMs: 200, id: "msg_0" } },
+        latest,
+      ),
+    ).toBe(true);
+    expect(hasOpenCodeUserMessageAfter({ sessionId: "ses_1", after: null }, null)).toBe(false);
   });
 
   it("classifies structured busy, completed, and error messages", () => {
@@ -722,7 +737,7 @@ describe("OpenCode adapter", () => {
         "#!/usr/bin/env node",
         "const exported = {",
         "  messages: [",
-        '    { info: { role: "user", id: "msg_1" }, parts: [{ type: "text", text: "EXPANDED SKILL BODY" }] },',
+        '    { info: { role: "user", id: "msg_1", time: { created: 1790546673635 } }, parts: [{ type: "text", text: "EXPANDED SKILL BODY" }] },',
         "  ],",
         "};",
         "process.stdout.write(JSON.stringify(exported));",
@@ -751,26 +766,36 @@ describe("OpenCode adapter", () => {
       return database;
     }
 
-    function insert(database: DatabaseSync, id: string, sessionId: string, role: string): void {
+    function insert(
+      database: DatabaseSync,
+      id: string,
+      sessionId: string,
+      role: string,
+      createdMs = 0,
+    ): void {
       database
-        .prepare("INSERT INTO message VALUES (?, ?, 0, 0, ?)")
-        .run(id, sessionId, JSON.stringify({ role }));
+        .prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)")
+        .run(id, sessionId, createdMs, JSON.stringify({ role }));
     }
 
-    it("reads only the session's user message ids", async () => {
+    it("reads the session's newest user message, by time then id", async () => {
       const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
       const database = await makeDatabase(dataHome);
-      insert(database, "msg_u1", "ses_1", "user");
-      insert(database, "msg_a1", "ses_1", "assistant");
-      insert(database, "msg_u2", "ses_other", "user");
+      insert(database, "msg_u2", "ses_1", "user", 100);
+      insert(database, "msg_u1", "ses_1", "user", 200);
+      insert(database, "msg_u0", "ses_1", "user", 200);
+      insert(database, "msg_a1", "ses_1", "assistant", 300);
+      insert(database, "msg_u9", "ses_other", "user", 400);
       database.close();
+      const path = openCodeDatabasePath({ XDG_DATA_HOME: dataHome });
       try {
-        await expect(
-          readOpenCodeUserMessageIdsFromDatabase(
-            "ses_1",
-            openCodeDatabasePath({ XDG_DATA_HOME: dataHome }),
-          ),
-        ).resolves.toEqual(new Set(["msg_u1"]));
+        await expect(readOpenCodeLatestUserMessageFromDatabase("ses_1", path)).resolves.toEqual({
+          createdMs: 200,
+          id: "msg_u1",
+        });
+        await expect(readOpenCodeLatestUserMessageFromDatabase("ses_none", path)).resolves.toBe(
+          null,
+        );
       } finally {
         await rm(dataHome, { recursive: true, force: true });
       }
