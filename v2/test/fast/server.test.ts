@@ -12,6 +12,8 @@ import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
+  buildForeignAgentProcessMessage,
+  ForeignAgentProcessError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
   SessionEndedError,
@@ -1516,7 +1518,10 @@ describe("startServer", () => {
     const originalSend = SessionService.prototype.send;
     const originalFlush = SessionService.prototype.flushQueuedMessage;
     const originalAnswer = SessionService.prototype.answerQuestion;
-    SessionService.prototype.send = async function mockSend(sessionId) {
+    SessionService.prototype.send = async function mockSend(sessionId, request) {
+      if (request.message === "foreign") {
+        throw new ForeignAgentProcessError(buildForeignAgentProcessMessage(sessionId, 4242));
+      }
       throw new SessionStartingError(`Session is still starting: ${sessionId}`);
     };
     SessionService.prototype.flushQueuedMessage = async function mockFlush(sessionId) {
@@ -1564,6 +1569,18 @@ describe("startServer", () => {
       expect(starting.status).toBe(409);
       await expect(starting.json()).resolves.toEqual({
         error: "Session is still starting: demo-1",
+      });
+
+      // The agent already runs outside its pane (a killed wrapper, status
+      // still running): refused, nothing typed.
+      const foreign = await post("/sessions/demo-1/send", {
+        message: "foreign",
+        queue: false,
+        interrupt: true,
+      });
+      expect(foreign.status).toBe(409);
+      await expect(foreign.json()).resolves.toEqual({
+        error: buildForeignAgentProcessMessage("demo-1", 4242),
       });
 
       const ended = await post("/sessions/demo-1/queue/flush", { message: "hi" });

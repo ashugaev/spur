@@ -963,6 +963,11 @@ export class SessionEndedError extends Error {
 
 // An immediate send (user, trigger, or automated) reached a session whose
 // launch prompt may still sit unsubmitted; typing would erase it.
+// Refused, nothing typed: the session's agent already runs outside its pane.
+export class ForeignAgentProcessError extends Error {
+  readonly statusCode = 409;
+}
+
 export class LaunchPromptPendingError extends Error {
   readonly statusCode = 409;
 }
@@ -12331,7 +12336,11 @@ export class SessionService {
     }
     this.queueDeliveryInFlight.add(sessionId);
     try {
-      await this.deliverPreparedLocked(sessionId, message, { entryPoint: "flush" });
+      // Same as web Send now: a working agent gets its interrupt key first.
+      await this.deliverPreparedLocked(sessionId, message, {
+        entryPoint: "flush",
+        interrupt: true,
+      });
       // Re-read: the delivery just wrote the record, so `session` is stale.
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
       const persisted = this.writeQueueWithout(latest, message);
@@ -12936,8 +12945,11 @@ export class SessionService {
         );
     const elapsedMs = Date.now() - startedAt;
     // Interactive callers own the live-timeout policy (delivered + warn), so
-    // they get the typed timeout, never this silent cursor pass.
-    if (session.agent === "cursor" && processAlive && !interactive) {
+    // they get the typed timeout, never this silent cursor pass. Neither does
+    // a launch send: an unacked launch prompt may still sit unsubmitted (or
+    // be gone), so it takes the launch-unconfirmed hold below, like claude
+    // and codex.
+    if (session.agent === "cursor" && processAlive && !interactive && !freshLaunch) {
       this.logEvent("session.submit.recovered", {
         level: "warn",
         sessionId: session.id,
@@ -12965,14 +12977,19 @@ export class SessionService {
         processAlive,
       },
     });
-    if (freshLaunch && processAlive && agentHasLaunchSubmitAck(session.agent)) {
-      // Scoped to agents with launch-send pacing (claude, codex): their short window
-      // plus Enter resends are the launch send's whole recovery, so throwing
-      // afterwards would only tear a healthy session down — the foreground
-      // spawn kills the pane in its catch and the background spawn retries from
-      // scratch. Agents without that pacing keep throwing, which is what drives
-      // their launch retry. The caller learns submission was never confirmed
-      // from the outcome below.
+    if (
+      freshLaunch &&
+      processAlive &&
+      (agentHasLaunchSubmitAck(session.agent) || session.agent === "cursor")
+    ) {
+      // Scoped to agents with launch-send pacing (claude, codex) and cursor:
+      // their window plus Enter resends are the launch send's whole recovery,
+      // so throwing afterwards would only tear a healthy session down — the
+      // foreground spawn kills the pane in its catch and the background spawn
+      // retries from scratch. Cursor used to pass here as silently submitted,
+      // which hid a lost launch prompt behind a normal-looking session. opencode
+      // keeps throwing, which is what drives its launch retry. The caller learns
+      // submission was never confirmed from the outcome below.
       return "submit_unconfirmed";
     }
     throw new SubmitAckTimeoutError({
@@ -13986,7 +14003,7 @@ export class SessionService {
       message: `Session ${session.id} already has a live agent process outside its pane`,
       details: { pids: scan.pids },
     });
-    throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
+    throw new ForeignAgentProcessError(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
   // Classifies a manual-status-gate refusal for the failure event. A ToDo
