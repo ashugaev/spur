@@ -15,6 +15,47 @@ const usage: SpurSessionView["tokenUsageView"] = {
 };
 
 describe("TokenCount", () => {
+  it("keeps unknown pre-flight diagnostics available without a measured total", () => {
+    render(
+      <TokenCount
+        session={{
+          preflightTokenUsageView: {
+            status: "unknown",
+            attemptCount: 2,
+            unknownAttemptCount: 2,
+            providerIterationCount: 0,
+          },
+        }}
+      />,
+    );
+    fireEvent.focus(screen.getByLabelText("Tokens: unavailable"));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Pre-flight statusunknown");
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByText("Unknown attempts").closest("div")).toHaveTextContent("2");
+  });
+  it("distinguishes an ignored limit from unknown accounting", () => {
+    render(
+      <TokenCount
+        sidebar
+        session={{
+          tokenUsageView: usage,
+          tokenBudgetView: {
+            budget: 1000,
+            knownTotalTokens: 800,
+            exhausted: false,
+            enforced: false,
+            overridden: true,
+            reason: "preflight_unknown",
+          },
+        }}
+      />,
+    );
+    const count = screen.getByLabelText("Tokens: at least 800");
+    expect(count).toHaveTextContent("≥800 / 1K");
+    fireEvent.focus(count);
+    expect(screen.getByText("Limit ignored · pre-flight usage unknown")).toBeInTheDocument();
+    expect(screen.queryByText(/Unavailable ·/)).not.toBeInTheDocument();
+  });
   it("rounds the count to integer K and preserves footer precision", () => {
     render(
       <TokenCount

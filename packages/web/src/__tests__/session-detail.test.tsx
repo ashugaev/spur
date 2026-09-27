@@ -5805,7 +5805,8 @@ describe("SessionDetail token usage", () => {
     expect(screen.getByText("1K / 2K")).toBeInTheDocument();
     expect(screen.getByText("Cache read")).toBeInTheDocument();
     expect(screen.getByText("300")).toBeInTheDocument();
-    expect(screen.queryByText("Cache write 5m")).not.toBeInTheDocument();
+    expect(screen.getByText("Cache write 5m")).toBeInTheDocument();
+    expect(screen.getByText("50")).toBeInTheDocument();
   });
 
   it("keeps pre-flight usage separate and shows the combined budget", async () => {
@@ -5891,6 +5892,13 @@ describe("SessionDetail token usage", () => {
     expect(row("Cache read")).toHaveTextContent("0?");
     expect(row("Cache write")).toHaveTextContent("5?");
     expect(row("Reasoning")).toHaveTextContent("2?");
+    expect(row("Cache write 5m")).toHaveTextContent("5?");
+    expect(screen.queryByText("Cache write 1h")).not.toBeInTheDocument();
+    expect(screen.getByText("Pre-flight status").closest("div")).toHaveTextContent("partial");
+    expect(screen.getByText("Pre-flight Claude").closest("div")).toHaveTextContent("20");
+    expect(screen.getByText("Pre-flight attempts").closest("div")).toHaveTextContent("2");
+    expect(screen.getByText("Unknown attempts").closest("div")).toHaveTextContent("1");
+    expect(screen.getByText("Provider iterations").closest("div")).toHaveTextContent("3");
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
@@ -6073,6 +6081,8 @@ describe("SessionDetail token usage", () => {
     });
     render(<SessionDetail sessionId="api-a1" />);
     expect(await screen.findByText("110 / 100")).toBeInTheDocument();
+    fireEvent.focus(screen.getByLabelText("Tokens: 110"));
+    expect(screen.getByText("Limit ignored")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
   });
@@ -6090,6 +6100,9 @@ describe("SessionDetail token usage", () => {
     });
     render(<SessionDetail sessionId="api-a1" />);
     expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
+    fireEvent.focus(screen.getByLabelText("Tokens: at least 20"));
+    expect(screen.getByText("Limit ignored · pre-flight usage unknown")).toBeInTheDocument();
+    expect(screen.queryByText("Unavailable · pre-flight usage unknown")).not.toBeInTheDocument();
   });
 
   it("keeps Restore blocked when only the main usage view reports exhaustion", async () => {

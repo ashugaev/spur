@@ -52,6 +52,7 @@ export function TokenCount({
   const limit = budget?.budget ?? session.tokenUsageView?.budget;
   const total = budget?.knownTotalTokens ?? (main?.totalTokens ?? 0) + (measured?.totalTokens ?? 0);
   const available = Boolean(main || measured || total > 0);
+  const hasDetails = available || Boolean(preflight);
   const hit = !budget?.overridden && (budget?.exhausted ?? main?.exhausted ?? false);
   const unenforced =
     limit !== undefined &&
@@ -64,7 +65,7 @@ export function TokenCount({
       ? "status-error"
       : unenforced
         ? "chip-warn-text"
-        : limit && total >= limit * 0.8
+        : !budget?.overridden && limit && total >= limit * 0.8
           ? "status-attention"
           : "text-secondary";
   const reason =
@@ -79,8 +80,13 @@ export function TokenCount({
     ["Cache read", measured?.cacheReadInputTokens, main?.cacheReadInputTokens],
     ["Cache write", measured?.cacheWriteInputTokens, main?.cacheWriteInputTokens],
     ["Reasoning", measured?.reasoningOutputTokens, main?.reasoningOutputTokens],
+    ["Cache write 5m", measured?.cacheWrite5mInputTokens, main?.cacheWrite5mInputTokens],
+    ["Cache write 1h", measured?.cacheWrite1hInputTokens, main?.cacheWrite1hInputTokens],
     ["Total", measured?.totalTokens, main?.totalTokens],
   ] as const;
+  const reportedRows = rows.filter(
+    ([, pre, current]) => pre !== undefined || current !== undefined,
+  );
   return (
     <span
       className="relative inline-block tabular-nums"
@@ -90,7 +96,7 @@ export function TokenCount({
       <span
         tabIndex={0}
         aria-label={`Tokens: ${available ? `${unenforced ? "at least " : ""}${total.toLocaleString()}` : "unavailable"}`}
-        aria-describedby={available && (hovered || focused) ? id : undefined}
+        aria-describedby={hasDetails && (hovered || focused) ? id : undefined}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         className={`cursor-default focus:outline-none focus:underline focus:decoration-dotted focus:underline-offset-4 ${hit ? "font-bold" : ""}`}
@@ -100,7 +106,7 @@ export function TokenCount({
           ? `${unenforced ? "≥" : ""}${compact(total)}${sidebar && limit !== undefined ? ` / ${compact(limit)}` : ""}`
           : "—"}
       </span>
-      {available && (hovered || focused) ? (
+      {hasDetails && (hovered || focused) ? (
         <span
           id={id}
           ref={cardRef}
@@ -108,18 +114,17 @@ export function TokenCount({
           className="absolute right-0 top-full z-50 block max-h-[calc(100dvh-16px)] w-72 overflow-auto border border-[var(--color-border-default)] bg-[var(--color-bg-base)] text-[var(--color-text-secondary)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
         >
           <span className="block bg-[var(--color-bg-elevated)] p-3">
-            <table className="w-full text-right">
-              <thead>
-                <tr>
-                  <th />
-                  <th className="font-normal">Pre-flight</th>
-                  <th className="font-normal">Main</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows
-                  .filter(([, pre, current]) => pre !== undefined || current !== undefined)
-                  .map(([label, pre, current]) => (
+            {reportedRows.length > 0 ? (
+              <table className="w-full text-right">
+                <thead>
+                  <tr>
+                    <th />
+                    <th className="font-normal">Pre-flight</th>
+                    <th className="font-normal">Main</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {reportedRows.map(([label, pre, current]) => (
                     <tr
                       key={label}
                       className={
@@ -133,19 +138,53 @@ export function TokenCount({
                       <td>{current?.toLocaleString() ?? "?"}</td>
                     </tr>
                   ))}
-              </tbody>
-            </table>
-            {hit || unenforced || limit !== undefined ? (
+                </tbody>
+              </table>
+            ) : null}
+            {preflight ? (
+              <dl className="mt-2 border-t border-[var(--color-border-subtle)] pt-2 text-left">
+                {[
+                  [
+                    "Pre-flight status",
+                    preflight.status === "legacy_unknown"
+                      ? "Legacy usage unknown"
+                      : preflight.status,
+                  ],
+                  ["Pre-flight attempts", preflight.attemptCount.toLocaleString()],
+                  ["Unknown attempts", preflight.unknownAttemptCount.toLocaleString()],
+                  ["Provider iterations", preflight.providerIterationCount.toLocaleString()],
+                  ...(["claude", "codex", "cursor", "opencode"] as const).flatMap((provider) => {
+                    const tokens = measured?.byProvider[provider]?.totalTokens;
+                    return tokens === undefined
+                      ? []
+                      : [
+                          [
+                            `Pre-flight ${provider === "opencode" ? "OpenCode" : provider[0].toUpperCase() + provider.slice(1)}`,
+                            tokens.toLocaleString(),
+                          ],
+                        ];
+                  }),
+                ].map(([label, value]) => (
+                  <div key={label} className="flex justify-between gap-2 py-0.5">
+                    <dt>{label}</dt>
+                    <dd>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
+            {hit || unenforced || limit !== undefined || budget?.overridden ? (
               <span
                 className={`mt-2 block border-t border-[var(--color-border-subtle)] pt-2 text-left ${hit ? "text-[var(--color-status-error)]" : unenforced ? "text-[var(--color-chip-warn-text)]" : "text-[var(--color-text-tertiary)]"}`}
               >
                 {hit
                   ? "Stopped by token budget"
-                  : unenforced
-                    ? `Unavailable · ${reason}`
-                    : limit !== undefined
-                      ? `${compact(total, true)} of ${compact(limit, true)} · ${Math.round((total / limit) * 100)}%`
-                      : null}
+                  : budget?.overridden
+                    ? `Limit ignored${budget.reason ? ` · ${reason}` : ""}`
+                    : unenforced
+                      ? `Unavailable · ${reason}`
+                      : limit !== undefined
+                        ? `${compact(total, true)} of ${compact(limit, true)} · ${Math.round((total / limit) * 100)}%`
+                        : null}
               </span>
             ) : null}
           </span>

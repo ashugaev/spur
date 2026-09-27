@@ -4103,6 +4103,13 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(card.getByRole("columnheader", { name: "Main" })).toBeVisible();
     await expect(card.getByRole("row", { name: "Total 20 80" })).toBeVisible();
     await expect(card.getByRole("row", { name: "Cache read 0 ?" })).toBeVisible();
+    await expect(card.getByRole("row", { name: "Cache write 5m 5 ?" })).toBeVisible();
+    await expect(card.getByText("Cache write 1h")).toHaveCount(0);
+    await expect(card.getByText("Pre-flight status").locator("..")).toContainText("partial");
+    await expect(card.getByText("Pre-flight attempts").locator("..")).toContainText("2");
+    await expect(card.getByText("Unknown attempts").locator("..")).toContainText("1");
+    await expect(card.getByText("Provider iterations").locator("..")).toContainText("3");
+    await expect(card.getByText("Pre-flight Claude").locator("..")).toContainText("20");
     await expect(card.getByText("Stopped by token budget")).toBeVisible();
     await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
@@ -4115,6 +4122,25 @@ test.describe("S5: Runtime sidebar", () => {
       });
     } else {
       await page.screenshot({ path: testInfo.outputPath("preflight-detail.png"), fullPage: true });
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByLabel("Tokens: at least 100").focus();
+    await expect
+      .poll(async () => {
+        const bounds = await card.boundingBox();
+        return bounds
+          ? bounds.x >= 0 &&
+              bounds.y >= 0 &&
+              bounds.x + bounds.width <= 390 &&
+              bounds.y + bounds.height <= 844
+          : false;
+      })
+      .toBe(true);
+    if (artifacts) {
+      mkdirSync(join(artifacts, "token-count"), { recursive: true });
+      await page.screenshot({ path: join(artifacts, "token-count", "preflight-mobile-focus.png") });
+      await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+      await page.screenshot({ path: join(artifacts, "token-count", "preflight-mobile-light.png") });
     }
   });
 
@@ -4179,6 +4205,8 @@ test.describe("S5: Runtime sidebar", () => {
       await expect.poll(() => Boolean(release)).toBe(true);
       release?.();
       await expect(page.getByText("100 / 100")).toBeVisible();
+      await page.getByLabel("Tokens: 100", { exact: true }).focus();
+      await expect(page.getByText("Limit ignored", { exact: true })).toBeVisible();
       await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
       await capture("resumed");
       const video = page.video();
@@ -4220,6 +4248,36 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByPlaceholder("Message...")).toBeEnabled();
     await expect(page.getByText("≥20 / 100")).toBeVisible();
     await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
+  });
+
+  test("ignored budget retains uncertainty without claiming enforcement unavailable", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "ignored-unknown",
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        overridden: true,
+        reason: "preflight_unknown",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    const count = page.getByLabel("Tokens: at least 20");
+    await expect(count).toHaveText("≥20 / 100");
+    await count.focus();
+    await expect(page.getByText("Limit ignored · pre-flight usage unknown")).toBeVisible();
+    await expect(page.getByRole("tooltip").getByRole("table")).toHaveCount(0);
+    await expect(page.getByText("Unavailable · pre-flight usage unknown")).toHaveCount(0);
+    await expect(page.getByPlaceholder("Message...")).toBeEnabled();
+    const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+    if (artifacts) {
+      mkdirSync(join(artifacts, "token-count"), { recursive: true });
+      await page.screenshot({ path: join(artifacts, "token-count", "ignored-unknown.png") });
+    }
   });
 
   for (const change of ["raised", "removed"] as const) {
