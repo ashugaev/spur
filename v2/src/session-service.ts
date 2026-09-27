@@ -2684,6 +2684,10 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  // Launch sends that returned submit_unconfirmed: epoch ms of the send, and
+  // whether queued delivery logged its hold. Cleared once the agent's
+  // transcript shows activity after the send (waitForQueuedMessage).
+  private readonly launchUnconfirmed = new Map<string, { sentAt: number; holdLogged: boolean }>();
   private readonly todoNudgesInFlight = new Set<string>();
   // Log-once-per-episode plus a retention bound for the rate-limit
   // reactivation guard's pane-unavailable skip: keyed by session id, value
@@ -5786,6 +5790,11 @@ export class SessionService {
     for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
       if (!liveIds.has(sessionId)) {
         this.queuedMessageDeliveryLastFailure.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.launchUnconfirmed.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.launchUnconfirmed.delete(sessionId);
       }
     }
     for (const sessionId of this.lastHumanHeldNudgeRevisions.keys()) {
@@ -9737,6 +9746,26 @@ export class SessionService {
     }
   }
 
+  // A launch send whose submit never confirmed may still sit unsubmitted in
+  // the composer; queued delivery holds until the transcript shows activity.
+  private trackLaunchSubmit(sessionId: string, outcome: AgentSendOutcome, sentAt: number): void {
+    if (outcome === "submit_unconfirmed") {
+      this.launchUnconfirmed.set(sessionId, { sentAt, holdLogged: false });
+    } else {
+      this.launchUnconfirmed.delete(sessionId);
+    }
+  }
+
+  // The one path for every spawn write after the placeholder: a kill that
+  // landed since stops the spawn instead of being overwritten, and queued
+  // messages carry over. Check, read, and write run in one synchronous span.
+  private writeSpawnRecord(record: SessionRecord): SessionRecord {
+    this.assertSpawnNotKilled(record.id);
+    const carried = this.carrySpawnQueue(record);
+    writeSession(this.config.dataDir, carried);
+    return carried;
+  }
+
   async spawn(
     request: SpawnSessionRequest,
     options?: {
@@ -10161,6 +10190,7 @@ export class SessionService {
             : undefined;
 
         stage = "tmux.create";
+        this.assertSpawnNotKilled(launchSessionId);
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
@@ -10192,7 +10222,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          writeSession(this.config.dataDir, this.carrySpawnQueue(runningRecord));
+          this.writeSpawnRecord(runningRecord);
         }
       };
       if (launchAgent === "opencode") {
@@ -10205,9 +10235,11 @@ export class SessionService {
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
+        const launchSentAt = Date.now();
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
+        this.trackLaunchSubmit(sessionId, sendOutcome, launchSentAt);
         firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -10245,6 +10277,7 @@ export class SessionService {
 
       if (launchPlan.deferredSensitiveInitialMessage) {
         stage = "prompt.sensitive_controls";
+        this.assertSpawnNotKilled(sessionId);
         const controlsOutcome = await this.sendDeferredSensitiveInitialMessage(
           runningRecord,
           launchPlan.deferredSensitiveInitialMessage.text,
@@ -10269,9 +10302,7 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
-      this.assertSpawnNotKilled(sessionId);
-      updatedRecord = this.carrySpawnQueue(updatedRecord);
-      writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
@@ -11024,7 +11055,7 @@ export class SessionService {
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         updatedAt: nowIso(),
       };
-      writeSession(this.config.dataDir, this.carrySpawnQueue(spawnPlaceholder));
+      this.writeSpawnRecord(spawnPlaceholder);
       ensureTodoLedger(this.config.dataDir, spawnPlaceholder);
       prepared.placeholder = spawnPlaceholder;
 
@@ -11175,6 +11206,7 @@ export class SessionService {
             : undefined;
 
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
+        this.assertSpawnNotKilled(sessionId);
         await createTmuxSession({
           sessionName: launchSessionId,
           cwd: workspacePath,
@@ -11211,7 +11243,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          writeSession(this.config.dataDir, this.carrySpawnQueue(runningRecord));
+          this.writeSpawnRecord(runningRecord);
         }
       };
       if (launchAgent === "opencode") {
@@ -11224,9 +11256,11 @@ export class SessionService {
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
+        const launchSentAt = Date.now();
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
+        this.trackLaunchSubmit(sessionId, sendOutcome, launchSentAt);
         initialPromptSent = true;
         firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
@@ -11273,9 +11307,7 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
-      this.assertSpawnNotKilled(sessionId);
-      updatedRecord = this.carrySpawnQueue(updatedRecord);
-      writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
@@ -11298,10 +11330,15 @@ export class SessionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const terminalPreflightFailure = error instanceof SpawnPreflightError;
+      const finalAttempt =
+        terminalPreflightFailure ||
+        this.spawnWasKilled(sessionId) ||
+        attempt >= SPAWN_RETRY_ATTEMPTS ||
+        initialPromptSent;
+      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalAttempt);
+      // Re-read after the cleanup await: a kill can land during it.
       const killed = this.spawnWasKilled(sessionId);
-      const finalFailure =
-        terminalPreflightFailure || killed || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
-      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
+      const finalFailure = finalAttempt || killed;
       if (terminalPreflightFailure) {
         this.logEvent("session.preflight.failed", {
           level: "error",
@@ -11315,15 +11352,12 @@ export class SessionService {
         });
       }
       if (!finalFailure) {
-        writeSession(
-          this.config.dataDir,
-          this.carrySpawnQueue({
-            ...prepared.placeholder,
-            launchCommand: "",
-            status: "spawning",
-            updatedAt: nowIso(),
-          }),
-        );
+        this.writeSpawnRecord({
+          ...prepared.placeholder,
+          launchCommand: "",
+          status: "spawning",
+          updatedAt: nowIso(),
+        });
         this.logEvent("session.spawn.retrying", {
           level: "warn",
           sessionId,
@@ -11943,7 +11977,9 @@ export class SessionService {
     const activeRecord = this.appendQueuedMessage(
       { ...readySession, status: "running" },
       finalMessage,
-      readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
+      readySession.queuedMessages?.awaitingPrompt === true ||
+        sendState !== "waiting" ||
+        this.launchUnconfirmed.has(sessionId),
     );
     if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
       await this.tryDeliverQueuedMessageLocked(sessionId);
@@ -16458,6 +16494,28 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
+      // An unconfirmed launch prompt can still sit in the composer, where the
+      // queued send's line clear would erase it. Hold until the transcript
+      // shows the agent took something after the launch send.
+      const launch = this.launchUnconfirmed.get(sessionId);
+      if (launch) {
+        const transcriptAt = classified.agentActivityAt;
+        if (!transcriptAt || transcriptAt.getTime() < launch.sentAt) {
+          if (!launch.holdLogged) {
+            launch.holdLogged = true;
+            this.logEvent("session.message.held_unconfirmed_launch", {
+              level: "warn",
+              sessionId,
+              projectId: session.project,
+              message: `Holding queued messages for ${sessionId}: launch prompt submit not confirmed`,
+              details: { queuedCount: queuedMessages(session).length },
+            });
+          }
+          await sleep(PIPELINE_POLL_INTERVAL_MS);
+          continue;
+        }
+        this.launchUnconfirmed.delete(sessionId);
+      }
       // A confirmed ack plus a transcript write after it means the agent took
       // the delivered message and closed that turn: no grace needed. Without
       // that evidence (unconfirmed ack, restart) the grace bridges the lag
@@ -17250,34 +17308,23 @@ export class SessionService {
   }
 
   // A spawning record no spawn in this process owns (the spawn was lost to a
-  // daemon restart) whose agent is alive: the launch reached the agent, so
-  // the session is running. Messages queued while it was spawning deliver
-  // behind whatever turn the agent is on.
-  private adoptOrphanedSpawn(
-    session: SessionRecord,
-    runtime: SessionRuntimeSnapshot,
-  ): { session: SessionRecord; runtime: SessionRuntimeSnapshot } {
-    const latest = readSession(this.config.dataDir, session.id);
-    if (latest?.status !== "spawning" || this.spawnsInFlight.has(session.id)) {
-      return { session: latest ?? session, runtime };
-    }
-    const adopted: SessionRecord = { ...latest, status: "running", updatedAt: nowIso() };
-    writeSession(this.config.dataDir, adopted);
-    this.stateCache.delete(session.id);
-    this.logEvent("session.spawn.orphan_adopted", {
+  // daemon restart) whose agent is alive. Nothing proves the launch prompt
+  // reached it, so its pane is stopped; the caller then reconciles the record
+  // to "stopped" like a dead orphan, queue kept, and restore or the next send
+  // relaunches it with the task prompt.
+  private async stopOrphanedSpawnPane(session: SessionRecord): Promise<SessionRuntimeSnapshot> {
+    this.logEvent("session.spawn.orphan_stopped", {
       level: "warn",
       sessionId: session.id,
       projectId: session.project,
-      message: `Adopted ${session.id}: spawn was lost but its agent is running`,
+      message: `Stopped ${session.id}: its spawn was lost before the launch prompt was confirmed`,
       details: {
         agent: session.agent,
-        queuedCount: queuedMessages(adopted).length,
+        queuedCount: queuedMessages(session).length,
       },
     });
-    if (this.shouldRunDelivery(adopted)) {
-      this.scheduleDeliveryRunner(adopted.id);
-    }
-    return { session: adopted, runtime };
+    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+    return this.readRuntimeSnapshot(session, { fresh: true });
   }
 
   private async reconcileUnexpectedStop(
@@ -17297,7 +17344,7 @@ export class SessionService {
       // spawning session with no active pipeline (finished, failed, or lost to a
       // daemon restart) and a dead runtime is reconciled like a dropped running
       // one — otherwise it hangs on "working" forever with no terminal state.
-      // One with a live agent is adopted as running (adoptOrphanedSpawn).
+      // One with a live agent has its pane stopped first (stopOrphanedSpawnPane).
       if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
         return { session, runtime };
       }
@@ -17305,25 +17352,26 @@ export class SessionService {
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
     if (!workspaceGone) {
-      if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
-        return session.status === "spawning"
-          ? this.adoptOrphanedSpawn(session, runtime)
-          : { session, runtime };
+      const live = (snapshot: SessionRuntimeSnapshot) =>
+        snapshot.runtimeAlive && snapshot.paneUsable && snapshot.processAlive;
+      if (!live(runtime)) {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        // fresh:true — an independent re-sample, not a replay of the same
+        // ~2s-TTL cached snapshot the first check above just read. Otherwise a
+        // single transient tmux/list-windows blip would agree with itself on
+        // both reads and mark a genuinely live session stopped.
+        confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       }
-      await sleep(PIPELINE_POLL_INTERVAL_MS);
-      // fresh:true — an independent re-sample, not a replay of the same
-      // ~2s-TTL cached snapshot the first check above just read. Otherwise a
-      // single transient tmux/list-windows blip would agree with itself on
-      // both reads and mark a genuinely live session stopped.
-      confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       if (
-        confirmedRuntime.runtimeAlive &&
-        confirmedRuntime.paneUsable &&
-        confirmedRuntime.processAlive
+        live(confirmedRuntime) &&
+        session.status === "spawning" &&
+        readSession(this.config.dataDir, session.id)?.status === "spawning" &&
+        !this.spawnsInFlight.has(session.id)
       ) {
-        return session.status === "spawning"
-          ? this.adoptOrphanedSpawn(session, confirmedRuntime)
-          : { session, runtime: confirmedRuntime };
+        confirmedRuntime = await this.stopOrphanedSpawnPane(session);
+      }
+      if (live(confirmedRuntime)) {
+        return { session, runtime: confirmedRuntime };
       }
       // A timeout-killed tmux probe is ambiguous, not confirmed absence — a
       // systemic tmux hang must never convert into a false teardown of every
