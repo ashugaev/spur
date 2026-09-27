@@ -16665,7 +16665,10 @@ describe("SessionService", () => {
     "persists the final structured %s sample after confirmed pane exit",
     async (agent) => {
       readSessionMock.mockReturnValue(
-        runningSession({ agent, ...(agent === "opencode" ? { agentSessionId: "ses_final" } : {}) }),
+        runningSession({
+          agent,
+          ...(agent === "opencode" || agent === "cursor" ? { agentSessionId: "ses_final" } : {}),
+        }),
       );
       tmuxPaneDeadMock.mockResolvedValue(true);
       const sample = {
@@ -16687,22 +16690,19 @@ describe("SessionService", () => {
       if (agent === "opencode") {
         readOpenCodeStructuredStateMock.mockResolvedValue({ state: null, tokenUsage: sample });
       }
+      if (agent === "cursor") readCursorTokenUsageMock.mockResolvedValue(sample);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const resultPromise = service.get("api-1");
       await vi.advanceTimersByTimeAsync(250);
       const result = await resultPromise;
       expect(result.status).toBe("stopped");
-      if (agent === "cursor") {
-        expect(result.tokenUsageView?.status).toBe("unavailable");
-        expect(readCursorJsonlStateMock).not.toHaveBeenCalled();
-      } else {
-        expect(result.tokenUsageView).toMatchObject({ status: "available", totalTokens: 10 });
-        expect(writeSessionMock).toHaveBeenCalledWith(
-          TEST_DATA_DIR,
-          expect.objectContaining({ tokenUsage: expect.objectContaining({ totalTokens: 10 }) }),
-        );
-      }
+      expect(result.tokenUsageView).toMatchObject({ status: "available", totalTokens: 10 });
+      expect(writeSessionMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ tokenUsage: expect.objectContaining({ totalTokens: 10 }) }),
+      );
+      if (agent === "cursor") expect(readCursorJsonlStateMock).not.toHaveBeenCalled();
       if (agent === "opencode") {
         expect(readOpenCodeStructuredStateMock).toHaveBeenCalledWith(
           "ses_final",
@@ -42975,6 +42975,16 @@ describe("SessionService", () => {
               id: "api-1",
               status,
               stopReason: "token_budget",
+              preflightTokenUsage: {
+                status: "measured",
+                attemptCount: 1,
+                unknownAttemptCount: 0,
+                providerIterationCount: 1,
+                inputTokens: 8,
+                outputTokens: 2,
+                totalTokens: 10,
+                byProvider: { claude: { inputTokens: 8, outputTokens: 2, totalTokens: 10 } },
+              },
               tokenUsage: {
                 provider: "claude",
                 inputTokens: 80,
@@ -42993,11 +43003,14 @@ describe("SessionService", () => {
           expect(sessions.get("api-1")).toMatchObject({
             status: "running",
             tokenBudgetOverride: true,
+            tokenUsage: { totalTokens: 100 },
+            preflightTokenUsage: { totalTokens: 10, status: "measured" },
           });
           const restarted = await createDisposedSessionService();
           const view = await restarted.get("api-1");
           expect(view.tokenBudgetView).toMatchObject({
             budget: 100,
+            knownTotalTokens: 110,
             overridden: true,
             exhausted: false,
             enforced: false,

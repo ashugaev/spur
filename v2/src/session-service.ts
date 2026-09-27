@@ -14860,7 +14860,8 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    const current = await this.enrich(session);
+    const currentView = await this.enrich(session);
+    const current = { ...(readSession(this.config.dataDir, sessionId) ?? session), ...currentView };
     if (!isRestorableSession(current)) {
       this.logEvent("session.restore.unrestorable", {
         level: "warn",
