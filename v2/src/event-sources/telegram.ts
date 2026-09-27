@@ -636,6 +636,38 @@ async function bindSpawnedSession(
   }
 }
 
+/**
+ * Records an inbound Telegram touch as the session's reply target. Carries the
+ * unconsumed status message and the last reply stamp across the whole-file
+ * replace, and keeps the status message a private-chat affordance: a group has
+ * no placeholder to edit.
+ */
+function recordTelegramReplyTarget(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  target: {
+    sessionId: string;
+    chatId: number;
+    messageThreadId?: number;
+    statusMessageId?: number;
+  },
+): void {
+  const previous = readTelegramReplyTarget(deps.dataDir, target.sessionId);
+  const statusMessageId =
+    target.statusMessageId !== undefined && target.chatId > 0
+      ? target.statusMessageId
+      : previous?.statusMessageId;
+  writeTelegramReplyTarget(deps.dataDir, {
+    sessionId: target.sessionId,
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
+    chatId: target.chatId,
+    ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+    ...(statusMessageId !== undefined ? { statusMessageId } : {}),
+    ...(previous?.lastReplyAt !== undefined ? { lastReplyAt: previous.lastReplyAt } : {}),
+    lastInboundAt: new Date().toISOString(),
+  });
+}
+
 async function bindTelegramThread(
   runtime: TelegramRuntime,
   chatId: number,
@@ -661,13 +693,10 @@ async function bindTelegramThread(
     logPersistError(deps, error);
     throw error;
   }
-  writeTelegramReplyTarget(deps.dataDir, {
+  recordTelegramReplyTarget(deps, {
     sessionId,
-    projectId: deps.projectId,
-    sourceId: deps.sourceId,
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
-    lastInboundAt: new Date().toISOString(),
   });
 }
 
@@ -983,20 +1012,11 @@ async function handleAgentChoiceCallback(
     chat: { id: choice.chatId },
     from,
   };
-  // Whole-file replace: carry the unconsumed status message and the last reply
-  // stamp over, a click posts neither.
-  const previous = readTelegramReplyTarget(deps.dataDir, choice.sessionId);
-  writeTelegramReplyTarget(deps.dataDir, {
-    ...(previous?.statusMessageId !== undefined
-      ? { statusMessageId: previous.statusMessageId }
-      : {}),
-    ...(previous?.lastReplyAt !== undefined ? { lastReplyAt: previous.lastReplyAt } : {}),
+  // A click posts no status message of its own.
+  recordTelegramReplyTarget(deps, {
     sessionId: choice.sessionId,
-    projectId: deps.projectId,
-    sourceId: deps.sourceId,
     chatId: choice.chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
-    lastInboundAt: new Date().toISOString(),
   });
   deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(clickMessage, choice.sessionId, choice.value));
 }
@@ -1214,26 +1234,13 @@ async function routeTelegramPrompt(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
     );
   }
-  // A failed ack posts no new status message, so keep the unconsumed one rather
-  // than dropping it in the whole-file replace.
-  const carried =
-    statusMessageId === undefined
-      ? readTelegramReplyTarget(deps.dataDir, binding.sessionId)?.statusMessageId
-      : undefined;
-  writeTelegramReplyTarget(deps.dataDir, {
+  recordTelegramReplyTarget(deps, {
     sessionId: binding.sessionId,
-    projectId: deps.projectId,
-    sourceId: deps.sourceId,
     chatId: message.chat.id,
-    ...(statusMessageId !== undefined && message.chat.id > 0
-      ? { statusMessageId }
-      : carried !== undefined
-        ? { statusMessageId: carried }
-        : {}),
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),
-    lastInboundAt: new Date().toISOString(),
+    ...(statusMessageId !== undefined ? { statusMessageId } : {}),
   });
   deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(message, binding.sessionId, text));
 }
