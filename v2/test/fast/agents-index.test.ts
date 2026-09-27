@@ -542,12 +542,13 @@ describe("agentSubmitAckPacing", () => {
     });
   });
 
-  it("reports launch-send pacing for claude only", () => {
+  it("reports launch-send pacing for claude and codex only", () => {
     // Callers scope launch-send handling by this flag, so it must track exactly
     // the agents whose short window and Enter resends justify it.
     expect(agentHasLaunchSubmitAck("claude")).toBe(true);
-    expect(agentHasLaunchSubmitAck("codex")).toBe(false);
+    expect(agentHasLaunchSubmitAck("codex")).toBe(true);
     expect(agentHasLaunchSubmitAck("cursor")).toBe(false);
+    expect(agentHasLaunchSubmitAck("opencode")).toBe(false);
   });
 
   it("bounds an interactive send to four 5s windows for every agent", () => {
@@ -564,13 +565,17 @@ describe("agentSubmitAckPacing", () => {
     });
   });
 
-  it("keeps cursor and codex pacing on a launch send", () => {
+  it("keeps cursor pacing on a launch send", () => {
     expect(agentSubmitAckPacing("cursor", { freshLaunch: true })).toEqual({
       windowMs: 5_000,
       maxResends: 12,
     });
+  });
+
+  it("scans a codex launch send in 10s windows, bounded to 30s", () => {
+    expect(agentSubmitAckPacing("codex")).toEqual({ windowMs: 300_000, maxResends: 2 });
     expect(agentSubmitAckPacing("codex", { freshLaunch: true })).toEqual({
-      windowMs: 300_000,
+      windowMs: 10_000,
       maxResends: 2,
     });
   });

@@ -12758,7 +12758,7 @@ export class SessionService {
       },
     });
     if (freshLaunch && processAlive && agentHasLaunchSubmitAck(session.agent)) {
-      // Scoped to agents with launch-send pacing (claude): their short window
+      // Scoped to agents with launch-send pacing (claude, codex): their short window
       // plus Enter resends are the launch send's whole recovery, so throwing
       // afterwards would only tear a healthy session down — the foreground
       // spawn kills the pane in its catch and the background spawn retries from
@@ -14597,13 +14597,12 @@ export class SessionService {
         ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
       };
       if (session.agent === "codex") {
-        // codex has no launch-send pacing (agentHasLaunchSubmitAck is false for
-        // it) and its rollout-based ack lags a fresh launch/resume enough that
-        // waiting on it here would reproduce the exact bug f79fb970f fixed for
-        // restore(): a healthy pane torn down because the ack scan, not the
-        // send, timed out. Bypass sendAgentMessage the same way restore() does
-        // for codex. A dead pane still surfaces: send-keys against a gone tmux
-        // session throws.
+        // codex's rollout-based ack lags a resume enough that waiting on it
+        // here would reproduce the exact bug f79fb970f fixed for restore(): a
+        // healthy pane torn down because the ack scan, not the send, timed
+        // out. Bypass sendAgentMessage the same way restore() does for codex.
+        // A dead pane still surfaces: send-keys against a gone tmux session
+        // throws.
         await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
           agent: session.agent,
         });

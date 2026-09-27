@@ -124,6 +124,12 @@ export const INTERACTIVE_SUBMIT_ACK_PACING: SubmitAckPacing = {
 // overwrite the composer.
 const CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS = 2;
+// Launch-send pacing for codex, same shape as claude's: a launch send that
+// never acked stayed in "spawning" behind the 300s default window. A healthy
+// codex launch records the prompt in its rollout ~2.5-4s after the submit,
+// so 10s windows leave margin before an Enter resend.
+const CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS = 10_000;
+const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 2;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
@@ -517,6 +523,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
+    launchSubmitAck: {
+      windowMs: CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS,
+      maxResends: CODEX_LAUNCH_SUBMIT_MAX_RESENDS,
+    },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
