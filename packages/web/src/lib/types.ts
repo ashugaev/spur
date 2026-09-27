@@ -373,15 +373,11 @@ export interface SpurTokenBudgetView {
 }
 
 export function isTokenBudgetBlocked(
-  session: Pick<SpurSessionView, "status" | "tokenBudgetView" | "tokenUsageView">,
+  session: Pick<SpurSessionView, "tokenBudgetView" | "tokenUsageView">,
 ): boolean {
   const budget = session.tokenBudgetView;
   if (budget?.overridden) return false;
-  return (
-    session.status === "budget_limited" ||
-    budget?.exhausted === true ||
-    session.tokenUsageView?.exhausted === true
-  );
+  return budget?.exhausted === true || session.tokenUsageView?.exhausted === true;
 }
 
 export type SpurSidecarStopReport =

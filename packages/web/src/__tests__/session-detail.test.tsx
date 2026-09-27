@@ -6043,6 +6043,33 @@ describe("SessionDetail token usage", () => {
     );
   });
 
+  it.each([
+    { budget: 200, knownTotalTokens: 100, exhausted: false, enforced: true },
+    { knownTotalTokens: 100, exhausted: false, enforced: true },
+  ])(
+    "restores a historical budget stop normally after raising or removing its budget %#",
+    async (tokenBudgetView) => {
+      stubFetch({
+        status: "budget_limited",
+        state: "budget_limited",
+        runtimeAlive: false,
+        tokenBudgetView,
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      expect(await screen.findByText("BUDGET LIMITED")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
+      const fetchMock = vi.mocked(global.fetch);
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
+      fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/sessions/api-a1/restore",
+          expect.objectContaining({ body: undefined }),
+        ),
+      );
+    },
+  );
+
   it("allows input after approval and displays the ignored limit", async () => {
     stubFetch({
       tokenBudgetView: {

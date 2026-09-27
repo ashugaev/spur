@@ -4190,6 +4190,43 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
   });
 
+  for (const change of ["raised", "removed"] as const) {
+    test(`a ${change} budget restores without a persistent override`, async ({ page }) => {
+      const session = makeStoppedSession({
+        id: `budget-${change}`,
+        status: "budget_limited",
+        state: "budget_limited",
+        tokenBudgetView: {
+          ...(change === "raised" ? { budget: 200 } : {}),
+          knownTotalTokens: 100,
+          exhausted: false,
+          enforced: true,
+        },
+      });
+      await mockSessionDetail(page, session);
+      await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+        expect(route.request().postData()).toBeNull();
+        session.status = "running";
+        session.state = "working";
+        session.runtimeAlive = true;
+        await route.fulfill({ status: 200, json: { ok: true } });
+      });
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("BUDGET LIMITED", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
+      const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+      if (artifacts) {
+        mkdirSync(join(artifacts, "budget-approval-ui"), { recursive: true });
+        await page.screenshot({
+          path: join(artifacts, "budget-approval-ui", `budget-${change}.png`),
+          fullPage: true,
+        });
+      }
+      await page.getByRole("button", { name: "Restore" }).click();
+      await expect(page.getByPlaceholder("Message...")).toBeEnabled();
+    });
+  }
+
   test("copy workspace access entries are visible when configured", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s5-3",
