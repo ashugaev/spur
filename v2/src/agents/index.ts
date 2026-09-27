@@ -33,6 +33,7 @@ import {
   findCursorSessionId,
 } from "./cursor.js";
 import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
+import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
 import {
   buildOpenCodePlan,
   buildOpenCodeConfig,
@@ -529,6 +530,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
+      if (cursorConfigDir) {
+        await ensureCursorTokenUsageHook(worktreePath, cursorConfigDir).catch(() => {
+          // Missing metering must not prevent agent activation.
+        });
+      }
       if (restrictWrites && cursorConfigDir) {
         await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
       }
