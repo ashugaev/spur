@@ -3277,6 +3277,68 @@ describe("github source", () => {
 
         handle.stop();
       });
+
+      // shouldPollThisTick's re-arm branch (github.ts, inside the session loop, right
+      // after the gate `continue`) is reachable ONLY through the real setInterval tick
+      // — runOnStart()/flushPollCycle drives pollCycle directly and never calls
+      // shouldPollThisTick at all, so every other test in this describe is structurally
+      // incapable of exercising it. Mirrors the "adaptive poll" describe's real-timer
+      // harness: node:timers' setInterval is not intercepted by vi's fake timers, so
+      // intervalMs here is a small REAL duration while Date stays faked and frozen
+      // except for explicit vi.setSystemTime jumps.
+      it("re-arms the tick for a due disabled session before the slow deadline, under adaptivePoll", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+        listSessionsMock.mockReturnValue([makeSession()]);
+        ghTransportMock.mockResolvedValueOnce(notFoundEnvelope(42, { withPath: true }));
+
+        const REAL_INTERVAL_MS = 20;
+        const handle = await githubSourceModule.start({
+          sourceId: "pr-watch",
+          projectId: "api",
+          dataDir: "/tmp/spur-data",
+          config: {
+            type: "github",
+            intervalMs: REAL_INTERVAL_MS,
+            runOnStart: false,
+            emitExisting: false,
+            // Large relative to the recheck window below: the slow deadline alone
+            // must NOT be what re-arms the tick here.
+            adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+            pollDisabledRecheckMs: 100,
+          },
+          emit: vi.fn(),
+          signal: new AbortController().signal,
+          logger: { info: vi.fn(), warn: vi.fn() },
+          resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+        });
+
+        // Seeded by the ungated startup poll in start() (runOnStart:false): one
+        // attempt, disabled.
+        expect(ghTransportMock).toHaveBeenCalledTimes(1);
+        expect(disabledEvents()).toHaveLength(1);
+
+        // Past the (short) recheck window, nowhere near the 600_000ms slow deadline.
+        vi.setSystemTime(new Date(Date.now() + 101));
+        ghTransportMock.mockResolvedValue(notFoundEnvelope(42, { withPath: true }));
+
+        const stepMs = 10;
+        const timeoutMs = 4000;
+        let waited = 0;
+        while (ghTransportMock.mock.calls.length < 2) {
+          if (waited >= timeoutMs) {
+            throw new Error(
+              `timed out waiting for a real gated tick to re-arm and probe; saw ${ghTransportMock.mock.calls.length} calls`,
+            );
+          }
+          await new Promise((resolve) => setTimeout(resolve, stepMs));
+          waited += stepMs;
+        }
+
+        expect(ghTransportMock).toHaveBeenCalledTimes(2);
+
+        handle.stop();
+      });
     });
 
     it("stops polling a session whose bound PR does not exist after one source.poll.disabled", async () => {
