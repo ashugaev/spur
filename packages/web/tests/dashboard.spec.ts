@@ -2907,8 +2907,15 @@ test.describe("D7b: Silent branch preflight", () => {
     await capture("preflight-preview-failed.png");
   });
 
-  test("keeps one paid batch when the first preview is superseded", async ({ page }) => {
+  test("keeps one paid batch through measured and superseded previews", async ({ page }) => {
     await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    let allocations = 0;
+    const allocatedId = "20000000-0000-4000-8000-000000000001";
+    await page.route("**/api/projects/my-project/preflight-batches", async (route) => {
+      allocations += 1;
+      expect(route.request().postData()).toBeNull();
+      await route.fulfill({ json: { preflightBatchId: allocatedId } });
+    });
     const batchIds: string[] = [];
     let firstRequest: (() => void) | undefined;
     const firstPending = new Promise<void>((resolve) => {
@@ -2917,7 +2924,7 @@ test.describe("D7b: Silent branch preflight", () => {
     await page.route("**/api/preflight", async (route) => {
       const body = route.request().postDataJSON() as { preflightBatchId: string };
       batchIds.push(body.preflightBatchId);
-      if (batchIds.length === 1) await firstPending;
+      if (batchIds.length === 2) await firstPending;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -2943,11 +2950,17 @@ test.describe("D7b: Silent branch preflight", () => {
     const prompt = page.locator("textarea").last();
     await prompt.fill("First preview");
     await expect.poll(() => batchIds.length).toBe(1);
+    await expect(page.getByText("Pre-flight tokens: 1", { exact: true })).toBeVisible();
     await prompt.fill("Second preview");
     await expect.poll(() => batchIds.length).toBe(2);
+    await prompt.fill("Supersede paid preview");
     firstRequest?.();
-    expect(batchIds[0]).toMatch(/^[0-9a-f-]{36}$/i);
+    await expect.poll(() => batchIds.length).toBe(3);
+    expect(batchIds[0]).toBe(allocatedId);
     expect(batchIds[1]).toBe(batchIds[0]);
+    expect(batchIds[2]).toBe(batchIds[0]);
+    expect(allocations).toBe(1);
+    await expect(page.getByText("Pre-flight tokens: 3", { exact: true })).toBeVisible();
     let spawnedBatchId: string | undefined;
     await page.route("**/api/spawn", async (route) => {
       const body = route.request().postDataJSON() as { preflightBatchId?: string };

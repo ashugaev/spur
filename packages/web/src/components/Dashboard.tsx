@@ -1088,6 +1088,7 @@ export function Dashboard() {
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPreflightBatchId, setSpawnPreflightBatchId] = useState<string | null>(null);
   const spawnPreflightBatchIdRef = useRef<string | null>(null);
+  const spawnPreflightOwnerRef = useRef({ project: "", queue: Promise.resolve() });
   const [spawnPreflightUsage, setSpawnPreflightUsage] =
     useState<SpurPreflightTokenUsageView | null>(null);
   const [spawnPreflightStatus, setSpawnPreflightStatus] = useState<"idle" | "pending" | "error">(
@@ -1600,6 +1601,12 @@ export function Dashboard() {
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
     const restoresPreflight = draft?.preflightBatchProjectId === nextProjectId;
     const restoredBatchId = restoresPreflight ? (draft.preflightBatchId ?? null) : null;
+    if (
+      spawnPreflightOwnerRef.current.project !== nextProjectId ||
+      restoredBatchId !== spawnPreflightBatchIdRef.current
+    ) {
+      spawnPreflightOwnerRef.current = { project: nextProjectId, queue: Promise.resolve() };
+    }
     spawnPreflightBatchIdRef.current = restoredBatchId;
     setSpawnPreflightBatchId(restoredBatchId);
     setSpawnPreflightUsage(null);
@@ -1630,6 +1637,7 @@ export function Dashboard() {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
     if (normalizedProjectId !== spawnProjectId) {
+      spawnPreflightOwnerRef.current = { project: normalizedProjectId, queue: Promise.resolve() };
       spawnPreflightBatchIdRef.current = null;
       setSpawnPreflightBatchId(null);
       setSpawnPreflightUsage(null);
@@ -1810,59 +1818,87 @@ export function Dashboard() {
     setSpawnPreflightStatus("pending");
     let cancelled = false;
     const timer = setTimeout(() => {
-      const batchId = spawnPreflightBatchIdRef.current ?? crypto.randomUUID();
-      spawnPreflightBatchIdRef.current = batchId;
-      setSpawnPreflightBatchId(batchId);
-      writeSpawnDraft({
-        ...spawnDraftRef.current,
-        preflightBatchId: batchId,
-        preflightBatchProjectId: project,
-      });
-      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-      const payload: Record<string, unknown> = {
-        projectId: project,
-        prompt,
-        agent: spawnAgent,
-        overrides,
-        preflightBatchId: batchId,
-      };
-
-      fetch("/api/preflight", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-        .then(async (response) => ({
-          ok: response.ok,
-          result: (await response.json().catch(() => null)) as {
-            branch?: string | null;
-            error?: string;
-            preflightBatchId?: string;
-            preflightTokenUsageView?: SpurPreflightTokenUsageView;
-          } | null,
-        }))
-        .then(({ ok, result }) => {
-          if (batchId !== spawnPreflightBatchIdRef.current) return;
-          if (!result) {
-            if (!cancelled) setSpawnPreflightStatus("error");
-            return;
-          }
-          if (result.preflightBatchId && result.preflightBatchId !== batchId) return;
-          const usage = result.preflightTokenUsageView;
-          if (usage) {
-            setSpawnPreflightUsage((current) =>
-              current && current.attemptCount > usage.attemptCount ? current : usage,
-            );
-          }
-          if (cancelled) return;
-          setSpawnPreflightStatus(ok && !result.error ? "idle" : "error");
-          if (ok && !result.error && result.branch && !spawnBranchExplicitRef.current)
-            setSpawnBranch(result.branch);
-        })
-        .catch(() => {
-          if (!cancelled && batchId === spawnPreflightBatchIdRef.current)
-            setSpawnPreflightStatus("error");
+      const owner = spawnPreflightOwnerRef.current;
+      const persistBatchId = (id: string) => {
+        spawnPreflightBatchIdRef.current = id;
+        setSpawnPreflightBatchId(id);
+        writeSpawnDraft({
+          ...spawnDraftRef.current,
+          preflightBatchId: id,
+          preflightBatchProjectId: project,
         });
+      };
+      owner.queue = owner.queue.then(async () => {
+        if (cancelled || owner !== spawnPreflightOwnerRef.current || spawningRef.current) return;
+        try {
+          let batchId = spawnPreflightBatchIdRef.current;
+          if (!batchId) {
+            const allocation = await fetch(
+              `/api/projects/${encodeURIComponent(project)}/preflight-batches`,
+              { method: "POST" },
+            );
+            const result: unknown = await allocation.json();
+            if (
+              !allocation.ok ||
+              typeof result !== "object" ||
+              result === null ||
+              !("preflightBatchId" in result) ||
+              typeof result.preflightBatchId !== "string" ||
+              !result.preflightBatchId
+            ) {
+              throw new Error("Failed to allocate pre-flight usage batch");
+            }
+            if (owner !== spawnPreflightOwnerRef.current) return;
+            batchId = result.preflightBatchId;
+            persistBatchId(batchId);
+          }
+          if (cancelled || owner !== spawnPreflightOwnerRef.current || spawningRef.current) return;
+          const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
+          const payload: Record<string, unknown> = {
+            projectId: project,
+            prompt,
+            agent: spawnAgent,
+            overrides,
+            preflightBatchId: batchId,
+          };
+
+          await fetch("/api/preflight", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+            .then(async (response) => ({
+              ok: response.ok,
+              result: (await response.json().catch(() => null)) as {
+                branch?: string | null;
+                error?: string;
+                preflightBatchId?: string;
+                preflightTokenUsageView?: SpurPreflightTokenUsageView;
+              } | null,
+            }))
+            .then(({ ok, result }) => {
+              if (owner !== spawnPreflightOwnerRef.current) return;
+              if (!result) {
+                if (!cancelled) setSpawnPreflightStatus("error");
+                return;
+              }
+              if (result.preflightBatchId) persistBatchId(result.preflightBatchId);
+              const usage = result.preflightTokenUsageView;
+              if (usage) {
+                setSpawnPreflightUsage((current) =>
+                  current && current.attemptCount > usage.attemptCount ? current : usage,
+                );
+              }
+              if (cancelled) return;
+              setSpawnPreflightStatus(ok && !result.error ? "idle" : "error");
+              if (ok && !result.error && result.branch && !spawnBranchExplicitRef.current)
+                setSpawnBranch(result.branch);
+            });
+        } catch {
+          if (!cancelled && owner === spawnPreflightOwnerRef.current)
+            setSpawnPreflightStatus("error");
+        }
+      });
     }, 500);
 
     return () => {
@@ -1916,6 +1952,7 @@ export function Dashboard() {
     spawningRef.current = true;
     setSpawning(true);
     try {
+      await spawnPreflightOwnerRef.current.queue;
       const payload = buildSpawnSessionPayload({
         projectId: nextProjectId,
         prompt: nextPrompt,
@@ -1959,6 +1996,7 @@ export function Dashboard() {
       setSpawnModel(null);
       setSpawnSessionMode(null);
       setSpawnBranch("");
+      spawnPreflightOwnerRef.current = { project: nextProjectId, queue: Promise.resolve() };
       spawnPreflightBatchIdRef.current = null;
       setSpawnPreflightBatchId(null);
       setSpawnPreflightUsage(null);

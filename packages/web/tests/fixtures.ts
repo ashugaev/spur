@@ -447,6 +447,10 @@ const NEUTRAL_PR_STATUS = {
 // Registered after the catch-all (so they win over it) and before the spec body
 // (so a spec's own route wins over them).
 const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unknown }[] = [
+  {
+    pattern: /\/api\/projects\/[^/]+\/preflight-batches$/,
+    body: { preflightBatchId: "10000000-0000-4000-8000-000000000001" },
+  },
   { pattern: "**/api/runtime/info", body: { version: "0.0.0-test" } },
   {
     pattern: "**/api/runtime/versions",

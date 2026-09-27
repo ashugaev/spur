@@ -842,6 +842,8 @@ describe("Dashboard project create/delete", () => {
     }> = [];
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "server-batch" }));
       if (url === "/api/runtime/resources") {
         return new Response(JSON.stringify({ available: false }));
       }
@@ -923,6 +925,8 @@ describe("Dashboard project create/delete", () => {
     });
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "server-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")

@@ -2446,9 +2446,92 @@ describe("Dashboard", () => {
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Escape now");
   });
 
+  it.each(["replacement", "lost-response", "lost-allocation"] as const)(
+    "shares allocated batches through cancelled previews and %s",
+    async (outcome) => {
+      let allocate: (response: Response) => void = () => undefined;
+      const allocation = new Promise<Response>((resolve) => {
+        allocate = resolve;
+      });
+      let finishPreview: (response: Response) => void = () => undefined;
+      let failPreview: (error: Error) => void = () => undefined;
+      const preview = new Promise<Response>((resolve, reject) => {
+        finishPreview = resolve;
+        failPreview = reject;
+      });
+      const previewBodies: string[] = [];
+      let allocations = 0;
+      vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url.endsWith("/preflight-batches")) {
+          allocations += 1;
+          if (outcome === "lost-allocation" && allocations === 1)
+            throw new Error("Allocation response lost");
+          return allocation;
+        }
+        if (url === "/api/preflight") {
+          previewBodies.push(String(init?.body));
+          if (previewBodies.length === 1) return preview;
+          return new Response(
+            JSON.stringify({
+              branch: "feature/result",
+              preflightTokenUsageView: {
+                status: "measured",
+                inputTokens: 80,
+                outputTokens: 20,
+                totalTokens: 100,
+                attemptCount: 2,
+                unknownAttemptCount: 0,
+                providerIterationCount: 2,
+                byProvider: { claude: { totalTokens: 100 } },
+              },
+            }),
+          );
+        }
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/sessions") return new Response(JSON.stringify(sessionsPayload()));
+        if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+        if (url.includes("/spawn-defaults"))
+          return new Response(JSON.stringify({ model: null, worktree: true }));
+        if (url.includes("/branches/exists"))
+          return new Response(JSON.stringify({ exists: false, remote: false, checkedOutAt: null }));
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<Dashboard />);
+      fireEvent.click(await screen.findByRole("button", { name: "Spawn Session" }));
+      const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+      fireEvent.change(prompt, { target: { value: "First prompt" } });
+      await waitFor(() => expect(allocations).toBe(1));
+      fireEvent.change(prompt, { target: { value: "Supersede during allocation" } });
+      allocate(new Response(JSON.stringify({ preflightBatchId: "server-batch" })));
+      await waitFor(() => expect(previewBodies).toHaveLength(1));
+      expect(previewBodies[0]).toContain('"preflightBatchId":"server-batch"');
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("server-batch");
+      fireEvent.change(prompt, { target: { value: "Supersede paid preview" } });
+      if (outcome === "replacement")
+        finishPreview(
+          new Response(
+            JSON.stringify({ preflightBatchId: "replacement-batch", branch: "feature/stale" }),
+          ),
+        );
+      else failPreview(new Error("Response lost after paid work"));
+      await waitFor(() => expect(previewBodies).toHaveLength(2));
+      expect(previewBodies[1]).toContain(
+        `"preflightBatchId":"${outcome === "replacement" ? "replacement-batch" : "server-batch"}"`,
+      );
+      expect(allocations).toBe(outcome === "lost-allocation" ? 2 : 1);
+      expect(await screen.findByText("100", { exact: false })).toBeInTheDocument();
+      expect(screen.getByLabelText("branch name")).toHaveValue("feature/result");
+    },
+  );
+
   it("keeps a restored explicit branch when preflight suggests another branch", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "allocated-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
@@ -2511,6 +2594,8 @@ describe("Dashboard", () => {
   it("allows preflight to fill a branch after normalization clears explicit input", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "allocated-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
@@ -3022,7 +3107,7 @@ describe("Dashboard", () => {
     fireEvent.click(spawnButton);
     fireEvent.click(spawnButton);
 
-    expect(spawnCalls).toBe(1);
+    await waitFor(() => expect(spawnCalls).toBe(1));
     expect(spawnButton).toBeDisabled();
 
     resolveSpawn?.(new Response(JSON.stringify(spawned), { status: 201 }));

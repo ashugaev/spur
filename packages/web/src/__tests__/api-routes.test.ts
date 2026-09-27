@@ -97,6 +97,7 @@ import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as postPrStatusBatch } from "@/app/api/pr-status/batch/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
+import { POST as allocatePreflight } from "@/app/api/projects/[id]/preflight-batches/route";
 import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
 import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
 import { POST as createProject } from "@/app/api/projects/route";
@@ -1697,6 +1698,19 @@ describe("Spur web API routes", () => {
   });
 
   // ── POST /api/preflight ────────────────────────────────────────────────
+
+  it("allocates a server-owned preflight batch before paid preview", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ preflightBatchId: "server-id" });
+    const response = await allocatePreflight(
+      new NextRequest("http://localhost/api/projects/api/preflight-batches", { method: "POST" }),
+      { params: Promise.resolve({ id: "api" }) },
+    );
+    expect(await response.json()).toEqual({ preflightBatchId: "server-id" });
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/projects/api/preflight-batches",
+      expect.objectContaining({ method: "POST", body: undefined }),
+    );
+  });
 
   it("POST /api/preflight returns suggested branch", async () => {
     mockedSpurRequestJson.mockResolvedValue({ branch: "feature/my-fix" });
