@@ -567,6 +567,9 @@ export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 // finish rendering the turn it just closed. A swallowed Enter is recovered by
 // the submit-ack resend loop. The trigger batching window above stays 30s.
 export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
+// Longest a queued send() waits for the delivery runner's pane write before
+// answering with the message still queued. Never covers the submit ack.
+export const QUEUED_SEND_PANE_WRITE_WAIT_MS = 3_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
   const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
@@ -1024,6 +1027,8 @@ interface AgentMessageWriteOptions {
   freshLaunch?: boolean;
   /** Target is idle or just interrupted: INTERACTIVE_SUBMIT_ACK_PACING. */
   interactive?: boolean;
+  /** Runs once the message and its submit key are in the pane, before the ack wait. */
+  onPaneWritten?: () => void;
 }
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 
@@ -2686,6 +2691,10 @@ export class SessionService {
   // does not bound (classifySessionRecord/ensureSessionReadyForSend can run
   // for a while before the pane lock is ever taken).
   private readonly queueDeliveryInFlight = new Set<string>();
+  // Sessions whose drain has typed its message (already off the queue) and
+  // waits only on the submit ack. The queue head is then a later message, not
+  // the one in flight, so removeQueuedMessage must not gate it.
+  private readonly queuedDeliveryTyped = new Set<string>();
   // Log-once-per-transition for a queued-message delivery attempt that
   // fails before or during the pane write: keyed by session id, value is
   // the last logged failure message. A permanently broken session (missing
@@ -2697,6 +2706,13 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  // Queued send() calls parked until the session's next queued pane write
+  // (notifyQueuedPaneWrite) or their own attempt's end, capped at
+  // QUEUED_SEND_PANE_WRITE_WAIT_MS.
+  private readonly queuedPaneWriteWaiters = new Map<string, Set<() => void>>();
+  // ensureDeliveryRunner calls that landed while a run was live. The run
+  // may already be past its last read, so its exit re-arms once for them.
+  private readonly deliveryRerunRequested = new Set<string>();
   private readonly todoNudgesInFlight = new Set<string>();
   // Log-once-per-episode plus a retention bound for the rate-limit
   // reactivation guard's pane-unavailable skip: keyed by session id, value
@@ -2860,6 +2876,8 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
+  private readonly queuedDeliveryAttempts = new Set<Promise<boolean>>();
   // Every spawn owns one future live-session slot from its synchronous
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
@@ -3043,14 +3061,15 @@ export class SessionService {
 
   /**
    * Resolves once every in-flight fire-and-forget run has settled: background
-   * spawns, PR auto-detect checks, healed-sidecar restarts, and the dashboard
-   * cache tick. Lets teardown drain async work whose writes and `gh` calls
-   * would otherwise land after the
-   * caller is gone.
+   * spawns, queued sends' delivery attempts, PR auto-detect checks,
+   * healed-sidecar restarts, and the dashboard cache tick. Lets teardown
+   * drain async work whose writes and `gh` calls would otherwise land after
+   * the caller is gone.
    */
   async settleBackgroundSpawns(): Promise<void> {
     await Promise.allSettled([
       ...this.backgroundSpawnRuns,
+      ...this.queuedDeliveryAttempts,
       ...this.prCheckRuns,
       ...this.sidecarHealTasks.values(),
       ...(this.dashboardCacheReady ? [this.dashboardCacheReady] : []),
@@ -11967,10 +11986,36 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () => this.sendLocked(sessionId, request));
+    const { view, paneWrite } = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const sent = await this.sendLockedWithAttempt(sessionId, request);
+      // Registered under the lock, so the attempt cannot type before the
+      // waiter exists. Waits for the pane write or a stand-down, never the
+      // submit ack.
+      return {
+        view: sent.view,
+        paneWrite: sent.attempt
+          ? this.waitForQueuedPaneWrite(sessionId, sent.attempt, QUEUED_SEND_PANE_WRITE_WAIT_MS)
+          : null,
+      };
+    });
+    if (!paneWrite) {
+      return view;
+    }
+    await paneWrite;
+    const latest = readSession(this.config.dataDir, sessionId);
+    return latest ? this.enrich(latest) : view;
   }
 
   private async sendLocked(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+    return (await this.sendLockedWithAttempt(sessionId, request)).view;
+  }
+
+  // `attempt` is the queued message's own detached delivery attempt, null
+  // when none was started (immediate send, spawning, held for the prompt).
+  private async sendLockedWithAttempt(
+    sessionId: string,
+    request: SendMessageRequest,
+  ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -11986,16 +12031,17 @@ export class SessionService {
         this.prepareSendMessage(session, request),
         true,
       );
-      return this.enrich(queued);
+      return { view: await this.enrich(queued), attempt: null };
     }
     assertSendableStatus(session);
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
-      return this.deliverPreparedLocked(sessionId, finalMessage, {
+      const view = await this.deliverPreparedLocked(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
         entryPoint: "send",
         hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
+      return { view, attempt: null };
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
@@ -12009,11 +12055,19 @@ export class SessionService {
         sendState !== "waiting" ||
         launchPromptPending(readySession),
     );
-    if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
-      await this.tryDeliverQueuedMessageLocked(sessionId);
+    // Detached: this call never holds the session lock through the pane
+    // write or its submit ack. The attempt arms the runner when it ends.
+    const attempt =
+      activeRecord.queuedMessages?.awaitingPrompt !== true
+        ? this.startQueuedDeliveryAttempt(sessionId)
+        : null;
+    if (!attempt) {
+      this.scheduleDeliveryRunner(sessionId);
     }
-    this.scheduleDeliveryRunner(sessionId);
-    return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
+    return {
+      view: await this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord),
+      attempt,
+    };
   }
 
   // Appends one message to the persisted queue on top of `base`, or returns
@@ -12177,18 +12231,21 @@ export class SessionService {
 
   async removeQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
-    // A drain (or a flush) already in flight for this session may have
-    // already typed the CURRENT head into the pane and be parked waiting on
-    // its ack — removing that exact text now would report "removed unsent"
-    // even though the pane write already landed (the same pane-write-
-    // precedes-ack-wait asymmetry the original bug was). Gate ONLY head
-    // removal: deliverQueuedMessage always targets index 0, so a non-head
-    // message can never be mid-delivery, and rejecting a safe, unrelated
-    // removal with a 409 would force the caller to wait out a live
-    // delivery's full ack window (up to ~900s) for no reason.
+    // A drain between its claim and its pane write, or a flush already in
+    // flight, may be typing the CURRENT head into the pane — removing that
+    // exact text now would report "removed unsent" even though the pane
+    // write lands (the same pane-write-precedes-ack-wait asymmetry the
+    // original bug was). Gate ONLY head removal: deliverQueuedMessage always
+    // targets index 0, so a non-head message can never be mid-delivery, and
+    // rejecting a safe, unrelated removal with a 409 would force the caller
+    // to wait out a live delivery's full ack window (up to ~900s) for no
+    // reason. A drain drops its text from the queue at the pane write
+    // (queuedDeliveryTyped), so during its ack wait the head is a later,
+    // untyped message.
     const isHead = queuedMessages(session)[0] === message;
     if (
       isHead &&
+      !this.queuedDeliveryTyped.has(sessionId) &&
       (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId))
     ) {
       throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
@@ -12782,6 +12839,7 @@ export class SessionService {
       }
     }
     await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+    options?.onPaneWritten?.();
     if (!binding) {
       return "submitted";
     }
@@ -15978,6 +16036,7 @@ export class SessionService {
 
   private ensureDeliveryRunner(sessionId: string): void {
     if (this.deliveryRuns.has(sessionId)) {
+      this.deliveryRerunRequested.add(sessionId);
       return;
     }
 
@@ -15988,14 +16047,73 @@ export class SessionService {
 
     const run = this.runDeliveryLoop(sessionId).finally(() => {
       this.deliveryRuns.delete(sessionId);
+      if (this.deliveryRerunRequested.delete(sessionId) && !this.deliveryStopped) {
+        this.ensureDeliveryRunner(sessionId);
+      }
     });
     this.deliveryRuns.set(sessionId, run);
+  }
+
+  private notifyQueuedPaneWrite(sessionId: string): void {
+    for (const resolve of this.queuedPaneWriteWaiters.get(sessionId) ?? []) {
+      resolve();
+    }
+  }
+
+  // Resolves at the session's next queued pane write, when `attempt` settles
+  // (it stood down without typing, or finished), or after timeoutMs.
+  private waitForQueuedPaneWrite(
+    sessionId: string,
+    attempt: Promise<boolean>,
+    timeoutMs: number,
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      const waiters = this.queuedPaneWriteWaiters.get(sessionId) ?? new Set<() => void>();
+      this.queuedPaneWriteWaiters.set(sessionId, waiters);
+      const done = (): void => {
+        clearTimeout(timer);
+        waiters.delete(done);
+        if (waiters.size === 0 && this.queuedPaneWriteWaiters.get(sessionId) === waiters) {
+          this.queuedPaneWriteWaiters.delete(sessionId);
+        }
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      timer.unref();
+      waiters.add(done);
+      void attempt.then(done);
+    });
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.tryDeliverQueuedMessageLocked(sessionId),
     );
+  }
+
+  // A queued send's own delivery attempt, detached from the caller: queued
+  // behind the caller's lock, it runs once that lock is released, so the
+  // caller never holds its lock through the pane write or the submit ack.
+  // Arms the runner only after it ends: a runner armed earlier would read
+  // the pre-attempt record and type the next queued message straight after
+  // this one, past the prompt hold. Never rejects: nothing awaits it to the end.
+  private startQueuedDeliveryAttempt(sessionId: string): Promise<boolean> {
+    const run = this.tryDeliverQueuedMessage(sessionId)
+      .catch((error: unknown) => {
+        this.logEvent("session.message.delivery_failed", {
+          level: "error",
+          sessionId,
+          message: `Failed to deliver queued message to ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return false;
+      })
+      .then((delivered) => {
+        this.queuedDeliveryAttempts.delete(run);
+        this.scheduleDeliveryRunner(sessionId);
+        return delivered;
+      });
+    this.queuedDeliveryAttempts.add(run);
+    return run;
   }
 
   private async tryDeliverQueuedMessageLocked(sessionId: string): Promise<boolean> {
@@ -16127,45 +16245,74 @@ export class SessionService {
     session: SessionRecord,
     message: string,
   ): Promise<SessionRecord> {
+    const sessionId = session.id;
     let recovered: SubmitAckTimeoutError | null = null;
+    // Object, not a `let`: set inside the pane-write callback.
+    const pane = { drained: false };
+    // Drains at the pane write, not the ack: a queued send waits on this
+    // write (send() -> waitForQueuedPaneWrite), never on the ack.
+    // Re-reads and subtracts the first occurrence of the text rather than
+    // trusting a slice taken before the send: a concurrent `send` append or
+    // flush would otherwise be erased by a blind whole-record write.
+    const drain = (): void => {
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      writeSession(
+        this.config.dataDir,
+        withQueuedMessages(
+          { ...latest, status: "running", updatedAt: nowIso() },
+          removeFirstOccurrence(queuedMessages(latest), message),
+          true,
+        ),
+      );
+      pane.drained = true;
+      this.queuedDeliveryTyped.add(sessionId);
+      this.notifyQueuedPaneWrite(sessionId);
+    };
     try {
-      await this.sendAgentMessage(session, message, { interrupt: false, interactive: true });
-      this.queuedDeliveryAckedAt.set(session.id, Date.now());
+      await this.sendAgentMessage(session, message, {
+        interrupt: false,
+        interactive: true,
+        onPaneWritten: drain,
+      });
+      this.queuedDeliveryAckedAt.set(sessionId, Date.now());
     } catch (error) {
-      this.queuedDeliveryAckedAt.delete(session.id);
+      this.queuedDeliveryAckedAt.delete(sessionId);
       // A live process past a submit-ack timeout means the pane write
       // landed; treat it as delivered rather than rethrow into the caller's
       // failure branch (isRecoveredSubmitAckTimeout, module scope, shared
       // with flush).
       if (!isRecoveredSubmitAckTimeout(error)) {
+        this.queuedDeliveryTyped.delete(sessionId);
+        if (pane.drained) {
+          // Retain: back at the head it was drained from. Appends go to the
+          // tail and flush stands down on queueDeliveryInFlight, so the head
+          // is still the right slot; a re-sent identical text already queued
+          // is not duplicated.
+          const latest = readSession(this.config.dataDir, sessionId) ?? session;
+          const current = queuedMessages(latest);
+          writeSession(
+            this.config.dataDir,
+            withQueuedMessages(
+              { ...latest, updatedAt: nowIso() },
+              current.includes(message) ? current : [message, ...current],
+              false,
+            ),
+          );
+        }
         throw error;
       }
       recovered = error;
     }
-    const sessionId = session.id;
+    // A resolved (or recovered) write means the pane write landed, hook or not.
+    if (!pane.drained) {
+      drain();
+    }
+    this.queuedDeliveryTyped.delete(sessionId);
     this.stateCache.delete(sessionId);
-    // Re-read and subtract the first occurrence of the delivered text,
-    // rather than trusting a pre-computed remaining-messages slice taken
-    // before the send: that slice can be stale by the time the send
-    // resolves (a concurrent `send` append, or a concurrent flush), and a
-    // blind write over it would erase the concurrent write.
-    const latest = readSession(this.config.dataDir, sessionId) ?? session;
-    const remaining = removeFirstOccurrence(queuedMessages(latest), message);
-    const updated = withQueuedMessages(
-      {
-        ...latest,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      remaining,
-      true,
-    );
-    // Persist the drain before the discovery wait below: captureAgentSessionId
-    // anchors its own internal write on a fresh readSession, and must never
-    // observe the pre-drain queue here. A crash between an internal write and
-    // this function's own write would otherwise leave agentSessionId on disk
-    // while the just-delivered message still shows as queued.
-    writeSession(this.config.dataDir, updated);
+    // The drain above is already on disk: captureAgentSessionId anchors its
+    // own internal write on a fresh readSession and must never observe the
+    // pre-drain queue.
+    const updated = readSession(this.config.dataDir, sessionId) ?? session;
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     if (recovered) {

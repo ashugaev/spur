@@ -1105,6 +1105,25 @@ async function advanceSeconds(seconds: number): Promise<void> {
   }
 }
 
+// Polls on real time without moving the fake clock, unlike vi.waitFor: the
+// delivery runner's poll sleep is real (node:timers/promises), while
+// attention/stale ticks run on fake timers and must not fire from the wait.
+async function waitForRealTime(assertion: () => void, timeoutMs = 5_000): Promise<void> {
+  const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+  // Counted polls, not a Date.now() deadline: the fake clock does not move.
+  for (let polls = Math.ceil(timeoutMs / 50); ; polls -= 1) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      if (polls <= 0) {
+        throw error;
+      }
+    }
+    await realTimers.setTimeout(50);
+  }
+}
+
 function mockClaudeJsonlState(state: string, options?: { lastMtimeMs?: number }) {
   readClaudeJsonlStateMock.mockResolvedValue({
     state,
@@ -9329,7 +9348,7 @@ describe("SessionService", () => {
 
     const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
     await vi.advanceTimersByTimeAsync(0);
-    // Parked in the send for "first"; nothing committed to disk yet.
+    // Parked on the ack for "first"; its drain committed at the pane write.
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
       agent: "claude",
     });
@@ -9337,7 +9356,8 @@ describe("SessionService", () => {
 
     const send = service.send("api-1", { message: "second" });
     await Promise.resolve();
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first"]);
+    // send() is parked on the drain's lock: nothing appended yet.
+    expect(sessions.get("api-1")?.queuedMessages).toEqual({ messages: [], awaitingPrompt: true });
 
     releaseAck();
     const [drained] = await Promise.all([drain, send]);
@@ -9514,8 +9534,9 @@ describe("SessionService", () => {
     const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
     await vi.advanceTimersByTimeAsync(0);
 
+    // "first" left the queue at its pane write; "second" is the untyped head.
     await service.removeQueuedMessage("api-1", "second");
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first"]);
+    expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
 
     releaseAck();
     expect(await drain).toBe(true);
@@ -9523,7 +9544,7 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
   });
 
-  it("returns 409 removing the head while the drain is parked on its ack, since the pane write may have already landed (PR #708 comment 2)", async () => {
+  it("never removes a typed head unsent while the drain is parked on its ack: it left the queue at the pane write (PR #708 comment 2)", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
     const sessions = createSessionStore();
@@ -9563,15 +9584,16 @@ describe("SessionService", () => {
     const drain = sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
     await vi.advanceTimersByTimeAsync(0);
     // "first" (the head) is already typed into the pane; the drain is only
-    // waiting on its ack. Removing it now would report success even though
-    // the text was already sent.
+    // waiting on its ack. It left the queue at the pane write, so a remove
+    // can never report it "removed unsent".
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "first", {
       agent: "claude",
     });
 
-    await expect(service.removeQueuedMessage("api-1", "first")).rejects.toThrow(/in flight/i);
-    // The queue is untouched by the rejected call.
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first", "second"]);
+    await expect(service.removeQueuedMessage("api-1", "first")).rejects.toThrow(
+      /not found in queue/i,
+    );
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["second"]);
 
     releaseAck();
     expect(await drain).toBe(true);
@@ -9717,7 +9739,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
       queuedMessages: {
-        messages: ["first"],
+        messages: ["first", "second"],
         awaitingPrompt: false,
       },
     });
@@ -9740,7 +9762,8 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(1);
 
-    await expect(service.flushQueuedMessage("api-1", "first")).rejects.toThrow(/in flight/i);
+    // "first" left the queue at its pane write; "second" is now the head.
+    await expect(service.flushQueuedMessage("api-1", "second")).rejects.toThrow(/in flight/i);
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
 
     releaseAck();
@@ -9856,6 +9879,239 @@ describe("SessionService", () => {
         .map(([, message]) => message),
     ).toEqual(["b", "a"]);
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["c", "d"]);
+  });
+
+  describe("queued send never waits on the submit ack (D5)", () => {
+    // The fake clock never moves in these tests, so send()'s pane-write cap
+    // (a fake setTimeout) can never fire: send() settles only when its
+    // delivery attempt types the message or stands down.
+    async function liveService() {
+      const { SessionService } = await loadSessionServiceModule();
+      return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    }
+
+    function trackSettled<T>(promise: Promise<T>): { settled: () => boolean; promise: Promise<T> } {
+      let done = false;
+      const tracked = promise.finally(() => {
+        done = true;
+      });
+      return { settled: () => done, promise: tracked };
+    }
+
+    function gateSubmitAck(service: unknown, result: { found: boolean }) {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+        async () => {
+          await gate;
+          return { found: result.found, lastScannedFile: "/x.jsonl" };
+        },
+      );
+      return () => release();
+    }
+
+    beforeEach(() => {
+      getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+      createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+        agent === "claude" ? { scan: vi.fn() } : null,
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+    });
+
+    it("answers queued at once for a busy agent, before the cap", async () => {
+      mockClaudeJsonlState("working");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+
+      const sent = trackSettled(service.send("api-1", { message: "later" }));
+      await waitForRealTime(() => {
+        expect(sent.settled()).toBe(true);
+      });
+
+      const view = await sent.promise;
+      expect(view.queuedMessages?.messages).toEqual(["later"]);
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it("answers delivered for an idle agent once the pane write lands, while the ack is still pending", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const releaseAck = gateSubmitAck(service, { found: true });
+
+      const sent = trackSettled(service.send("api-1", { message: "now" }));
+      await waitForRealTime(() => {
+        expect(sent.settled()).toBe(true);
+      });
+
+      const view = await sent.promise;
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "now", { agent: "claude" });
+      // No real queued message left: the CLI prints "Delivered".
+      expect(view.queuedMessages?.messages ?? []).toEqual([]);
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      // The ack wait is still parked in the detached attempt.
+      expect(sessionServiceInternals(service).paneWriteLocks.has("api-1")).toBe(true);
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.message.sent", sessionId: "api-1" }),
+      );
+
+      releaseAck();
+      await waitForRealTime(() => {
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ event: "session.message.sent", sessionId: "api-1" }),
+        );
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("types a queued second message only after the prompt hold, not straight after the first", async () => {
+      mockClaudeJsonlState("waiting");
+      // Seeded after construction, so boot delivery arms no runner: a stuck
+      // head with no runner, which the send's own attempt types.
+      const service = await liveService();
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ queuedMessages: { messages: ["a"], awaitingPrompt: false } }),
+      );
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: "/x.jsonl",
+      });
+
+      await service.send("api-1", { message: "b" });
+      await waitForRealTime(() => {
+        expect(sessionServiceInternals(service).deliveryRuns.has("api-1")).toBe(true);
+      });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+
+      expect(
+        sendMessageToTmuxMock.mock.calls.filter(([id]) => id === "api-1").map(([, m]) => m),
+      ).toEqual(["a"]);
+      expect(sessions.get("api-1")?.queuedMessages).toEqual({
+        messages: ["b"],
+        awaitingPrompt: true,
+      });
+    });
+
+    it("keeps a delivered answer delivered when the ack later times out on a live agent", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const releaseAck = gateSubmitAck(service, { found: false });
+
+      const view = await service.send("api-1", { message: "steer" });
+      expect(view.queuedMessages?.messages ?? []).toEqual([]);
+
+      releaseAck();
+      await waitForRealTime(() => {
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.message.delivery_recovered",
+            level: "warn",
+            sessionId: "api-1",
+          }),
+        );
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      await waitForRealTime(() => {
+        expect(sessionServiceInternals(service).deliveryRuns.has("api-1")).toBe(true);
+      });
+    });
+
+    it("re-queues the message at the head when the ack later fails on a dead agent, and the runner retries it", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      let dead = false;
+      isProcessRunningInTmuxMock.mockImplementation(async () => !dead);
+      const releaseAck = gateSubmitAck(service, { found: false });
+
+      const view = await service.send("api-1", { message: "retry me" });
+      expect(view.queuedMessages?.messages ?? []).toEqual([]);
+
+      // The agent dies inside the ack window, after send() answered.
+      dead = true;
+      releaseAck();
+      // Real-time waits: a fake-clock tick would classify the dead agent and
+      // end the session before the runner's retry.
+      await waitForRealTime(() => {
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({
+            event: "session.message.delivery_failed",
+            level: "error",
+            sessionId: "api-1",
+          }),
+        );
+      });
+      expect(sessions.get("api-1")?.queuedMessages).toEqual({
+        messages: ["retry me"],
+        awaitingPrompt: false,
+      });
+
+      // Agent back; the runner armed after the attempt retypes the head.
+      dead = false;
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: "/x.jsonl",
+      });
+      await waitForRealTime(() => {
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+      expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(2, "api-1", "retry me", {
+        agent: "claude",
+      });
+    });
+
+    it("re-arms the runner for a send that lands while a run is already exiting", async () => {
+      mockClaudeJsonlState("waiting");
+      const service = await liveService();
+      const sessions = createSessionStore();
+      // Held for the prompt: send() starts no attempt of its own and relies
+      // on the runner alone.
+      sessions.set(
+        "api-1",
+        runningSession({ queuedMessages: { messages: ["x"], awaitingPrompt: true } }),
+      );
+      const internals = service as unknown as {
+        ensureDeliveryRunner(sessionId: string): void;
+        runDeliveryLoop(sessionId: string): Promise<void>;
+      };
+      // A run already past its last read: it exits without seeing the append.
+      let finishStaleRun: () => void = () => {};
+      const loop = vi.spyOn(internals, "runDeliveryLoop").mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishStaleRun = resolve;
+          }),
+      );
+      internals.ensureDeliveryRunner("api-1");
+
+      await service.send("api-1", { message: "y" });
+      expect(loop).toHaveBeenCalledTimes(1);
+
+      finishStaleRun();
+      await waitForRealTime(() => {
+        expect(loop).toHaveBeenCalledTimes(2);
+      });
+      expect(sessionServiceInternals(service).deliveryRuns.has("api-1")).toBe(true);
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["x", "y"]);
+    });
   });
 
   it("a deliver() landing while a drain is mid-send does not resurrect the drained head (AC12)", async () => {
