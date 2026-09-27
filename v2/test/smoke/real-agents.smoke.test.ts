@@ -287,13 +287,15 @@ ${args.extraProjectYaml ?? ""}
 `;
 }
 
-async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
+async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<T>): Promise<T> {
   const saved = {
+    SPUR_CONFIG: process.env.SPUR_CONFIG,
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
     SPUR_CURSOR_BIN: process.env.SPUR_CURSOR_BIN,
     SPUR_OPENCODE_BIN: process.env.SPUR_OPENCODE_BIN,
   };
+  process.env.SPUR_CONFIG = configPath;
   if (CLAUDE_BIN) {
     process.env.SPUR_CLAUDE_BIN = CLAUDE_BIN;
   }
@@ -310,6 +312,8 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
+    if (saved.SPUR_CONFIG === undefined) delete process.env.SPUR_CONFIG;
+    else process.env.SPUR_CONFIG = saved.SPUR_CONFIG;
     if (saved.SPUR_CLAUDE_BIN === undefined) {
       delete process.env.SPUR_CLAUDE_BIN;
     } else {
@@ -462,8 +466,9 @@ async function runSmoke(
     : undefined;
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
   cleanupItems.push(cleanupItem);
-  const repoDir = agent === "codex" ? join(rootDir, "repo") : SMOKE_REPO_DIR;
-  if (agent === "codex") {
+  const usesEmptyRepo = agent === "codex" || agent === "cursor";
+  const repoDir = usesEmptyRepo ? join(rootDir, "repo") : SMOKE_REPO_DIR;
+  if (usesEmptyRepo) {
     await mkdir(repoDir);
     await git(repoDir, "init", "--initial-branch=main");
     await git(
@@ -479,7 +484,7 @@ async function runSmoke(
     );
     cleanupItem.repoDir = repoDir;
   }
-  const baseRef = agent === "codex" ? await git(repoDir, "rev-parse", "HEAD") : SMOKE_BASE_REF;
+  const baseRef = usesEmptyRepo ? await git(repoDir, "rev-parse", "HEAD") : SMOKE_BASE_REF;
 
   setActiveTmuxSocketName(tmuxSocketName);
   await syncTmuxEnvironment({});
@@ -506,7 +511,7 @@ async function runSmoke(
     "utf8",
   );
 
-  await withPinnedAgentBinaries(async () => {
+  await withPinnedAgentBinaries(configPath, async () => {
     const service = await startServer(configPath, {});
     const initialSmokeTimeoutMs = agent === "claude" ? 180_000 : 240_000;
     const expectedTitle = `${agent} smoke slots`;
@@ -522,7 +527,7 @@ async function runSmoke(
         prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
-After the file and the session metadata are set, wait for more instructions.${agent === "codex" ? " The task is complete only after a follow-up message asks you to create smoke-followup.txt." : ""}`,
+After the file and the session metadata are set, wait for more instructions.${agent === "codex" ? " The task is complete only after a follow-up message asks you to create smoke-followup.txt." : ""}${agent === "cursor" ? " This is an isolated runtime test: skip memory, planning, git, and project workflows. Use only the file-writing tool and the session metadata helper, then end your response immediately." : ""}`,
       });
       cleanupItem.branch = session.branch;
       cleanupItem.worktreePath = session.worktreePath;
@@ -586,7 +591,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
       }
 
       await service.send(session.id, {
-        message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
+        message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".${agent === "cursor" ? " Skip memory, planning, git, and project workflows; write the file and end your response immediately." : ""}`,
       });
 
       const followupFile = join(session.worktreePath, "smoke-followup.txt");
@@ -651,7 +656,7 @@ async function runOpenCodeSmoke(): Promise<void> {
     "utf8",
   );
 
-  await withPinnedAgentBinaries(async () => {
+  await withPinnedAgentBinaries(configPath, async () => {
     const service = await startServer(configPath, {});
     try {
       const session = await service.spawn({
