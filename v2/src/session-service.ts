@@ -945,6 +945,17 @@ export class AgentExitedBeforeSendError extends Error {
   readonly statusCode = 409;
 }
 
+// An immediate send, flush, or answer reached a session whose spawn has not
+// finished. A queued send is accepted instead (see sendLocked).
+export class SessionStartingError extends Error {
+  readonly statusCode = 409;
+}
+
+// A send, flush, or answer reached a session in a terminal status.
+export class SessionEndedError extends Error {
+  readonly statusCode = 409;
+}
+
 export class WakeTargetMissingError extends Error {
   readonly statusCode = 409;
 }
@@ -1079,6 +1090,28 @@ class SidecarUrlProbeSidecarExitedError extends Error {
 
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
+}
+
+// Status gate for the user send paths (send, flush, answer). A restorable
+// status passes: ensureSessionReadyForSend relaunches a stopped or paused one.
+function assertSendableStatus(session: Pick<SessionRecord, "id" | "status">): void {
+  const status = session.status;
+  switch (status) {
+    case "running":
+    case "stopped":
+    case "paused":
+      return;
+    case "spawning":
+      throw new SessionStartingError(`Session is still starting: ${session.id}`);
+    case "errored":
+    case "completed":
+    case "killed":
+      throw new SessionEndedError(`Session has ended (${status}): ${session.id}`);
+    default: {
+      const unhandled: never = status;
+      throw new Error(`Unknown session status ${String(unhandled)}: ${session.id}`);
+    }
+  }
 }
 
 type WakeDeliverability = "deliverable" | "status_not_restorable" | "workspace_missing";
@@ -1730,6 +1763,20 @@ function withQueuedMessages(
       awaitingPrompt,
     },
   };
+}
+
+// session.spawn.failed details: messages queued while spawning stay on the
+// errored record; a kill mid-spawn keeps the killed record, whose queue the
+// kill already dropped.
+function spawnFailureQueueDetails(
+  persistedFailure: SessionRecord | null,
+  killed: boolean,
+): { killedDuringSpawn?: true; queuedCount?: number } {
+  if (killed) {
+    return { killedDuringSpawn: true };
+  }
+  const queuedCount = persistedFailure ? queuedMessages(persistedFailure).length : 0;
+  return queuedCount > 0 ? { queuedCount } : {};
 }
 
 // Removes only the first occurrence of `value`, never all of them: `send`'s
@@ -4178,7 +4225,7 @@ export class SessionService {
         // only accepts "completed"), so its schedule is
         // dead weight: clear intervalWake/dailyWake here so this loop stops
         // re-visiting it every tick and spamming interval_failed/daily_failed
-        // for a send() that can only throw "Session is not running". Every
+        // for a send() that can only throw SessionEndedError. Every
         // other status — stopped, paused, errored, and completed itself — can
         // still come back (restore() or reopen()), so its schedule stays
         // armed-but-suppressed via evaluateWakeDeliverability below rather
@@ -9667,6 +9714,29 @@ export class SessionService {
     return this.finalizeSpawnTarget(project, normalized, modeResolution, request.project);
   }
 
+  // A spawn builds its records in memory and writes them over the placeholder;
+  // this carries the messages send() queued onto the persisted record since.
+  // Callers write the result in the same synchronous run, so no send can land
+  // between this read and that write.
+  private carrySpawnQueue(record: SessionRecord): SessionRecord {
+    const persisted = readSession(this.config.dataDir, record.id);
+    if (!persisted || !hasQueuedMessages(persisted)) {
+      return record;
+    }
+    return withQueuedMessages(record, queuedMessages(persisted), true);
+  }
+
+  // A kill that lands mid-spawn wins: the spawn never writes over it.
+  private spawnWasKilled(sessionId: string): boolean {
+    return readSession(this.config.dataDir, sessionId)?.status === "killed";
+  }
+
+  private assertSpawnNotKilled(sessionId: string): void {
+    if (this.spawnWasKilled(sessionId)) {
+      throw new Error(`Session ${sessionId} was killed while spawning`);
+    }
+  }
+
   async spawn(
     request: SpawnSessionRequest,
     options?: {
@@ -10122,7 +10192,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          writeSession(this.config.dataDir, runningRecord);
+          writeSession(this.config.dataDir, this.carrySpawnQueue(runningRecord));
         }
       };
       if (launchAgent === "opencode") {
@@ -10131,6 +10201,7 @@ export class SessionService {
         await launchAndBind();
       }
 
+      this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
@@ -10198,11 +10269,8 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
-      const latestPlaceholder = readSession(this.config.dataDir, updatedRecord.id);
-      if (latestPlaceholder && hasQueuedMessages(latestPlaceholder)) {
-        updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestPlaceholder), true);
-      }
-
+      this.assertSpawnNotKilled(sessionId);
+      updatedRecord = this.carrySpawnQueue(updatedRecord);
       writeSession(this.config.dataDir, updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
@@ -10295,7 +10363,11 @@ export class SessionService {
           updatedAt: nowIso(),
           error: message,
         };
-        writeSession(this.config.dataDir, erroredRecord);
+        const killed = this.spawnWasKilled(sessionId);
+        const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
+        if (persistedFailure) {
+          writeSession(this.config.dataDir, persistedFailure);
+        }
 
         this.logEvent("session.spawn.failed", {
           level: "error",
@@ -10308,6 +10380,7 @@ export class SessionService {
             worktreePath: workspacePath || null,
             agent: erroredRecord.agent,
             branch: erroredRecord.branch,
+            ...spawnFailureQueueDetails(persistedFailure, killed),
           },
         });
 
@@ -10951,7 +11024,7 @@ export class SessionService {
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         updatedAt: nowIso(),
       };
-      writeSession(this.config.dataDir, spawnPlaceholder);
+      writeSession(this.config.dataDir, this.carrySpawnQueue(spawnPlaceholder));
       ensureTodoLedger(this.config.dataDir, spawnPlaceholder);
       prepared.placeholder = spawnPlaceholder;
 
@@ -11138,7 +11211,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          writeSession(this.config.dataDir, runningRecord);
+          writeSession(this.config.dataDir, this.carrySpawnQueue(runningRecord));
         }
       };
       if (launchAgent === "opencode") {
@@ -11147,6 +11220,7 @@ export class SessionService {
         await launchAndBind();
       }
 
+      this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
@@ -11199,6 +11273,8 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
+      this.assertSpawnNotKilled(sessionId);
+      updatedRecord = this.carrySpawnQueue(updatedRecord);
       writeSession(this.config.dataDir, updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
@@ -11222,8 +11298,9 @@ export class SessionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const terminalPreflightFailure = error instanceof SpawnPreflightError;
+      const killed = this.spawnWasKilled(sessionId);
       const finalFailure =
-        terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
+        terminalPreflightFailure || killed || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
       await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
       if (terminalPreflightFailure) {
         this.logEvent("session.preflight.failed", {
@@ -11238,12 +11315,15 @@ export class SessionService {
         });
       }
       if (!finalFailure) {
-        writeSession(this.config.dataDir, {
-          ...prepared.placeholder,
-          launchCommand: "",
-          status: "spawning",
-          updatedAt: nowIso(),
-        });
+        writeSession(
+          this.config.dataDir,
+          this.carrySpawnQueue({
+            ...prepared.placeholder,
+            launchCommand: "",
+            status: "spawning",
+            updatedAt: nowIso(),
+          }),
+        );
         this.logEvent("session.spawn.retrying", {
           level: "warn",
           sessionId,
@@ -11258,14 +11338,19 @@ export class SessionService {
         });
         return "retry";
       }
-      writeSession(this.config.dataDir, {
-        ...prepared.placeholder,
-        worktreePath: workspacePath || prepared.placeholder.worktreePath,
-        launchCommand: "",
-        status: "errored",
-        updatedAt: nowIso(),
-        error: message,
-      });
+      const persistedFailure = killed
+        ? null
+        : this.carrySpawnQueue({
+            ...prepared.placeholder,
+            worktreePath: workspacePath || prepared.placeholder.worktreePath,
+            launchCommand: "",
+            status: "errored",
+            updatedAt: nowIso(),
+            error: message,
+          });
+      if (persistedFailure) {
+        writeSession(this.config.dataDir, persistedFailure);
+      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         sessionId,
@@ -11278,6 +11363,7 @@ export class SessionService {
           worktreePath: workspacePath || prepared.placeholder.worktreePath || null,
           agent,
           branch: prepared.placeholder.branch,
+          ...spawnFailureQueueDetails(persistedFailure, killed),
         },
       });
       return "completed";
@@ -11830,9 +11916,17 @@ export class SessionService {
     if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
-    if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
+    if (session.status === "spawning" && request.queue !== false) {
+      // Held on the placeholder; the spawn carries it into the running record
+      // behind the initial prompt (carrySpawnQueue) and arms delivery.
+      const queued = this.appendQueuedMessage(
+        session,
+        this.prepareSendMessage(session, request),
+        true,
+      );
+      return this.enrich(queued);
     }
+    assertSendableStatus(session);
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
       return this.deliverPreparedLocked(sessionId, finalMessage, {
@@ -11846,58 +11940,66 @@ export class SessionService {
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
       ? await this.classifySessionState(readySession)
       : "waiting";
-    // Single fresh read, taken once immediately before both the dedupe check
-    // and the append below, and used for both: `readySession` above can be
-    // stale by the time this runs (ensureSessionReadyForSend may have waited
-    // on a busy agent), and checking the dedupe against a stale queue while
-    // appending onto a fresher one lets two concurrent sends of the same
-    // text both pass the dedupe check and both append, leaving a duplicate
-    // entry that breaks unit 2's content key (exact text unique per queue).
-    // Only the queue field is taken from the fresh read; every other field
-    // still comes from `readySession`.
-    const latestQueued = queuedMessages(
-      readSession(this.config.dataDir, sessionId) ?? readySession,
+    const activeRecord = this.appendQueuedMessage(
+      { ...readySession, status: "running" },
+      finalMessage,
+      readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
     );
-    let activeRecord: SessionRecord;
-    if (latestQueued.includes(finalMessage)) {
-      this.logEvent("session.message.duplicate_ignored", {
-        level: "info",
-        sessionId,
-        projectId: readySession.project,
-        message: `Ignored duplicate queued message for ${sessionId}`,
-        details: {
-          queuedCount: latestQueued.length,
-          messageLength: finalMessage.length,
-        },
-      });
-      activeRecord = readySession;
-    } else {
-      activeRecord = withQueuedMessages(
-        {
-          ...readySession,
-          status: "running",
-          updatedAt: nowIso(),
-        },
-        [...latestQueued, finalMessage],
-        readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
-      );
-      writeSession(this.config.dataDir, activeRecord);
-      this.logEvent("session.message.queued", {
-        level: "info",
-        sessionId,
-        projectId: activeRecord.project,
-        message: `Queued message for ${sessionId}`,
-        details: {
-          queuedCount: queuedMessages(activeRecord).length,
-          messageLength: finalMessage.length,
-        },
-      });
-    }
     if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
       await this.tryDeliverQueuedMessageLocked(sessionId);
     }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
+  }
+
+  // Appends one message to the persisted queue on top of `base`, or returns
+  // the persisted record unchanged when the exact text is already queued.
+  // Single fresh read, taken once immediately before both the dedupe check
+  // and the append, and used for both: `base` can be stale by the time this
+  // runs (ensureSessionReadyForSend may have waited on a busy agent), and
+  // checking the dedupe against a stale queue while appending onto a fresher
+  // one lets two concurrent sends of the same text both pass the dedupe check
+  // and both append, leaving a duplicate entry that breaks the queue ops'
+  // content key (exact text unique per queue). Only the queue field is taken
+  // from the fresh read; every other field comes from `base`.
+  private appendQueuedMessage(
+    base: SessionRecord,
+    message: string,
+    awaitingPrompt: boolean,
+  ): SessionRecord {
+    const latest = readSession(this.config.dataDir, base.id) ?? base;
+    const latestQueued = queuedMessages(latest);
+    if (latestQueued.includes(message)) {
+      this.logEvent("session.message.duplicate_ignored", {
+        level: "info",
+        sessionId: base.id,
+        projectId: base.project,
+        message: `Ignored duplicate queued message for ${base.id}`,
+        details: {
+          queuedCount: latestQueued.length,
+          messageLength: message.length,
+        },
+      });
+      return latest;
+    }
+    const record = withQueuedMessages(
+      { ...base, updatedAt: nowIso() },
+      [...latestQueued, message],
+      awaitingPrompt,
+    );
+    writeSession(this.config.dataDir, record);
+    this.logEvent("session.message.queued", {
+      level: "info",
+      sessionId: base.id,
+      projectId: record.project,
+      message: `Queued message for ${base.id}`,
+      details: {
+        queuedCount: queuedMessages(record).length,
+        messageLength: message.length,
+        ...(base.status === "spawning" ? { spawning: true } : {}),
+      },
+    });
+    return record;
   }
 
   async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
@@ -11908,9 +12010,7 @@ export class SessionService {
     if (session.agent !== "claude") {
       throw new Error("Interactive answering is only supported for claude sessions");
     }
-    if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
-    }
+    assertSendableStatus(session);
     if (!Number.isInteger(optionIndex) || optionIndex < 0) {
       throw new Error("optionIndex must be a non-negative integer");
     }
@@ -12023,6 +12123,7 @@ export class SessionService {
 
   private async flushQueuedMessageLocked(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
+    assertSendableStatus(session);
     // Both probes are synchronous, before any await. The pane-lock probe
     // catches a drain already past its own queueDeliveryInFlight registration
     // and into the pane write; the marker probe catches a drain (or another
@@ -12588,14 +12689,14 @@ export class SessionService {
         return "submitted";
       }
       if (attempt < maxResends) {
-        // Cursor-only fast dead-agent exit (I2 scopes this to cursor's short
-        // window/high-resend pacing; claude/codex/opencode keep their long
-        // window and freshLaunch "submit_unconfirmed" pacing untouched). A
-        // dead pane process does not come back inside one send, so a false
-        // result here can be trusted for the rest of this loop; { fresh: true }
-        // is mandatory — a stale cached hit would report an agent that just
-        // died as alive.
-        if (session.agent === "cursor" || interactive) {
+        // Fast dead-agent exit before each resent Enter: cursor, interactive
+        // sends, and the launch send (a kill mid-spawn removes its pane).
+        // Deliver() into a busy claude/codex/opencode keeps its long window
+        // untouched. A dead pane process does not come back inside one send,
+        // so a false result here can be trusted for the rest of this loop;
+        // { fresh: true } is mandatory — a stale cached hit would report an
+        // agent that just died as alive.
+        if (session.agent === "cursor" || interactive || freshLaunch) {
           const alive = await agentProcessAlive(
             {
               tmuxSession: session.tmuxSession,
@@ -13965,11 +14066,16 @@ export class SessionService {
     }
 
     const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
-    const record: SessionRecord = {
-      ...this.sessionWithReleasedSidecarPorts(cleanedSession),
-      status: "killed",
-      updatedAt: nowIso(),
-    };
+    // A killed session never runs again, so its undelivered queue goes with it.
+    const record: SessionRecord = withQueuedMessages(
+      {
+        ...this.sessionWithReleasedSidecarPorts(cleanedSession),
+        status: "killed",
+        updatedAt: nowIso(),
+      },
+      [],
+      false,
+    );
     delete record.retainInList;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
@@ -14001,6 +14107,9 @@ export class SessionService {
       message: `Killed ${sessionId}`,
       details: {
         worktree: session.worktree,
+        ...(hasQueuedMessages(cleanedSession)
+          ? { discardedQueuedCount: queuedMessages(cleanedSession).length }
+          : {}),
       },
     });
     return this.enrich(record);
@@ -17141,6 +17250,37 @@ export class SessionService {
     return false;
   }
 
+  // A spawning record no spawn in this process owns (the spawn was lost to a
+  // daemon restart) whose agent is alive: the launch reached the agent, so
+  // the session is running. Messages queued while it was spawning deliver
+  // behind whatever turn the agent is on.
+  private adoptOrphanedSpawn(
+    session: SessionRecord,
+    runtime: SessionRuntimeSnapshot,
+  ): { session: SessionRecord; runtime: SessionRuntimeSnapshot } {
+    const latest = readSession(this.config.dataDir, session.id);
+    if (latest?.status !== "spawning" || this.spawnsInFlight.has(session.id)) {
+      return { session: latest ?? session, runtime };
+    }
+    const adopted: SessionRecord = { ...latest, status: "running", updatedAt: nowIso() };
+    writeSession(this.config.dataDir, adopted);
+    this.stateCache.delete(session.id);
+    this.logEvent("session.spawn.orphan_adopted", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Adopted ${session.id}: spawn was lost but its agent is running`,
+      details: {
+        agent: session.agent,
+        queuedCount: queuedMessages(adopted).length,
+      },
+    });
+    if (this.shouldRunDelivery(adopted)) {
+      this.scheduleDeliveryRunner(adopted.id);
+    }
+    return { session: adopted, runtime };
+  }
+
   private async reconcileUnexpectedStop(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
@@ -17158,6 +17298,7 @@ export class SessionService {
       // spawning session with no active pipeline (finished, failed, or lost to a
       // daemon restart) and a dead runtime is reconciled like a dropped running
       // one — otherwise it hangs on "working" forever with no terminal state.
+      // One with a live agent is adopted as running (adoptOrphanedSpawn).
       if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
         return { session, runtime };
       }
@@ -17166,7 +17307,9 @@ export class SessionService {
     let confirmedRuntime = runtime;
     if (!workspaceGone) {
       if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
-        return { session, runtime };
+        return session.status === "spawning"
+          ? this.adoptOrphanedSpawn(session, runtime)
+          : { session, runtime };
       }
       await sleep(PIPELINE_POLL_INTERVAL_MS);
       // fresh:true — an independent re-sample, not a replay of the same
@@ -17179,7 +17322,9 @@ export class SessionService {
         confirmedRuntime.paneUsable &&
         confirmedRuntime.processAlive
       ) {
-        return { session, runtime: confirmedRuntime };
+        return session.status === "spawning"
+          ? this.adoptOrphanedSpawn(session, confirmedRuntime)
+          : { session, runtime: confirmedRuntime };
       }
       // A timeout-killed tmux probe is ambiguous, not confirmed absence — a
       // systemic tmux hang must never convert into a false teardown of every

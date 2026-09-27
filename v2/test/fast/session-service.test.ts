@@ -9984,7 +9984,7 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await expect(service.answerQuestion("api-1", 0)).rejects.toThrow(
-      "Session is not running: api-1",
+      "Session has ended (killed): api-1",
     );
     expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
   });
@@ -46184,6 +46184,361 @@ describe("SessionService", () => {
         const second = await service.get("api-1");
         expect(second.state).toBe("stale");
       });
+    });
+  });
+
+  describe("send by session status", () => {
+    // Holds the spawn at tmux.ready until the returned release runs, so a
+    // test can act while the record is still "spawning".
+    function holdSpawnAtReady(): { release: () => void; fail: (error: Error) => void } {
+      let release: () => void = () => {};
+      let fail: (error: Error) => void = () => {};
+      waitForTmuxReadyMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolveReady, rejectReady) => {
+            release = resolveReady;
+            fail = rejectReady;
+          }),
+      );
+      return { release: () => release(), fail: (error) => fail(error) };
+    }
+
+    function tmuxTexts(): string[] {
+      return sendMessageToTmuxMock.mock.calls.map((call) => String(call[1]));
+    }
+
+    function eventsNamed(name: string): Array<{ details?: Record<string, unknown> }> {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry as { event: string; details?: Record<string, unknown> })
+        .filter((entry) => entry.event === name);
+    }
+
+    it.each(["spawn", "spawnInBackground"] as const)(
+      "queues a send onto a spawning session and delivers it once, after the initial prompt (%s)",
+      async (spawnMethod) => {
+        mockTimerPromisesSleepWithFakeTimers();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        const held = holdSpawnAtReady();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const spawning = service[spawnMethod]({ project: "api", prompt: "hello" });
+        await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+        expect(sessions.get("api-1")?.status).toBe("spawning");
+
+        const first = await service.send("api-1", { message: "follow up one", queue: true });
+        const second = await service.send("api-1", { message: "follow up two", queue: true });
+        expect(first.status).toBe("spawning");
+        expect(second.queuedMessages).toEqual({
+          messages: ["follow up one", "follow up two"],
+          awaitingPrompt: true,
+        });
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+        held.release();
+        await spawning;
+        await vi.waitFor(() => {
+          expect(tmuxTexts().filter((text) => text === "follow up two")).toHaveLength(1);
+        });
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        const texts = tmuxTexts();
+        const initialIndex = texts.findIndex((text) => text.includes("hello"));
+        expect(initialIndex).toBe(0);
+        expect(texts.filter((text) => text === "follow up one")).toHaveLength(1);
+        expect(texts.filter((text) => text === "follow up two")).toHaveLength(1);
+        expect(texts.indexOf("follow up one")).toBeGreaterThan(initialIndex);
+        expect(texts.indexOf("follow up two")).toBeGreaterThan(texts.indexOf("follow up one"));
+        expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+        service.dispose();
+      },
+    );
+
+    it("ignores a duplicate queued send while spawning", async () => {
+      mockTimerPromisesSleepWithFakeTimers();
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const held = holdSpawnAtReady();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = service.spawn({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+      await service.send("api-1", { message: "follow up", queue: true });
+      await service.send("api-1", { message: "follow up", queue: true });
+
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["follow up"]);
+      expect(eventsNamed("session.message.duplicate_ignored")).toHaveLength(1);
+      held.release();
+      await spawning;
+      await vi.waitFor(() => {
+        expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("rejects send-now, flush, and answer to a spawning session without typing or queueing", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const held = holdSpawnAtReady();
+      const { SessionService, SessionStartingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spawning = service.spawn({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+      await service.send("api-1", { message: "already queued", queue: true });
+
+      await expect(
+        service.send("api-1", { message: "now", queue: false, interrupt: true }),
+      ).rejects.toThrow(new SessionStartingError("Session is still starting: api-1"));
+      await expect(service.flushQueuedMessage("api-1", "already queued")).rejects.toBeInstanceOf(
+        SessionStartingError,
+      );
+      await expect(service.answerQuestion("api-1", 0)).rejects.toBeInstanceOf(SessionStartingError);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["already queued"]);
+      held.release();
+      await spawning;
+      service.dispose();
+    });
+
+    it.each(["errored", "completed", "killed"] as const)(
+      "rejects every send path to a %s session with SessionEndedError",
+      async (status) => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            status,
+            queuedMessages: { messages: ["left over"], awaitingPrompt: false },
+          }),
+        );
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        const { SessionService, SessionEndedError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const ended = new SessionEndedError(`Session has ended (${status}): api-1`);
+
+        await expect(service.send("api-1", { message: "queued", queue: true })).rejects.toThrow(
+          ended,
+        );
+        await expect(
+          service.send("api-1", { message: "now", queue: false, interrupt: true }),
+        ).rejects.toThrow(ended);
+        await expect(service.flushQueuedMessage("api-1", "left over")).rejects.toThrow(ended);
+        await expect(service.answerQuestion("api-1", 0)).rejects.toThrow(ended);
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendMenuSelectionKeysMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["left over"]);
+        service.dispose();
+      },
+    );
+
+    it("keeps messages queued during a failed spawn on the errored record and reports them", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const held = holdSpawnAtReady();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = service.spawn({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+      await service.send("api-1", { message: "follow up", queue: true });
+      held.fail(new Error("agent never became ready"));
+
+      await expect(spawning).rejects.toThrow("agent never became ready");
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        queuedMessages: { messages: ["follow up"], awaitingPrompt: true },
+      });
+      expect(eventsNamed("session.spawn.failed")[0]?.details).toMatchObject({ queuedCount: 1 });
+      expect(tmuxTexts()).toEqual([]);
+      service.dispose();
+    });
+
+    it("keeps queued messages across a background spawn retry and delivers them once", async () => {
+      mockTimerPromisesSleepWithFakeTimers();
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const held = holdSpawnAtReady();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawnInBackground({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+      await service.send("api-1", { message: "follow up", queue: true });
+      held.fail(new Error("first attempt never became ready"));
+
+      await vi.waitFor(() => {
+        expect(eventsNamed("session.spawn.retrying")).toHaveLength(1);
+        expect(eventsNamed("session.spawn.completed")).toHaveLength(1);
+      });
+      await vi.waitFor(() => {
+        expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+      expect(sessions.get("api-1")?.status).toBe("running");
+      service.dispose();
+    });
+
+    it("lets a kill during spawning win: queue dropped, nothing typed, record stays killed", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const held = holdSpawnAtReady();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = service.spawn({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+      await service.send("api-1", { message: "follow up", queue: true });
+      const killed = await service.kill("api-1", { skipPrCheck: true, force: true });
+      expect(killed.status).toBe("killed");
+      expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+      expect(eventsNamed("session.kill.completed")[0]?.details).toMatchObject({
+        discardedQueuedCount: 1,
+      });
+
+      held.release();
+      await expect(spawning).rejects.toThrow("api-1 was killed while spawning");
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(tmuxTexts()).toEqual([]);
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.status).toBe("killed");
+      expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+      expect(eventsNamed("session.spawn.failed")[0]?.details).toMatchObject({
+        killedDuringSpawn: true,
+      });
+      service.dispose();
+    });
+
+    it("stops resending Enter for a launch send once the pane is gone", async () => {
+      mockTimerPromisesSleepWithFakeTimers();
+      mockClaudeJsonlState("waiting");
+      createSessionStore();
+      scanCodexRolloutForMessageMock.mockResolvedValue({ found: false, lastScannedFile: null });
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = service.spawn({ project: "api", prompt: "hello", agent: "codex" });
+      const outcome = spawning.then(
+        () => "resolved",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      await vi.advanceTimersByTimeAsync(1_000_000);
+
+      await expect(outcome).resolves.toContain("submit ack");
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("queues a send made after the spawn completes behind the delivered spawn-time queue", async () => {
+      mockTimerPromisesSleepWithFakeTimers();
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const held = holdSpawnAtReady();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = service.spawn({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+      await service.send("api-1", { message: "queued while starting", queue: true });
+      held.release();
+      await spawning;
+      await vi.waitFor(() => {
+        expect(tmuxTexts()).toContain("queued while starting");
+      });
+      await service.send("api-1", { message: "sent now", queue: false, interrupt: true });
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const texts = tmuxTexts();
+      expect(texts.filter((text) => text === "queued while starting")).toHaveLength(1);
+      expect(texts.filter((text) => text === "sent now")).toHaveLength(1);
+      expect(texts.indexOf("sent now")).toBeGreaterThan(texts.indexOf("queued while starting"));
+      expect(sessions.get("api-1")?.status).toBe("running");
+      service.dispose();
+    });
+
+    it("adopts a spawning record whose spawn was lost to a restart once its agent is alive", async () => {
+      mockTimerPromisesSleepWithFakeTimers();
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "spawning",
+          queuedMessages: { messages: ["queued before restart"], awaitingPrompt: true },
+        }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.reconcileStoppedSessions();
+      expect(sessions.get("api-1")?.status).toBe("spawning");
+
+      const view = await service.get("api-1");
+      expect(view.status).toBe("running");
+      expect(eventsNamed("session.spawn.orphan_adopted")[0]?.details).toMatchObject({
+        queuedCount: 1,
+      });
+      await vi.waitFor(() => {
+        expect(tmuxTexts().filter((text) => text === "queued before restart")).toHaveLength(1);
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(tmuxTexts().filter((text) => text === "queued before restart")).toHaveLength(1);
+      service.dispose();
+    });
+
+    it("keeps the queue of a spawning record lost to a restart whose agent is gone", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "spawning",
+          queuedMessages: { messages: ["queued before restart"], awaitingPrompt: true },
+        }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.status).toBe("stopped");
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued before restart"]);
+      expect(tmuxTexts()).toEqual([]);
+      service.dispose();
+    });
+
+    it("never types into an open question menu: queue holds, send-now interrupts first", async () => {
+      mockClaudeJsonlState("needs_input");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const queued = await service.send("api-1", { message: "later", queue: true });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(queued.queuedMessages?.messages).toEqual(["later"]);
+      expect(tmuxTexts()).toEqual([]);
+
+      sendInterruptKeysToTmuxMock.mockResolvedValue(true);
+      await service.send("api-1", { message: "now", queue: false, interrupt: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "claude");
+      expect(sendInterruptKeysToTmuxMock.mock.invocationCallOrder[0]).toBeLessThan(
+        sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(tmuxTexts()).toEqual(["now"]);
+      service.dispose();
     });
   });
 

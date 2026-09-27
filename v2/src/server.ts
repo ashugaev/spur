@@ -51,11 +51,13 @@ import {
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
+  SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
+  SessionStartingError,
   SidecarPortConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
@@ -1986,7 +1988,9 @@ export async function startServer(
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||
         error instanceof QueueDeliveryInFlightError ||
-        error instanceof AgentExitedBeforeSendError
+        error instanceof AgentExitedBeforeSendError ||
+        error instanceof SessionStartingError ||
+        error instanceof SessionEndedError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;
