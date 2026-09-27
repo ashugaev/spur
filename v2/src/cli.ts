@@ -1307,7 +1307,7 @@ function renderSidecarStopMessage(name: string, session: SidecarStopView): strin
   if (sidecarStop.outcome === "partial") {
     // ND-2: unverifiedPorts has two distinct causes (a probe that could not
     // run, or a port excluded as ambiguous against a non-terminal sibling —
-    // see docs/daemon-api.md's sidecar-stop route entry) — this message
+    // see the sidecars/:name/stop route handler in server.ts) — this message
     // names neither, rather than misattributing an ambiguous-ownership
     // exclusion to a missing OS tool.
     const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
