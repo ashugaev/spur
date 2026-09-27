@@ -14558,22 +14558,6 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     this.clearTargetGoneNudgeGate(sessionId);
-    // Drops the GitHub poll-disable registry for this session so the next poll cycle
-    // re-probes its PR immediately instead of waiting on the bounded recheck window.
-    // Covers spur restore, spur reopen (funnels here via reopenLocked), and the
-    // automatic reboot restore (restoreRebootedSessions -> this.restore). Swallowed:
-    // a failed clear must never fail a restore, and the recheck window still recovers
-    // the session on its own.
-    try {
-      await this.enableSourcePoll(sessionId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.restore.poll_disable_clear_failed", {
-        level: "warn",
-        message: `Failed to clear GitHub poll-disable registry on restore for ${sessionId}: ${message}`,
-        details: { sessionId, message },
-      });
-    }
     // A restore can replay every sidecar afresh (directly, or via
     // relaunchSessionInPlace on the fresh-launch fallback); a cached
     // refusal from before this restore must never carry over.
@@ -14641,6 +14625,27 @@ export class SessionService {
       await this.lookupPanePidQuietly(current.tmuxSession),
       request.force === true,
     );
+    // Past both gates above (restorability, foreign-process): this restore is
+    // actually going to proceed, so clear the GitHub poll-disable registry for this
+    // session now, not earlier — a rejected restore (not restorable, or refused over
+    // a live foreign process) must stay a no-op for the caller AND leave the durable
+    // disable untouched, or a poll-eligible (running/stale-parked) session would pick
+    // up a spurious source.poll.disabled on its very next cycle. Re-probes the PR
+    // immediately instead of waiting on the bounded recheck window. Covers spur
+    // restore, spur reopen (funnels here via reopenLocked), and the automatic reboot
+    // restore (restoreRebootedSessions -> this.restore). Swallowed: a failed clear
+    // must never fail a restore, and the recheck window still recovers the session
+    // on its own.
+    try {
+      await this.enableSourcePoll(sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.restore.poll_disable_clear_failed", {
+        level: "warn",
+        message: `Failed to clear GitHub poll-disable registry on restore for ${sessionId}: ${message}`,
+        details: { sessionId, message },
+      });
+    }
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the

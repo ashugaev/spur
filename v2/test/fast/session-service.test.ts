@@ -27134,48 +27134,6 @@ describe("SessionService", () => {
     );
   });
 
-  // A10: reopen funnels through restoreLocked (session-service.ts reopenLocked's tail).
-  it("clears the github poll-disable registry on reopen", async () => {
-    loadConfigMock.mockReturnValue({
-      ...baseConfig(),
-      projects: {
-        api: {
-          ...baseConfig().projects.api,
-          sources: { gh: { type: "github" } },
-          triggers: {},
-        },
-      },
-    });
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "completed",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
-    tmuxSessionExistsMock.mockResolvedValue(false);
-    clearGitHubPollDisabledSessionMock.mockReturnValue(42);
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    await service.reopen("api-1").catch(() => undefined);
-
-    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
-      TEST_DATA_DIR,
-      "api",
-      "gh",
-      "api-1",
-    );
-  });
-
   // A11
   it("restores when clearing the poll-disable registry throws", async () => {
     loadConfigMock.mockReturnValue({
@@ -27657,6 +27615,44 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
+  // Gap the review found: a rejected restore (not restorable here) must be a
+  // no-op for the poll-disable registry too, or a poll-eligible session that
+  // never actually restored would pick up a spurious source.poll.disabled on its
+  // very next cycle. enableSourcePoll runs only past the restorability/
+  // foreign-process gates, not at restoreLocked's top.
+  it("does not clear the github poll-disable registry when restore is rejected as not restorable", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { gh: { type: "github" } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService, SessionNotRestorableError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.restore("api-1")).rejects.toThrow(SessionNotRestorableError);
+    expect(clearGitHubPollDisabledSessionMock).not.toHaveBeenCalled();
+  });
+
   it("offers respawn when restoring an errored session that is not restorable", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -27860,6 +27856,38 @@ describe("SessionService", () => {
       expect(createWorktreeMock).not.toHaveBeenCalled();
       expect(removeWorktreeMock).not.toHaveBeenCalled();
       expect(reopened).toMatchObject({ id: "api-1", status: "running" });
+    });
+
+    // A10: reopen funnels through restoreLocked (session-service.ts reopenLocked's
+    // tail), which clears the github poll-disable registry only once the restore
+    // itself actually succeeds. A genuinely successful reopen, not a rejected one —
+    // see "does not clear the poll-disable registry on a rejected reopen" below for
+    // the negative case.
+    it("clears the github poll-disable registry on a successful reopen", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sources: { gh: { type: "github" } },
+          },
+        },
+      });
+      seedReopenableSession();
+      clearGitHubPollDisabledSessionMock.mockReturnValue(42);
+
+      const service = await createDisposedSessionService();
+      mockTimerPromisesSleepWithFakeTimers();
+
+      const reopened = await service.reopen("api-1");
+
+      expect(reopened).toMatchObject({ id: "api-1", status: "running" });
+      expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        "api",
+        "gh",
+        "api-1",
+      );
     });
 
     it("refuses before touching git when the stored worktree path is not this session's own (e.g. a desk anchor's)", async () => {
