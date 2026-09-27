@@ -1206,6 +1206,55 @@ describe("runtime-tmux", () => {
     ).toBe(true);
   });
 
+  it("reads a pane dead when its codex wrapper died and the orphaned native binary sits in the background", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // `kill -9` on the `node .../codex` wrapper: zsh took the tty's
+            // foreground back (tpgid == zsh's pgid) ...
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            // ... while the native binary, reparented, kept the dead job's
+            // pgid and still names "codex" on the same tty.
+            "2301310 1 2301303 2300788 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
+  });
+
+  it("keeps reading a foreground codex alive", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 90000 node /home/alek/.local/bin/codex --enable hooks",
+            "2301310 2301303 2301303 2301303 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(true);
+  });
+
   it("does not let codex-code-mode-host alone satisfy the canonical codex matcher", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {

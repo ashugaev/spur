@@ -824,8 +824,27 @@ export async function probeTmuxProcessMatch(
       return { alive: false, matchedByName: false };
     }
     const rows = await getPsSnapshot();
+    // tpgid on the row whose pid IS a pane pid is that tty's foreground
+    // process group, shared by every process attached to the tty.
+    const allPanePids = entry?.allPanePids ?? [];
+    const panePids = new Set(allPanePids);
+    const fgPgidByTty = new Map<string, number>();
+    for (const row of rows) {
+      if (panePids.has(row.pid) && ttySet.has(row.tty)) {
+        fgPgidByTty.set(row.tty, row.tpgid);
+      }
+    }
     for (const row of rows) {
       if (!ttySet.has(row.tty)) {
+        continue;
+      }
+      // A name match counts only in the tty's foreground group: a pane
+      // whose agent wrapper died leaves the shell in the foreground, and an
+      // orphaned agent binary still on the tty in the background must not
+      // read alive, or a send lands in the shell. Unresolvable foreground
+      // group (no pane-pid row, unparseable tpgid): name match alone.
+      const fgPgid = fgPgidByTty.get(row.tty);
+      if (fgPgid !== undefined && fgPgid > 0 && row.pgid !== fgPgid) {
         continue;
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
@@ -845,15 +864,7 @@ export async function probeTmuxProcessMatch(
     // background helper is not. fgPgid per tty is read off the row whose pid
     // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
     // pgid, shared by every process attached to that tty.
-    const allPanePids = entry?.allPanePids ?? [];
     if (options?.paneChildFallback && allPanePids.length > 0) {
-      const panePids = new Set(allPanePids);
-      const fgPgidByTty = new Map<string, number>();
-      for (const row of rows) {
-        if (panePids.has(row.pid) && ttySet.has(row.tty)) {
-          fgPgidByTty.set(row.tty, row.tpgid);
-        }
-      }
       for (const row of rows) {
         if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
           continue;
