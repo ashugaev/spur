@@ -10244,6 +10244,7 @@ export class SessionService {
           sessionName: tmuxSession,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
+          launchScriptDir: sessionToolDir,
           env: sessionEnv,
         });
         this.logEvent("session.spawn.tmux_created", {
@@ -11259,6 +11260,7 @@ export class SessionService {
           sessionName: launchSessionId,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
+          launchScriptDir: prepared.sessionToolDir,
           env: sessionEnv,
         });
         this.logEvent("session.spawn.tmux_created", {
@@ -14612,6 +14614,7 @@ export class SessionService {
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
         launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+        launchScriptDir: sessionToolDir,
         env,
       });
       await waitForTmuxReady(
@@ -14674,6 +14677,7 @@ export class SessionService {
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
         launchCommand: freshLaunchCommand,
+        launchScriptDir: sessionToolDir,
         env,
       });
       await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
@@ -15054,6 +15058,7 @@ export class SessionService {
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
         launchCommand: restoreLaunchCommand,
+        launchScriptDir: sessionToolDir,
         env,
       });
       try {

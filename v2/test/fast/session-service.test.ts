@@ -2019,6 +2019,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: "/tmp/spur-tools/api-1",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -6201,6 +6202,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/repo/api",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: "/tmp/spur-tools/api-1",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -22655,6 +22657,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      launchScriptDir: "/tmp/spur-tools/api-1",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -27704,6 +27707,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      launchScriptDir: "/tmp/spur-tools/api-1",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -28010,6 +28014,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: "/tmp/spur-tools/api-1",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -28981,6 +28986,7 @@ describe("SessionService", () => {
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand:
         "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+      launchScriptDir: "/tmp/spur-tools/api-1",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",

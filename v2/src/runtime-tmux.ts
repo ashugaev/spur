@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -918,12 +918,17 @@ function invalidateFleetProbeCaches(): void {
   psSnapshotCache.clear();
 }
 
+export const AGENT_LAUNCH_SCRIPT_NAME = "agent-launch.sh";
+
 export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
   launchCommand: string;
+  /** Session tool dir; holds the launch script, removed with the session. */
+  launchScriptDir: string;
   env?: Record<string, string>;
 }): Promise<void> {
+  const scriptPath = writeAgentLaunchScript(input.launchScriptDir, input.launchCommand);
   await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
     "-f",
@@ -935,24 +940,36 @@ export async function createTmuxSession(input: {
     "-c",
     input.cwd,
     ...buildEnvArgs(input.env),
-    buildAgentPaneShellCommand(input.launchCommand),
+    buildAgentPaneShellCommand(scriptPath),
   ]);
   invalidateFleetProbeCaches();
 }
 
-// The agent pane runs the launch command as its shell's own command, never
-// as keystrokes typed into a shell that may not be reading yet: an rc-file
+// The launch lives in a file, not on the tmux command line: tmux refuses a
+// new-session command past about 16KB, and opencode carries the whole task
+// prompt in its launch. Owner-only: the launch can carry env assignments
+// with credentials.
+function writeAgentLaunchScript(dir: string, launchCommand: string): string {
+  mkdirSync(dir, { recursive: true });
+  const scriptPath = join(dir, AGENT_LAUNCH_SCRIPT_NAME);
+  writeFileSync(scriptPath, `${launchCommand}\n`, { encoding: "utf-8", mode: 0o600 });
+  chmodSync(scriptPath, 0o600);
+  return scriptPath;
+}
+
+// The agent pane runs the launch as its shell's own command, never as
+// keystrokes typed into a shell that may not be reading yet: an rc-file
 // prompt (oh-my-zsh's "update? [Y/n]") ate the first typed character, so
 // codex started as `ODEX_HOME=...` on the default home and Spur never saw
 // its rollout. The login+interactive shell keeps the user's rc environment
 // (PATH, nvm, exported keys) exactly as a typed launch had; an rc prompt now
-// waits visibly in the pane instead of corrupting the command. The agent
-// stays a direct child of the pane shell, and the pane drops to the same
-// login shell when the agent exits.
-export function buildAgentPaneShellCommand(launchCommand: string): string {
+// waits visibly in the pane instead of corrupting the command. Sourcing the
+// script keeps the agent a direct child of the pane shell, and the pane
+// drops to the same login shell when the agent exits.
+export function buildAgentPaneShellCommand(scriptPath: string): string {
   // tmux sets SHELL in every pane's environment to the shell it starts.
   const shell = '"$SHELL"';
-  return `exec ${shell} -lic ${shellEscape(`${launchCommand}; exec ${shell} -l`)}`;
+  return `exec ${shell} -lic ${shellEscape(`. ${shellEscape(scriptPath)}; exec ${shell} -l`)}`;
 }
 
 // Non-agent panes (sidecars, project services, the Claude OAuth login pane)

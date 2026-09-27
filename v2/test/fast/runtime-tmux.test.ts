@@ -1,5 +1,7 @@
 import type * as childProcessModule from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
@@ -15,6 +17,9 @@ type ExecFileAsync = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
+// createTmuxSession writes its launch script for real; keep it out of any
+// session dir.
+const LAUNCH_SCRIPT_DIR = mkdtempSync(join(tmpdir(), "spur-launch-script-test-"));
 const execFileMock: ((...args: unknown[]) => void) & {
   [promisify.custom]: typeof execFileAsyncMock;
 } = Object.assign(vi.fn(), {
@@ -195,6 +200,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
     const firstCall = execFileAsyncMock.mock.calls[0];
@@ -213,32 +219,73 @@ describe("runtime-tmux", () => {
       "-c",
       "/tmp/worktree",
     ]);
-    // The pane's login+interactive shell runs the launch as its command, then
-    // stays as that shell; no keystrokes race the shell's startup.
-    expect(args.at(-1)).toBe(
-      `exec "$SHELL" -lic 'codex --dangerously-bypass-approvals-and-sandbox; exec "$SHELL" -l'`,
+    // The pane's login+interactive shell sources the owner-only launch
+    // script, then stays as that shell; nothing is typed, and the launch
+    // never rides the tmux command line.
+    const scriptPath = join(LAUNCH_SCRIPT_DIR, "agent-launch.sh");
+    expect(args.at(-1)).toBe(`exec "$SHELL" -lic '. '\\''${scriptPath}'\\''; exec "$SHELL" -l'`);
+    expect(readFileSync(scriptPath, "utf8")).toBe(
+      "codex --dangerously-bypass-approvals-and-sandbox\n",
     );
+    expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
     expect(execFileAsyncMock.mock.calls.some(([, callArgs]) => callArgs[0] === "send-keys")).toBe(
       false,
     );
     expect(sleepMock).not.toHaveBeenCalled();
   });
 
-  it("quotes a launch command carrying single quotes and newlines for the pane shell", async () => {
-    const { buildAgentPaneShellCommand } = await import("../../src/runtime-tmux.js");
-    const launch = "CODEX_HOME='/tmp/h' codex --prompt 'line one\nit'\\''s two'";
-    const command = buildAgentPaneShellCommand(launch);
+  it("keeps a launch past tmux's command-length limit off the tmux command line", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+    const launchScriptDir = mkdtempSync(join(tmpdir(), "spur-launch-long-"));
+    const prompt = "x".repeat(18_000);
+    const launchCommand = `opencode --auto --prompt '${prompt}'`;
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand,
+      launchScriptDir,
+    });
+
+    const newSession = execFileAsyncMock.mock.calls.find(([, args]) =>
+      args.includes("new-session"),
+    );
+    expect(newSession?.[1]?.at(-1)?.length ?? Infinity).toBeLessThan(1_024);
+    expect(newSession?.[1]?.at(-1)).not.toContain(prompt);
+    expect(readFileSync(join(launchScriptDir, "agent-launch.sh"), "utf8")).toBe(
+      `${launchCommand}\n`,
+    );
+  });
+
+  it("runs the launch script's quotes, $, backticks, and newlines exactly as written", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+    const home = mkdtempSync(join(tmpdir(), "spur-launch-home-"));
+    const out = join(home, "out.txt");
+    const launchCommand = `printf '%s\\n' "it's" '$HOME' '\`echo nope\`' 'line one\nline two' > ${out}`;
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand,
+      launchScriptDir: home,
+    });
+    const paneCommand = String(
+      execFileAsyncMock.mock.calls.find(([, args]) => args.includes("new-session"))?.[1]?.at(-1),
+    );
     const { execFileSync } = await vi.importActual<typeof childProcessModule>("node:child_process");
-    // Parsed by sh the way tmux's default-shell does: the inner -c script is
-    // the launch command verbatim, followed by the shell re-exec.
-    const inner = execFileSync(
-      "sh",
-      ["-c", `set -- ${command.slice("exec ".length)}; printf %s "$3"`],
-      {
-        env: { SHELL: "/bin/sh", PATH: process.env["PATH"] ?? "" },
-      },
-    ).toString();
-    expect(inner).toBe(`${launch}; exec "$SHELL" -l`);
+    // As tmux runs it: default-shell -c <pane command>, with an rc-free HOME.
+    execFileSync("sh", ["-c", paneCommand], {
+      env: { SHELL: "/bin/bash", HOME: home, PATH: process.env["PATH"] ?? "" },
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    expect(readFileSync(out, "utf8")).toBe("it's\n$HOME\n`echo nope`\nline one\nline two\n");
   });
 
   // Regression (status-verifier shp-a4bc, spur-9813): the spur daemon is
@@ -269,6 +316,7 @@ describe("runtime-tmux", () => {
         sessionName: "api-1",
         cwd: "/tmp/worktree",
         launchCommand: "claude --dangerously-skip-permissions",
+        launchScriptDir: LAUNCH_SCRIPT_DIR,
       });
 
       const firstCall = execFileAsyncMock.mock.calls[0];
@@ -303,6 +351,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
     const firstCall = execFileAsyncMock.mock.calls[0];
@@ -320,7 +369,7 @@ describe("runtime-tmux", () => {
     ]);
     expect(firstCall[1]).toContain("new-session");
     // The launch rides the new-session command itself: nothing is typed.
-    expect(firstCall[1].at(-1)).toContain("claude --dangerously-skip-permissions");
+    expect(firstCall[1].at(-1)).toContain(join(LAUNCH_SCRIPT_DIR, "agent-launch.sh"));
     expect(execFileAsyncMock.mock.calls).toHaveLength(1);
   });
 
@@ -342,6 +391,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
     expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
@@ -370,6 +420,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
       agent: "claude" as const,
     };
     await createTmuxSession(session);
@@ -403,6 +454,7 @@ describe("runtime-tmux", () => {
         sessionName: "api-1",
         cwd: "/tmp/worktree",
         launchCommand: "claude --dangerously-skip-permissions",
+        launchScriptDir: LAUNCH_SCRIPT_DIR,
       }),
     ).rejects.toThrow("Failed to connect to bus");
     expect(execFileAsyncMock.mock.calls).toHaveLength(1);
@@ -874,16 +926,17 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
-    // Only the launch payload itself (the pane command, new-session's last
-    // arg) must be unwrapped — unlike the earlier `-e KEY=VALUE`
+    // Only the launch payload itself (the launch script the pane command
+    // sources) must be unwrapped — unlike the earlier `-e KEY=VALUE`
     // new-session args, which legitimately carry the session's own env
     // (including the pin) and are exempt from this assertion.
     const newSession = execFileAsyncMock.mock.calls.find(([, args]) =>
       args.includes("new-session"),
     );
-    expect(newSession?.[1]?.at(-1)).toContain("claude --dangerously-skip-permissions");
+    expect(newSession?.[1]?.at(-1)).toContain(join(LAUNCH_SCRIPT_DIR, "agent-launch.sh"));
 
     const sanitizedNames = [
       "NPM_CONFIG_PREFIX",
@@ -892,7 +945,8 @@ describe("runtime-tmux", () => {
       "npm_config_globalconfig",
       "PREFIX",
     ];
-    const payload = String(newSession?.[1]?.at(-1));
+    const payload = readFileSync(join(LAUNCH_SCRIPT_DIR, "agent-launch.sh"), "utf8");
+    expect(payload).toBe("claude --dangerously-skip-permissions\n");
     for (const name of sanitizedNames) {
       expect(payload).not.toContain(name);
     }
