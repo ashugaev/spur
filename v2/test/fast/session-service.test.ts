@@ -9537,7 +9537,7 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.pipeline).toEqual(pipelineBefore);
   });
 
-  it("returns 409 while the drain is parked before its pane write, and starts no second delivery (AC7a)", async () => {
+  it("waits out a drain parked before its pane write instead of 409, and starts no second delivery (AC7a)", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
     const sessions = createSessionStore();
@@ -9574,11 +9574,18 @@ describe("SessionService", () => {
     await Promise.resolve();
 
     expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
-    await expect(service.flushQueuedMessage("api-1", "first")).rejects.toThrow(/in flight/i);
+    // Nothing is typed yet, so the flush is not refused; it queues behind the
+    // drain's lifecycle lock and finds the head already delivered.
+    const flush = service.flushQueuedMessage("api-1", "first");
+    const flushOutcome = flush.then(
+      () => "flushed",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
 
     releaseGate();
     expect(await drain).toBe(true);
+    await expect(flushOutcome).resolves.toBe("Message not found in queue for api-1");
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
   });
 
@@ -46766,6 +46773,45 @@ describe("SessionService", () => {
       await service.restore("api-2");
       expect(sessions.get("api-2")?.status).toBe("running");
       expect(sessions.get("api-2")?.launchUnconfirmedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("lets the queue head be removed during a slow pre-delivery state check and never types it", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ queuedMessages: { messages: ["remove me"], awaitingPrompt: false } }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as {
+        classifySessionRecord(record: SessionRecord): Promise<unknown>;
+        tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
+      };
+      const classify = internals.classifySessionRecord.bind(service);
+      const slowCheck = deferred<undefined>();
+      let reachedCheck: () => void = () => {};
+      const checking = new Promise<void>((resolve) => {
+        reachedCheck = resolve;
+      });
+      vi.spyOn(internals, "classifySessionRecord").mockImplementationOnce(async (record) => {
+        reachedCheck();
+        await slowCheck.promise;
+        return classify(record);
+      });
+
+      const drain = internals.tryDeliverQueuedMessage("api-1");
+      await checking;
+      const removed = await service.removeQueuedMessage("api-1", "remove me");
+      expect(removed.queuedMessages).toBeUndefined();
+      slowCheck.resolve(undefined);
+      await drain;
+
+      expect(tmuxTexts()).toEqual([]);
+      expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
       service.dispose();
     });
 

@@ -5512,9 +5512,9 @@ export class SessionService {
         // Kick the delivery runner now, synchronously, so it (not reconcile)
         // is the one racing for this session: ensureDeliveryRunner is a no-op
         // if a loop is already running (deliveryRuns dedupe), and the loop's
-        // own tryDeliverQueuedMessage claims queueDeliveryInFlight before its
-        // first await, so this can never start a second concurrent recovery
-        // attempt against the same pane. Queue the runner after this locked
+        // own tryDeliverQueuedMessage runs under the same lifecycle lock, so
+        // this can never start a second concurrent recovery attempt against
+        // the same pane. Queue the runner after this locked
         // method returns; its promise starts on a later microtask and chains
         // behind the lifecycle lock held here.
         if (cleaned && cleaned.status === "running" && deliveryPending) {
@@ -16044,7 +16044,11 @@ export class SessionService {
     ) {
       return false;
     }
-    this.queueDeliveryInFlight.add(sessionId);
+    // Claimed only around the pane write below, never across the readiness
+    // and settle checks: those can take seconds (opencode classifies through
+    // `opencode export`), and remove/flush must not 409 while nothing is
+    // being typed.
+    let claimed = false;
     try {
       let nextMessage: string | undefined;
       try {
@@ -16094,6 +16098,13 @@ export class SessionService {
           return false;
         }
 
+        // Same synchronous span as the re-read above: a removal that landed
+        // before it is already gone from `latest`; one after it sees the claim.
+        if (this.queueDeliveryInFlight.has(sessionId)) {
+          return false;
+        }
+        this.queueDeliveryInFlight.add(sessionId);
+        claimed = true;
         await this.deliverQueuedMessage(latest, nextMessage);
         // A delivery that actually landed clears any dedup so a LATER
         // failure (a new problem, not a repeat) logs fresh.
@@ -16130,7 +16141,9 @@ export class SessionService {
         return true;
       }
     } finally {
-      this.queueDeliveryInFlight.delete(sessionId);
+      if (claimed) {
+        this.queueDeliveryInFlight.delete(sessionId);
+      }
     }
   }
 
