@@ -40,6 +40,7 @@ const activityConfig: Record<string, ActivityConfig> = {
     text: "var(--color-status-attention)",
   },
   error: errorConfig,
+  budget_limited: { ...errorConfig, label: "BUDGET LIMITED" },
   stopped: { ...inactiveConfig, label: "stopped" },
   killed: { ...inactiveConfig, label: "killed" },
 };

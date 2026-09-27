@@ -1169,6 +1169,34 @@ describe("Spur web API routes", () => {
 
   // ── Lifecycle actions ──────────────────────────────────────────────────
 
+  it("restore forwards explicit token budget approval", async () => {
+    mockedSpurRequest.mockResolvedValue(new Response(JSON.stringify({ ok: true })));
+    const response = await restoreSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/restore", {
+        method: "POST",
+        body: JSON.stringify({ overrideTokenBudget: true }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/restore",
+      expect.objectContaining({ body: JSON.stringify({ overrideTokenBudget: true }) }),
+    );
+  });
+
+  it.each(["{", "null", "[]"])("restore rejects malformed approval body %s", async (body) => {
+    const response = await restoreSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/restore", {
+        method: "POST",
+        body,
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
   it("POST lifecycle actions proxy to Spur daemon", async () => {
     mockedSpurRequestJson.mockResolvedValue({ ok: true });
     mockedSpurRequest.mockImplementation(async () => {

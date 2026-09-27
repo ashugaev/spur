@@ -327,6 +327,16 @@ export function SessionRow({
 
       <TagEditor session={session} variant="dots" />
 
+      {session.status === "budget_limited" ? (
+        <Link
+          href={buildSessionPath(session.id, projectFilterId)}
+          className="shrink-0 font-bold uppercase text-[var(--color-status-attention)]"
+          title="Token budget stopped this session. Open it to approve and ignore the limit."
+        >
+          Budget limited
+        </Link>
+      ) : null}
+
       <span
         className={`hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline ${attentionTextOpacity}`}
       >

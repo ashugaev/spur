@@ -23,6 +23,8 @@ type ElementBox = {
   height: number;
 };
 
+test.use({ video: process.env.SPUR_SESSION_ARTIFACTS_DIR ? "on" : "off" });
+
 function boxesOverlap(first: ElementBox, second: ElementBox): boolean {
   return (
     first.x < second.x + second.width &&
@@ -3987,6 +3989,18 @@ test.describe("S5: Runtime sidebar", () => {
           exhausted: true,
         },
       }),
+      makeWorkingSession({
+        id: "detail-s5-cursor-measured",
+        agent: "cursor",
+        tokenUsageView: {
+          status: "available",
+          provider: "cursor",
+          inputTokens: 80,
+          outputTokens: 20,
+          totalTokens: 100,
+          exhausted: false,
+        },
+      }),
     ];
     for (const session of sessions) await mockSessionDetail(page, session);
 
@@ -3994,6 +4008,8 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByText("Waiting for usage")).toBeVisible();
     await page.goto("/sessions/detail-s5-token-available");
     await expect(page.getByText("1,234 / 2,000")).toBeVisible();
+    await page.goto("/sessions/detail-s5-cursor-measured");
+    await expect(page.getByText("100", { exact: true })).toBeVisible();
     await page.goto("/sessions/detail-s5-token-unavailable");
     await expect(page.getByText("Token usage unavailable · budget unenforced")).toBeVisible();
     await page.goto("/sessions/detail-s5-token-exhausted");
@@ -4069,6 +4085,78 @@ test.describe("S5: Runtime sidebar", () => {
     } else {
       await page.screenshot({ path: testInfo.outputPath("preflight-detail.png"), fullPage: true });
     }
+  });
+
+  test.describe("budget approval evidence", () => {
+    test("budget approval shows loading, error, and resumed states", async ({ page }, testInfo) => {
+      const session = makeStoppedSession({
+        id: "budget-approval",
+        status: "budget_limited",
+        state: "budget_limited",
+        tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: true, enforced: true },
+      });
+      await mockSessionDetail(page, session);
+      let release: (() => void) | undefined;
+      let attempts = 0;
+      await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+        expect(route.request().postDataJSON()).toEqual({ overrideTokenBudget: true });
+        attempts += 1;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        if (attempts === 1) {
+          await route.fulfill({ status: 500, json: { error: "Approval failed; retry" } });
+        } else {
+          session.status = "running";
+          session.state = "working";
+          session.runtimeAlive = true;
+          session.tokenBudgetView = {
+            budget: 100,
+            knownTotalTokens: 100,
+            exhausted: false,
+            enforced: false,
+            overridden: true,
+          };
+          await route.fulfill({ status: 200, json: { ok: true } });
+        }
+      });
+      const capture = async (state: string) => {
+        const directory = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+        if (directory) mkdirSync(join(directory, "budget-approval-ui"), { recursive: true });
+        await page.screenshot({
+          path: directory
+            ? join(directory, "budget-approval-ui", `${state}.png`)
+            : testInfo.outputPath(`${state}.png`),
+          fullPage: true,
+        });
+      };
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("BUDGET LIMITED", { exact: true })).toBeVisible();
+      await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
+      await capture("limited");
+      await page.getByRole("button", { name: "Approve / ignore limit" }).click();
+      await expect(
+        page.getByRole("button", { name: "Approving and restoring session" }),
+      ).toBeDisabled();
+      await expect.poll(() => Boolean(release)).toBe(true);
+      await capture("loading");
+      release?.();
+      await expect(page.getByText("Approval failed; retry")).toBeVisible();
+      await capture("error");
+      release = undefined;
+      await page.getByRole("button", { name: "Approve / ignore limit" }).click();
+      await expect.poll(() => Boolean(release)).toBe(true);
+      release?.();
+      await expect(page.getByText("100 / 100 · limit ignored")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Approve / ignore limit" })).toHaveCount(0);
+      await capture("resumed");
+      const video = page.video();
+      const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+      if (video && artifacts) {
+        await page.close();
+        await video.saveAs(join(artifacts, "budget-approval-ui", "approval.webm"));
+      }
+    });
   });
 
   test("unknown pre-flight usage blocks Restore before the known total reaches the limit", async ({

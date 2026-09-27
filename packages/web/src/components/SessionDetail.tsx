@@ -204,9 +204,9 @@ function tokenUsageRows(
     ? [
         [
           "Combined budget",
-          `${budget.enforced ? "" : "At least "}${budget.knownTotalTokens.toLocaleString()} / ${budget.budget.toLocaleString()}${budget.exhausted ? " · limit hit" : ""}`,
+          `${budget.enforced || (budget.overridden && !budget.reason) ? "" : "At least "}${budget.knownTotalTokens.toLocaleString()} / ${budget.budget.toLocaleString()}${budget.overridden ? " · limit ignored" : budget.exhausted ? " · limit hit" : ""}`,
         ],
-        ...(budget.enforced
+        ...(budget.enforced || budget.overridden
           ? []
           : ([["Budget enforcement", `Unavailable · ${budgetReason}`]] as Array<[string, string]>)),
       ]
@@ -2590,6 +2590,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [titleDraft, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
+    if (session.status === "budget_limited") return "budget_limited";
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
       return session.state;
     }
@@ -3147,6 +3148,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 <BusyContent busy={busyAction === "restore"}>Restore</BusyContent>
+              </button>
+            ) : null}
+            {isRestorable(session) && tokenBudgetBlocked ? (
+              <button
+                aria-busy={busyAction === "restore" || undefined}
+                aria-label={
+                  busyAction === "restore" ? "Approving and restoring session" : undefined
+                }
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("restore", { overrideTokenBudget: true })}
+                title="Ignore the token budget for this session and resume work"
+                className="border border-[var(--color-status-attention)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              >
+                <BusyContent busy={busyAction === "restore"}>Approve / ignore limit</BusyContent>
               </button>
             ) : null}
             {canReopen(session) ? (

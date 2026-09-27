@@ -5946,6 +5946,17 @@ describe("SessionDetail token usage", () => {
 
   it.each([
     [
+      {
+        status: "available",
+        provider: "cursor",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        exhausted: false,
+      } as const,
+      "100",
+    ],
+    [
       { status: "waiting", provider: "codex", budget: 2000, exhausted: false } as const,
       "Waiting for usage",
     ],
@@ -6009,6 +6020,60 @@ describe("SessionDetail token usage", () => {
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByText("Not accepting input. Restore to continue.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve / ignore limit" })).toBeInTheDocument();
+  });
+
+  it("approves a budget-limited session and forwards the explicit override", async () => {
+    stubFetch({
+      status: "budget_limited",
+      state: "budget_limited",
+      runtimeAlive: false,
+      tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: true, enforced: true },
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    expect(await screen.findByText("BUDGET LIMITED")).toBeInTheDocument();
+    const fetchMock = vi.mocked(global.fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
+    fireEvent.click(screen.getByRole("button", { name: "Approve / ignore limit" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/restore",
+        expect.objectContaining({ body: JSON.stringify({ overrideTokenBudget: true }) }),
+      ),
+    );
+  });
+
+  it("allows input after approval and displays the ignored limit", async () => {
+    stubFetch({
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 110,
+        exhausted: false,
+        enforced: false,
+        overridden: true,
+      },
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    expect(await screen.findByText("110 / 100 · limit ignored")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Approve / ignore limit" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
+  });
+
+  it("keeps an approved unknown total labeled as a minimum", async () => {
+    stubFetch({
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        overridden: true,
+        reason: "preflight_unknown",
+      },
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    expect(await screen.findByText("At least 20 / 100 · limit ignored")).toBeInTheDocument();
   });
 
   it("keeps Restore blocked when only the main usage view reports exhaustion", async () => {

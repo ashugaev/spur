@@ -27,6 +27,29 @@ import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
 
+test("budget-limited dashboard row links to approval", async ({ page }) => {
+  await mockSessions(page, [
+    makeStoppedSession({
+      id: "budget-dashboard",
+      status: "budget_limited",
+      state: "budget_limited",
+    }),
+  ]);
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "Budget limited" })).toHaveAttribute(
+    "href",
+    /sessions\/budget-dashboard/,
+  );
+  const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifacts) {
+    mkdirSync(join(artifacts, "budget-approval-ui"), { recursive: true });
+    await page.screenshot({
+      path: join(artifacts, "budget-approval-ui", "dashboard.png"),
+      fullPage: true,
+    });
+  }
+});
+
 test("failed update diagnosis reports Shepherd reuse and links the session", async ({ page }) => {
   await page.clock.install();
   await mockSessions(page, []);

@@ -4,6 +4,7 @@ export type SpurSessionStatus =
   | "spawning"
   | "running"
   | "stopped"
+  | "budget_limited"
   | "paused"
   | "errored"
   | "completed"
@@ -16,6 +17,7 @@ export type SpurSessionState =
   | "rate_limited"
   | "stale"
   | "stopped"
+  | "budget_limited"
   | "error"
   | "killed";
 
@@ -317,13 +319,13 @@ export type SpurSessionTokenUsageView =
       reasoningOutputTokens?: number;
       cacheWrite5mInputTokens?: number;
       cacheWrite1hInputTokens?: number;
-      provider: "claude" | "codex" | "opencode";
+      provider: "claude" | "codex" | "opencode" | "cursor";
       budget?: number;
       exhausted: boolean;
     }
   | {
       status: "waiting";
-      provider: "claude" | "codex" | "opencode";
+      provider: "claude" | "codex" | "opencode" | "cursor";
       budget?: number;
       exhausted: false;
     }
@@ -362,6 +364,7 @@ export type SpurPreflightTokenUsageView =
     };
 
 export interface SpurTokenBudgetView {
+  overridden?: boolean;
   budget?: number;
   knownTotalTokens: number;
   exhausted: boolean;
@@ -373,6 +376,7 @@ export function isTokenBudgetBlocked(
   session: Pick<SpurSessionView, "tokenBudgetView" | "tokenUsageView">,
 ): boolean {
   const budget = session.tokenBudgetView;
+  if (budget?.overridden) return false;
   return (
     (budget?.budget !== undefined && (!budget.enforced || budget.exhausted)) ||
     session.tokenUsageView?.exhausted === true
@@ -931,7 +935,12 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
   if (!session.workspaceExists) return false;
-  if (session.status === "paused" || session.status === "stopped") return true;
+  if (
+    session.status === "paused" ||
+    session.status === "stopped" ||
+    session.status === "budget_limited"
+  )
+    return true;
   return !session.runtimeAlive;
 }
 
@@ -1015,6 +1024,7 @@ export interface ConversationResponse {
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
+  if (session.status === "budget_limited") return "respond";
   if (isTerminalSession(session)) {
     return "done";
   }

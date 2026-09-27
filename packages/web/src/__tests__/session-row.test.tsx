@@ -66,6 +66,25 @@ const onRestoreSession = vi.fn().mockResolvedValue(undefined);
 const onCompleteSession = vi.fn().mockResolvedValue(undefined);
 
 describe("SessionRow", () => {
+  it("links budget-limited sessions to their approval action", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
+    render(
+      <SessionRow
+        session={makeSession({
+          status: "budget_limited",
+          state: "budget_limited",
+          runtimeAlive: false,
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Budget limited" })).toHaveAttribute(
+      "href",
+      expect.stringContaining("/sessions/"),
+    );
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
   beforeEach(() => {
     onCompleteSession.mockReset();
     onCompleteSession.mockResolvedValue(undefined);
