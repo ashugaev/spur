@@ -570,6 +570,7 @@ export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
 // Longest a queued send() waits for the delivery runner's pane write before
 // answering with the message still queued. Never covers the submit ack.
 export const QUEUED_SEND_PANE_WRITE_WAIT_MS = 3_000;
+const TYPED_ACK_CLOCK_SLACK_MS = 10_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
   const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
@@ -11986,6 +11987,11 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+    const appended =
+      request.queue !== false ? this.appendBehindTypingDelivery(sessionId, request) : null;
+    if (appended) {
+      return this.enrich(appended);
+    }
     const { view, paneWrite } = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const sent = await this.sendLockedWithAttempt(sessionId, request);
       // Registered under the lock, so the attempt cannot type before the
@@ -12004,6 +12010,33 @@ export class SessionService {
     await paneWrite;
     const latest = readSession(this.config.dataDir, sessionId);
     return latest ? this.enrich(latest) : view;
+  }
+
+  // A queued send while this session's delivery is typing or waiting on its
+  // submit ack: that delivery holds the session lock for up to the ack
+  // budget, so the lock path would stall this request as long. The session
+  // is live and running (the pane write is under way), so no readiness check
+  // is needed. One synchronous span, read to write: no lifecycle op can
+  // interleave. Held for the prompt; whoever owns the in-flight delivery
+  // (the send's attempt, the runner, a flush) arms the runner after it.
+  // Returns null to take the lock path.
+  private appendBehindTypingDelivery(
+    sessionId: string,
+    request: SendMessageRequest,
+  ): SessionRecord | null {
+    if (!this.queueDeliveryInFlight.has(sessionId) && !this.queuedDeliveryTyped.has(sessionId)) {
+      return null;
+    }
+    const session = readSession(this.config.dataDir, sessionId);
+    if (
+      !session ||
+      session.status !== "running" ||
+      launchPromptPending(session) ||
+      !hasMessageContent(request)
+    ) {
+      return null;
+    }
+    return this.appendQueuedMessage(session, this.prepareSendMessage(session, request), true);
   }
 
   private async sendLocked(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
@@ -14238,7 +14271,7 @@ export class SessionService {
 
     const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
     // A killed session never runs again, so its undelivered queue and any
-    // pending-launch marker go with it.
+    // pending-launch and typed-awaiting-ack markers go with it.
     const record: SessionRecord = withQueuedMessages(
       {
         ...this.sessionWithReleasedSidecarPorts(cleanedSession),
@@ -14250,6 +14283,7 @@ export class SessionService {
     );
     delete record.retainInList;
     delete record.launchUnconfirmedAt;
+    delete record.queuedMessageTyped;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -16019,6 +16053,19 @@ export class SessionService {
 
   private resumeSessionDelivery(): void {
     for (const session of listSessions(this.config.dataDir)) {
+      if (session.queuedMessageTyped) {
+        // Arms the runner itself once the typed message is settled.
+        void this.recoverTypedQueuedMessage(session.id).catch((error: unknown) => {
+          this.logEvent("session.message.delivery_failed", {
+            level: "error",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Failed to recover a typed queued message for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          this.ensureDeliveryRunner(session.id);
+        });
+        continue;
+      }
       this.ensureDeliveryRunner(session.id);
     }
   }
@@ -16254,12 +16301,20 @@ export class SessionService {
     // Re-reads and subtracts the first occurrence of the text rather than
     // trusting a slice taken before the send: a concurrent `send` append or
     // flush would otherwise be erased by a blind whole-record write.
+    // The persisted queuedMessageTyped marker covers a restart before the ack
+    // (recoverTypedQueuedMessage).
     const drain = (): void => {
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      const typedAt = nowIso();
       writeSession(
         this.config.dataDir,
         withQueuedMessages(
-          { ...latest, status: "running", updatedAt: nowIso() },
+          {
+            ...latest,
+            status: "running",
+            updatedAt: typedAt,
+            queuedMessageTyped: { message, typedAt },
+          },
           removeFirstOccurrence(queuedMessages(latest), message),
           true,
         ),
@@ -16284,20 +16339,7 @@ export class SessionService {
       if (!isRecoveredSubmitAckTimeout(error)) {
         this.queuedDeliveryTyped.delete(sessionId);
         if (pane.drained) {
-          // Retain: back at the head it was drained from. Appends go to the
-          // tail and flush stands down on queueDeliveryInFlight, so the head
-          // is still the right slot; a re-sent identical text already queued
-          // is not duplicated.
-          const latest = readSession(this.config.dataDir, sessionId) ?? session;
-          const current = queuedMessages(latest);
-          writeSession(
-            this.config.dataDir,
-            withQueuedMessages(
-              { ...latest, updatedAt: nowIso() },
-              current.includes(message) ? current : [message, ...current],
-              false,
-            ),
-          );
+          this.requeueTypedMessageAtHead(sessionId, message);
         }
         throw error;
       }
@@ -16309,10 +16351,12 @@ export class SessionService {
     }
     this.queuedDeliveryTyped.delete(sessionId);
     this.stateCache.delete(sessionId);
-    // The drain above is already on disk: captureAgentSessionId anchors its
-    // own internal write on a fresh readSession and must never observe the
-    // pre-drain queue.
-    const updated = readSession(this.config.dataDir, sessionId) ?? session;
+    // The drain above is already on disk, and the typed marker clears here:
+    // captureAgentSessionId anchors its own internal write on a fresh
+    // readSession and must never observe the pre-drain queue or the marker.
+    const { queuedMessageTyped: _acked, ...updated } =
+      readSession(this.config.dataDir, sessionId) ?? session;
+    writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     if (recovered) {
@@ -16343,6 +16387,87 @@ export class SessionService {
       },
     });
     return persisted;
+  }
+
+  // Puts a typed-but-unacked message back at the queue head, on a fresh read:
+  // appends since the drain (send's lock-free path) stay behind it in order,
+  // and an identical text re-sent meanwhile moves up rather than duplicating.
+  // Clears the typed marker; awaitingPrompt false so the runner retypes it
+  // (the line clear before a retype erases any text left in the composer).
+  private requeueTypedMessageAtHead(sessionId: string, message: string): void {
+    const latest = readSession(this.config.dataDir, sessionId);
+    if (!latest) {
+      return;
+    }
+    const { queuedMessageTyped: _typed, ...base } = latest;
+    writeSession(
+      this.config.dataDir,
+      withQueuedMessages(
+        { ...base, updatedAt: nowIso() },
+        [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
+        false,
+      ),
+    );
+  }
+
+  // Daemon restart with a queued message typed but never acked: the in-memory
+  // ack wait is gone, and a swallowed Enter would leave the text in the
+  // composer for the next message's line clear to erase. No matching user
+  // turn in the transcript since it was typed -> back at the head. Skipped
+  // while this daemon's own delivery owns the session.
+  private async recoverTypedQueuedMessage(sessionId: string): Promise<void> {
+    await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      const typed = session?.queuedMessageTyped;
+      if (
+        !session ||
+        !typed ||
+        this.queuedDeliveryTyped.has(sessionId) ||
+        this.queueDeliveryInFlight.has(sessionId)
+      ) {
+        return;
+      }
+      if (isTerminalSessionStatus(session.status)) {
+        const { queuedMessageTyped: _typed, ...cleared } = session;
+        writeSession(this.config.dataDir, cleared);
+        return;
+      }
+      const entries =
+        (await readAgentConversation(session.agent, {
+          worktreePath: session.worktreePath,
+          ...(session.agent === "codex"
+            ? { codexSessionsDir: this.codexSessionsDir(session.id) }
+            : {}),
+          ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+        })) ?? [];
+      // typedAt is stamped just after the Enter, so the agent's own record of
+      // the turn can precede it by the write's duration.
+      const typedAtMs = Date.parse(typed.typedAt) - TYPED_ACK_CLOCK_SLACK_MS;
+      const text = typed.message.trim();
+      const acked = entries.some(
+        (entry) =>
+          entry.kind === "message" &&
+          entry.role === "user" &&
+          entry.text.trim() !== "" &&
+          (entry.text.includes(text) || text.includes(entry.text.trim())) &&
+          (entry.timestampMs === undefined || entry.timestampMs >= typedAtMs),
+      );
+      if (acked) {
+        const latest = readSession(this.config.dataDir, sessionId) ?? session;
+        const { queuedMessageTyped: _typed, ...cleared } = latest;
+        writeSession(this.config.dataDir, cleared);
+        return;
+      }
+      this.requeueTypedMessageAtHead(sessionId, typed.message);
+      this.logEvent("session.message.requeued", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Re-queued a message typed before a restart with no submit ack for ${sessionId}`,
+        details: { messageLength: typed.message.length, typedAt: typed.typedAt },
+      });
+    });
+    this.ensureDeliveryRunner(sessionId);
   }
 
   private async runDeliveryLoop(sessionId: string): Promise<void> {

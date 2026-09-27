@@ -9356,8 +9356,11 @@ describe("SessionService", () => {
 
     const send = service.send("api-1", { message: "second" });
     await Promise.resolve();
-    // send() is parked on the drain's lock: nothing appended yet.
-    expect(sessions.get("api-1")?.queuedMessages).toEqual({ messages: [], awaitingPrompt: true });
+    // Lock-free append behind the typing drain: queued at once.
+    expect(sessions.get("api-1")?.queuedMessages).toEqual({
+      messages: ["second"],
+      awaitingPrompt: true,
+    });
 
     releaseAck();
     const [drained] = await Promise.all([drain, send]);
@@ -9868,10 +9871,14 @@ describe("SessionService", () => {
 
     const send = service.send("api-1", { message: "d" });
     await Promise.resolve();
-    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "b", "c"]);
+    // Lock-free append behind the in-flight flush: queued at once.
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "b", "c", "d"]);
 
     releaseAck();
     await Promise.all([flush, send]);
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["a", "c", "d"]);
+    // The flush arms the runner (stopped here by dispose); drive its attempt.
+    expect(await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1")).toBe(true);
 
     expect(
       sendMessageToTmuxMock.mock.calls
@@ -10111,6 +10118,222 @@ describe("SessionService", () => {
       });
       expect(sessionServiceInternals(service).deliveryRuns.has("api-1")).toBe(true);
       expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["x", "y"]);
+    });
+
+    function typedMessages(): string[] {
+      return sendMessageToTmuxMock.mock.calls
+        .filter(([id]) => id === "api-1")
+        .map(([, message]) => String(message));
+    }
+
+    async function timedSend(
+      service: { send(id: string, request: { message: string }): Promise<SessionView> },
+      message: string,
+    ): Promise<{ ms: number; view: SessionView }> {
+      const startedAt = process.hrtime.bigint();
+      const view = await service.send("api-1", { message });
+      return { ms: Number(process.hrtime.bigint() - startedAt) / 1e6, view };
+    }
+
+    it("queues a 2nd and 3rd send at once while the 1st waits on its ack, then types them in order exactly once", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const releaseAck = gateSubmitAck(service, { found: true });
+
+      await service.send("api-1", { message: "first" });
+      expect(typedMessages()).toEqual(["first"]);
+
+      const second = await timedSend(service, "second");
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["second"]);
+      const third = await timedSend(service, "third");
+      expect(second.ms).toBeLessThan(100);
+      expect(third.ms).toBeLessThan(100);
+      expect(third.view.queuedMessages?.messages).toEqual(["second", "third"]);
+      expect(sessions.get("api-1")?.queuedMessages).toEqual({
+        messages: ["second", "third"],
+        awaitingPrompt: true,
+      });
+      expect(typedMessages()).toEqual(["first"]);
+
+      releaseAck();
+      // Each typed message holds the next for the prompt grace, measured on
+      // the fake Date. Move the date, never the timers, so no tick fires.
+      let now = Date.parse("2026-03-18T10:05:00.000Z");
+      await waitForRealTime(() => {
+        now += 60_000;
+        vi.setSystemTime(new Date(now));
+        expect(typedMessages()).toEqual(["first", "second", "third"]);
+      }, 15_000);
+      await waitForRealTime(() => {
+        expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      });
+      expect(typedMessages()).toEqual(["first", "second", "third"]);
+    }, 30_000);
+
+    it("drops lock-free appends and types nothing more when a kill lands during the ack wait", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const releaseAck = gateSubmitAck(service, { found: true });
+
+      await service.send("api-1", { message: "first" });
+      await service.send("api-1", { message: "second" });
+      await service.send("api-1", { message: "third" });
+      const killed = service.kill("api-1", { skipPrCheck: true });
+
+      releaseAck();
+      await killed;
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+
+      expect(typedMessages()).toEqual(["first"]);
+      expect(sessions.get("api-1")?.status).toBe("killed");
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+    });
+
+    it("re-queues a dead agent's typed message ahead of lock-free appends, moving an identical tail copy up", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      let dead = false;
+      isProcessRunningInTmuxMock.mockImplementation(async () => !dead);
+      const releaseAck = gateSubmitAck(service, { found: false });
+
+      await service.send("api-1", { message: "first" });
+      await service.send("api-1", { message: "second" });
+      // Identical to the in-flight text: not queued (drained), so it appends.
+      await service.send("api-1", { message: "first" });
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["second", "first"]);
+
+      dead = true;
+      releaseAck();
+      await waitForRealTime(() => {
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ event: "session.message.delivery_failed", sessionId: "api-1" }),
+        );
+      });
+      expect(sessions.get("api-1")?.queuedMessages).toEqual({
+        messages: ["first", "second"],
+        awaitingPrompt: false,
+      });
+      expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+      expect(typedMessages()).toEqual(["first"]);
+    });
+
+    it("removes the untyped second message while the first waits on its ack, and never types it", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const releaseAck = gateSubmitAck(service, { found: true });
+
+      await service.send("api-1", { message: "first" });
+      await service.send("api-1", { message: "second" });
+      // "second" is the head now, but not the message in flight.
+      await service.removeQueuedMessage("api-1", "second");
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+
+      releaseAck();
+      await waitForRealTime(() => {
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ event: "session.message.sent", sessionId: "api-1" }),
+        );
+      });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual(["first"]);
+    });
+
+    it("persists the typed marker until the ack, then clears it", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const releaseAck = gateSubmitAck(service, { found: true });
+
+      await service.send("api-1", { message: "first" });
+      expect(sessions.get("api-1")?.queuedMessageTyped).toEqual({
+        message: "first",
+        typedAt: expect.any(String),
+      });
+
+      releaseAck();
+      await waitForRealTime(() => {
+        expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+      });
+    });
+
+    it("re-queues at the head on restart a message typed with no user turn in the transcript since", async () => {
+      mockClaudeJsonlState("waiting");
+      readAgentConversationMock.mockResolvedValue([
+        {
+          kind: "message",
+          role: "user",
+          text: "typed",
+          timestampMs: Date.parse("2026-03-18T09:00:00.000Z"),
+        },
+      ]);
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          queuedMessages: { messages: ["later"], awaitingPrompt: true },
+          queuedMessageTyped: { message: "typed", typedAt: "2026-03-18T10:04:00.000Z" },
+        }),
+      );
+      createAgentSubmitAckBindingMock.mockResolvedValue(null);
+
+      await liveService();
+
+      await waitForRealTime(() => {
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ event: "session.message.requeued", sessionId: "api-1" }),
+        );
+      });
+      await waitForRealTime(() => {
+        expect(typedMessages()[0]).toBe("typed");
+      });
+      expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+    });
+
+    it("clears the typed marker on restart when the transcript shows the turn", async () => {
+      mockClaudeJsonlState("waiting");
+      readAgentConversationMock.mockResolvedValue([
+        {
+          kind: "message",
+          role: "user",
+          text: "typed",
+          timestampMs: Date.parse("2026-03-18T10:04:00.500Z"),
+        },
+      ]);
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          queuedMessages: { messages: [], awaitingPrompt: true },
+          queuedMessageTyped: { message: "typed", typedAt: "2026-03-18T10:04:00.000Z" },
+        }),
+      );
+
+      await liveService();
+
+      await waitForRealTime(() => {
+        expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      expect(logSpurEventMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ event: "session.message.requeued" }),
+      );
+      expect(typedMessages()).toEqual([]);
     });
   });
 

@@ -1183,6 +1183,36 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, confirmed);
     expect(readSession(dataDir, "api-1")?.launchUnconfirmedAt).toBeUndefined();
   });
+
+  it("keeps queuedMessageTyped across an unrelated later write and drops it once cleared", async () => {
+    const dataDir = await newDataDir();
+    const typed = { message: "typed text", typedAt: "2026-03-18T10:00:30.000Z" };
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessageTyped: typed,
+    });
+    const first = readSession(dataDir, "api-1");
+    if (!first) throw new Error("record missing");
+    writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
+
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual(typed);
+    expect(listSessions(dataDir)[0]?.queuedMessageTyped).toEqual(typed);
+
+    const { queuedMessageTyped: _cleared, ...acked } = first;
+    writeSession(dataDir, acked);
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toBeUndefined();
+  });
 });
 
 const sessionBase = {

@@ -1034,6 +1034,12 @@ export interface SessionRecord {
    * holds while set; cleared on the first transcript activity after it.
    */
   launchUnconfirmedAt?: string;
+  /**
+   * A queued message already typed into the pane (and so off the queue)
+   * whose submit ack is still pending. A daemon restart with this set and no
+   * matching user turn in the transcript puts the message back at the head.
+   */
+  queuedMessageTyped?: { message: string; typedAt: string };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;

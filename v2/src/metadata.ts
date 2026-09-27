@@ -840,6 +840,16 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.launchUnconfirmedAt
       ? { launchUnconfirmedAt: normalizedSession.launchUnconfirmedAt }
       : {}),
+    ...(normalizedSession.queuedMessageTyped &&
+    typeof normalizedSession.queuedMessageTyped.message === "string" &&
+    typeof normalizedSession.queuedMessageTyped.typedAt === "string"
+      ? {
+          queuedMessageTyped: {
+            message: normalizedSession.queuedMessageTyped.message,
+            typedAt: normalizedSession.queuedMessageTyped.typedAt,
+          },
+        }
+      : {}),
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
