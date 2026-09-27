@@ -48,6 +48,30 @@ interface CleanupItem {
   worktreePath?: string;
 }
 
+async function waitForRestorableSession(
+  service: { get(sessionId: string): Promise<SessionView> },
+  sessionId: string,
+): Promise<SessionView> {
+  return pollUntil(() => service.get(sessionId), {
+    timeoutMs: 20_000,
+    intervalMs: 250,
+    accept: isRestorableSession,
+    label: `restorable session ${sessionId}`,
+  });
+}
+
+async function waitForIdleSession(
+  service: { get(sessionId: string): Promise<SessionView> },
+  sessionId: string,
+): Promise<SessionView> {
+  return pollUntil(() => service.get(sessionId), {
+    timeoutMs: 120_000,
+    intervalMs: 500,
+    accept: (session) => session.state === "waiting" || session.state === "needs_input",
+    label: `idle session ${sessionId}`,
+  });
+}
+
 async function binaryPath(name: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("which", [name]);
@@ -534,7 +558,7 @@ async function runSmoke(
         prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
-After the file and the session metadata are set, wait for more instructions.${agent === "codex" ? " The task is complete only after a follow-up message asks you to create smoke-followup.txt." : ""}${agent === "cursor" ? " This is an isolated runtime test: skip memory, planning, git, and project workflows. Use only the file-writing tool and the session metadata helper, then end your response immediately." : ""}`,
+After the file and the session metadata are set, wait for more instructions.${agent === "codex" ? " End this response immediately; do not poll or wait with tools. The task is complete only after a follow-up message asks you to create smoke-followup.txt." : ""}${agent === "cursor" ? " This is an isolated runtime test: skip memory, planning, git, and project workflows. Use only the file-writing tool and the session metadata helper, then end your response immediately." : ""}`,
       });
       cleanupItem.branch = session.branch;
       cleanupItem.worktreePath = session.worktreePath;
@@ -590,6 +614,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
       }
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
+      await waitForIdleSession(service, session.id);
       const initialUsage =
         agent === "cursor" ? await assertStructuredMainUsage(agent, session, service, dataDir) : 0;
 
@@ -599,11 +624,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
         await killTmuxSession(session.id);
       }
 
-      await pollUntil(() => service.get(session.id), {
-        timeoutMs: 30_000,
-        accept: isRestorableSession,
-        label: "restorable agent after tmux exit",
-      });
+      await waitForRestorableSession(service, session.id);
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);
@@ -713,6 +734,7 @@ async function runOpenCodeSmoke(): Promise<void> {
       });
 
       await service.pause(session.id);
+      await waitForRestorableSession(service, session.id);
       const restored = await service.restore(session.id);
       expect(restored.agentSessionId).toBe(nativeSessionId);
       await service.send(session.id, { message: "Reply with exactly SPUR_OPENCODE_SMOKE_TWO" });

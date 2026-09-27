@@ -1261,6 +1261,13 @@ type SessionServiceInternals = {
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
+  enrichWithClassified(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+    sessionBatch?: SessionRecord[],
+  ): Promise<{ view: SessionView; classified: unknown }>;
+  restoreWarmupUntil: Map<string, number>;
+  withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   confirmAgentExited(
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean>;
@@ -1381,12 +1388,7 @@ describe("SessionService", () => {
     buildAgentLaunchPlanMock
       .mockReset()
       .mockImplementation(
-        (
-          agent: string,
-          initialMessage: string,
-          options?: { planMode?: boolean },
-          deferredSensitiveInitialMessage?: { text: string; sensitive: true },
-        ) => ({
+        (agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
           agent,
           launchCommand:
             agent === "codex"
@@ -1396,7 +1398,6 @@ describe("SessionService", () => {
                 : "claude --dangerously-skip-permissions",
           initialMessage,
           readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
-          ...(deferredSensitiveInitialMessage ? { deferredSensitiveInitialMessage } : {}),
         }),
       );
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
@@ -2282,6 +2283,113 @@ describe("SessionService", () => {
       expect((await service.readTodo("api-1")).revision).toBe(before.revision);
       expect(sessions.get("api-1")?.status).toBe("stopped");
       service.dispose();
+    });
+
+    it("skips scheduling ToDo nudges when warmup starts after a waiting view is enriched", async () => {
+      const sessions = createSessionStore();
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+        await Promise.resolve();
+      }
+      expect(internals.attentionMonitorRunning).toBe(false);
+      const session = runningSession({ worktree: false });
+      sessions.set(session.id, session);
+      const deadline = Date.now() + 30_000;
+      const views: SessionView[] = [];
+      const enrich = internals.enrichWithClassified.bind(internals);
+      vi.spyOn(internals, "enrichWithClassified").mockImplementation(async (...args) => {
+        const result = await enrich(...args);
+        views.push(result.view);
+        if (views.length === 1) internals.restoreWarmupUntil.set(session.id, deadline);
+        return result;
+      });
+      const nudge = vi.spyOn(internals, "maybeNudgeTodo").mockResolvedValue();
+
+      await internals.pollAttentionStates(false);
+      expect(views).toHaveLength(1);
+      expect(views[0]).toMatchObject({ id: session.id, status: "running", state: "waiting" });
+      expect(internals.restoreWarmupUntil.get(session.id)).toBe(deadline);
+      expect(nudge).not.toHaveBeenCalled();
+
+      vi.setSystemTime(deadline);
+      await internals.pollAttentionStates(false);
+      expect(views).toHaveLength(2);
+      expect(views[1]).toMatchObject({ id: session.id, status: "running", state: "waiting" });
+      expect(nudge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }));
+    });
+
+    it("suppresses ToDo reads and delivery until the exact restore warmup deadline", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const session = runningSession({ agent: "codex" });
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockClear();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      const deadline = Date.now() + 30_000;
+      internals.restoreWarmupUntil.set(session.id, deadline);
+
+      vi.setSystemTime(deadline - 1);
+      await internals.maybeNudgeTodo(session);
+      expect(todo.ensureTodoLedger).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+
+      vi.setSystemTime(deadline);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo is empty");
+      expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(1);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it("checks restore warmup after a ToDo nudge acquires the lifecycle lock", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const session = runningSession({ agent: "codex" });
+      sessions.set(session.id, session);
+      const todo = await import("../../src/todo.js");
+      vi.mocked(todo.ensureTodoLedger).mockClear();
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let signalHeld!: () => void;
+      const held = new Promise<void>((resolve) => {
+        signalHeld = resolve;
+      });
+      const blocker = internals.withWorkspaceLifecycleLocks(session.id, async () => {
+        signalHeld();
+        await barrier;
+      });
+      await held;
+      const lock = vi.spyOn(internals, "withWorkspaceLifecycleLocks");
+      const queued = internals.maybeNudgeTodo(session);
+      const deadline = Date.now() + 30_000;
+      try {
+        expect(lock).toHaveBeenCalledWith(session.id, expect.any(Function));
+        expect(internals.restoreWarmupUntil.has(session.id)).toBe(false);
+        internals.restoreWarmupUntil.set(session.id, deadline);
+      } finally {
+        release();
+        await Promise.all([blocker, queued]);
+      }
+      expect(todo.ensureTodoLedger).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+
+      vi.setSystemTime(deadline);
+      await internals.maybeNudgeTodo(session);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(1);
     });
 
     it("nudges an empty ledger, at most once per 60s", async () => {
@@ -12350,32 +12458,6 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("waiting");
-  });
-
-  it("delivers sensitive spawn controls after the ordinary prompt without persisting them", async () => {
-    mockClaudeJsonlState("waiting");
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    const sensitiveControls = "unsubscribe ap1_secret-control";
-
-    await service.spawn(
-      { project: "api", prompt: "hello" },
-      { sensitivePromptSuffix: sensitiveControls },
-    );
-
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      expect.not.stringContaining("ap1_secret-control"),
-      { agent: "claude" },
-    );
-    expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledOnce();
-    expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledWith("api-1", sensitiveControls, {
-      agent: "claude",
-    });
-    expect(sendMessageToTmuxMock.mock.invocationCallOrder[0]).toBeLessThan(
-      sendSensitiveMessageToTmuxMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-    );
-    expect(JSON.stringify(writeSessionMock.mock.calls)).not.toContain("ap1_secret-control");
   });
 
   it("classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes", async () => {

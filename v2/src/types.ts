@@ -494,7 +494,7 @@ export interface ReviewSignal {
 
 export type AutoPingScope = "event" | "thread" | "subscription";
 
-export type AutoPingDestination = { kind: "session"; sessionId: string } | { kind: "trigger" };
+export type AutoPingDestination = { kind: "session"; sessionId: string };
 
 export type AutoPingThreadTarget =
   | { kind: "github-review-thread"; threadId: string }
@@ -513,7 +513,7 @@ export interface AutoPingRouteDescriptor {
   sourceId: string;
   sourceType: SourceType;
   eventName: string;
-  actionKind: "send" | "spawn";
+  actionKind: "send";
   destination: AutoPingDestination;
   spawnDeskGroup: boolean;
 }

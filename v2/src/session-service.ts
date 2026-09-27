@@ -5717,7 +5717,11 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
-          if (view.status === "running" && view.state === "waiting") {
+          if (
+            view.status === "running" &&
+            view.state === "waiting" &&
+            !this.isInRestoreWarmup(session.id)
+          ) {
             await this.maybeNudgeTodo(session);
           }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
@@ -6891,6 +6895,7 @@ export class SessionService {
 
   private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
     if (
+      this.isInRestoreWarmup(session.id) ||
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
       session.pipeline?.status === "running"
@@ -9867,7 +9872,6 @@ export class SessionService {
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
       closeoutOwnerTransfer?: boolean;
-      sensitivePromptSuffix?: string;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -10245,12 +10249,7 @@ export class SessionService {
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       };
-      const launchPlan = options?.sensitivePromptSuffix
-        ? buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions, {
-            text: options.sensitivePromptSuffix,
-            sensitive: true,
-          })
-        : buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
+      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
       const promptDeliveredOnLaunch =
         launchPlan.initialMessageDeliveredOnLaunch === true ||
         (startupImagePaths.length > 0 &&
@@ -10388,25 +10387,6 @@ export class SessionService {
       }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
-      }
-
-      if (launchPlan.deferredSensitiveInitialMessage) {
-        stage = "prompt.sensitive_controls";
-        const controlsOutcome = await this.sendDeferredSensitiveInitialMessage(
-          runningRecord,
-          launchPlan.deferredSensitiveInitialMessage.text,
-        );
-        this.logEvent("session.spawn.sensitive_controls_sent", {
-          level: "info",
-          sessionId,
-          projectId: request.project,
-          message: `Sent automatic ping controls to ${sessionId}`,
-          details: {
-            controlCount: (launchPlan.deferredSensitiveInitialMessage.text.match(/ap1_/g) ?? [])
-              .length,
-            outcome: controlsOutcome,
-          },
-        });
       }
 
       stage = "record.write";
