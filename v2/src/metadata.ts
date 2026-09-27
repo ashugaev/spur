@@ -22,6 +22,7 @@ import {
   type ReviewSnapshot,
   type RuntimeLogCursorState,
   type SessionQueuedMessagesState,
+  type SubmitAckBaseline,
   type ServiceInstanceRecord,
   type ServiceSourceState,
   type SessionPipelineState,
@@ -708,6 +709,48 @@ function normalizeQueuedMessagesState(
   };
 }
 
+// A malformed ackBaseline drops alone: the marker then re-queues on restart,
+// the same as an unconfirmed ack.
+function normalizeQueuedMessageTyped(
+  typed: NonNullable<SessionRecord["queuedMessageTyped"]>,
+): NonNullable<SessionRecord["queuedMessageTyped"]> {
+  const ackBaseline = normalizeSubmitAckBaseline(typed.ackBaseline);
+  return {
+    message: typed.message,
+    typedAt: typed.typedAt,
+    ...(ackBaseline ? { ackBaseline } : {}),
+  };
+}
+
+function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const { agent } = record;
+  if (
+    (agent === "claude" || agent === "cursor") &&
+    typeof record["file"] === "string" &&
+    typeof record["size"] === "number"
+  ) {
+    return { agent, file: record["file"], size: record["size"] };
+  }
+  const offsets = record["offsets"];
+  if (agent === "codex" && offsets !== null && typeof offsets === "object") {
+    const entries = Object.entries(offsets).filter(
+      (entry): entry is [string, number] => typeof entry[1] === "number",
+    );
+    return { agent, offsets: Object.fromEntries(entries) };
+  }
+  const ids = record["userMessageIds"];
+  if (agent === "opencode" && typeof record["sessionId"] === "string" && Array.isArray(ids)) {
+    return {
+      agent,
+      sessionId: record["sessionId"],
+      userMessageIds: ids.filter((id): id is string => typeof id === "string"),
+    };
+  }
+  return undefined;
+}
+
 // Keeps only entries whose pid/pgid/starttime are finite positive integers —
 // a malformed entry (bad restore, hand-edited JSON) must never survive a
 // write, since it would be trusted as a real signal target later.
@@ -844,10 +887,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     typeof normalizedSession.queuedMessageTyped.message === "string" &&
     typeof normalizedSession.queuedMessageTyped.typedAt === "string"
       ? {
-          queuedMessageTyped: {
-            message: normalizedSession.queuedMessageTyped.message,
-            typedAt: normalizedSession.queuedMessageTyped.typedAt,
-          },
+          queuedMessageTyped: normalizeQueuedMessageTyped(normalizedSession.queuedMessageTyped),
         }
       : {}),
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),

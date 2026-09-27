@@ -30,7 +30,7 @@ import {
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
-import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
+import type { PersistedPendingBatch, SessionRecord, SubmitAckBaseline } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -1186,7 +1186,11 @@ describe("session metadata PR migration", () => {
 
   it("keeps queuedMessageTyped across an unrelated later write and drops it once cleared", async () => {
     const dataDir = await newDataDir();
-    const typed = { message: "typed text", typedAt: "2026-03-18T10:00:30.000Z" };
+    const typed = {
+      message: "typed text",
+      typedAt: "2026-03-18T10:00:30.000Z",
+      ackBaseline: { agent: "codex" as const, offsets: { "/s/rollout.jsonl": 120 } },
+    };
     writeSession(dataDir, {
       id: "api-1",
       project: "api",
@@ -1212,6 +1216,51 @@ describe("session metadata PR migration", () => {
     const { queuedMessageTyped: _cleared, ...acked } = first;
     writeSession(dataDir, acked);
     expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toBeUndefined();
+  });
+
+  it("keeps every agent's ack baseline shape on the typed marker and drops a malformed one alone", async () => {
+    const dataDir = await newDataDir();
+    const base = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const typedAt = "2026-03-18T10:00:30.000Z";
+    const baselines: SubmitAckBaseline[] = [
+      { agent: "claude", file: "/c.jsonl", size: 7 },
+      { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "opencode", sessionId: "ses_1", userMessageIds: ["msg_1", "msg_2"] },
+    ];
+    for (const ackBaseline of baselines) {
+      writeSession(dataDir, {
+        ...base,
+        queuedMessageTyped: { message: "m", typedAt, ackBaseline },
+      });
+      expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({
+        message: "m",
+        typedAt,
+        ackBaseline,
+      });
+    }
+    const malformed = { agent: "claude", size: "x" } as unknown as {
+      agent: "claude";
+      file: string;
+      size: number;
+    };
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
   });
 });
 

@@ -1036,10 +1036,12 @@ export interface SessionRecord {
   launchUnconfirmedAt?: string;
   /**
    * A queued message already typed into the pane (and so off the queue)
-   * whose submit ack is still pending. A daemon restart with this set and no
-   * matching user turn in the transcript puts the message back at the head.
+   * whose submit ack is still pending. `ackBaseline` is the ack scan's
+   * pre-send transcript position, absent when the send had no ack scan. A
+   * daemon restart with this set and no ack past that position (or no
+   * position at all) puts the message back at the head.
    */
-  queuedMessageTyped?: { message: string; typedAt: string };
+  queuedMessageTyped?: { message: string; typedAt: string; ackBaseline?: SubmitAckBaseline };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -1620,6 +1622,17 @@ export interface ConversationMessage {
   text: string;
   timestampMs: number;
 }
+
+/**
+ * JSON form of a submit-ack binding's pre-send transcript position. Persisted
+ * with a typed queued message so a restarted daemon can rebind the same scan
+ * (resumeAgentSubmitAckBinding) and see only turns recorded after the send.
+ */
+export type SubmitAckBaseline =
+  | { agent: "claude"; file: string; size: number }
+  | { agent: "codex"; offsets: Record<string, number> }
+  | { agent: "cursor"; file: string; size: number }
+  | { agent: "opencode"; sessionId: string; userMessageIds: string[] };
 
 export type TranscriptEntry =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }

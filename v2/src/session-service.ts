@@ -29,6 +29,7 @@ import {
   findAgentSessionId,
   parseAgentName,
   readAgentConversation,
+  resumeAgentSubmitAckBinding,
   setupAgentHooks,
   type SubmitAckBinding,
   type SubmitAckScanResult,
@@ -441,6 +442,7 @@ import {
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
+  type SubmitAckBaseline,
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
@@ -570,7 +572,6 @@ export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
 // Longest a queued send() waits for the delivery runner's pane write before
 // answering with the message still queued. Never covers the submit ack.
 export const QUEUED_SEND_PANE_WRITE_WAIT_MS = 3_000;
-const TYPED_ACK_CLOCK_SLACK_MS = 10_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
   const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
@@ -1028,8 +1029,11 @@ interface AgentMessageWriteOptions {
   freshLaunch?: boolean;
   /** Target is idle or just interrupted: INTERACTIVE_SUBMIT_ACK_PACING. */
   interactive?: boolean;
-  /** Runs once the message and its submit key are in the pane, before the ack wait. */
-  onPaneWritten?: () => void;
+  /**
+   * Runs once the message and its submit key are in the pane, before the ack
+   * wait; gets the ack scan's baseline, null when the send waits on no ack.
+   */
+  onPaneWritten?: (ackBaseline: SubmitAckBaseline | null) => void;
 }
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 
@@ -12872,7 +12876,7 @@ export class SessionService {
       }
     }
     await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
-    options?.onPaneWritten?.();
+    options?.onPaneWritten?.(binding?.baseline ?? null);
     if (!binding) {
       return "submitted";
     }
@@ -16303,7 +16307,7 @@ export class SessionService {
     // flush would otherwise be erased by a blind whole-record write.
     // The persisted queuedMessageTyped marker covers a restart before the ack
     // (recoverTypedQueuedMessage).
-    const drain = (): void => {
+    const drain = (ackBaseline: SubmitAckBaseline | null): void => {
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
       const typedAt = nowIso();
       writeSession(
@@ -16313,7 +16317,7 @@ export class SessionService {
             ...latest,
             status: "running",
             updatedAt: typedAt,
-            queuedMessageTyped: { message, typedAt },
+            queuedMessageTyped: { message, typedAt, ...(ackBaseline ? { ackBaseline } : {}) },
           },
           removeFirstOccurrence(queuedMessages(latest), message),
           true,
@@ -16347,7 +16351,7 @@ export class SessionService {
     }
     // A resolved (or recovered) write means the pane write landed, hook or not.
     if (!pane.drained) {
-      drain();
+      drain(null);
     }
     this.queuedDeliveryTyped.delete(sessionId);
     this.stateCache.delete(sessionId);
@@ -16412,9 +16416,12 @@ export class SessionService {
 
   // Daemon restart with a queued message typed but never acked: the in-memory
   // ack wait is gone, and a swallowed Enter would leave the text in the
-  // composer for the next message's line clear to erase. No matching user
-  // turn in the transcript since it was typed -> back at the head. Skipped
-  // while this daemon's own delivery owns the session.
+  // composer for the next message's line clear to erase. The live send's own
+  // ack scan, rebound to its persisted pre-send baseline, decides: only turns
+  // recorded after that send count, with the agent's own matching (opencode:
+  // any new user message id, since it stores a /cmd prompt expanded). No ack,
+  // or no baseline to scan from -> back at the head. Skipped while this
+  // daemon's own delivery owns the session.
   private async recoverTypedQueuedMessage(sessionId: string): Promise<void> {
     await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
@@ -16432,26 +16439,18 @@ export class SessionService {
         writeSession(this.config.dataDir, cleared);
         return;
       }
-      const entries =
-        (await readAgentConversation(session.agent, {
-          worktreePath: session.worktreePath,
-          ...(session.agent === "codex"
-            ? { codexSessionsDir: this.codexSessionsDir(session.id) }
-            : {}),
-          ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-        })) ?? [];
-      // typedAt is stamped just after the Enter, so the agent's own record of
-      // the turn can precede it by the write's duration.
-      const typedAtMs = Date.parse(typed.typedAt) - TYPED_ACK_CLOCK_SLACK_MS;
-      const text = typed.message.trim();
-      const acked = entries.some(
-        (entry) =>
-          entry.kind === "message" &&
-          entry.role === "user" &&
-          entry.text.trim() !== "" &&
-          (entry.text.includes(text) || text.includes(entry.text.trim())) &&
-          (entry.timestampMs === undefined || entry.timestampMs >= typedAtMs),
-      );
+      const binding = typed.ackBaseline
+        ? await resumeAgentSubmitAckBinding(
+            session.agent,
+            {
+              worktreePath: session.worktreePath,
+              codexSessionsDir: this.codexSessionsDir(session.id),
+              ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+            },
+            typed.ackBaseline,
+          )
+        : null;
+      const acked = binding ? (await binding.scan(typed.message)).found : false;
       if (acked) {
         const latest = readSession(this.config.dataDir, sessionId) ?? session;
         const { queuedMessageTyped: _typed, ...cleared } = latest;

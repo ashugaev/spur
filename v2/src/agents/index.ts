@@ -53,6 +53,7 @@ import type {
   ProviderReasoningEffort,
   TranscriptEntry,
   SidecarMcpBinding,
+  SubmitAckBaseline,
 } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
@@ -151,6 +152,7 @@ export interface SubmitAckPacing {
 }
 
 export interface SubmitAckBinding {
+  baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
 }
 
@@ -214,9 +216,13 @@ interface AgentAdapter {
    * Capture a baseline before the message is sent, returning a binding whose
    * `scan` walks only new bytes appended after the send. Returns `null` when
    * no acknowledgment is required (for example, Claude on a fresh session
-   * before any JSONL exists).
+   * before any JSONL exists). `persisted`, this agent's own earlier
+   * baseline, replaces the capture.
    */
-  submitAck?(ctx: AgentSubmitAckContext): Promise<SubmitAckBinding | null>;
+  submitAck?(
+    ctx: AgentSubmitAckContext,
+    persisted?: SubmitAckBaseline,
+  ): Promise<SubmitAckBinding | null>;
 }
 
 function claudePlanOptions(options?: AgentPlanOptions): {
@@ -466,14 +472,18 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
-        freshLaunch: ctx.freshLaunch === true,
-      });
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "claude"
+          ? { file: persisted.file, size: persisted.size }
+          : await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
+              freshLaunch: ctx.freshLaunch === true,
+            });
       if (!baseline) {
         return null;
       }
       return {
+        baseline: { agent: "claude", ...baseline },
         async scan(text) {
           const found = await scanClaudeJsonlForMessage(
             baseline,
@@ -529,9 +539,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureCodexRolloutBaseline(ctx.codexSessionsDir);
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "codex"
+          ? new Map(Object.entries(persisted.offsets))
+          : await captureCodexRolloutBaseline(ctx.codexSessionsDir);
       return {
+        baseline: { agent: "codex", offsets: Object.fromEntries(baseline) },
         async scan(text) {
           return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
         },
@@ -579,12 +593,16 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "cursor"
+          ? { file: persisted.file, size: persisted.size }
+          : await captureCursorSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
       if (!baseline) {
         return null;
       }
       return {
+        baseline: { agent: "cursor", ...baseline },
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,
@@ -623,12 +641,20 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "opencode"
+          ? { sessionId: persisted.sessionId, userMessageIds: new Set(persisted.userMessageIds) }
+          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
       if (!baseline) {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
       }
       return {
+        baseline: {
+          agent: "opencode",
+          sessionId: baseline.sessionId,
+          userMessageIds: [...baseline.userMessageIds],
+        },
         async scan() {
           return {
             found: await scanOpenCodeForNewUserMessage(baseline),
@@ -795,6 +821,20 @@ export async function createAgentSubmitAckBinding(
     return null;
   }
   return adapter.submitAck(ctx);
+}
+
+// Rebinds a scan to a baseline persisted from an earlier binding of the same
+// agent: the same matcher, bounded to turns recorded after that send.
+export async function resumeAgentSubmitAckBinding(
+  agent: AgentName,
+  ctx: AgentSubmitAckContext,
+  baseline: SubmitAckBaseline,
+): Promise<SubmitAckBinding | null> {
+  const adapter = agentAdapter(agent);
+  if (!adapter.submitAck || baseline.agent !== agent) {
+    return null;
+  }
+  return adapter.submitAck(ctx, baseline);
 }
 
 export function agentBusyQueuedSendAwaitsPrompt(agent: AgentName): boolean {

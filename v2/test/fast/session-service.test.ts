@@ -95,6 +95,7 @@ const agentWaitsForSubmitAckMock = vi.fn();
 const agentSubmitAckPacingMock = vi.fn();
 const agentHasLaunchSubmitAckMock = vi.fn();
 const createAgentSubmitAckBindingMock = vi.fn();
+const resumeAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
 const captureOpenCodeSessionBaselineMock = vi.fn();
@@ -495,6 +496,7 @@ vi.mock("../../src/agents/index.js", () => ({
   agentSubmitAckPacing: agentSubmitAckPacingMock,
   agentHasLaunchSubmitAck: agentHasLaunchSubmitAckMock,
   createAgentSubmitAckBinding: createAgentSubmitAckBindingMock,
+  resumeAgentSubmitAckBinding: resumeAgentSubmitAckBindingMock,
   parseAgentName: parseAgentNameMock,
   setupAgentHooks: setupAgentHooksMock,
 }));
@@ -1498,6 +1500,7 @@ describe("SessionService", () => {
     scanCodexRolloutForMessageMock
       .mockReset()
       .mockResolvedValue({ found: true, lastScannedFile: null });
+    resumeAgentSubmitAckBindingMock.mockReset().mockResolvedValue(null);
     createAgentSubmitAckBindingMock
       .mockReset()
       .mockImplementation(async (agent: string, ctx: { codexSessionsDir: string }) => {
@@ -10256,12 +10259,16 @@ describe("SessionService", () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       const service = await liveService();
+      const ackBaseline = { agent: "claude", file: "/t/claude.jsonl", size: 42 } as const;
+      createAgentSubmitAckBindingMock.mockResolvedValue({ baseline: ackBaseline, scan: vi.fn() });
       const releaseAck = gateSubmitAck(service, { found: true });
 
       await service.send("api-1", { message: "first" });
+      // The live ack scan's own baseline, for a restart to rebind to.
       expect(sessions.get("api-1")?.queuedMessageTyped).toEqual({
         message: "first",
         typedAt: expect.any(String),
+        ackBaseline,
       });
 
       releaseAck();
@@ -10270,28 +10277,26 @@ describe("SessionService", () => {
       });
     });
 
-    it("re-queues at the head on restart a message typed with no user turn in the transcript since", async () => {
-      mockClaudeJsonlState("waiting");
-      readAgentConversationMock.mockResolvedValue([
-        {
-          kind: "message",
-          role: "user",
-          text: "typed",
-          timestampMs: Date.parse("2026-03-18T09:00:00.000Z"),
-        },
-      ]);
-      const sessions = createSessionStore();
+    const restartBaseline = { agent: "claude", file: "/t/claude.jsonl", size: 42 } as const;
+
+    function seedTypedBeforeRestart(
+      sessions: ReturnType<typeof createSessionStore>,
+      withBaseline = true,
+    ) {
       sessions.set(
         "api-1",
         runningSession({
           queuedMessages: { messages: ["later"], awaitingPrompt: true },
-          queuedMessageTyped: { message: "typed", typedAt: "2026-03-18T10:04:00.000Z" },
+          queuedMessageTyped: {
+            message: "typed",
+            typedAt: "2026-03-18T10:04:00.000Z",
+            ...(withBaseline ? { ackBaseline: restartBaseline } : {}),
+          },
         }),
       );
-      createAgentSubmitAckBindingMock.mockResolvedValue(null);
+    }
 
-      await liveService();
-
+    async function expectRequeuedOnBoot(sessions: ReturnType<typeof createSessionStore>) {
       await waitForRealTime(() => {
         expect(logSpurEventMock).toHaveBeenCalledWith(
           TEST_DATA_DIR,
@@ -10302,38 +10307,71 @@ describe("SessionService", () => {
         expect(typedMessages()[0]).toBe("typed");
       });
       expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+    }
+
+    it("re-queues at the head on restart when the rebound ack scan finds no turn past the baseline", async () => {
+      mockClaudeJsonlState("waiting");
+      const scan = vi.fn().mockResolvedValue({ found: false, lastScannedFile: null });
+      resumeAgentSubmitAckBindingMock.mockResolvedValue({ baseline: restartBaseline, scan });
+      createAgentSubmitAckBindingMock.mockResolvedValue(null);
+      const sessions = createSessionStore();
+      seedTypedBeforeRestart(sessions);
+
+      await liveService();
+
+      await expectRequeuedOnBoot(sessions);
+      expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+        "claude",
+        expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+        restartBaseline,
+      );
+      expect(scan).toHaveBeenCalledWith("typed");
     });
 
-    it("clears the typed marker on restart when the transcript shows the turn", async () => {
+    it("drops a leftover typed marker with the queue on kill", async () => {
       mockClaudeJsonlState("waiting");
-      readAgentConversationMock.mockResolvedValue([
-        {
-          kind: "message",
-          role: "user",
-          text: "typed",
-          timestampMs: Date.parse("2026-03-18T10:04:00.500Z"),
-        },
-      ]);
+      // Seeded after construction: boot recovery never sees it.
+      const service = await createDisposedSessionService();
       const sessions = createSessionStore();
-      sessions.set(
-        "api-1",
-        runningSession({
-          queuedMessages: { messages: [], awaitingPrompt: true },
-          queuedMessageTyped: { message: "typed", typedAt: "2026-03-18T10:04:00.000Z" },
-        }),
-      );
+      seedTypedBeforeRestart(sessions);
+
+      await service.kill("api-1", { skipPrCheck: true });
+
+      expect(sessions.get("api-1")?.status).toBe("killed");
+      expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    });
+
+    it("re-queues at the head on restart when the marker carries no ack baseline", async () => {
+      mockClaudeJsonlState("waiting");
+      createAgentSubmitAckBindingMock.mockResolvedValue(null);
+      const sessions = createSessionStore();
+      seedTypedBeforeRestart(sessions, false);
+
+      await liveService();
+
+      await expectRequeuedOnBoot(sessions);
+      expect(resumeAgentSubmitAckBindingMock).not.toHaveBeenCalled();
+    });
+
+    it("clears the typed marker on restart when the rebound ack scan finds the turn", async () => {
+      mockClaudeJsonlState("waiting");
+      const scan = vi.fn().mockResolvedValue({ found: true, lastScannedFile: null });
+      resumeAgentSubmitAckBindingMock.mockResolvedValue({ baseline: restartBaseline, scan });
+      const sessions = createSessionStore();
+      seedTypedBeforeRestart(sessions);
 
       await liveService();
 
       await waitForRealTime(() => {
         expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
       });
-      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
       expect(logSpurEventMock).not.toHaveBeenCalledWith(
         TEST_DATA_DIR,
         expect.objectContaining({ event: "session.message.requeued" }),
       );
-      expect(typedMessages()).toEqual([]);
+      expect(typedMessages()).not.toContain("typed");
     });
   });
 
