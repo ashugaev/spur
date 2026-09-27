@@ -887,8 +887,10 @@ export function canHandoff(session: DashboardSession): boolean {
   );
 }
 
+// A spawning session takes queued messages before its pane exists; the daemon
+// holds them until the launch prompt is in.
 export function canSendMessage(session: DashboardSession): boolean {
-  return session.runtimeAlive && !isTerminalSession(session);
+  return (session.runtimeAlive || session.status === "spawning") && !isTerminalSession(session);
 }
 
 export interface ConversationMessage {

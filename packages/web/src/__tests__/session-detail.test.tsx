@@ -3288,6 +3288,85 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  describe("while the session is spawning", () => {
+    function mockSpawningSessionFetch(
+      sendResponse: () => Response = () => new Response(JSON.stringify({ ok: true })),
+    ) {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(sessionFixture({ status: "spawning", runtimeAlive: false })),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), {
+            status: 200,
+          });
+        }
+        if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+          return sendResponse();
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+    }
+
+    it("labels the session starting, keeps Queue, and disables Send now with the reason", async () => {
+      mockSpawningSessionFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Queued while starting" } });
+
+      expect(screen.getByText("starting")).toBeInTheDocument();
+      expect(screen.queryByText("working")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Queue" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /Send now/ })).toBeDisabled();
+      expect(
+        screen.getByText("Session is starting. Queued messages send after launch."),
+      ).toBeInTheDocument();
+    });
+
+    it("queues from the primary hotkey instead of sending now", async () => {
+      const fetchMock = mockSpawningSessionFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Queued by hotkey" } });
+      fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/send", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "Queued by hotkey", queue: true }),
+        });
+      });
+    });
+
+    it("shows the daemon's refusal message when a send is rejected", async () => {
+      mockSpawningSessionFetch(
+        () =>
+          new Response(JSON.stringify({ error: "Session is still starting: api-a1" }), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+      render(<SessionDetail sessionId="api-a1" />);
+
+      const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Refused" } });
+      fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+
+      expect(await screen.findByText("Session is still starting: api-a1")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("Refused");
+    });
+  });
+
   it("renders the full queued stack in FIFO order", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

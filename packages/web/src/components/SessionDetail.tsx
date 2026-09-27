@@ -2499,6 +2499,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return session.state;
   }, [conversation?.state, session]);
 
+  // The daemon queues a send to a spawning session and refuses Send now (409).
+  const sessionStarting = session?.status === "spawning";
   const hasSession = Boolean(session);
   const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
 
@@ -2929,7 +2931,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
             <TagsContext.Provider value={tagsContextValue}>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {displayState ? (
+                  <ActivityDot activity={sessionStarting ? "starting" : displayState} />
+                ) : null}
                 {session.branch ? (
                   <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                     {session.branch}
@@ -3278,7 +3282,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         }
                         if (isPrimarySubmitHotkey(event)) {
                           event.preventDefault();
-                          void doSend({ queue: false, interrupt: true });
+                          void doSend(
+                            sessionStarting ? { queue: true } : { queue: false, interrupt: true },
+                          );
                         }
                       }}
                       onRemoveAttachment={(index) =>
@@ -3300,6 +3306,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
                           <VoiceStatusHint voice={voice} />
+                        ) : sessionStarting ? (
+                          "Session is starting. Queued messages send after launch."
                         ) : null}
                       </span>
                       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -3334,7 +3342,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           aria-label={busyAction === "send" ? "Sending message" : undefined}
                           type="button"
                           disabled={
-                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                            sessionStarting ||
+                            busyAction !== null ||
+                            (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
