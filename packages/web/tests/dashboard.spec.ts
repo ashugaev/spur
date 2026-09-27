@@ -27,6 +27,73 @@ import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
 
+test("token counts preserve exhaustion, rounding, and meaningful keyboard stops", async ({
+  page,
+}, testInfo) => {
+  const measured = makeWorkingSession({
+    id: "token-boundary",
+    tokenUsageView: {
+      status: "available",
+      provider: "codex",
+      inputTokens: 999500,
+      outputTokens: 0,
+      totalTokens: 999500,
+      exhausted: true,
+    },
+    tokenBudgetView: {
+      budget: 1000000,
+      knownTotalTokens: 999500,
+      exhausted: false,
+      enforced: true,
+    },
+  });
+  await mockSessions(page, [
+    measured,
+    makeWorkingSession({ id: "token-empty" }),
+    makeWorkingSession({
+      id: "token-unknown",
+      preflightTokenUsageView: {
+        status: "unknown",
+        attemptCount: 1,
+        unknownAttemptCount: 1,
+        providerIterationCount: 0,
+      },
+    }),
+  ]);
+  await page.goto("/");
+  const count = page.getByLabel("Tokens: 999,500", { exact: true });
+  await expect(count).toHaveText("1M");
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-error);");
+  await count.focus();
+  await expect(page.getByRole("tooltip")).toContainText("Stopped by token budget");
+  await page.screenshot({ path: testInfo.outputPath("conflicting-exhaustion.png") });
+  const dashes = page.getByLabel("Tokens: unavailable", { exact: true });
+  await expect(dashes).toHaveCount(2);
+  const unknown = page.locator('[aria-label="Tokens: unavailable"][tabindex="0"]');
+  await expect(unknown).toHaveCount(1);
+  await unknown.focus();
+  await expect(page.getByRole("tooltip")).toContainText("Unknown attempts");
+  await page.screenshot({ path: testInfo.outputPath("unknown-preflight-focus.png") });
+  await expect(page.locator('[aria-label="Tokens: unavailable"]:not([tabindex])')).toHaveCount(1);
+  await mockSessions(page, [
+    {
+      ...measured,
+      tokenBudgetView: {
+        budget: 1000000,
+        knownTotalTokens: 999500,
+        exhausted: false,
+        overridden: true,
+        enforced: false,
+      },
+    },
+  ]);
+  await page.reload();
+  await expect(count).toHaveAttribute("style", "color: var(--color-text-secondary);");
+  await count.focus();
+  await expect(page.getByRole("tooltip")).toContainText("Limit ignored");
+  await page.screenshot({ path: testInfo.outputPath("override.png") });
+});
+
 test("token count shows budget tone and isolated hover card, hides on mobile", async ({ page }) => {
   await mockSessions(page, [
     makeWorkingSession({

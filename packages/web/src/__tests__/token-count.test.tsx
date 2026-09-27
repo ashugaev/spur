@@ -28,6 +28,7 @@ describe("TokenCount", () => {
         }}
       />,
     );
+    expect(screen.getByLabelText("Tokens: unavailable")).toHaveAttribute("tabindex", "0");
     fireEvent.focus(screen.getByLabelText("Tokens: unavailable"));
     expect(screen.getByRole("tooltip")).toHaveTextContent("Pre-flight statusunknown");
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
@@ -77,6 +78,51 @@ describe("TokenCount", () => {
     expect(screen.getByText("184.2K of 500K · 37%")).toBeInTheDocument();
   });
   it.each([
+    [999499, "999K"],
+    [999500, "1M"],
+    [999999, "1M"],
+    [1000000, "1M"],
+    [1200000, "1.2M"],
+  ])("formats the million boundary %i as %s", (totalTokens, expected) => {
+    render(
+      <TokenCount
+        sidebar
+        session={{ tokenUsageView: { ...usage, totalTokens, budget: totalTokens } }}
+      />,
+    );
+    expect(screen.getByLabelText(`Tokens: ${totalTokens.toLocaleString()}`)).toHaveTextContent(
+      `${expected} / ${expected}`,
+    );
+  });
+
+  it.each([false, true])("uses either exhaustion signal unless overridden=%s", (overridden) => {
+    render(
+      <TokenCount
+        session={{
+          tokenUsageView: { ...usage, exhausted: true },
+          tokenBudgetView: {
+            budget: 1000,
+            knownTotalTokens: 800,
+            exhausted: false,
+            enforced: !overridden,
+            overridden,
+          },
+        }}
+      />,
+    );
+    const count = screen.getByLabelText("Tokens: 800");
+    expect(count).toHaveAttribute(
+      "style",
+      `color: var(--color-${overridden ? "text-secondary" : "status-error"});`,
+    );
+    expect(count.classList.contains("font-bold")).toBe(!overridden);
+    fireEvent.focus(count);
+    expect(
+      screen.getByText(overridden ? "Limit ignored" : "Stopped by token budget"),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
     undefined,
     { status: "waiting", provider: "codex", exhausted: false } as const,
     {
@@ -90,6 +136,7 @@ describe("TokenCount", () => {
     render(<TokenCount session={{ tokenUsageView }} />);
     const count = screen.getByLabelText("Tokens: unavailable");
     expect(count).toHaveTextContent("—");
+    expect(count).not.toHaveAttribute("tabindex");
     fireEvent.focus(count);
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });

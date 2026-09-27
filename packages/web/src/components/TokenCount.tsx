@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useLayoutEffect, useRef, useState } from "react";
-import type { SpurSessionView } from "@/lib/types";
+import { isTokenBudgetBlocked, type SpurSessionView } from "@/lib/types";
 
 type TokenSession = Pick<
   SpurSessionView,
@@ -10,8 +10,10 @@ type TokenSession = Pick<
 
 function compact(value: number, precise = false): string {
   if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`;
-  if (value >= 1_000)
-    return `${precise ? Number((value / 1_000).toFixed(1)) : Math.round(value / 1_000)}K`;
+  if (value >= 1_000) {
+    const thousands = precise ? Number((value / 1_000).toFixed(1)) : Math.round(value / 1_000);
+    return thousands >= 1_000 ? "1M" : `${thousands}K`;
+  }
   return value.toLocaleString();
 }
 
@@ -53,7 +55,7 @@ export function TokenCount({
   const total = budget?.knownTotalTokens ?? (main?.totalTokens ?? 0) + (measured?.totalTokens ?? 0);
   const available = Boolean(main || measured || total > 0);
   const hasDetails = available || Boolean(preflight);
-  const hit = !budget?.overridden && (budget?.exhausted ?? main?.exhausted ?? false);
+  const hit = isTokenBudgetBlocked(session);
   const unenforced =
     limit !== undefined &&
     (budget
@@ -94,7 +96,7 @@ export function TokenCount({
       onMouseLeave={() => setHovered(false)}
     >
       <span
-        tabIndex={0}
+        tabIndex={hasDetails ? 0 : undefined}
         aria-label={`Tokens: ${available ? `${unenforced ? "at least " : ""}${total.toLocaleString()}` : "unavailable"}`}
         aria-describedby={hasDetails && (hovered || focused) ? id : undefined}
         onFocus={() => setFocused(true)}
