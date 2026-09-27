@@ -67,6 +67,7 @@ import {
 } from "./update-health.js";
 import { getVersion } from "./version.js";
 import { resolveAgentExecutable } from "./agents/executable.js";
+import { ensureCursorTokenUsageHook } from "./cursor-token-usage.js";
 
 // C2: below this available-KB/free-inode floor, `data-dir-disk-space` reports
 // an error — deliberately low so a normal dev/CI host's disk is never flagged.
@@ -1690,6 +1691,9 @@ export function runNpmInit(
     args.push("--web-port", options.webPort);
   }
   args.push(options.tailscale === false ? "--no-tailscale" : "--tailscale");
+  if (!ensureCursorTokenUsageHook()) {
+    writeStderr("spur: Cursor token hook setup skipped; existing hooks were preserved");
+  }
   execFileSync("bash", [script, ...args], { stdio: "inherit" });
   // Refreshes ~/.claude/skills and ~/.codex/skills for every `spur init` /
   // `update` / `reinit` / `POST /deploy/switch` / auto-update tick — the

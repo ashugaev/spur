@@ -606,4 +606,6 @@ Pin a version by hand while auto-update is on: turn `autoUpdate` off first — [
 
 ## spur init (npm host flags)
 
+`spur init`, `update`, and `reinit` install Cursor's token collector in `~/.cursor/spur-cursor-token-usage.mjs` and append its stop hook to `~/.cursor/hooks.json`. Existing hooks stay intact. Malformed or unwritable config skips metering without blocking setup; Cursor spawn retries installation. The collector does nothing outside Spur sessions. Claude, Codex, and OpenCode token accounting reads native structured usage without metering hooks. Codex lifecycle hooks remain session-scoped.
+
 `spur init` installs the `spur-daemon`/`spur-web` systemd user units. Flags: `--no-start`; `--expose-web` (public `0.0.0.0` bind, default `127.0.0.1`); `--web-port <port>` (default `5555`); `--tailscale`/`--no-tailscale` (default on — widens `spur-web.service` `WEB_HOST` to `127.0.0.1,<tailnet-ip>` once the tailnet is up; loopback stays bound; never `0.0.0.0`). `--expose-web` is the explicit public override and supersedes Tailscale. `WEB_HOST` takes a comma-separated host list (`packages/web/server/web-hosts.ts`); `spur-web`'s production server binds one listener per host. Full walkthrough: [install-from-npm.md](install-from-npm.md).

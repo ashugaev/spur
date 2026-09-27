@@ -1,5 +1,7 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { TokenUsageTotals } from "./types.js";
@@ -10,12 +12,12 @@ const SCRIPT_NAME = "spur-cursor-token-usage.mjs";
 // Keep one snapshot per provider generation: repeated stop delivery must not add usage.
 const SCRIPT = `import { mkdir, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
+const configDir = process.env.CURSOR_CONFIG_DIR;
+if (!process.env.SPUR_SESSION || !configDir) process.exit(0);
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 try {
   const value = JSON.parse(input);
-  const configDir = process.env.CURSOR_CONFIG_DIR;
-  if (!configDir) process.exit(0);
   if (typeof value.conversation_id !== 'string' || typeof value.generation_id !== 'string') process.exit(0);
   const usage = Object.fromEntries(['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'].map(key => [key, value[key]]));
   if (!Object.values(usage).every(value => Number.isSafeInteger(value) && value >= 0)) process.exit(0);
@@ -28,47 +30,68 @@ try {
 } catch { /* Metering must never block the provider. */ }
 `;
 
-export async function ensureCursorTokenUsageHook(
-  worktreePath: string,
-  configDir: string,
-): Promise<void> {
-  await mkdir(configDir, { recursive: true });
-  const hooksDir = join(worktreePath, ".cursor");
-  await mkdir(hooksDir, { recursive: true });
-  // Shared-workspace sessions execute the same hook with their own launch environment.
-  const scriptPath = join(hooksDir, SCRIPT_NAME);
-  const scriptTemp = `${scriptPath}.${randomUUID()}.tmp`;
-  await writeFile(scriptTemp, SCRIPT, "utf8");
-  await rename(scriptTemp, scriptPath);
-  const hooksPath = join(hooksDir, "hooks.json");
-  let config: Record<string, unknown> = { version: 1 };
+export function ensureCursorTokenUsageHook(home = homedir()): boolean {
+  const dir = join(home, ".cursor");
+  const lock = join(dir, ".spur-token-usage.lock");
+  let locked = false;
+  const temporary: string[] = [];
   try {
-    const parsed: unknown = JSON.parse(await readFile(hooksPath, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Invalid Cursor hooks configuration");
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(lock);
+    locked = true;
+    const path = join(dir, "hooks.json");
+    const readConfig = () => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    };
+    const original = readConfig();
+    const config: unknown =
+      original === undefined ? { version: 1, hooks: {} } : JSON.parse(original);
+    if (!config || typeof config !== "object" || Array.isArray(config)) return false;
+    const record = config as Record<string, unknown>;
+    if (record.version !== 1) return false;
+    const hooks = record.hooks;
+    if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return false;
+    const entries = hooks as Record<string, unknown>;
+    if (entries.stop !== undefined && !Array.isArray(entries.stop)) return false;
+    const stop = (entries.stop ?? []) as unknown[];
+    const scriptPath = join(dir, SCRIPT_NAME);
+    const command = `node ${shellEscape(scriptPath)}`;
+    const scriptTemp = `${scriptPath}.${randomUUID()}.tmp`;
+    temporary.push(scriptTemp);
+    writeFileSync(scriptTemp, SCRIPT, "utf8");
+    renameSync(scriptTemp, scriptPath);
+    const ownIndex = stop.findIndex(
+      (entry) =>
+        entry && typeof entry === "object" && "command" in entry && entry.command === command,
+    );
+    const own = ownIndex >= 0 ? (stop[ownIndex] as Record<string, unknown>) : undefined;
+    if (own?.timeout === 30) return true;
+    entries.stop = own
+      ? stop.map((entry, index) => (index === ownIndex ? { ...own, timeout: 30 } : entry))
+      : [...stop, { command, timeout: 30 }];
+    const temp = `${path}.${randomUUID()}.tmp`;
+    temporary.push(temp);
+    writeFileSync(temp, JSON.stringify(config, null, 2) + "\n", "utf8");
+    // Do not overwrite an editor's change made while preparing our additive update.
+    if (readConfig() !== original) return false;
+    renameSync(temp, path);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    for (const path of [...temporary, ...(locked ? [lock] : [])]) {
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch {
+        /* Cleanup must not block launch. */
+      }
     }
-    config = parsed as Record<string, unknown>;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const hooks = config["hooks"];
-  if (hooks !== undefined && (!hooks || typeof hooks !== "object" || Array.isArray(hooks))) {
-    throw new Error("Invalid Cursor hooks configuration");
-  }
-  const entries = { ...(hooks as Record<string, unknown> | undefined) };
-  const stop = entries["stop"];
-  if (stop !== undefined && !Array.isArray(stop)) throw new Error("Invalid Cursor stop hooks");
-  entries["stop"] = [
-    ...(Array.isArray(stop) ? stop : []).filter((entry: unknown) => {
-      if (!entry || typeof entry !== "object") return true;
-      const command = (entry as Record<string, unknown>)["command"];
-      return typeof command !== "string" || !command.includes(SCRIPT_NAME);
-    }),
-    { command: `node ${shellEscape(scriptPath)}`, timeout: 5 },
-  ];
-  const temp = `${hooksPath}.${randomUUID()}.tmp`;
-  await writeFile(temp, JSON.stringify({ ...config, hooks: entries }, null, 2) + "\n");
-  await rename(temp, hooksPath);
 }
 
 export async function readCursorTokenUsage(

@@ -12,6 +12,8 @@ Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config. A missi
 
 Commands that never reach that guard: `init`/`reinit` bootstrap the default path only; `doctor` and `cache` never bootstrap; `update`/`update-monitor` fall back to default port resolution rather than failing, so a typo'd `SPUR_CONFIG` there probes `4310` instead of exiting non-zero.
 
+Host setup and Cursor hook installation: [spur init](configuration.md#spur-init-npm-host-flags).
+
 ## Session tools and environment
 
 `$SPUR_SESSION_TOOL_DIR` on `PATH`, holding session-bound wrappers:

@@ -531,9 +531,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (cursorConfigDir) {
-        await ensureCursorTokenUsageHook(worktreePath, cursorConfigDir).catch(() => {
-          // Missing metering must not prevent agent activation.
-        });
+        ensureCursorTokenUsageHook();
       }
       if (restrictWrites && cursorConfigDir) {
         await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);

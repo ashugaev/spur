@@ -289,6 +289,7 @@ ${args.extraProjectYaml ?? ""}
 
 async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<T>): Promise<T> {
   const saved = {
+    DISABLE_AUTO_UPDATE: process.env.DISABLE_AUTO_UPDATE,
     SPUR_CONFIG: process.env.SPUR_CONFIG,
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
@@ -296,6 +297,7 @@ async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<
     SPUR_OPENCODE_BIN: process.env.SPUR_OPENCODE_BIN,
   };
   process.env.SPUR_CONFIG = configPath;
+  process.env.DISABLE_AUTO_UPDATE = "true";
   if (CLAUDE_BIN) {
     process.env.SPUR_CLAUDE_BIN = CLAUDE_BIN;
   }
@@ -312,6 +314,8 @@ async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<
   try {
     return await fn();
   } finally {
+    if (saved.DISABLE_AUTO_UPDATE === undefined) delete process.env.DISABLE_AUTO_UPDATE;
+    else process.env.DISABLE_AUTO_UPDATE = saved.DISABLE_AUTO_UPDATE;
     if (saved.SPUR_CONFIG === undefined) delete process.env.SPUR_CONFIG;
     else process.env.SPUR_CONFIG = saved.SPUR_CONFIG;
     if (saved.SPUR_CLAUDE_BIN === undefined) {
@@ -368,12 +372,14 @@ async function assertStructuredMainUsage(
   session: SessionView,
   service: Awaited<ReturnType<typeof startServer>>,
   dataDir: string,
-): Promise<void> {
+  previousTotal = 0,
+): Promise<number> {
   const withUsage = await pollUntil(() => service.get(session.id), {
     timeoutMs: 60_000,
     accept: (state) =>
-      state.tokenUsageView?.status === "available" && state.tokenUsageView.totalTokens > 0,
-    label: `structured ${agent} usage after follow-up`,
+      state.tokenUsageView?.status === "available" &&
+      state.tokenUsageView.totalTokens > previousTotal,
+    label: `structured ${agent} usage after provider turn`,
   });
   const view = withUsage.tokenUsageView;
   expect(view).toMatchObject({ status: "available", provider: agent });
@@ -449,6 +455,7 @@ async function assertStructuredMainUsage(
       "utf8",
     );
   }
+  return settledView.totalTokens;
 }
 
 async function runSmoke(
@@ -531,6 +538,29 @@ After the file and the session metadata are set, wait for more instructions.${ag
       });
       cleanupItem.branch = session.branch;
       cleanupItem.worktreePath = session.worktreePath;
+      if (agent === "cursor") {
+        // The harness owns lifecycle validation; keep automatic ToDo nudges out of provider turns.
+        const ledger = await service.mutateTodo(
+          session.id,
+          {
+            action: "add",
+            text: "Run isolated lifecycle proof",
+            reason: "Smoke harness owns this step",
+          },
+          { kind: "human", origin: "cli" },
+        );
+        const item = ledger.items.at(-1);
+        if (!item) throw new Error("Missing smoke ToDo item");
+        await service.mutateTodo(
+          session.id,
+          {
+            action: "complete",
+            itemId: item.id,
+            reason: "Provider task is supplied by the smoke harness",
+          },
+          { kind: "human", origin: "cli" },
+        );
+      }
       if (expectedPreflightBranch) {
         expect(session.branch).toBe(expectedPreflightBranch);
         expect(session.branchSource).toBe("preflight");
@@ -559,6 +589,9 @@ After the file and the session metadata are set, wait for more instructions.${ag
         expect(links).toEqual(expectedLinkPairs);
       }
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
+
+      const initialUsage =
+        agent === "cursor" ? await assertStructuredMainUsage(agent, session, service, dataDir) : 0;
 
       if (agent === "claude" || agent === "cursor") {
         await service.pause(session.id);
@@ -600,7 +633,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
         accept: Boolean,
       });
       expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
-      await assertStructuredMainUsage(agent, session, service, dataDir);
+      await assertStructuredMainUsage(agent, session, service, dataDir, initialUsage);
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");

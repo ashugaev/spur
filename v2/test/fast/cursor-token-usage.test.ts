@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ const dirs: string[] = [];
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), "cursor-usage-test-"));
   dirs.push(dir);
-  await ensureCursorTokenUsageHook(dir, join(dir, "config"));
+  await ensureCursorTokenUsageHook(dir);
   return dir;
 }
 async function report(
@@ -17,12 +17,13 @@ async function report(
   generation: string,
   usage: Record<string, unknown> = {},
   configDir = join(dir, "config"),
+  spurSession: string | undefined = "test-session",
 ) {
   await new Promise<void>((resolve, reject) => {
     const child = execFile(
       process.execPath,
       [join(dir, ".cursor", "spur-cursor-token-usage.mjs")],
-      { env: { ...process.env, CURSOR_CONFIG_DIR: configDir } },
+      { env: { ...process.env, CURSOR_CONFIG_DIR: configDir, SPUR_SESSION: spurSession } },
       (error) => (error ? reject(error) : resolve()),
     );
     child.stdin?.end(
@@ -46,10 +47,7 @@ describe("Cursor structured stop usage", () => {
   it("routes concurrent shared-workspace sessions to their own config directories", async () => {
     const dir = await setup();
     const second = join(dir, "second-config");
-    await Promise.all([
-      ensureCursorTokenUsageHook(dir, join(dir, "config")),
-      ensureCursorTokenUsageHook(dir, second),
-    ]);
+    await Promise.all([ensureCursorTokenUsageHook(dir), ensureCursorTokenUsageHook(dir)]);
     await Promise.all([report(dir, "first"), report(dir, "second", { output_tokens: 40 }, second)]);
     expect((await readCursorTokenUsage(join(dir, "config"), "chat"))?.totalTokens).toBe(120);
     expect((await readCursorTokenUsage(second, "chat"))?.totalTokens).toBe(140);
@@ -58,10 +56,11 @@ describe("Cursor structured stop usage", () => {
   });
   it("does not fail the provider when the usage destination cannot be written", async () => {
     const dir = await setup();
-    const blocked = join(dir, "blocked-config");
+    const blocked = join(dir, "config", "token-usage");
+    await mkdir(join(dir, "config"));
     await writeFile(blocked, "not a directory");
-    await expect(report(dir, "first", {}, blocked)).resolves.toBeUndefined();
-    expect(await readCursorTokenUsage(blocked, "chat")).toBeUndefined();
+    await expect(report(dir, "first")).resolves.toBeUndefined();
+    expect(await readCursorTokenUsage(join(dir, "config"), "chat")).toBeUndefined();
   });
   it("reads counters captured from a live interactive Cursor stop hook", async () => {
     const dir = await setup();
@@ -113,7 +112,7 @@ describe("Cursor structured stop usage", () => {
     await writeFile(join(usageDir, file), "not json");
     expect(await readCursorTokenUsage(join(dir, "config"), "chat")).toBeUndefined();
   });
-  it("preserves existing hooks and installs one collector", async () => {
+  it("preserves existing user hooks and installs one additive collector", async () => {
     const dir = await setup();
     const path = join(dir, ".cursor", "hooks.json");
     await writeFile(
@@ -123,11 +122,51 @@ describe("Cursor structured stop usage", () => {
         hooks: { stop: [{ command: "custom" }], beforeShellExecution: [{ command: "guard" }] },
       }),
     );
-    await ensureCursorTokenUsageHook(dir, join(dir, "config"));
-    await ensureCursorTokenUsageHook(dir, join(dir, "config"));
+    await ensureCursorTokenUsageHook(dir);
+    const before = await readFile(path, "utf8");
+    await ensureCursorTokenUsageHook(dir);
     const config = JSON.parse(await readFile(path, "utf8"));
+    expect(await readFile(path, "utf8")).toBe(before);
     expect(config.hooks.stop).toHaveLength(2);
     expect(config.hooks.stop[0]).toEqual({ command: "custom" });
     expect(config.hooks.beforeShellExecution).toEqual([{ command: "guard" }]);
+    expect(await readdir(join(dir, ".cursor"))).toEqual([
+      "hooks.json",
+      "spur-cursor-token-usage.mjs",
+    ]);
+  });
+  it("does nothing outside a Spur session", async () => {
+    const dir = await setup();
+    await report(dir, "outside", {}, join(dir, "config"), "");
+    expect(await readCursorTokenUsage(join(dir, "config"), "chat")).toBeUndefined();
+  });
+  it("upgrades its own hook deadline without duplicating or changing user hooks", async () => {
+    const dir = await setup();
+    const path = join(dir, ".cursor", "hooks.json");
+    const config = JSON.parse(await readFile(path, "utf8"));
+    config.hooks.stop[0].timeout = 5;
+    config.hooks.stop.push({ command: "custom", timeout: 2 });
+    await writeFile(path, JSON.stringify(config));
+    expect(ensureCursorTokenUsageHook(dir)).toBe(true);
+    const updated = JSON.parse(await readFile(path, "utf8"));
+    expect(updated.hooks.stop).toHaveLength(2);
+    expect(updated.hooks.stop[0].timeout).toBe(30);
+    expect(updated.hooks.stop[1]).toEqual({ command: "custom", timeout: 2 });
+  });
+  it("leaves malformed config and a concurrent installer untouched", async () => {
+    const dir = await setup();
+    const path = join(dir, ".cursor", "hooks.json");
+    await writeFile(path, "not json");
+    expect(await ensureCursorTokenUsageHook(dir)).toBe(false);
+    expect(await readFile(path, "utf8")).toBe("not json");
+    await mkdir(join(dir, ".cursor", ".spur-token-usage.lock"));
+    expect(await ensureCursorTokenUsageHook(dir)).toBe(false);
+    expect(await readFile(path, "utf8")).toBe("not json");
+  });
+  it("fails open when the hook directory cannot be written", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cursor-unwritable-"));
+    dirs.push(dir);
+    await writeFile(join(dir, ".cursor"), "not a directory");
+    expect(await ensureCursorTokenUsageHook(dir)).toBe(false);
   });
 });
