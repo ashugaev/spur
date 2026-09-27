@@ -3331,6 +3331,42 @@ describe("SessionDetail voice input", () => {
       ).toBeInTheDocument();
     });
 
+    it("disables sending a queued row now while keeping its remove button", async () => {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                status: "spawning",
+                runtimeAlive: false,
+                queuedMessages: { messages: ["Queued while starting"], awaitingPrompt: true },
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), {
+            status: 200,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(
+        await screen.findByRole("button", { name: "Send queued message #1 now" }),
+      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Remove queued message #1" })).toBeEnabled();
+      expect(
+        screen.getByText("Session is starting. Queued messages send after launch."),
+      ).toBeInTheDocument();
+    });
+
     it("queues from the primary hotkey instead of sending now", async () => {
       const fetchMock = mockSpawningSessionFetch();
       render(<SessionDetail sessionId="api-a1" />);

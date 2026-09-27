@@ -3193,7 +3193,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                   label={`Send queued message #${index + 1} now`}
                                   busyLabel={`Sending queued message #${index + 1}…`}
                                   busy={flushBusy}
-                                  disabled={busyAction !== null}
+                                  disabled={sessionStarting || busyAction !== null}
                                   onClick={() =>
                                     void handleQueueAction("flush", queuedMessage, index)
                                   }
