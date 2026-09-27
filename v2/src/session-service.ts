@@ -222,11 +222,7 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import {
-  PreflightArtifactError,
-  runSpawnPreflight,
-  type SpawnPreflightResult,
-} from "./preflight.js";
+import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
@@ -2557,7 +2553,6 @@ async function runSpawnPreflightForSpawn(args: {
         });
       preflight = args.runAttempt ? await args.runAttempt(execute) : await execute();
     } catch (error) {
-      if (error instanceof PreflightArtifactError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
       feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
@@ -5468,7 +5463,16 @@ export class SessionService {
     session: SessionRecord,
   ): Promise<SessionRecord | undefined> {
     if (!this.tokenBudgetActivationError(session)) return undefined;
-    await this.teardownSessionSidecars(session);
+    try {
+      await this.teardownSessionSidecars(session);
+    } catch (error) {
+      this.logEvent("session.token_budget.teardown_failed", {
+        level: "error",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Sidecar teardown failed after token budget exhaustion for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
     const limited: SessionRecord = {
       ...this.sessionWithReleasedSidecarPorts(session),
       status: "budget_limited",
@@ -11482,8 +11486,7 @@ export class SessionService {
       return "completed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const terminalPreflightFailure =
-        error instanceof SpawnPreflightError || error instanceof PreflightArtifactError;
+      const terminalPreflightFailure = error instanceof SpawnPreflightError;
       const finalFailure =
         terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
       await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
@@ -14822,11 +14825,18 @@ export class SessionService {
     if (request.overrideTokenBudget === true) {
       if (
         session.status !== "budget_limited" &&
-        !(session.status === "stopped" && session.stopReason === "token_budget")
+        !(session.status === "stopped" && session.stopReason === "token_budget") &&
+        !(
+          this.tokenBudgetActivationError(session) &&
+          isRestorableSession(await this.enrich(session))
+        )
       ) {
         throw new Error(`Session ${sessionId} is not budget-limited`);
       }
-      session = { ...session, tokenBudgetOverride: true };
+      session = {
+        ...(readSession(this.config.dataDir, sessionId) ?? session),
+        tokenBudgetOverride: true,
+      };
       writeSession(this.config.dataDir, session);
     }
     this.assertTokenBudgetAllowsActivation(session);

@@ -526,7 +526,6 @@ vi.mock("../../src/config.js", () => ({
 }));
 
 vi.mock("../../src/preflight.js", () => ({
-  PreflightArtifactError: class PreflightArtifactError extends Error {},
   PreflightBranchValidationError: MockPreflightBranchValidationError,
   runSpawnPreflight: runSpawnPreflightMock,
 }));
@@ -3560,6 +3559,37 @@ describe("SessionService", () => {
     },
   );
 
+  it.each(["spawn", "background"] as const)(
+    "launches OpenCode %s after pre-flight usage is unavailable",
+    async (path) => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            tokenBudget: 100,
+            preflight: { prompt: "Choose a branch" },
+          },
+        },
+      });
+      runSpawnPreflightMock.mockResolvedValueOnce({ branch: "feature/unmetered" });
+      const sessions = createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const request = { project: "api", agent: "opencode" as const, prompt: "hello" };
+      const result =
+        path === "spawn" ? await service.spawn(request) : await service.spawnInBackground(request);
+      await vi.waitFor(() => expect(sessions.get(result.id)?.status).toBe("running"));
+      expect(sessions.get(result.id)).toMatchObject({
+        branch: "feature/unmetered",
+        preflightTokenUsage: { status: "unknown", unknownAttemptCount: 1 },
+      });
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    },
+  );
+
   it("rejects an unavailable explicit OpenCode model before preparing a background spawn", async () => {
     validateOpenCodeModelMock.mockRejectedValueOnce(
       new Error('OpenCode model "openai/missing" is not available'),
@@ -4753,9 +4783,14 @@ describe("SessionService", () => {
     ).toBe(true);
   });
 
-  it.each(["spawn", "spawnInBackground"] as const)(
-    "holds %s after claiming exhausted preview usage until approval",
-    async (spawnMethod) => {
+  it.each([
+    ["spawn", false],
+    ["spawn", true],
+    ["spawnInBackground", false],
+    ["spawnInBackground", true],
+  ] as const)(
+    "holds %s after claiming exhausted preview usage until approval (teardown fails: %s)",
+    async (spawnMethod, teardownFails) => {
       const config = {
         ...baseConfig(),
         projects: {
@@ -4779,6 +4814,12 @@ describe("SessionService", () => {
         projects: { api: { ...config.projects.api, tokenBudget: 50 } },
       });
       const budgeted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      if (teardownFails) {
+        vi.spyOn(
+          budgeted as unknown as { teardownSessionSidecars: () => Promise<void> },
+          "teardownSessionSidecars",
+        ).mockRejectedValueOnce(new Error("sidecar teardown failed"));
+      }
       await budgeted[spawnMethod]({
         project: "api",
         prompt: "hello",
@@ -4792,6 +4833,12 @@ describe("SessionService", () => {
         preflightTokenUsage: { status: "measured", totalTokens: 50 },
       });
       expect(sessions.get("api-1")?.worktreePath).not.toBe("");
+      if (teardownFails)
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, event]) => event.event === "session.token_budget.teardown_failed",
+          ),
+        ).toBe(true);
       mockClaudeJsonlState("waiting");
       mockExitedThenRestoredProcess();
       await budgeted.restore("api-1", { overrideTokenBudget: true });
@@ -42961,9 +43008,47 @@ describe("SessionService", () => {
     });
 
     describe("pollAttentionStates parking", () => {
-      it.each(["budget_limited", "stopped"] as const)(
-        "requires explicit approval to resume %s and retains approval",
-        async (status) => {
+      it.each([
+        ["paused", 50],
+        ["running", 120],
+        ["completed", 120],
+      ] as const)(
+        "rejects budget approval for ineligible %s session with %s tokens",
+        async (status, totalTokens) => {
+          loadConfigMock.mockReturnValue({
+            ...baseConfig(),
+            projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+          });
+          const sessions = createSessionStore();
+          sessions.set(
+            "api-1",
+            runningSession({
+              status,
+              tokenUsage: {
+                provider: "claude",
+                inputTokens: totalTokens,
+                outputTokens: 0,
+                totalTokens,
+                generations: {},
+              },
+            }),
+          );
+          const service = await createDisposedSessionService();
+          await expect(service.restore("api-1", { overrideTokenBudget: true })).rejects.toThrow(
+            "not budget-limited",
+          );
+          expect(sessions.get("api-1")?.tokenBudgetOverride).toBeUndefined();
+        },
+      );
+
+      it.each([
+        ["budget_limited", "token_budget"],
+        ["stopped", "token_budget"],
+        ["paused", "manual_pause"],
+        ["stopped", "stale_timeout"],
+      ] as const)(
+        "requires explicit approval to resume %s (%s) and retains approval",
+        async (status, stopReason) => {
           loadConfigMock.mockReturnValue({
             ...baseConfig(),
             projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
@@ -42974,7 +43059,7 @@ describe("SessionService", () => {
             runningSession({
               id: "api-1",
               status,
-              stopReason: "token_budget",
+              stopReason,
               preflightTokenUsage: {
                 status: "measured",
                 attemptCount: 1,
