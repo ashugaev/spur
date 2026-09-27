@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAgentLaunchPlan } from "../../src/agents/index.js";
 import {
   findOpenCodeSessionId,
+  readOpenCodeConversation,
   readOpenCodeJson,
   readOpenCodeState,
   resetOpenCodeExportState,
@@ -800,6 +801,106 @@ describe("OpenCode adapter", () => {
         await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
       } finally {
         database.close();
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("conversation from opencode.db", () => {
+    async function makeDatabase(dataHome: string): Promise<DatabaseSync> {
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      database.exec(
+        "CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      return database;
+    }
+
+    function insertMessage(
+      database: DatabaseSync,
+      message: { id: string; sessionId: string; role: string; createdAt: number },
+      parts: Array<{ id: string; data: Record<string, unknown> }>,
+    ): void {
+      database
+        .prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)")
+        .run(
+          message.id,
+          message.sessionId,
+          message.createdAt,
+          JSON.stringify({ role: message.role }),
+        );
+      for (const part of parts) {
+        database
+          .prepare("INSERT INTO part VALUES (?, ?, ?, 0, 0, ?)")
+          .run(part.id, message.id, message.sessionId, JSON.stringify(part.data));
+      }
+    }
+
+    async function fakeOpenCodeBin(dataHome: string, exportJson: unknown): Promise<string> {
+      const binPath = join(dataHome, "opencode-bin");
+      const spawnedMarker = join(dataHome, "spawned");
+      await writeFile(
+        binPath,
+        `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(spawnedMarker)}, "1");\nprocess.stdout.write(${JSON.stringify(JSON.stringify(exportJson))});\n`,
+        "utf8",
+      );
+      await chmod(binPath, 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      return spawnedMarker;
+    }
+
+    it("reads the session's text parts in order without spawning the CLI", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      // Inserted out of order: the read orders by message time, then part id.
+      insertMessage(
+        database,
+        { id: "msg_a1", sessionId: "ses_1", role: "assistant", createdAt: 2 },
+        [
+          { id: "prt_a3", data: { type: "text", text: "world" } },
+          { id: "prt_a1", data: { type: "step-start" } },
+          { id: "prt_a2", data: { type: "text", text: "hello" } },
+          { id: "prt_a4", data: { type: "tool", tool: "bash", state: { output: "ls" } } },
+        ],
+      );
+      insertMessage(database, { id: "msg_u1", sessionId: "ses_1", role: "user", createdAt: 1 }, [
+        { id: "prt_u1", data: { type: "text", text: "hi" } },
+      ]);
+      insertMessage(
+        database,
+        { id: "msg_o1", sessionId: "ses_other", role: "user", createdAt: 0 },
+        [{ id: "prt_o1", data: { type: "text", text: "other session" } }],
+      );
+      database.close();
+      const spawnedMarker = await fakeOpenCodeBin(dataHome, { messages: [] });
+      try {
+        await expect(readOpenCodeConversation("ses_1")).resolves.toEqual([
+          { kind: "message", role: "user", text: "hi" },
+          { kind: "message", role: "assistant", text: "hello\nworld" },
+        ]);
+        await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back to the CLI export when the database is unreadable", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const spawnedMarker = await fakeOpenCodeBin(dataHome, {
+        messages: [{ info: { role: "user" }, parts: [{ type: "text", text: "from export" }] }],
+      });
+      try {
+        await expect(readOpenCodeConversation("ses_1")).resolves.toEqual([
+          { kind: "message", role: "user", text: "from export" },
+        ]);
+        await expect(readFile(spawnedMarker, "utf8")).resolves.toBe("1");
+      } finally {
         vi.unstubAllEnvs();
         await rm(dataHome, { recursive: true, force: true });
       }

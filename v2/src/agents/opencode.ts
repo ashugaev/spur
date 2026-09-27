@@ -677,13 +677,51 @@ export async function readOpenCodeState(
   }
 }
 
+// Same store and fallback contract as readOpenCodeUserMessageIdsFromDatabase:
+// the agent page polls the conversation every few seconds, and a per-poll
+// `opencode export` piles up behind the export gate. Only text parts are
+// selected; rows are shaped like the export so one parser serves both paths.
+export async function readOpenCodeConversationFromDatabase(
+  sessionId: string,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<TranscriptEntry[]> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const rows = database
+      .prepare(
+        `SELECT m.id AS messageId, json_extract(m.data, '$.role') AS role, json_extract(p.data, '$.text') AS text
+         FROM message m JOIN part p ON p.message_id = m.id
+         WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'text'
+         ORDER BY m.time_created, m.id, p.id`,
+      )
+      .all(sessionId);
+    const messages = new Map<unknown, { info: { role: unknown }; parts: unknown[] }>();
+    for (const row of rows) {
+      let message = messages.get(row["messageId"]);
+      if (!message) {
+        message = { info: { role: row["role"] }, parts: [] };
+        messages.set(row["messageId"], message);
+      }
+      message.parts.push({ type: "text", text: row["text"] });
+    }
+    return parseOpenCodeExport({ messages: [...messages.values()] });
+  } finally {
+    database.close();
+  }
+}
+
 export async function readOpenCodeConversation(
   sessionId?: string,
 ): Promise<TranscriptEntry[] | null> {
   if (!sessionId) return null;
   try {
-    return parseOpenCodeExport(await exportOpenCodeSession(sessionId));
+    return await readOpenCodeConversationFromDatabase(sessionId);
   } catch {
-    return null;
+    try {
+      return parseOpenCodeExport(await exportOpenCodeSession(sessionId));
+    } catch {
+      return null;
+    }
   }
 }
