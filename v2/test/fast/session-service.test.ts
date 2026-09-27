@@ -46718,6 +46718,34 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("submits a pending launch prompt with the submit key, never by typing", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT }));
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      const { SessionService, LaunchPromptPendingError, AgentExitedBeforeSendError } =
+        await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.submitPendingLaunch("api-1");
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+      expect(tmuxTexts()).toEqual([]);
+      expect(eventsNamed("session.spawn.launch_submitted")).toHaveLength(1);
+
+      await expect(service.submitPendingLaunch("api-2")).rejects.toBeInstanceOf(
+        LaunchPromptPendingError,
+      );
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      await expect(service.submitPendingLaunch("api-1")).rejects.toBeInstanceOf(
+        AgentExitedBeforeSendError,
+      );
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
     it("drops the pending-launch marker on kill and on restore", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();

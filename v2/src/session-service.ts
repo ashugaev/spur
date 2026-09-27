@@ -12087,6 +12087,45 @@ export class SessionService {
     return record;
   }
 
+  // The one escape from a pending launch: press the submit key over the
+  // prompt already in the composer, never type over it. The marker clears
+  // when the agent's transcript shows it took the prompt.
+  async submitPendingLaunch(sessionId: string): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      assertSendableStatus(session);
+      if (!launchPromptPending(session)) {
+        throw new LaunchPromptPendingError(`No pending launch prompt for ${sessionId}`);
+      }
+      await this.withPaneWriteLock(session.tmuxSession, async () => {
+        const alive = await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: session.launchCommand,
+          },
+          { fresh: true },
+        );
+        if (!alive) {
+          throw new AgentExitedBeforeSendError(
+            `Agent process for ${sessionId} is not running; launch prompt not submitted`,
+          );
+        }
+        await sendSubmitKeyToTmux(session.tmuxSession);
+      });
+      this.logEvent("session.spawn.launch_submitted", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Pressed submit over the pending launch prompt for ${sessionId}`,
+      });
+      return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+    });
+  }
+
   async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {

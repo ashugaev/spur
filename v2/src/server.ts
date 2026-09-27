@@ -1723,6 +1723,12 @@ export async function startServer(
         return;
       }
 
+      const launchSubmitSessionId = path.match(/^\/sessions\/([^/]+)\/launch\/submit$/)?.[1];
+      if (method === "POST" && launchSubmitSessionId) {
+        sendJson(response, 200, await service.submitPendingLaunch(launchSubmitSessionId));
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
         const body = await readJsonBody<SourceReplyRequest>(request);

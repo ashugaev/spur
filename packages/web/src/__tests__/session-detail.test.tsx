@@ -3275,6 +3275,86 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  describe("while the launch prompt is pending", () => {
+    function mockPendingLaunchFetch() {
+      let pending = true;
+      const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                state: "waiting",
+                queuedMessages: { messages: ["Held follow-up"], awaitingPrompt: true },
+                ...(pending ? { launchUnconfirmedAt: "2026-04-02T10:00:05.000Z" } : {}),
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), {
+            status: 200,
+          });
+        }
+        if (url === "/api/sessions/api-a1/launch/submit" && init?.method === "POST") {
+          pending = false;
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      return fetchMock;
+    }
+
+    it("shows the hold, blocks Send now and row send, and queues from the hotkey", async () => {
+      const fetchMock = mockPendingLaunchFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(
+        await screen.findByText(/Agent has not confirmed the launch prompt/),
+      ).toBeInTheDocument();
+      const textarea = screen.getByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Later" } });
+      expect(screen.getByRole("button", { name: /Send now/ })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Send queued message #1 now" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Queue" })).toBeEnabled();
+
+      fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/send", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "Later", queue: true }),
+        });
+      });
+    });
+
+    it("submits the pending prompt from the banner and clears the hold", async () => {
+      const fetchMock = mockPendingLaunchFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Submit launch prompt" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/launch/submit", {
+          method: "POST",
+        });
+      });
+      await waitFor(() => {
+        expect(screen.queryByText(/Agent has not confirmed the launch prompt/)).toBeNull();
+      });
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url) === "/api/sessions/api-a1/send"),
+      ).toBe(false);
+    });
+  });
+
   describe("while the session is spawning", () => {
     function mockSpawningSessionFetch(
       sendResponse: () => Response = () => new Response(JSON.stringify({ ok: true })),

@@ -14,6 +14,7 @@ import {
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
+import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
@@ -2490,6 +2491,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   // The daemon queues a send to a spawning session and refuses Send now (409).
   const sessionStarting = session?.status === "spawning";
+  // The daemon refuses every immediate send (409) while the launch prompt is
+  // pending; Queue stays, and PendingLaunchBanner submits the prompt.
+  const launchPending = Boolean(session?.launchUnconfirmedAt);
+  const sendNowBlocked = sessionStarting || launchPending;
   const hasSession = Boolean(session);
   const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
 
@@ -3182,7 +3187,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                   label={`Send queued message #${index + 1} now`}
                                   busyLabel={`Sending queued message #${index + 1}…`}
                                   busy={flushBusy}
-                                  disabled={sessionStarting || busyAction !== null}
+                                  disabled={sendNowBlocked || busyAction !== null}
                                   onClick={() =>
                                     void handleQueueAction("flush", queuedMessage, index)
                                   }
@@ -3257,6 +3262,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
+                    {launchPending ? (
+                      <PendingLaunchBanner sessionId={sessionId} onSubmitted={loadSession} />
+                    ) : null}
                     <FileAttachmentTextarea
                       attachments={attachments}
                       clearLabel="Clear message"
@@ -3272,7 +3280,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         if (isPrimarySubmitHotkey(event)) {
                           event.preventDefault();
                           void doSend(
-                            sessionStarting ? { queue: true } : { queue: false, interrupt: true },
+                            sendNowBlocked ? { queue: true } : { queue: false, interrupt: true },
                           );
                         }
                       }}
@@ -3331,7 +3339,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           aria-label={busyAction === "send" ? "Sending message" : undefined}
                           type="button"
                           disabled={
-                            sessionStarting ||
+                            sendNowBlocked ||
                             busyAction !== null ||
                             (!message.trim() && attachments.length === 0)
                           }
