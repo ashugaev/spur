@@ -43,6 +43,13 @@ interface BatchRecord {
   claimedBy?: string;
   claimedAt?: string;
   attempts: AttemptRecord[];
+  accountingIncomplete?: boolean;
+}
+
+class UnavailableBatchError extends Error {
+  constructor(readonly identity?: { project?: string; claimedBy?: string }) {
+    super("Preflight accounting is unavailable");
+  }
 }
 
 function isProvider(value: unknown): value is PreflightUsageProvider {
@@ -137,7 +144,18 @@ function parseBatch(value: unknown): BatchRecord | null {
     ...(typeof record["claimedBy"] === "string" ? { claimedBy: record["claimedBy"] } : {}),
     ...(typeof record["claimedAt"] === "string" ? { claimedAt: record["claimedAt"] } : {}),
     attempts,
+    ...(record["accountingIncomplete"] === true ? { accountingIncomplete: true } : {}),
   };
+}
+
+function batchUsage(batch: BatchRecord): PreflightTokenUsageRecord {
+  const usage = aggregatePreflightAttempts(batch.attempts);
+  if (batch.accountingIncomplete) {
+    usage.status = batch.attempts.some((attempt) => attempt.outcome === "measured")
+      ? "partial"
+      : "unknown";
+  }
+  return usage;
 }
 
 function addTotals(values: TokenUsageTotals[]): TokenUsageTotals {
@@ -196,6 +214,7 @@ export class PreflightUsageStore {
   private readonly directory: string;
   private readonly chains = new Map<string, Promise<void>>();
   private readonly createdIds = new Set<string>();
+  private readonly memory = new Map<string, BatchRecord>();
   private collisionSequence = 0;
 
   constructor(dataDir: string) {
@@ -208,31 +227,47 @@ export class PreflightUsageStore {
   }
 
   private async write(batch: BatchRecord): Promise<void> {
-    await mkdir(this.directory, { recursive: true });
     const path = this.path(batch.id);
-    const temp = `${path}.${randomUUID()}.tmp`;
-    await writeFile(temp, `${JSON.stringify(batch, null, 2)}\n`, "utf8");
-    await rename(temp, path);
+    this.memory.set(batch.id, structuredClone(batch));
+    try {
+      await mkdir(this.directory, { recursive: true });
+      const temp = `${path}.${randomUUID()}.tmp`;
+      await writeFile(temp, `${JSON.stringify(batch, null, 2)}\n`, "utf8");
+      await rename(temp, path);
+    } catch {
+      // Accounting persistence must not repeat or prevent the provider call.
+    }
   }
 
   private async read(id: string): Promise<BatchRecord> {
+    const path = this.path(id);
+    const cached = this.memory.get(id);
+    if (cached) return structuredClone(cached);
     let raw: string;
     try {
-      raw = await readFile(this.path(id), "utf8");
+      raw = await readFile(path, "utf8");
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         throw new Error(`Unknown preflight batch ${id}`, { cause: error });
       }
-      throw error;
+      throw new UnavailableBatchError();
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw) as unknown;
-    } catch (error) {
-      throw new Error(`Corrupt preflight batch ${id}`, { cause: error });
+    } catch {
+      throw new UnavailableBatchError();
     }
     const batch = parseBatch(parsed);
-    if (!batch) throw new Error(`Corrupt preflight batch ${id}`);
+    if (!batch) {
+      const identity =
+        parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+      throw new UnavailableBatchError({
+        ...(typeof identity["project"] === "string" ? { project: identity["project"] } : {}),
+        ...(typeof identity["claimedBy"] === "string" ? { claimedBy: identity["claimedBy"] } : {}),
+      });
+    }
+    if (batch.id !== id) throw new Error("preflight batch identity mismatch");
     const now = new Date().toISOString();
     let recovered = false;
     for (const attempt of batch.attempts) {
@@ -245,6 +280,7 @@ export class PreflightUsageStore {
       batch.updatedAt = now;
       await this.write(batch);
     }
+    this.memory.set(id, structuredClone(batch));
     return batch;
   }
 
@@ -265,7 +301,7 @@ export class PreflightUsageStore {
     }
   }
 
-  async create(project: string): Promise<string> {
+  async create(project: string, accountingIncomplete = false): Promise<string> {
     const base = randomUUID();
     let id: string = base;
     while (this.createdIds.has(id)) {
@@ -278,7 +314,15 @@ export class PreflightUsageStore {
     this.createdIds.add(id);
     const now = new Date().toISOString();
     try {
-      await this.write({ version: 1, id, project, createdAt: now, updatedAt: now, attempts: [] });
+      await this.write({
+        version: 1,
+        id,
+        project,
+        createdAt: now,
+        updatedAt: now,
+        attempts: [],
+        ...(accountingIncomplete ? { accountingIncomplete: true } : {}),
+      });
     } catch (error) {
       this.createdIds.delete(id);
       throw error;
@@ -289,11 +333,19 @@ export class PreflightUsageStore {
   async resolve(project: string, requested?: string): Promise<string> {
     if (!requested) return this.create(project);
     this.path(requested);
-    await this.withBatchLock(requested, async () => {
+    return this.withBatchLock(requested, async () => {
       let batch: BatchRecord;
       try {
         batch = await this.read(requested);
       } catch (error) {
+        if (error instanceof UnavailableBatchError) {
+          if (error.identity?.project !== undefined && error.identity.project !== project) {
+            throw new Error("preflight batch project mismatch", { cause: error });
+          }
+          if (error.identity?.claimedBy)
+            throw new Error("preflight batch is already claimed", { cause: error });
+          return this.create(project, true);
+        }
         if (!(error instanceof Error) || !error.message.startsWith("Unknown preflight batch")) {
           throw error;
         }
@@ -309,8 +361,8 @@ export class PreflightUsageStore {
         await this.write(batch);
       }
       if (batch.project !== project) throw new Error("preflight batch project mismatch");
+      return requested;
     });
-    return requested;
   }
 
   async runAttempt<T extends PreflightAttemptResult>(
@@ -366,7 +418,7 @@ export class PreflightUsageStore {
     return this.withBatchLock(id, async () => {
       const batch = await this.read(id);
       if (batch.project !== project) throw new Error("preflight batch project mismatch");
-      return preflightUsageView(aggregatePreflightAttempts(batch.attempts));
+      return preflightUsageView(batchUsage(batch));
     });
   }
 
@@ -383,7 +435,7 @@ export class PreflightUsageStore {
         batch.updatedAt = batch.claimedAt;
         await this.write(batch);
       }
-      return aggregatePreflightAttempts(batch.attempts);
+      return batchUsage(batch);
     });
   }
 
@@ -407,6 +459,7 @@ export class PreflightUsageStore {
                 now - Date.parse(batch.updatedAt) > RETENTION_MS
               ) {
                 await rm(this.path(id), { force: true });
+                this.memory.delete(id);
               }
             });
           } catch {

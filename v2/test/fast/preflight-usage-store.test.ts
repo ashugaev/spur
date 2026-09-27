@@ -30,7 +30,7 @@ describe("PreflightUsageStore", () => {
     await expect(ledger.resolve("api", "not-a-uuid")).rejects.toThrow("invalid preflightBatchId");
   });
 
-  it("rejects corrupt requested batches without overwriting their evidence", async () => {
+  it("replaces corrupt requested batches without overwriting their evidence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "spur-preflight-corrupt-test-"));
     directories.push(directory);
     const ledger = new PreflightUsageStore(directory);
@@ -38,8 +38,75 @@ describe("PreflightUsageStore", () => {
     const path = join(directory, "preflight-batches", `${id}.json`);
     await mkdir(join(directory, "preflight-batches"));
     await writeFile(path, "{corrupt", "utf8");
-    await expect(ledger.resolve("api", id)).rejects.toThrow("Corrupt preflight batch");
+    const replacement = await ledger.resolve("api", id);
+    expect(replacement).not.toBe(id);
+    await expect(ledger.view(replacement, "api")).resolves.toMatchObject({ status: "unknown" });
+    await ledger.runAttempt(replacement, "api", "claude", async () => ({
+      usage: { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+    }));
+    await expect(ledger.claim(replacement, "api", "session-1")).resolves.toMatchObject({
+      status: "partial",
+      totalTokens: 5,
+    });
+    const restarted = new PreflightUsageStore(directory);
+    await expect(restarted.view(replacement, "api")).resolves.toMatchObject({
+      status: "partial",
+      totalTokens: 5,
+    });
+    await expect(restarted.claim(replacement, "api", "session-2")).rejects.toThrow(
+      "another session",
+    );
     expect(await readFile(path, "utf8")).toBe("{corrupt");
+  });
+
+  it("runs once and retains claim checks when ledger storage is unwritable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-preflight-unwritable-test-"));
+    directories.push(directory);
+    await writeFile(join(directory, "preflight-batches"), "not a directory");
+    const ledger = new PreflightUsageStore(directory);
+    const id = await ledger.resolve("api", randomUUID());
+    const execute = vi.fn(async () => ({
+      usage: { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+    }));
+    await ledger.runAttempt(id, "api", "claude", execute);
+    expect(execute).toHaveBeenCalledTimes(1);
+    await expect(ledger.claim(id, "api", "session-1")).resolves.toMatchObject({ totalTokens: 5 });
+    await expect(ledger.claim(id, "api", "session-2")).rejects.toThrow("another session");
+    await expect(ledger.resolve("other", id)).rejects.toThrow("project mismatch");
+  });
+
+  it("preserves provider failure when accounting writes fail", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-preflight-provider-error-test-"));
+    directories.push(directory);
+    await writeFile(join(directory, "preflight-batches"), "not a directory");
+    const ledger = new PreflightUsageStore(directory);
+    const id = await ledger.create("api");
+    const failure = new Error("provider failed");
+    await expect(
+      ledger.runAttempt(id, "api", "claude", async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    await expect(ledger.view(id, "api")).resolves.toMatchObject({
+      status: "unknown",
+      attemptCount: 1,
+    });
+  });
+
+  it("retains project and claim errors when usage data is corrupt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-preflight-identity-test-"));
+    directories.push(directory);
+    await mkdir(join(directory, "preflight-batches"));
+    const id = randomUUID();
+    const path = join(directory, "preflight-batches", `${id}.json`);
+    const ledger = new PreflightUsageStore(directory);
+    await writeFile(path, JSON.stringify({ project: "other", attempts: "corrupt" }));
+    await expect(ledger.resolve("api", id)).rejects.toThrow("project mismatch");
+    await writeFile(
+      path,
+      JSON.stringify({ project: "api", claimedBy: "session-1", attempts: "corrupt" }),
+    );
+    await expect(ledger.resolve("api", id)).rejects.toThrow("already claimed");
   });
 
   it("does not prune a batch while its paid attempt is in flight", async () => {
