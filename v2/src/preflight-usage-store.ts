@@ -357,6 +357,7 @@ export class PreflightUsageStore {
           createdAt: now,
           updatedAt: now,
           attempts: [],
+          accountingIncomplete: true,
         };
         await this.write(batch);
       }

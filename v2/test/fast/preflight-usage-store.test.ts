@@ -75,6 +75,34 @@ describe("PreflightUsageStore", () => {
     await expect(ledger.resolve("other", id)).rejects.toThrow("project mismatch");
   });
 
+  it("keeps a lost batch unknown after failed writes and daemon restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-preflight-restart-test-"));
+    directories.push(directory);
+    const ledgerPath = join(directory, "preflight-batches");
+    await writeFile(ledgerPath, "not a directory");
+    const ledger = new PreflightUsageStore(directory);
+    const id = await ledger.create("api");
+    await ledger.runAttempt(id, "api", "claude", async () => ({
+      usage: { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+    }));
+    await expect(ledger.view(id, "api")).resolves.toMatchObject({
+      status: "measured",
+      totalTokens: 50,
+    });
+    await rm(ledgerPath);
+    const restarted = new PreflightUsageStore(directory);
+    const restoredId = await restarted.resolve("api", id);
+    await expect(restarted.view(restoredId, "api")).resolves.toMatchObject({ status: "unknown" });
+    await expect(restarted.claim(restoredId, "api", "session-1")).resolves.toMatchObject({
+      status: "unknown",
+    });
+    const freshId = await restarted.create("api");
+    await expect(restarted.view(freshId, "api")).resolves.toMatchObject({
+      status: "measured",
+      totalTokens: 0,
+    });
+  });
+
   it("preserves provider failure when accounting writes fail", async () => {
     const directory = await mkdtemp(join(tmpdir(), "spur-preflight-provider-error-test-"));
     directories.push(directory);

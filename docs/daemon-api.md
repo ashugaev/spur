@@ -56,7 +56,7 @@ Budget exhaustion sets `status: "budget_limited"`; automatic wakes cannot resume
 
 `POST /projects/:id/preflight` accepts optional UUID `preflightBatchId` and returns `branch`, `preflightBatchId`, and `preflightTokenUsageView`. A failed preview after batch creation returns non-2xx with `error`, `preflightBatchId`, and the recorded `preflightTokenUsageView`. A new UUID creates a batch before the first preview; reuse it for later previews and the spawn request. A project change requires a new id. `POST /sessions` and `POST /sessions/background` accept the id, claim it once for the created session, and reject project mismatch or replay by another session.
 
-An unreadable accounting batch is replaced with a new id; prior usage stays unknown. Ledger write failures preserve accounting in daemon memory and do not block provider execution. Known project and ownership mismatches still reject the request.
+An unreadable accounting batch is replaced with a new id; prior usage stays unknown. A supplied id absent from storage also has unknown prior usage. Ledger write failures preserve accounting in daemon memory and do not block provider execution. Known project and ownership mismatches still reject the request.
 
 ## Project routes
 
