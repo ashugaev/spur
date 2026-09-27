@@ -3718,6 +3718,10 @@ test.describe("D7c: Background spawn lifecycle", () => {
     const sessions: SpurSessionView[] = [];
     let spawnCalls = 0;
 
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: placeholder.branch } }),
+    );
+
     await page.route("**/api/spawn", async (route) => {
       spawnCalls += 1;
       if (spawnCalls === 1) {
