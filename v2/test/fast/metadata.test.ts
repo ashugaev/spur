@@ -10,6 +10,8 @@ import {
   deleteWorkItemLifecycle,
   listSessions,
   clearGitHubPollDisabledSession,
+  listGitHubPollDisabledEntries,
+  markGitHubPollDisabledChecked,
   readCommentSeenRegistry,
   readGitHubPollDisabled,
   recordGitHubPollDisabledSession,
@@ -158,19 +160,46 @@ describe("github poll-disabled registry", () => {
     );
     const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
     expect(entries.size).toBe(1);
-    expect(entries.get("api-a1b2")).toBe(42);
+    expect(entries.get("api-a1b2")).toEqual({ prNumber: 42, disabledAtMs: 0, lastCheckedAtMs: 0 });
+  });
+
+  // A9: a legacy bare-number entry (the shape this branch wrote before the
+  // recheck window landed) is honored and probes immediately.
+  it("reads a legacy numeric poll-disabled entry as a zero-timestamp entry", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-poll-disabled", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "pr-watch.json"), JSON.stringify({ "api-a1b2": 42 }), "utf8");
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toEqual({ prNumber: 42, disabledAtMs: 0, lastCheckedAtMs: 0 });
   });
 
   it("round-trips a recorded session", async () => {
     const dataDir = await newDataDir();
-    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
     const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
-    expect(entries.get("api-a1b2")).toBe(42);
+    expect(entries.get("api-a1b2")).toEqual({
+      prNumber: 42,
+      disabledAtMs: 1000,
+      lastCheckedAtMs: 1000,
+    });
+  });
+
+  it("preserves disabledAtMs and lastCheckedAtMs when re-recording the same prNumber", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 9999);
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toEqual({
+      prNumber: 42,
+      disabledAtMs: 1000,
+      lastCheckedAtMs: 1000,
+    });
   });
 
   it("an empty map removes the registry file", async () => {
     const dataDir = await newDataDir();
-    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
     writeGitHubPollDisabled(dataDir, "api", "pr-watch", new Map());
     const path = join(dataDir, "source-state", "github-poll-disabled", "api", "pr-watch.json");
     expect(existsSync(path)).toBe(false);
@@ -178,9 +207,61 @@ describe("github poll-disabled registry", () => {
 
   it("clear returns the prNumber then null on repeat", async () => {
     const dataDir = await newDataDir();
-    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
     expect(clearGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2")).toBe(42);
     expect(clearGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2")).toBeNull();
+  });
+
+  // A7 half: markGitHubPollDisabledChecked returns false and writes nothing for an
+  // unknown session, so the caller's override keeps gating instead of dropping the
+  // disable entirely.
+  it("markGitHubPollDisabledChecked returns false and writes nothing for an unknown session", async () => {
+    const dataDir = await newDataDir();
+    const path = join(dataDir, "source-state", "github-poll-disabled", "api", "pr-watch.json");
+    expect(markGitHubPollDisabledChecked(dataDir, "api", "pr-watch", "api-a1b2", 5000)).toBe(false);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("markGitHubPollDisabledChecked stamps lastCheckedAtMs and preserves disabledAtMs", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    expect(markGitHubPollDisabledChecked(dataDir, "api", "pr-watch", "api-a1b2", 5000)).toBe(true);
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toEqual({
+      prNumber: 42,
+      disabledAtMs: 1000,
+      lastCheckedAtMs: 5000,
+    });
+  });
+
+  it("listGitHubPollDisabledEntries walks every project/source and sorts by disabledAtMs", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-b", 7, 2000);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a", 8, 1000);
+    recordGitHubPollDisabledSession(dataDir, "web", "issues", "web-c", 9, 3000);
+    const entries = listGitHubPollDisabledEntries(dataDir);
+    expect(entries).toEqual([
+      {
+        projectId: "api",
+        sourceId: "pr-watch",
+        sessionId: "api-a",
+        prNumber: 8,
+        disabledAtMs: 1000,
+      },
+      {
+        projectId: "api",
+        sourceId: "pr-watch",
+        sessionId: "api-b",
+        prNumber: 7,
+        disabledAtMs: 2000,
+      },
+      { projectId: "web", sourceId: "issues", sessionId: "web-c", prNumber: 9, disabledAtMs: 3000 },
+    ]);
+  });
+
+  it("listGitHubPollDisabledEntries returns an empty array when the root is missing", async () => {
+    const dataDir = await newDataDir();
+    expect(listGitHubPollDisabledEntries(dataDir)).toEqual([]);
   });
 });
 

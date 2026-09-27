@@ -27091,6 +27091,131 @@ describe("SessionService", () => {
     expect(restored.runtimeAlive).toBe(true);
   });
 
+  // A10
+  it("clears the github poll-disable registry on restore", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { gh: { type: "github" } },
+          triggers: {},
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    clearGitHubPollDisabledSessionMock.mockReturnValue(42);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.restore("api-1");
+
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "gh",
+      "api-1",
+    );
+  });
+
+  // A10: reopen funnels through restoreLocked (session-service.ts reopenLocked's tail).
+  it("clears the github poll-disable registry on reopen", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { gh: { type: "github" } },
+          triggers: {},
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "completed",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    clearGitHubPollDisabledSessionMock.mockReturnValue(42);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.reopen("api-1").catch(() => undefined);
+
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "gh",
+      "api-1",
+    );
+  });
+
+  // A11
+  it("restores when clearing the poll-disable registry throws", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { gh: { type: "github" } },
+          triggers: {},
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    clearGitHubPollDisabledSessionMock.mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const restored = await service.restore("api-1");
+
+    expect(restored.status).toBe("running");
+  });
+
   it("pins pnpm virtual store to the source repo when node_modules is symlinked into a worktree", async () => {
     const repoPath = resolve(process.cwd(), "..");
     loadConfigMock.mockReturnValue({

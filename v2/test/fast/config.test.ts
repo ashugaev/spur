@@ -2136,6 +2136,57 @@ projects:
     });
   });
 
+  // A12
+  it("parses pollDisabledRecheckMs on a github source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        pollDisabledRecheckMs: 3600000
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      pollDisabledRecheckMs: 3_600_000,
+    });
+  });
+
+  it("omits pollDisabledRecheckMs when unset", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["pr-watch"];
+    expect(parsed).toBeDefined();
+    expect("pollDisabledRecheckMs" in (parsed ?? {})).toBe(false);
+  });
+
+  it.each([0, 2.5, "8"])("rejects a non-positive pollDisabledRecheckMs %s", async (value) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        pollDisabledRecheckMs: ${JSON.stringify(value)}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /pollDisabledRecheckMs must be a positive integer/,
+    );
+  });
+
   it("parses a sentry source with a resolved token and defaults", async () => {
     const configPath = await writeConfig(`
 projects:

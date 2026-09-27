@@ -122,7 +122,7 @@ describe("github poll-disabled registry survives a real restart", () => {
   it("case 2: a registry entry recorded before a fresh handle start survives it", async () => {
     const dataDir = await newDataDir();
     await makeSession(dataDir, join(dataDir, "worktree-2"));
-    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, Date.now());
     ghTransportMock.mockResolvedValue(openPrEnvelope(42));
 
     const handle = await startHandle(dataDir);
@@ -141,7 +141,7 @@ describe("github poll-disabled registry survives a real restart", () => {
   it("case 3 (mutation check): removing the registry file re-arms polling", async () => {
     const dataDir = await newDataDir();
     await makeSession(dataDir, join(dataDir, "worktree-3"));
-    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, Date.now());
     ghTransportMock.mockResolvedValue(openPrEnvelope(42));
 
     const registryPath = join(
@@ -161,5 +161,50 @@ describe("github poll-disabled registry survives a real restart", () => {
     expect(ghTransportMock).toHaveBeenCalledTimes(1);
 
     handle.stop();
+  });
+
+  // A8: the recheck deadline is stamped onto the disk entry (lastCheckedAtMs), so a
+  // source handle recreated on the same dataDir still honors it — before the window
+  // it makes no gh call, after the window it probes exactly once.
+  it("keeps the recheck deadline across a source handle restart", async () => {
+    const dataDir = await newDataDir();
+    await makeSession(dataDir, join(dataDir, "worktree-4"));
+    const disabledAtMs = Date.now() - (86_400_000 - 60_000); // 1 minute short of the 24h window
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, disabledAtMs);
+    ghTransportMock.mockResolvedValue(openPrEnvelope(42));
+
+    const handleBeforeWindow = await startHandle(dataDir);
+    handleBeforeWindow.runOnStart?.();
+    await flushPollCycle();
+    expect(ghTransportMock).toHaveBeenCalledTimes(0);
+    handleBeforeWindow.stop();
+
+    const registryPath = join(
+      dataDir,
+      "source-state",
+      "github-poll-disabled",
+      "api",
+      "pr-watch.json",
+    );
+    const { readFileSync, writeFileSync } = await import("node:fs");
+    const stored = JSON.parse(readFileSync(registryPath, "utf-8")) as Record<
+      string,
+      { prNumber: number; disabledAtMs: number; lastCheckedAtMs: number }
+    >;
+    const existing = stored["api-a1b2"];
+    if (!existing) throw new Error("expected an existing registry entry");
+    stored["api-a1b2"] = {
+      prNumber: existing.prNumber,
+      disabledAtMs: existing.disabledAtMs,
+      lastCheckedAtMs: Date.now() - (86_400_000 + 1000),
+    };
+    writeFileSync(registryPath, JSON.stringify(stored));
+
+    const handleAfterWindow = await startHandle(dataDir);
+    handleAfterWindow.runOnStart?.();
+    await flushPollCycle();
+    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+
+    handleAfterWindow.stop();
   });
 });

@@ -27,6 +27,7 @@ import {
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  markGitHubPollDisabledChecked,
   readGitHubPollDisabled,
   readLifecycleBaselinedSessions,
   readReviewSourceSnapshots,
@@ -36,6 +37,7 @@ import {
   removeLifecycleBaselinedSession,
   writeGitHubPollDisabled,
   writeReviewSourceSnapshot,
+  type GitHubPollDisabledEntry,
 } from "../metadata.js";
 import { hasRecentSessionUserAction } from "../user-action-log.js";
 import {
@@ -65,6 +67,10 @@ const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
 // pair returns for a transiently-failing session (event-log.ts:170-183).
 const SESSION_POLL_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const SESSION_POLL_BACKOFF_MAX_MS = 30 * 60 * 1000;
+// Default bound on the auto-recheck for a durably poll-disabled session: at most one
+// probe request per pair per window. Overridable per source via
+// GitHubSourceConfig.pollDisabledRecheckMs.
+const POLL_DISABLED_RECHECK_INTERVAL_MS = 86_400_000;
 const ADAPTIVE_ACTIVITY_ACTIONS = new Set(["session.send", "session.source_reply"]);
 // After this many consecutive poll failures for the same session, its failures stop
 // counting toward the CI-active hysteresis flag (see consecutiveSessionPollErrors).
@@ -309,6 +315,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.sourceId,
   );
   const adaptive = deps.config.adaptivePoll;
+  const recheckMs = deps.config.pollDisabledRecheckMs ?? POLL_DISABLED_RECHECK_INTERVAL_MS;
   const attemptedSessionIds = new Set<string>();
   // Tracks consecutive poll failures per session (catch-block errors or a failed CI
   // checks fetch). A session erroring on *every* cycle (persistent 404/permission
@@ -378,7 +385,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // the disk entry would never heal even once writes recover. Cleared once a later
   // record* for that sessionId succeeds; also dropped by the sweep when the session
   // disappears.
-  const pendingPollDisabledOverrides = new Map<string, number>();
+  const pendingPollDisabledOverrides = new Map<string, GitHubPollDisabledEntry>();
 
   // Both wrap a synchronous fs write in try/catch and swallow-and-log, mirroring
   // logSpurEvent's own `catch {}` (event-log.ts:232-234). Mandatory, not defensive
@@ -398,7 +405,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // a rebind (the self-heal clear path, which does retry its own write every cycle —
   // see safeClearPollDisabled below), the sweep pruning a disappeared session, or
   // handle recreation reseeding from whatever the disk last held.
-  const safeRecordPollDisabled = (sessionId: string, prNumber: number): void => {
+  const safeRecordPollDisabled = (sessionId: string, prNumber: number, nowMs: number): void => {
     try {
       recordGitHubPollDisabledSession(
         deps.dataDir,
@@ -406,12 +413,51 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         deps.sourceId,
         sessionId,
         prNumber,
+        nowMs,
       );
       pendingPollDisabledOverrides.delete(sessionId);
     } catch (error) {
-      pendingPollDisabledOverrides.set(sessionId, prNumber);
+      pendingPollDisabledOverrides.set(sessionId, {
+        prNumber,
+        disabledAtMs: nowMs,
+        lastCheckedAtMs: nowMs,
+      });
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] failed to persist poll-disabled state for ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  };
+
+  // Updates the in-memory entry's lastCheckedAtMs unconditionally (so a due window
+  // never re-probes until the NEXT recheck window even if the write below fails), then
+  // tries to persist the stamp. A thrown write, or a false return (no disk entry — a
+  // prior record* write never landed), sets the pending override to the stamped entry
+  // so a persistently failing disk still bounds the probe to once per window. A true
+  // return drops the override — the disk already reflects the stamp.
+  const safeMarkPollDisabledChecked = (sessionId: string, nowMs: number): void => {
+    const current = permanentPrNotFound.get(sessionId);
+    if (!current) return;
+    const stamped: GitHubPollDisabledEntry = { ...current, lastCheckedAtMs: nowMs };
+    permanentPrNotFound.set(sessionId, stamped);
+    try {
+      const wrote = markGitHubPollDisabledChecked(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        sessionId,
+        nowMs,
+      );
+      if (wrote) {
+        pendingPollDisabledOverrides.delete(sessionId);
+      } else {
+        pendingPollDisabledOverrides.set(sessionId, stamped);
+      }
+    } catch (error) {
+      pendingPollDisabledOverrides.set(sessionId, stamped);
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] failed to persist poll-disabled recheck stamp for ${sessionId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -445,8 +491,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const refreshPollDisabled = (): void => {
     try {
       const fresh = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
-      for (const [sessionId, prNumber] of pendingPollDisabledOverrides) {
-        fresh.set(sessionId, prNumber);
+      for (const [sessionId, entry] of pendingPollDisabledOverrides) {
+        fresh.set(sessionId, entry);
       }
       permanentPrNotFound = fresh;
     } catch (error) {
@@ -458,13 +504,19 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
+  // The second clause clamps a future timestamp (clock skew, hand-edited file) that
+  // would otherwise gate the session forever — the exact failure mode this recheck
+  // exists to kill.
+  const isPollDisabledRecheckDue = (entry: GitHubPollDisabledEntry, nowMs: number): boolean =>
+    nowMs >= entry.lastCheckedAtMs + recheckMs || entry.lastCheckedAtMs > nowMs;
+
   const isSessionPollGated = (session: SessionRecord, nowMs: number): boolean => {
-    const disabledPr = permanentPrNotFound.get(session.id);
-    if (disabledPr !== undefined) {
-      if (!session.pr || session.pr.number !== disabledPr) {
+    const entry = permanentPrNotFound.get(session.id);
+    if (entry !== undefined) {
+      if (!session.pr || session.pr.number !== entry.prNumber) {
         safeClearPollDisabled(session.id);
         permanentPrNotFound.delete(session.id);
-      } else {
+      } else if (!isPollDisabledRecheckDue(entry, nowMs)) {
         return true;
       }
     }
@@ -506,6 +558,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (lastCycleCiActive) return true;
     for (const session of listPollableSessions()) {
       if (isSessionPollGated(session, Date.now())) continue;
+      // A disabled session whose recheck window is due is no longer gated above, but
+      // it was already attempted before being disabled, so the attemptedSessionIds
+      // check below would not re-arm the tick. Explicit branch: re-arm immediately
+      // rather than waiting on the slow adaptive deadline.
+      const disabledEntry = permanentPrNotFound.get(session.id);
+      if (disabledEntry && isPollDisabledRecheckDue(disabledEntry, Date.now())) return true;
       const existing = snapshots.get(session.id);
       if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number))
         continue;
@@ -622,6 +680,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             attemptedSessionIds.add(session.id);
           }
           if (!batchResult || batchResult.status === "skipped") continue;
+          // Consumes this session's recheck window: reached only when a request was
+          // actually made (skipped results `continue`d above). A probe that throws
+          // below (permanent-not-found again, or transient) still burns it; a
+          // successful probe burns it and clears the entry via the recovery block
+          // below anyway.
+          if (permanentPrNotFound.has(session.id)) {
+            safeMarkPollDisabledChecked(session.id, Date.now());
+          }
           if (batchResult.status === "error") throw batchResult.error;
           const collected = batchResult.collected;
           if (collected?.ciActive) {
@@ -657,6 +723,26 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
               );
             }
             continue;
+          }
+
+          // `collected` truthy is the only proof the PR resolved — a clean not-found
+          // above must never clear the disable, since that is the same negative
+          // answer arriving without an exception.
+          if (permanentPrNotFound.has(session.id)) {
+            permanentPrNotFound.delete(session.id);
+            safeClearPollDisabled(session.id);
+            deps.logger.warn?.(
+              `[source:${deps.projectId}/${deps.sourceId}] signal polling re-enabled for ${session.id}: PR #${collected.data.prNumber} resolved`,
+            );
+            logSpurEvent(deps.dataDir, {
+              event: "source.poll.enabled",
+              level: "warn",
+              projectId: deps.projectId,
+              sourceId: deps.sourceId,
+              sessionId: session.id,
+              message: `Signal polling re-enabled for ${deps.projectId}/${deps.sourceId}/${session.id}: PR #${collected.data.prNumber} resolved`,
+              details: { prNumber: collected.data.prNumber },
+            });
           }
 
           const previous = reviewSnapshotBaseline(
@@ -731,9 +817,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         } catch (error) {
           const message = extractGithubErrorText(error);
           if (session.pr && isGitHubPermanentNotFoundError(message, session.pr.number)) {
-            if (permanentPrNotFound.get(session.id) !== session.pr.number) {
-              permanentPrNotFound.set(session.id, session.pr.number);
-              safeRecordPollDisabled(session.id, session.pr.number);
+            if (permanentPrNotFound.get(session.id)?.prNumber !== session.pr.number) {
+              const nowMs = Date.now();
+              permanentPrNotFound.set(session.id, {
+                prNumber: session.pr.number,
+                disabledAtMs: nowMs,
+                lastCheckedAtMs: nowMs,
+              });
+              safeRecordPollDisabled(session.id, session.pr.number, nowMs);
               deps.logger.warn?.(
                 `[source:${deps.projectId}/${deps.sourceId}] signal polling disabled for ${session.id}: PR #${session.pr.number} not found`,
               );
@@ -951,7 +1042,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         }
       : {}),
     clearPollDisabledOverride(sessionId: string): number | null {
-      const pending = pendingPollDisabledOverrides.get(sessionId) ?? null;
+      const pending = pendingPollDisabledOverrides.get(sessionId)?.prNumber ?? null;
       pendingPollDisabledOverrides.delete(sessionId);
       // Also drop the live gate, not just the override. Both isSessionPollGated
       // call sites already run refreshPollDisabled first in the same
