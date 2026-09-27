@@ -198,12 +198,11 @@ export function buildDirectTerminalWsUrl(location: TerminalLocation, sessionId: 
 
 /**
  * Build an SGR mouse scroll sequence.
- * Button 64 = scroll up, 65 = scroll down.  Position (1,1) is fine — tmux
- * only cares about the button for WheelUpPane / WheelDownPane.
+ * Button 64 = scroll up, 65 = scroll down.
  */
-function sgrScroll(up: boolean): string {
+function sgrScroll(up: boolean, column: number, row: number): string {
   const button = up ? 64 : 65;
-  return `\x1b[<${button};1;1M`;
+  return `\x1b[<${button};${column};${row}M`;
 }
 
 interface InputAckMessage {
@@ -685,16 +684,46 @@ export function DirectTerminal({
         const onTouchMove = (e: Event) => {
           const te = e as TouchEvent;
           if (te.touches.length !== 1) return;
-          const dy = touchStartY - te.touches[0].clientY;
+          const touch = te.touches[0];
+          const dy = touchStartY - touch.clientY;
           touchAccum += dy;
-          touchStartY = te.touches[0].clientY;
+          touchStartY = touch.clientY;
 
           const lines = Math.trunc(touchAccum / TOUCH_SCROLL_THRESHOLD);
           if (lines === 0) return;
+
+          const rect = touchTarget.getBoundingClientRect();
+          const cols = terminal?.cols;
+          const rows = terminal?.rows;
+          if (
+            !Number.isFinite(rect.width) ||
+            rect.width <= 0 ||
+            !Number.isFinite(rect.height) ||
+            rect.height <= 0 ||
+            typeof cols !== "number" ||
+            !Number.isFinite(cols) ||
+            cols <= 0 ||
+            typeof rows !== "number" ||
+            !Number.isFinite(rows) ||
+            rows <= 0 ||
+            !Number.isFinite(touch.clientX) ||
+            !Number.isFinite(touch.clientY)
+          ) {
+            return;
+          }
+
+          const column = Math.min(
+            cols,
+            Math.max(1, Math.ceil(((touch.clientX - rect.left) * cols) / rect.width)),
+          );
+          const row = Math.min(
+            rows,
+            Math.max(1, Math.ceil(((touch.clientY - rect.top) * rows) / rect.height)),
+          );
           touchAccum -= lines * TOUCH_SCROLL_THRESHOLD;
 
           const up = lines < 0;
-          const seq = sgrScroll(up);
+          const seq = sgrScroll(up, column, row);
           const count = Math.abs(lines);
           for (let i = 0; i < count; i++) {
             sendTerminalInput(seq);

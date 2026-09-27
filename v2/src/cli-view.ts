@@ -4,6 +4,7 @@ import type {
   RuntimeInfo,
   ServiceInstanceState,
   ServiceInstanceView,
+  SessionListItemView,
   SessionSidecarView,
   SessionState,
   SessionView,
@@ -104,7 +105,7 @@ function hyperlink(text: string, url: string): string {
   return `\u001B]8;;${url}\u0007${text}\u001B]8;;\u0007`;
 }
 
-function formatSessionAssociations(session: SessionView): string[] {
+function formatSessionAssociations(session: SessionListItemView): string[] {
   return (session.slots?.links ?? []).map((link) => {
     const display = formatSessionLinkDisplay(link);
     return hyperlink(display.text, display.url);
@@ -149,7 +150,7 @@ function formatSidecarAgeSeconds(seconds: number): string {
 // resolved, renders unchanged. Names only the single oldest sidecar even
 // when several are running, keeping the facts line terse; the count for
 // the rest is folded into "+N more".
-function describeSidecarAge(session: SessionView): string | null {
+function describeSidecarAge(session: SessionListItemView): string | null {
   const aged = session.sidecars.filter(
     (sidecar): sidecar is SessionSidecarView & { ageSeconds: number } =>
       sidecar.ageSeconds !== undefined,
@@ -164,19 +165,19 @@ function describeSidecarAge(session: SessionView): string | null {
 
 // Counts only `messages` (real queued sends), never `pipelineMessages` (a
 // pipeline's own future auto-steps).
-export function queuedMessageCount(session: SessionView): number {
+export function queuedMessageCount(session: SessionListItemView): number {
   return session.queuedMessages?.messages.length ?? 0;
 }
 
 // Compact indicator so a session holding real queued messages is visible in
 // `spur list` without a second command — quiet (no fact added) when the queue
 // is empty or absent.
-function describeQueueDepth(session: SessionView): string | null {
+function describeQueueDepth(session: SessionListItemView): string | null {
   const count = queuedMessageCount(session);
   return count > 0 ? `queued ${count}` : null;
 }
 
-function describeRow(session: SessionView): SessionRow {
+function describeRow(session: SessionListItemView): SessionRow {
   return {
     id: session.id,
     state: rowLabel(session),
@@ -186,7 +187,7 @@ function describeRow(session: SessionView): SessionRow {
   };
 }
 
-function rowLabel(session: SessionView): string {
+function rowLabel(session: SessionListItemView): string {
   if (session.status === "paused") {
     return "Paused";
   }
@@ -217,7 +218,7 @@ function stateLabel(state: SessionState): string {
   }
 }
 
-function statusColor(session: SessionView): string {
+function statusColor(session: SessionListItemView): string {
   const state = session.state;
   if (state === "working") return SUCCESS;
   if (state === "waiting" || state === "needs_input" || state === "rate_limited") return WARNING;
@@ -225,7 +226,7 @@ function statusColor(session: SessionView): string {
   return MUTED;
 }
 
-export function describeSession(session: SessionView): string {
+export function describeSession(session: SessionListItemView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
   const services = session.services;
 
@@ -304,7 +305,7 @@ function formatInlineService(service: ServiceInstanceView): string {
     : `${base}:${serviceStateLabel(service.state)}`;
 }
 
-function measureSessionColumns(sessions: SessionView[]): SessionColumnWidths {
+function measureSessionColumns(sessions: SessionListItemView[]): SessionColumnWidths {
   const rows = sessions.map(describeRow);
   return {
     id: Math.max(MIN_ID_WIDTH, "id".length, ...rows.map((row) => row.id.length)),
@@ -318,7 +319,7 @@ function measureSessionColumns(sessions: SessionView[]): SessionColumnWidths {
   };
 }
 
-function renderSessionRow(session: SessionView, widths: SessionColumnWidths): string {
+function renderSessionRow(session: SessionListItemView, widths: SessionColumnWidths): string {
   const row = describeRow(session);
   return [
     accent(row.id.padEnd(widths.id)),
@@ -341,7 +342,7 @@ function renderSessionHeader(widths: SessionColumnWidths): string {
   );
 }
 
-function renderStatusIndicator(session: SessionView): string {
+function renderStatusIndicator(session: SessionListItemView): string {
   if (session.state === "needs_input") {
     return colorize("! ", `${BOLD}${WARNING}`);
   }
@@ -353,14 +354,14 @@ export function renderEmptyState(message: string, hint?: string): string {
 }
 
 export function renderSessionCard(
-  session: SessionView,
+  session: SessionListItemView,
   widths = measureSessionColumns([session]),
 ): string {
   const lines = [`${renderSessionRow(session, widths)}`, `  ${dimText(describeSession(session))}`];
   return lines.join("\n");
 }
 
-export function renderSessionList(sessions: SessionView[]): string {
+export function renderSessionList(sessions: SessionListItemView[]): string {
   if (sessions.length === 0) {
     return renderEmptyState("No sessions.", "Run `spur spawn <project>` to start one.");
   }
@@ -395,10 +396,13 @@ export function renderRuntimeSummary(info: RuntimeInfo): string {
 
 function renderSessionDetailsPane(args: {
   selected: SessionView | null;
+  detailLoading: boolean;
   maxDetailLines: number;
 }): string[] {
   if (!args.selected) {
-    return [brandLine("Selected"), dimText("Use ↑↓ to reselect before acting.")];
+    return args.detailLoading
+      ? [brandLine("Selected"), dimText("Loading …")]
+      : [brandLine("Selected"), dimText("Use ↑↓ to reselect before acting.")];
   }
 
   const selected = args.selected;
@@ -436,7 +440,7 @@ function renderSessionDetailsPane(args: {
 
 export function renderSessionDashboard(args: {
   info: RuntimeInfo;
-  sessions: SessionView[];
+  sessions: SessionListItemView[];
 }): string {
   const lines = [renderRuntimeSummary(args.info), "", brandLine("Sessions"), ""];
   lines.push(renderSessionList(args.sessions));
@@ -444,7 +448,7 @@ export function renderSessionDashboard(args: {
 }
 
 export function renderWaitingInputAlert(args: {
-  sessions: SessionView[];
+  sessions: SessionListItemView[];
   selectedSessionId: string | null;
 }): string | undefined {
   const waiting = args.sessions.filter((session) => session.state === "needs_input");
@@ -464,8 +468,10 @@ export function renderWaitingInputAlert(args: {
 
 export function renderInteractiveSessionList(args: {
   info: RuntimeInfo;
-  sessions: SessionView[];
+  sessions: SessionListItemView[];
   selectedSessionId: string | null;
+  selectedDetail: SessionView | null;
+  detailLoading: boolean;
   totalSessions: number;
   windowStart: number;
   maxDetailLines: number;
@@ -494,7 +500,6 @@ export function renderInteractiveSessionList(args: {
     return lines.join("\n");
   }
 
-  const selected = args.sessions.find((session) => session.id === args.selectedSessionId) ?? null;
   const windowEnd = args.windowStart + args.sessions.length;
   const widths = measureSessionColumns(args.sessions);
   const title =
@@ -503,12 +508,13 @@ export function renderInteractiveSessionList(args: {
       : "Sessions";
   lines.push(brandLine(title), `  ${renderSessionHeader(widths)}`);
   for (const session of args.sessions) {
-    const selectedMark = session.id === selected?.id ? accent("›") : " ";
+    const selectedMark = session.id === args.selectedSessionId ? accent("›") : " ";
     lines.push(`${selectedMark} ${renderSessionRow(session, widths)}`);
   }
 
   const detailLines = renderSessionDetailsPane({
-    selected,
+    selected: args.selectedDetail,
+    detailLoading: args.detailLoading,
     maxDetailLines: args.maxDetailLines,
   });
   lines.push(

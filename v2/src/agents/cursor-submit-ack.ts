@@ -1,25 +1,43 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { findLatestCursorTranscriptFile } from "../cursor-jsonl-state.js";
+import {
+  findCursorAckTranscriptFile,
+  resolveCursorPinnedTranscriptPath,
+} from "../cursor-jsonl-state.js";
 
 export interface CursorSubmitBaseline {
   file: string;
   size: number;
 }
 
+export interface CursorSubmitAckScanResult {
+  found: boolean;
+  scannedFile: string;
+}
+
 export async function captureCursorSubmitBaseline(
   worktreePath: string,
+  agentSessionId?: string,
 ): Promise<CursorSubmitBaseline | null> {
-  const file = await findLatestCursorTranscriptFile(worktreePath);
+  const file = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
   if (!file) {
-    return null;
+    if (!agentSessionId) {
+      // No id to pin on and nothing resolved: today's behavior, unchanged. A
+      // fresh launch with no project dir at all has no baseline to wait on.
+      return null;
+    }
+    // A pinned id with nothing on disk yet must still yield a WAITING baseline,
+    // never null — session-service.ts treats a null binding as an unconditional,
+    // un-waited "submitted", so this is the anti-regression path for a send that
+    // races cursor's own creation of the transcript file.
+    return { file: await resolveCursorPinnedTranscriptPath(worktreePath, agentSessionId), size: 0 };
   }
   try {
     const fileStat = await stat(file);
     return { file, size: fileStat.size };
   } catch {
-    return null;
+    return agentSessionId ? { file, size: 0 } : null;
   }
 }
 
@@ -107,19 +125,21 @@ export async function scanCursorJsonlForMessage(
   baseline: CursorSubmitBaseline,
   text: string,
   worktreePath: string,
-): Promise<boolean> {
+  agentSessionId?: string,
+): Promise<CursorSubmitAckScanResult> {
   const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
-    return false;
+    return { found: false, scannedFile: baseline.file };
   }
 
   if (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget)) {
-    return true;
+    return { found: true, scannedFile: baseline.file };
   }
 
-  const latest = await findLatestCursorTranscriptFile(worktreePath);
+  const latest = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
   if (!latest || latest === baseline.file) {
-    return false;
+    return { found: false, scannedFile: baseline.file };
   }
-  return scanFileForUserText(latest, 0, normalizedTarget);
+  const found = await scanFileForUserText(latest, 0, normalizedTarget);
+  return { found, scannedFile: latest };
 }

@@ -53,7 +53,10 @@ export function toCursorProjectPath(worktreePath: string): string {
     .replace(/-+$/, "");
 }
 
-async function findLatestCursorTranscriptInDir(transcriptsDir: string): Promise<string | null> {
+async function findLatestCursorTranscriptInDir(
+  transcriptsDir: string,
+  options?: { minMtimeMs?: number | undefined },
+): Promise<{ path: string; mtimeMs: number } | null> {
   let entries: string[];
   try {
     entries = await readdir(transcriptsDir);
@@ -66,6 +69,9 @@ async function findLatestCursorTranscriptInDir(transcriptsDir: string): Promise<
       const filePath = join(transcriptsDir, entry, `${entry}.jsonl`);
       try {
         const fileStat = await stat(filePath);
+        if (options?.minMtimeMs !== undefined && fileStat.mtimeMs < options.minMtimeMs) {
+          return null;
+        }
         return { path: filePath, mtimeMs: fileStat.mtimeMs };
       } catch {
         return null;
@@ -74,21 +80,26 @@ async function findLatestCursorTranscriptInDir(transcriptsDir: string): Promise<
   );
   const existing = files.filter((file): file is { path: string; mtimeMs: number } => Boolean(file));
   existing.sort((left, right) => right.mtimeMs - left.mtimeMs);
-  return existing[0]?.path ?? null;
+  return existing[0] ?? null;
+}
+
+function transcriptsDirFor(candidate: string): string {
+  return join(
+    homedir(),
+    ".cursor",
+    "projects",
+    toCursorProjectPath(candidate),
+    "agent-transcripts",
+  );
 }
 
 export async function findLatestCursorTranscriptFile(
   worktreePath: string,
   agentSessionId?: string,
+  options?: { minMtimeMs?: number | undefined },
 ): Promise<string | null> {
   for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
-    const transcriptsDir = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      toCursorProjectPath(candidate),
-      "agent-transcripts",
-    );
+    const transcriptsDir = transcriptsDirFor(candidate);
     if (agentSessionId) {
       const pinnedPath = join(transcriptsDir, agentSessionId, `${agentSessionId}.jsonl`);
       try {
@@ -98,12 +109,50 @@ export async function findLatestCursorTranscriptFile(
         continue;
       }
     }
-    const latest = await findLatestCursorTranscriptInDir(transcriptsDir);
+    const latest = await findLatestCursorTranscriptInDir(transcriptsDir, options);
     if (latest) {
-      return latest;
+      return latest.path;
     }
   }
   return null;
+}
+
+// Ack-path-only resolver. Unlike findLatestCursorTranscriptFile's first-dir-wins
+// selection (kept unchanged for state classification and the dialog viewer, I8),
+// the no-id case here searches ALL candidate dirs and takes the GLOBAL newest by
+// mtime. A stale shadow project dir (for example a symlinked worktree's raw-path
+// slug, still holding old or stub transcripts) loses on mtime the moment the live
+// agent writes under the realpath slug, so the ack self-corrects inside one wait
+// window instead of being permanently masked by first-dir-wins.
+export async function findCursorAckTranscriptFile(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<string | null> {
+  if (agentSessionId) {
+    return findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+  }
+  let newest: { path: string; mtimeMs: number } | null = null;
+  for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
+    const found = await findLatestCursorTranscriptInDir(transcriptsDirFor(candidate));
+    if (found && (!newest || found.mtimeMs > newest.mtimeMs)) {
+      newest = found;
+    }
+  }
+  return newest?.path ?? null;
+}
+
+// Path builder for the pending-pin baseline (change c). Cursor may not have
+// created the pinned transcript file yet at capture time; this still returns
+// the path it will land at once cursor writes, so the ack wait can WAIT on it
+// instead of reporting no baseline at all (session-service.ts:10468-10470 treats
+// a null binding as an unconditional, un-waited "submitted").
+export async function resolveCursorPinnedTranscriptPath(
+  worktreePath: string,
+  agentSessionId: string,
+): Promise<string> {
+  const candidates = await resolveWorktreePathCandidates(worktreePath);
+  const lastCandidate = candidates[candidates.length - 1] ?? worktreePath;
+  return join(transcriptsDirFor(lastCandidate), agentSessionId, `${agentSessionId}.jsonl`);
 }
 
 export function parseCursorJsonlRecord(
@@ -199,11 +248,9 @@ function isWithinActivityWindow(
 }
 
 function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
-  for (let i = records.length - 1; i >= 0; i--) {
-    const record = records[i];
-    if (record?.terminalError && typeof record.text === "string" && record.text.length > 0) {
-      return record.text;
-    }
+  const latest = records[records.length - 1];
+  if (latest?.terminalError && typeof latest.text === "string" && latest.text.length > 0) {
+    return latest.text;
   }
   return null;
 }
@@ -219,7 +266,10 @@ export function classifyCursorJsonlState(
       continue;
     }
     if (record.terminalError) {
-      return "error";
+      if (i === records.length - 1) {
+        return "error";
+      }
+      continue;
     }
     if (record.role === "assistant") {
       if (record.requestsUserInput) {
@@ -248,16 +298,19 @@ export async function readCursorJsonlState(
   worktreePath: string,
   reader?: CursorJsonlReaderState,
   agentSessionId?: string,
+  options?: { minMtimeMs?: number | undefined },
 ): Promise<{
   state: SessionState;
   reader: CursorJsonlReaderState;
   rateLimit: RateLimitDetection | null;
 } | null> {
-  const resolvedPath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+  const resolvedPath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId, options);
   const filePath =
     resolvedPath ??
     (agentSessionId ? null : reader?.filePath) ??
-    (agentSessionId ? null : await findLatestCursorTranscriptFile(worktreePath));
+    (agentSessionId
+      ? null
+      : await findLatestCursorTranscriptFile(worktreePath, undefined, options));
   if (!filePath) {
     return null;
   }
@@ -266,6 +319,13 @@ export async function readCursorJsonlState(
   try {
     fileStat = await stat(filePath);
   } catch {
+    return null;
+  }
+  if (
+    !agentSessionId &&
+    options?.minMtimeMs !== undefined &&
+    fileStat.mtimeMs < options.minMtimeMs
+  ) {
     return null;
   }
 

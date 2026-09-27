@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 
 type MediaQueryListener = (event: MediaQueryListEvent) => void;
@@ -7,8 +7,8 @@ type MediaQueryListener = (event: MediaQueryListEvent) => void;
 interface FakeMediaQueryList {
   matches: boolean;
   media: string;
-  addEventListener: ReturnType<typeof vi.fn>;
-  removeEventListener: ReturnType<typeof vi.fn>;
+  addEventListener: Mock<(event: string, listener: MediaQueryListener) => void>;
+  removeEventListener: Mock<(event: string, listener: MediaQueryListener) => void>;
   dispatch: (matches: boolean) => void;
 }
 

@@ -75,10 +75,12 @@ import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as updateWakeMessage } from "@/app/api/sessions/[id]/wake/route";
 import { POST as removeQueuedMessage } from "@/app/api/sessions/[id]/queue/remove/route";
 import { POST as flushQueuedMessage } from "@/app/api/sessions/[id]/queue/flush/route";
 import { POST as answerQuestion } from "@/app/api/sessions/[id]/answer/route";
 import { POST as markOpened } from "@/app/api/sessions/[id]/opened/route";
+import { POST as updateSessionTitle } from "@/app/api/sessions/[id]/title/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
@@ -684,6 +686,111 @@ describe("Spur web API routes", () => {
     );
   });
 
+  it("POST /api/sessions/:id/wake forwards targeted message updates", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({})), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "interval", message: "Updated wake" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/wake",
+      expect.objectContaining({
+        body: JSON.stringify({ target: "interval", message: "Updated wake" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/wake rejects blank and mixed update bodies", async () => {
+    const blank = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "interval", message: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(blank.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+
+    const mixed = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "interval", message: "Updated", intervalMs: 60_000 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(mixed.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/wake forwards targeted wake dispatch", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({})), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "interval", dispatch: true }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/wake",
+      expect.objectContaining({
+        body: JSON.stringify({ target: "interval", dispatch: true }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/wake rejects non-object JSON bodies", async () => {
+    const response = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: "null",
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/wake passes through daemon 409 responses", async () => {
+    const conflict = { error: 'Wake target "daily" not found for api-a1' };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await updateWakeMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/wake", {
+        method: "POST",
+        body: JSON.stringify({ target: "daily", message: "Updated wake" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+  });
+
   it("send forwards a 409 rate-limited body and status verbatim", async () => {
     const conflict = { error: "Session api-a1 is rate limited" };
     mockedSpurRequest.mockResolvedValue(
@@ -921,6 +1028,143 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
+  // ── POST /api/sessions/:id/title ───────────────────────────────────────
+
+  it("POST /api/sessions/:id/title sends manual title updates", async () => {
+    mockedSpurRequestJson.mockResolvedValue(
+      sessionFixture({ slotUpdate: { titleResult: "updated" } }),
+    );
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "  Manual title  " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        body: JSON.stringify({ title: "Manual title", source: "manual" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/title sends manual title clears", async () => {
+    mockedSpurRequestJson.mockResolvedValue(
+      sessionFixture({ slotUpdate: { titleResult: "cleared" } }),
+    );
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: null }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        body: JSON.stringify({ clearTitle: true, source: "manual" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/title rejects invalid title bodies", async () => {
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: 42 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/title rejects a whitespace-only title without calling the daemon (T3)", async () => {
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("title must not be empty");
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/title rejects a non-JSON body with 400, not 502", async () => {
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: "not json",
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/title surfaces a daemon not-found as 404, not 502", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("Session not found: api-a1", 404));
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "New title" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("POST /api/sessions/:id/title returns 409 when the daemon reports a blocked title result", async () => {
+    mockedSpurRequestJson.mockResolvedValue(
+      sessionFixture({
+        slotUpdate: { titleResult: "blocked", message: "title editing unavailable" },
+      }),
+    );
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "New title" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("title editing unavailable");
+  });
+
+  it("POST /api/sessions/:id/title succeeds against an older daemon reply with no slotUpdate", async () => {
+    // A pre-skew daemon returns a plain SessionView (no slotUpdate field);
+    // the write already happened, so this must not 502 or otherwise fail.
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "New title" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+  });
+
   // ── Lifecycle actions ──────────────────────────────────────────────────
 
   it("POST lifecycle actions proxy to Spur daemon", async () => {
@@ -1139,22 +1383,20 @@ describe("Spur web API routes", () => {
     );
   });
 
-  it("POST /api/sessions/:id/complete trims and forwards ToDo override reason", async () => {
+  it("POST /api/sessions/:id/complete drops a ToDo override reason the daemon no longer takes", async () => {
     mockedSpurRequest.mockResolvedValue(
       new Response(JSON.stringify(sessionFixture()), { status: 200 }),
     );
     await completeSession(
       new NextRequest("http://localhost/api/sessions/api-a1/complete", {
         method: "POST",
-        body: JSON.stringify({ todoOverrideReason: "  Operator accepted risk  " }),
+        body: JSON.stringify({ todoOverrideReason: "Operator accepted risk" }),
       }),
       { params: Promise.resolve({ id: "api-a1" }) },
     );
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/complete",
-      expect.objectContaining({
-        body: JSON.stringify({ todoOverrideReason: "Operator accepted risk" }),
-      }),
+      expect.objectContaining({ body: JSON.stringify({}) }),
     );
   });
 

@@ -98,6 +98,7 @@ ALWAYS-ON RULES
   Detect session state and rate limits from structured agent sources first (transcript/rollout JSONL, status files). Scan the tmux pane buffer only as a fallback when the structured sources cannot resolve it. Never start detection from tmux.
   Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
   Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
+  Never publish operator environment detail to GitHub — issue and PR titles, bodies, comments, commit messages, CI logs. Banned: IP addresses, hostnames, VM and machine names, OS usernames, internal URLs and ports, tokens, absolute home paths, names of the operator's personal skills, agents, or unrelated projects and repos. Say `the host`, `a dev box`, `a local daemon` instead. Real names stay in session artifacts and local notes. Redact before posting, never after.
   Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
   For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
@@ -112,6 +113,9 @@ ALWAYS-ON RULES
   Capture what the task taught before closing it. Route by scope: reusable across projects -> global rules; specific to this repo -> the owning `SKILL.md` or `spur memory --scope project`. Skip what git history, the code, or an existing rule already records.
   Worth capturing: a protocol that worked, a tool quirk, a wrong assumption that cost a cycle, a load-bearing invariant. Not: task status, one-off trivia, anything re-derivable by reading the code.
   Skill found stale, wrong, or missing a rule while using it: fix it in the same change. Never leave a known-wrong instruction for the next agent.
+  Never fix a problem outside the current request. Covers an unrelated bug found along the way, and review feedback that arrives after its PR merged. Two carve-outs, both stated above: a stale or wrong skill rule hit while using it, and a CI failure on your own PR — fix those in the same change. Otherwise file a GitHub issue for it before close-out; procedure in `.agents/skills/github/SKILL.md`. An agent without shell access reports it to manager instead.
+  Log Spur-operation friction with `spur agent-issue log`: friction blocking your operation of Spur, never a code defect in this repo. Boundary and usage: `docs/commands.md`.
+  Keep Spur skill byte-minimal: general user-facing actions and capabilities plus canonical references; runtime and interface details live in owning docs or source.
   No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text or colon labels.
   Skill and agent bodies follow the FORMAT law in `skill-writer` (.agents/skills/skill-writer/SKILL.md): markdown file, minimal markdown, UPPERCASE labels and two-space indent instead of headings, tables, and fences. Lists use `-`; number only when the number carries meaning.
   Never restate an external tool's help, a code constant a source file defines, or a config key a doc owns. Reference it.

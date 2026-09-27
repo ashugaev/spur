@@ -22,31 +22,12 @@ function errorCode(error: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
-function errorStdout(error: unknown): string {
-  if (typeof error !== "object" || error === null || !("stdout" in error)) {
-    return "";
-  }
-  const stdout = (error as { stdout?: unknown }).stdout;
-  return typeof stdout === "string" || Buffer.isBuffer(stdout) ? stdout.toString() : "";
-}
-
-async function execFileOutput(file: string, args: string[]): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync(file, args, { timeout: LISTENER_LOOKUP_TIMEOUT_MS });
-    return stdout.toString();
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") {
-      return "";
-    }
-    return errorStdout(error);
-  }
-}
-
-// Unlike execFileOutput, a failure here must stay visibly distinct from an
-// empty/zero-row success — the sidecar reap veto (hasEstablishedConnections)
-// treats "the probe could not run" as "unknown" (keep, never reap), not as
-// "no connections" (which would authorize a reap). execFileOutput collapsing
-// every failure to "" is exactly the trap this sibling exists to avoid.
+// A probe failure must stay visibly distinct from an empty/zero-row success
+// — the sidecar reap veto (hasEstablishedConnections) treats "the probe
+// could not run" as "unknown" (keep, never reap), not as "no connections"
+// (which would authorize a reap), and findListenerPids below leans on the
+// same distinction to avoid reading an unavailable probe as proof a port is
+// free.
 async function execFileTriState(
   file: string,
   args: string[],
@@ -101,19 +82,36 @@ export function isHostPortFree(port: number): Promise<boolean> {
   });
 }
 
+// A failed probe (both tools missing, or both timing out) must stay
+// distinguishable from "genuinely zero listeners" — collapsing the two would
+// let a host with neither `lsof` nor `ss` (or one that only times out)
+// report an occupied port as free. Throws only when NEITHER tool produced a
+// usable result; either one succeeding (even with zero rows) is a real
+// answer.
 export async function findListenerPids(port: number): Promise<number[]> {
   if (!isValidPort(port)) {
     throw new Error(`Invalid port: ${port}`);
   }
 
-  const lsofOutput = await execFileOutput("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
-  const lsofPids = parseLsofPids(lsofOutput);
-  if (lsofPids.length > 0) {
-    return lsofPids;
+  const lsofResult = await execFileTriState("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
+  if (lsofResult.ok) {
+    const lsofPids = parseLsofPids(lsofResult.stdout);
+    if (lsofPids.length > 0) {
+      return lsofPids;
+    }
   }
 
-  const ssOutput = await execFileOutput("ss", ["-ltnp", "sport", "=", `:${port}`]);
-  return parseSsPids(ssOutput);
+  const ssResult = await execFileTriState("ss", ["-ltnp", "sport", "=", `:${port}`]);
+  if (ssResult.ok) {
+    return parseSsPids(ssResult.stdout);
+  }
+
+  if (lsofResult.ok) {
+    // lsof ran and found nothing; ss being unavailable doesn't erase that.
+    return [];
+  }
+
+  throw new Error(`Port listener probe unavailable for port ${port}: neither lsof nor ss ran`);
 }
 
 // The sidecar reap veto: an established TCP connection on a sidecar's

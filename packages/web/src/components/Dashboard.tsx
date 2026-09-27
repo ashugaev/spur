@@ -24,7 +24,6 @@ import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
-import { TodoOverrideDialog } from "@/components/TodoOverrideDialog";
 import { ToastViewport } from "@/components/Toast";
 import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
@@ -68,8 +67,6 @@ import {
   isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
-  isTodoLedgerEmptyPayload,
-  isTodoOpenWorkPayload,
   toDashboardSession,
   type AttentionLevel,
   type AvailableBacklogItem,
@@ -610,21 +607,23 @@ function ProjectMenu({
           className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           role="menu"
         >
-          <button
-            aria-checked={selectedProjectId === ""}
-            className={`mb-1 flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
-            onClick={() => {
-              popover.dismiss();
-              onSelectProject("");
-            }}
-            role="menuitemradio"
-            type="button"
-          >
-            <span aria-hidden="true" className="w-3 text-center">
-              {selectedProjectId === "" ? "✓" : ""}
-            </span>
-            <span>All Projects</span>
-          </button>
+          <div className="mb-1 transition hover:bg-[var(--color-hover-overlay)]">
+            <button
+              aria-checked={selectedProjectId === ""}
+              className={`flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
+              onClick={() => {
+                popover.dismiss();
+                onSelectProject("");
+              }}
+              role="menuitemradio"
+              type="button"
+            >
+              <span aria-hidden="true" className="w-3 text-center">
+                {selectedProjectId === "" ? "✓" : ""}
+              </span>
+              <span>All Projects</span>
+            </button>
+          </div>
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
@@ -633,12 +632,12 @@ function ProjectMenu({
                 <li
                   key={project.id}
                   role="none"
-                  className="group flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5 transition hover:bg-[var(--color-accent)]/10"
+                  className="group flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5 transition hover:bg-[var(--color-hover-overlay)]"
                 >
                   {project.configured ? (
                     <button
                       aria-checked={selectedProjectId === project.id}
-                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
+                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
                       onClick={() => {
                         popover.dismiss();
                         onSelectProject(project.id);
@@ -673,7 +672,7 @@ function ProjectMenu({
                   ) : null}
                   <button
                     aria-label={`Edit ${project.name}`}
-                    className="border border-transparent px-1.5 py-1 text-[var(--color-text-tertiary)] transition group-hover:border-[var(--color-border-subtle)] group-hover:bg-[var(--color-accent)]/15 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)]"
+                    className="border border-transparent px-1.5 py-1 text-[var(--color-text-tertiary)] transition group-hover:border-[var(--color-border-subtle)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-accent)]"
                     onClick={() => {
                       popover.dismiss();
                       onEdit(project);
@@ -1069,22 +1068,6 @@ export function Dashboard() {
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
   const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] = useState(false);
-  const [todoOverride, setTodoOverride] = useState<
-    | {
-        session: DashboardSession;
-        options: { prAction?: OpenPrAction; skipPrCheck?: true };
-        empty: true;
-      }
-    | {
-        session: DashboardSession;
-        options: { prAction?: OpenPrAction; skipPrCheck?: true };
-        empty?: false;
-        openCount: number;
-        heldCount: number;
-      }
-    | null
-  >(null);
-  const [todoOverrideBusy, setTodoOverrideBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -2184,7 +2167,6 @@ export function Dashboard() {
       prAction?: OpenPrAction;
       retry?: true;
       skipPrCheck?: true;
-      todoOverrideReason?: string;
     },
   ): Promise<boolean> => {
     const prAction = options?.prAction;
@@ -2228,7 +2210,6 @@ export function Dashboard() {
         scope: "desk",
         ...(prAction ? { prAction } : {}),
         ...(options?.skipPrCheck ? { skipPrCheck: true } : {}),
-        ...(options?.todoOverrideReason ? { todoOverrideReason: options.todoOverrideReason } : {}),
       };
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
@@ -2241,10 +2222,8 @@ export function Dashboard() {
           if (previousResponse) {
             queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
           }
-          // Only one dashboard dialog is ever mounted: a PR 409 clears the todo
-          // dialog too, or a later todo-override retry could stack both.
+          // Only one dashboard dialog is ever mounted.
           setPrCheckUnavailable(null);
-          setTodoOverride(null);
           setOpenPrAction({ session, payload });
           return false;
         }
@@ -2256,36 +2235,7 @@ export function Dashboard() {
           // the sibling mounted stacks both, and the stale one survives a later
           // success and re-fires /complete on a terminal session.
           setOpenPrAction(null);
-          setTodoOverride(null);
           setPrCheckUnavailable({ session, payload });
-          return false;
-        }
-        if (isTodoOpenWorkPayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
-          setOpenPrAction(null);
-          setPrCheckUnavailable(null);
-          const { sessions } = payload;
-          setTodoOverride({
-            session,
-            options: { prAction, ...(options?.skipPrCheck ? { skipPrCheck: true } : {}) },
-            openCount: sessions.reduce((count, entry) => count + entry.openItemIds.length, 0),
-            heldCount: sessions.reduce((count, entry) => count + entry.heldItemIds.length, 0),
-          });
-          return false;
-        }
-        if (isTodoLedgerEmptyPayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
-          setOpenPrAction(null);
-          setPrCheckUnavailable(null);
-          setTodoOverride({
-            session,
-            options: { prAction, ...(options?.skipPrCheck ? { skipPrCheck: true } : {}) },
-            empty: true,
-          });
           return false;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
@@ -2336,26 +2286,6 @@ export function Dashboard() {
       // handleCompleteSession already toasted; keep the dialog reachable.
     } finally {
       setOpenPrActionBusy(false);
-    }
-  };
-
-  const handleTodoOverride = async (reason: string) => {
-    if (!todoOverride) return;
-    setTodoOverrideBusy(true);
-    try {
-      if (
-        await handleCompleteSession(todoOverride.session, {
-          ...todoOverride.options,
-          retry: true,
-          todoOverrideReason: reason,
-        })
-      ) {
-        setTodoOverride(null);
-      }
-    } catch {
-      // handleCompleteSession already toasted; keep the dialog reachable.
-    } finally {
-      setTodoOverrideBusy(false);
     }
   };
 
@@ -2461,14 +2391,7 @@ export function Dashboard() {
         !event.shiftKey &&
         ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
       if (!exactFindShortcut || event.isComposing) return;
-      if (
-        spawnOpen ||
-        newProjectOpen ||
-        terminalSession ||
-        openPrAction ||
-        prCheckUnavailable ||
-        todoOverride
-      )
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction || prCheckUnavailable)
         return;
 
       const target = event.target;
@@ -2490,7 +2413,7 @@ export function Dashboard() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [newProjectOpen, openPrAction, prCheckUnavailable, spawnOpen, terminalSession, todoOverride]);
+  }, [newProjectOpen, openPrAction, prCheckUnavailable, spawnOpen, terminalSession]);
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
@@ -3006,16 +2929,6 @@ export function Dashboard() {
               onRetry={() => void handlePrCheckUnavailable({})}
               onSkip={() => void handlePrCheckUnavailable({ skipPrCheck: true })}
               payload={prCheckUnavailable.payload}
-            />
-          ) : null}
-          {todoOverride ? (
-            <TodoOverrideDialog
-              busy={todoOverrideBusy}
-              onCancel={() => setTodoOverride(null)}
-              onSubmit={(reason) => void handleTodoOverride(reason)}
-              {...(todoOverride.empty
-                ? { empty: true }
-                : { openCount: todoOverride.openCount, heldCount: todoOverride.heldCount })}
             />
           ) : null}
         </main>

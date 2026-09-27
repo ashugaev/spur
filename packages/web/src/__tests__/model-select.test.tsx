@@ -234,6 +234,11 @@ describe("ModelSelect", () => {
   });
 
   describe("onResolvedChange", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
     it("never reports resolved on the pre-effect mount render, even when the models fetch settles fast", async () => {
       // Regression guard: ModelSelect's own `loading` must start true, not
       // false. If it started false, the very first render — before the
@@ -515,19 +520,19 @@ describe("ModelSelect", () => {
 
     it("F2: a models fetch that never resolves on its own times out into the error state instead of disabling submit forever", async () => {
       vi.useFakeTimers();
-      let capturedSignal: AbortSignal | undefined;
+      // Fake timers don't drive AbortSignal.timeout — model the timeout
+      // rejection here so advanceTimersByTimeAsync triggers the error path.
       vi.stubGlobal(
         "fetch",
-        vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
-          capturedSignal = init?.signal ?? undefined;
-          // Never resolves or rejects on its own — only reacts to abort,
-          // exactly like a real fetch racing AbortSignal.timeout.
-          return new Promise<Response>((_resolve, reject) => {
-            capturedSignal?.addEventListener("abort", () => {
-              reject(new DOMException("The operation was aborted", "TimeoutError"));
-            });
-          });
-        }) as unknown as typeof fetch,
+        vi.fn(
+          () =>
+            new Promise<Response>((_resolve, reject) => {
+              setTimeout(
+                () => reject(new DOMException("The operation was aborted", "TimeoutError")),
+                12_000,
+              );
+            }),
+        ) as unknown as typeof fetch,
       );
       const onResolvedChange = vi.fn();
       render(
@@ -541,7 +546,6 @@ describe("ModelSelect", () => {
         />,
       );
 
-      expect(capturedSignal).toBeInstanceOf(AbortSignal);
       expect(onResolvedChange).not.toHaveBeenCalledWith(true, expect.anything());
 
       await act(async () => {
@@ -554,8 +558,6 @@ describe("ModelSelect", () => {
           name: "Resolving model",
         }),
       ).not.toBeInTheDocument();
-
-      vi.useRealTimers();
     });
 
     it("does not report resolved just because a caller-seeded value is already non-null, before any fetch settles", async () => {

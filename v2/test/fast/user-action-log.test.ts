@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_USER_ACTION_LOG_CONFIG,
@@ -81,6 +82,31 @@ describe("appendUserAction dual-write", () => {
 
     expect(readUserActionLog(dir)).toHaveLength(1);
     expect(existsSync(sessionUserActionLogPath(dir, "demo-1"))).toBe(false);
+  });
+});
+
+describe("auto-ping actions", () => {
+  it("records unsubscribe scope without the credential or its hash", () => {
+    const handle = `ap1_${"s".repeat(43)}`;
+    const handleHash = createHash("sha256").update(handle).digest("hex");
+    const action = buildUserActionRecord({
+      method: "POST",
+      path: "/sessions/demo-1/auto-ping-suppressions/unsubscribe",
+      origin: "cli",
+      body: { scope: "thread", handle },
+      statusCode: 200,
+      latencyMs: 5,
+      error: `failed ${handle}`,
+    });
+
+    expect(action).toMatchObject({
+      action: "session.auto_ping_unsubscribe",
+      sessionId: "demo-1",
+      params: { scope: "thread" },
+      error: "failed [auto-ping-handle]",
+    });
+    expect(JSON.stringify(action)).not.toContain(handle);
+    expect(JSON.stringify(action)).not.toContain(handleHash);
   });
 });
 

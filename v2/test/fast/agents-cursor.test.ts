@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
@@ -39,15 +39,17 @@ import {
   findCursorSessionId,
 } from "../../src/agents/cursor.js";
 
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
-const mockReaddir = readdir as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
-const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockRename = rename as ReturnType<typeof vi.fn>;
-const mockChmod = chmod as ReturnType<typeof vi.fn>;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+const mockExistsSync = existsSync as unknown as Mock<typeof existsSync>;
+const mockMkdir = mkdir as unknown as Mock<typeof mkdir>;
+const mockReaddir = readdir as unknown as Mock;
+const mockStat = stat as unknown as Mock;
+const mockWriteFile = writeFile as unknown as Mock<typeof writeFile>;
+const mockReadFile = readFile as unknown as Mock<typeof readFile>;
+const mockRename = rename as unknown as Mock;
+const mockChmod = chmod as unknown as Mock<typeof chmod>;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
+  typeof resolveWorktreePathCandidates
+>;
 
 function cursorHash(path: string): string {
   return createHash("md5").update(resolve(path)).digest("hex");
@@ -228,6 +230,38 @@ describe("ensureCursorRestrictWritesConfig", () => {
     };
     expect(merged.hooks.stop).toEqual(["build.sh"]);
     expect(merged.hooks.beforeShellExecution).toEqual([
+      { command: scriptPath, timeout: 5, failClosed: true },
+    ]);
+  });
+
+  it("prunes spur-managed restrict-writes guard entries but keeps human hooks", async () => {
+    const staleGuard = "/tmp/.spur/cursor/old-session/restrict-writes-hook.js";
+    const humanGuard = ".cursor/restrict-writes-hook.js";
+    mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          beforeShellExecution: [
+            { command: staleGuard, timeout: 5, failClosed: true },
+            { command: `node ${staleGuard}`, timeout: 5, failClosed: true },
+            { command: humanGuard, timeout: 5 },
+            { command: "other-hook.sh", timeout: 5 },
+          ],
+        },
+      }),
+    );
+
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    const tmpPath = mockRename.mock.calls[0]?.[0] as string;
+    const written = mockWriteFile.mock.calls.find((call) => call[0] === tmpPath);
+    const merged = JSON.parse(written?.[1] as string) as {
+      hooks: { beforeShellExecution: Array<{ command: string }> };
+    };
+    expect(merged.hooks.beforeShellExecution).toEqual([
+      { command: humanGuard, timeout: 5 },
+      { command: "other-hook.sh", timeout: 5 },
       { command: scriptPath, timeout: 5, failClosed: true },
     ]);
   });

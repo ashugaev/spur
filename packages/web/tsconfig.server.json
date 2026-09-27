@@ -11,5 +11,5 @@
     "verbatimModuleSyntax": false
   },
   "include": ["server"],
-  "exclude": ["server/__tests__"]
+  "exclude": ["server/__tests__", "server/**/*.test.ts"]
 }

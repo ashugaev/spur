@@ -139,6 +139,56 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function isAddrInUse(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "EADDRINUSE"
+  );
+}
+
+// findFreePort() picks an ephemeral port and immediately releases it so the
+// caller can bind it later; on a busy host another process can grab that same
+// port in the gap before the real bind happens. Retrying with a freshly
+// picked port on EADDRINUSE closes that race without masking any other error.
+export async function startOnFreePort<T>(
+  start: (port: number, configPath: string) => Promise<T>,
+  buildConfigPath: (port: number) => Promise<string>,
+): Promise<{ server: T; port: number }> {
+  for (let attempt = 0; ; attempt += 1) {
+    const port = await findFreePort();
+    const configPath = await buildConfigPath(port);
+    try {
+      return { server: await start(port, configPath), port };
+    } catch (error) {
+      if (attempt >= 2 || !isAddrInUse(error)) throw error;
+    }
+  }
+}
+
+export async function listenOnHostPort(
+  server: ReturnType<typeof createServer>,
+  port: number,
+  host = "127.0.0.1",
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, host, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      return;
+    } catch (error) {
+      if (attempt >= 4 || !isAddrInUse(error)) throw error;
+      await sleep(25 * (attempt + 1));
+    }
+  }
+}
+
 export async function processExists(pid: number): Promise<boolean> {
   try {
     process.kill(pid, 0);

@@ -17,6 +17,16 @@ const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
+// Delegates to isProcessRunningInTmuxMock so this file's existing
+// isProcessRunningInTmuxMock.mockResolvedValue(...) setups keep driving
+// probeAgentProcess's single probeTmuxProcessMatch call unchanged; none of
+// this file's tests exercise a matcher/pane_child disagreement.
+const probeTmuxProcessMatchMock = vi.fn(
+  async (name: string, matchers: string[], options?: { fresh?: boolean }) => {
+    const alive: boolean = await isProcessRunningInTmuxMock(name, matchers, options);
+    return { alive, matchedByName: alive };
+  },
+);
 const getTmuxSessionActivityMock = vi.fn();
 const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const setTmuxSocketNameMock = vi.fn();
@@ -49,6 +59,7 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentResumePlan: vi.fn(),
   findAgentSessionId: vi.fn(),
   agentProcessMatchers: agentProcessMatchersMock,
+  agentLaunchUsesForeignBinary: vi.fn(() => false),
   agentSessionConfig: vi.fn(() => ({})),
   agentStateStrategy: agentStateStrategyMock,
   agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
@@ -123,7 +134,16 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   getTmuxPanePid: vi.fn(() => Promise.resolve(null)),
+  // Delegates to the same mocks readRuntimeSnapshot's other reads already
+  // drive, so this file's existing tmuxSessionExistsMock overrides keep
+  // working unchanged; `unresponsive` is never exercised by this file's tests.
+  getTmuxSessionPresence: vi.fn(async (name: string, options?: { fresh?: boolean }) => ({
+    present: await tmuxSessionExistsMock(name, options),
+    unresponsive: false,
+  })),
+  getTmuxPanePresence: vi.fn(async () => ({ dead: false, unresponsive: false })),
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
+  probeTmuxProcessMatch: probeTmuxProcessMatchMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
@@ -180,18 +200,20 @@ vi.mock("../../src/registry.js", () => ({
   isInsideWorktreeDir: vi.fn(() => false),
   removeConfigRegistryPath: vi.fn(() => []),
   // Keep existing per-test buildMergedConfigMock setups driving the merged config.
-  ConfigRegistryScanner: vi.fn().mockImplementation(() => ({
-    invalidateRemovedPaths: vi.fn(),
-    canonicalizePath: vi.fn((path: string) => path),
-    scan: () => {
+  ConfigRegistryScanner: class {
+    invalidateRemovedPaths = vi.fn();
+    canonicalizePath(path: string) {
+      return path;
+    }
+    scan() {
       const merged = buildMergedConfigMock() as { config: unknown; configPaths: string[] };
       return {
         config: merged.config,
         configPaths: merged.configPaths,
         newDiagnostics: [],
       };
-    },
-  })),
+    }
+  },
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -238,10 +260,26 @@ function baseConfig(): AppConfig {
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
     },
+    artifactRetention: {
+      enabled: false,
+      olderThanDays: 30,
+      intervalMinutes: 360,
+      maxAnchorsPerSweep: 20,
+      maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+      maxFilesPerSession: 500,
+    },
     sidecarGc: {
       enabled: true,
       idleTtlMinutes: 120,
       maxAgeWarnMinutes: 360,
+    },
+    diskBudget: {
+      enabled: false,
+      intervalMinutes: 360,
+      warnAttributableGb: 60,
+      npmCacheMaxGb: 20,
+      buildCacheOlderThanDays: 14,
+      maxWorktreesPerSweep: 20,
     },
     admission: {
       enabled: true,

@@ -86,6 +86,35 @@ describe("findListenerPids", () => {
       expect.objectContaining({ timeout: expect.any(Number) }),
     );
   });
+
+  it("returns [] (not a throw) when lsof finds nothing and ss is unavailable — lsof's own zero-row answer is a real result", async () => {
+    execFileAsyncMock.mockImplementation(async (file: string) => {
+      if (file === "lsof") return { stdout: "", stderr: "" };
+      throw Object.assign(new Error("ss: command not found"), { code: "ENOENT" });
+    });
+
+    await expect(findListenerPids(4311)).resolves.toEqual([]);
+  });
+
+  // 859/N1: a probe failure (both tools missing, or both timing out) must
+  // never collapse to the same "[]" a genuinely free port produces — a host
+  // with neither tool would otherwise let a real listener go unreported.
+  // Mutation check: reverting findListenerPids to swallow every failure to
+  // "" (the pre-fix `execFileOutput` shape) makes this test fail — the
+  // Promise resolves to [] instead of rejecting.
+  it("859/N1: throws when NEITHER lsof nor ss produces a usable result — a probe failure is never proof the port is free", async () => {
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("command not found"), { code: "ENOENT" }),
+    );
+
+    await expect(findListenerPids(4312)).rejects.toThrow(/probe unavailable/);
+  });
+
+  it("859/N1: throws when both tools time out, not just when they are missing", async () => {
+    execFileAsyncMock.mockRejectedValue(Object.assign(new Error("timed out"), { killed: true }));
+
+    await expect(findListenerPids(4313)).rejects.toThrow(/probe unavailable/);
+  });
 });
 
 describe("hasEstablishedConnections", () => {
