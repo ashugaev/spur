@@ -1397,9 +1397,11 @@ export async function waitForTmuxReady(
       pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
     }
     if (options?.agent === "cursor" && cursorShowsReadyPrompt(capture)) {
-      if (cursorTrustConfirmAttempts > 0) {
-        await sleep(CURSOR_READY_SETTLE_DELAY_MS);
-      }
+      // Cursor can draw its input box before the box takes keystrokes: a
+      // launch prompt pasted at first sight of it was lost (live, 1 in 10
+      // spawns), leaving an empty composer. Same settle as after a trust
+      // confirm.
+      await sleep(CURSOR_READY_SETTLE_DELAY_MS);
       return;
     }
     if (readyMarkers.every((marker) => capture.includes(marker))) {

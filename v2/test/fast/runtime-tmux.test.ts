@@ -1081,6 +1081,22 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
 
+  it("settles after cursor's input box first appears, with no trust prompt", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        return { stdout: "Cursor Agent\n→ Plan, search, build anything", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" });
+
+    expect(sleepMock).toHaveBeenCalledWith(1_000);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "send-keys")).toBe(false);
+  });
+
   it("resolves on a banner-less cursor resumed pane via the readyMarkers path", async () => {
     const resumedPane = "some replayed history line\nanother replayed line\n→ Add a follow-up";
     execFileAsyncMock.mockImplementation(async (_file, args) => {
