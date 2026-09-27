@@ -12,11 +12,17 @@ async function setup() {
   await ensureCursorTokenUsageHook(dir, join(dir, "config"));
   return dir;
 }
-async function report(dir: string, generation: string, usage: Record<string, unknown> = {}) {
+async function report(
+  dir: string,
+  generation: string,
+  usage: Record<string, unknown> = {},
+  configDir = join(dir, "config"),
+) {
   await new Promise<void>((resolve, reject) => {
     const child = execFile(
       process.execPath,
-      [join(dir, "config", "spur-cursor-token-usage.mjs")],
+      [join(dir, ".cursor", "spur-cursor-token-usage.mjs")],
+      { env: { ...process.env, CURSOR_CONFIG_DIR: configDir } },
       (error) => (error ? reject(error) : resolve()),
     );
     child.stdin?.end(
@@ -37,6 +43,26 @@ afterEach(async () => {
 });
 
 describe("Cursor structured stop usage", () => {
+  it("routes concurrent shared-workspace sessions to their own config directories", async () => {
+    const dir = await setup();
+    const second = join(dir, "second-config");
+    await Promise.all([
+      ensureCursorTokenUsageHook(dir, join(dir, "config")),
+      ensureCursorTokenUsageHook(dir, second),
+    ]);
+    await Promise.all([report(dir, "first"), report(dir, "second", { output_tokens: 40 }, second)]);
+    expect((await readCursorTokenUsage(join(dir, "config"), "chat"))?.totalTokens).toBe(120);
+    expect((await readCursorTokenUsage(second, "chat"))?.totalTokens).toBe(140);
+    const hooks = JSON.parse(await readFile(join(dir, ".cursor", "hooks.json"), "utf8"));
+    expect(hooks.hooks.stop).toHaveLength(1);
+  });
+  it("does not fail the provider when the usage destination cannot be written", async () => {
+    const dir = await setup();
+    const blocked = join(dir, "blocked-config");
+    await writeFile(blocked, "not a directory");
+    await expect(report(dir, "first", {}, blocked)).resolves.toBeUndefined();
+    expect(await readCursorTokenUsage(blocked, "chat")).toBeUndefined();
+  });
   it("reads counters captured from a live interactive Cursor stop hook", async () => {
     const dir = await setup();
     const usage: unknown = JSON.parse(

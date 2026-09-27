@@ -7,6 +7,8 @@ import { findForeignAgentProcessesForSession } from "../../src/agent-processes.j
 import { readCodexRolloutState, codexHookHomePath } from "../../src/agents/codex.js";
 import { exportOpenCodeSession, parseOpenCodeTokenUsage } from "../../src/agents/opencode.js";
 import { readClaudeJsonlState } from "../../src/claude-jsonl-state.js";
+import { cursorConfigDirForSession } from "../../src/agents/cursor.js";
+import { readCursorTokenUsage } from "../../src/cursor-token-usage.js";
 import { startServer } from "../../src/server.js";
 import { isRestorableSession } from "../../src/session-service.js";
 import type { ProviderTokenUsageSample } from "../../src/token-usage.js";
@@ -272,6 +274,10 @@ function smokeConfig(args: {
 dataDir: ${args.dataDir}
 worktreeDir: ${args.worktreeDir}
 defaultAgent: ${args.agent}
+admission:
+  memoryGuard:
+    enforceFloors: false
+    shedEnabled: false
 projects:
   api:
     path: ${args.repoDir}
@@ -359,25 +365,6 @@ async function assertStructuredMainUsage(
   service: Awaited<ReturnType<typeof startServer>>,
   dataDir: string,
 ): Promise<void> {
-  if (agent === "cursor") {
-    const view = (await service.get(session.id)).tokenUsageView;
-    expect(view).toMatchObject({
-      status: "unavailable",
-      provider: "cursor",
-      reason: "structured_usage_unavailable",
-    });
-    expect(view).not.toHaveProperty("totalTokens");
-    const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
-    if (artifactsDir) {
-      await writeFile(
-        join(artifactsDir, "token-live-smoke-cursor.json"),
-        `${JSON.stringify({ agent, source: "cursor-jsonl-no-usage", api: view }, null, 2)}\n`,
-        "utf8",
-      );
-    }
-    return;
-  }
-
   const withUsage = await pollUntil(() => service.get(session.id), {
     timeoutMs: 60_000,
     accept: (state) =>
@@ -405,6 +392,14 @@ async function assertStructuredMainUsage(
     );
     sample = (await readCodexRolloutState(sessionsDir)).tokenUsage;
     source = "codex-rollout-jsonl";
+  } else if (agent === "cursor") {
+    if (!withUsage.agentSessionId) throw new Error("Cursor session id unavailable");
+    const usage = await readCursorTokenUsage(
+      cursorConfigDirForSession(dataDir, session.id),
+      withUsage.agentSessionId,
+    );
+    if (usage) sample = { ...usage, provider: "cursor", generationId: withUsage.agentSessionId };
+    source = "cursor-stop-hook";
   } else {
     if (!session.agentSessionId) throw new Error("OpenCode session id unavailable");
     sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(session.agentSessionId));

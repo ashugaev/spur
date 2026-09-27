@@ -1,5 +1,6 @@
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { TokenUsageTotals } from "./types.js";
 
@@ -8,16 +9,17 @@ const SCRIPT_NAME = "spur-cursor-token-usage.mjs";
 // Cursor's interactive stop hook reports gross input (including both cache fields).
 // Keep one snapshot per provider generation: repeated stop delivery must not add usage.
 const SCRIPT = `import { mkdir, writeFile, rename } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 try {
   const value = JSON.parse(input);
+  const configDir = process.env.CURSOR_CONFIG_DIR;
+  if (!configDir) process.exit(0);
   if (typeof value.conversation_id !== 'string' || typeof value.generation_id !== 'string') process.exit(0);
   const usage = Object.fromEntries(['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'].map(key => [key, value[key]]));
   if (!Object.values(usage).every(value => Number.isSafeInteger(value) && value >= 0)) process.exit(0);
-  const dir = join(dirname(fileURLToPath(import.meta.url)), 'token-usage', Buffer.from(value.conversation_id).toString('hex'));
+  const dir = join(configDir, 'token-usage', Buffer.from(value.conversation_id).toString('hex'));
   await mkdir(dir, { recursive: true });
   const target = join(dir, Buffer.from(value.generation_id).toString('hex') + '.json');
   const temp = target + '.' + process.pid + '.tmp';
@@ -31,10 +33,13 @@ export async function ensureCursorTokenUsageHook(
   configDir: string,
 ): Promise<void> {
   await mkdir(configDir, { recursive: true });
-  const scriptPath = join(configDir, SCRIPT_NAME);
-  await writeFile(scriptPath, SCRIPT, "utf8");
   const hooksDir = join(worktreePath, ".cursor");
   await mkdir(hooksDir, { recursive: true });
+  // Shared-workspace sessions execute the same hook with their own launch environment.
+  const scriptPath = join(hooksDir, SCRIPT_NAME);
+  const scriptTemp = `${scriptPath}.${randomUUID()}.tmp`;
+  await writeFile(scriptTemp, SCRIPT, "utf8");
+  await rename(scriptTemp, scriptPath);
   const hooksPath = join(hooksDir, "hooks.json");
   let config: Record<string, unknown> = { version: 1 };
   try {
@@ -61,7 +66,7 @@ export async function ensureCursorTokenUsageHook(
     }),
     { command: `node ${shellEscape(scriptPath)}`, timeout: 5 },
   ];
-  const temp = `${hooksPath}.${process.pid}.tmp`;
+  const temp = `${hooksPath}.${randomUUID()}.tmp`;
   await writeFile(temp, JSON.stringify({ ...config, hooks: entries }, null, 2) + "\n");
   await rename(temp, hooksPath);
 }
