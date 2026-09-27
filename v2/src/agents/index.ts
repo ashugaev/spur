@@ -625,14 +625,8 @@ export function parseAgentName(agent: string): AgentName {
   throw new Error(`Unsupported agent: ${agent}`);
 }
 
-export function buildAgentLaunchPlan(
-  agent: AgentName,
-  prompt: string,
-  options?: AgentPlanOptions,
-  deferredSensitiveInitialMessage?: { text: string; sensitive: true },
-) {
-  const plan = agentAdapter(agent).buildLaunchPlan(prompt, options);
-  return deferredSensitiveInitialMessage ? { ...plan, deferredSensitiveInitialMessage } : plan;
+export function buildAgentLaunchPlan(agent: AgentName, prompt: string, options?: AgentPlanOptions) {
+  return agentAdapter(agent).buildLaunchPlan(prompt, options);
 }
 
 export async function buildAgentRestorePlan(

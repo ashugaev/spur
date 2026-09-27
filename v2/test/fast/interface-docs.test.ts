@@ -32,12 +32,12 @@ describe("published interface contracts", () => {
     expect(commands).toContain("Unredeemed handles expire after 30 days");
     expect(commands).toContain("Event suppressions expire 24 hours");
     expect(commands).toContain("grant_not_ready");
+    expect(commands).toContain("Spawn triggers issue no auto-ping controls");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
     expect(daemonApi).toContain("`409` for pending grants or consumed-then-resumed grants");
-    expect(configuration).toContain("`github-ci`: event and subscription for spawn triggers");
-    expect(configuration).toContain("Cron, Sentry, and GitHub CI send triggers stay unsupported");
+    expect(configuration).toContain("`github-ci`: no controls; spawn triggers only");
     expect(agentSkill).toContain("Stop unwanted auto-pings with `spur auto-ping unsubscribe`");
     expect(agentSkill).toContain("Scopes and resume: `docs/commands.md#auto-ping`");
     expect(agentSkill).toContain("API: `docs/daemon-api.md`");
