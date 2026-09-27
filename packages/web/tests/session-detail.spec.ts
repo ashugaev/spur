@@ -4110,7 +4110,7 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(card.getByText("Unknown attempts").locator("..")).toContainText("1");
     await expect(card.getByText("Provider iterations").locator("..")).toContainText("3");
     await expect(card.getByText("Pre-flight Claude").locator("..")).toContainText("20");
-    await expect(card.getByText("Stopped by token budget")).toBeVisible();
+    await expect(card.getByText("Token budget reached")).toBeVisible();
     await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
     const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
