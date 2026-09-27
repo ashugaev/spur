@@ -27,6 +27,51 @@ import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
 
+test("token count shows budget tone and isolated hover card, hides on mobile", async ({ page }) => {
+  await mockSessions(page, [
+    makeWorkingSession({
+      id: "token-count-dashboard",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 600,
+        outputTokens: 100,
+        totalTokens: 700,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "measured",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        attemptCount: 1,
+        unknownAttemptCount: 0,
+        providerIterationCount: 1,
+        byProvider: {},
+      },
+      tokenBudgetView: { budget: 1000, knownTotalTokens: 800, exhausted: false, enforced: true },
+    }),
+  ]);
+  await page.goto("/");
+  const count = page.getByLabel("Tokens: 800", { exact: true });
+  await expect(count).toHaveText("800");
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
+  await count.hover();
+  await expect(page.getByRole("tooltip").getByRole("row", { name: "Total 100 700" })).toBeVisible();
+  await page.setViewportSize({ width: 640, height: 844 });
+  await count.hover();
+  await expect
+    .poll(async () => (await page.getByRole("tooltip").boundingBox())?.x)
+    .toBeGreaterThanOrEqual(0);
+  const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifacts) {
+    mkdirSync(join(artifacts, "token-count"), { recursive: true });
+    await page.screenshot({ path: join(artifacts, "token-count", "dashboard-hover.png") });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(count).toBeHidden();
+});
+
 test("budget-limited dashboard row links to approval", async ({ page }) => {
   await mockSessions(page, [
     makeStoppedSession({

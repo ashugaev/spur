@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { TagEditor } from "@/components/TagEditor";
+import { TokenCount } from "@/components/TokenCount";
 import { formatRelativeTime, formatSidecarAge, getSessionTitle } from "@/lib/format";
 import {
   isReviewLinkLabel,
@@ -267,6 +268,9 @@ export function SessionRow({
         {session.projectName}
       </span>
 
+      <span className="hidden shrink-0 sm:inline">
+        <TokenCount session={session} />
+      </span>
       <span className="hidden w-[3.5rem] shrink-0 text-[var(--color-text-tertiary)] md:inline">
         {session.agent}
       </span>

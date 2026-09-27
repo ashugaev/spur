@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   type MouseEvent,
   type PointerEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -16,6 +17,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
+import { TokenCount } from "@/components/TokenCount";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { buildDeskSpawnPayload, buildRespawnSessionPayload } from "@/lib/spawn-payload";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -147,103 +149,6 @@ function displayLinkLabel(label: string, url: string): string {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
   }
   return label;
-}
-
-function tokenUsageRows(
-  session: Pick<SpurSessionView, "tokenUsageView" | "preflightTokenUsageView" | "tokenBudgetView">,
-): Array<[string, string]> {
-  const usage = session.tokenUsageView;
-  const preflight = session.preflightTokenUsageView;
-  const preflightRow: [string, string] = [
-    "Pre-flight tokens",
-    !preflight || preflight.status === "legacy_unknown"
-      ? "Legacy usage unknown"
-      : !("totalTokens" in preflight)
-        ? "Usage unavailable"
-        : `${preflight.totalTokens.toLocaleString()}${preflight.status === "partial" ? " · partial" : ""}`,
-  ];
-  const component = (tokens: number | undefined): string =>
-    tokens === undefined ? "Not reported" : tokens.toLocaleString();
-  const preflightRows: Array<[string, string]> = [preflightRow];
-  if (preflight) {
-    if ("totalTokens" in preflight) {
-      preflightRows.push(
-        ["Pre-flight input", preflight.inputTokens.toLocaleString()],
-        ["Pre-flight output", preflight.outputTokens.toLocaleString()],
-        ["Pre-flight cache read", component(preflight.cacheReadInputTokens)],
-        ["Pre-flight cache write", component(preflight.cacheWriteInputTokens)],
-        ["Pre-flight reasoning", component(preflight.reasoningOutputTokens)],
-        ["Pre-flight cache write 5m", component(preflight.cacheWrite5mInputTokens)],
-        ["Pre-flight cache write 1h", component(preflight.cacheWrite1hInputTokens)],
-      );
-      for (const provider of ["claude", "codex", "cursor", "opencode"] as const) {
-        const total = preflight.byProvider[provider]?.totalTokens;
-        if (total !== undefined)
-          preflightRows.push([
-            `Pre-flight ${provider === "opencode" ? "OpenCode" : provider[0].toUpperCase() + provider.slice(1)}`,
-            total.toLocaleString(),
-          ]);
-      }
-    }
-    preflightRows.push(
-      ["Pre-flight attempts", preflight.attemptCount.toLocaleString()],
-      ["Pre-flight unknown attempts", preflight.unknownAttemptCount.toLocaleString()],
-      ["Pre-flight iterations", preflight.providerIterationCount.toLocaleString()],
-    );
-  }
-  const budget = session.tokenBudgetView;
-  const budgetReason =
-    budget?.reason === "preflight_unknown"
-      ? "pre-flight usage unknown"
-      : budget?.reason === "legacy_unknown"
-        ? "earlier usage unknown"
-        : budget?.reason === "main_usage_unavailable"
-          ? "main usage unavailable"
-          : "usage unavailable";
-  const budgetRows: Array<[string, string]> = budget?.budget
-    ? [
-        [
-          "Combined budget",
-          `${budget.enforced || (budget.overridden && !budget.reason) ? "" : "At least "}${budget.knownTotalTokens.toLocaleString()} / ${budget.budget.toLocaleString()}${budget.overridden ? " · limit ignored" : budget.exhausted ? " · limit hit" : ""}`,
-        ],
-        ...(budget.enforced || budget.overridden
-          ? []
-          : ([["Budget enforcement", `Unavailable · ${budgetReason}`]] as Array<[string, string]>)),
-      ]
-    : [];
-  if (!usage) return [["Tokens", "Waiting for usage"], ...preflightRows, ...budgetRows];
-  if (usage.status === "unavailable") {
-    return [
-      [
-        "Tokens",
-        usage.unenforced
-          ? "Token usage unavailable · budget unenforced"
-          : "Token usage unavailable",
-      ],
-      ...preflightRows,
-      ...budgetRows,
-    ];
-  }
-  if (usage.status === "waiting")
-    return [["Tokens", "Waiting for usage"], ...preflightRows, ...budgetRows];
-  const used = usage.totalTokens.toLocaleString();
-  const value = usage.budget === undefined ? used : `${used} / ${usage.budget.toLocaleString()}`;
-  const rows: Array<[string, string]> = [
-    ["Tokens", usage.exhausted ? `${value} · limit hit` : value],
-    ["Input", usage.inputTokens.toLocaleString()],
-    ["Output", usage.outputTokens.toLocaleString()],
-    ["Cache read", component(usage.cacheReadInputTokens)],
-    ["Cache write", component(usage.cacheWriteInputTokens)],
-    ["Reasoning", component(usage.reasoningOutputTokens)],
-  ];
-  if (usage.provider === "claude") {
-    rows.push(
-      ["Cache write 5m", component(usage.cacheWrite5mInputTokens)],
-      ["Cache write 1h", component(usage.cacheWrite1hInputTokens)],
-    );
-  }
-  rows.push(...preflightRows, ...budgetRows);
-  return rows;
 }
 
 // Two failing portIds can share an overlapping declared range and both name
@@ -3659,30 +3564,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
               </h2>
               <dl className="space-y-2 text-[var(--color-text-secondary)]">
-                {[
-                  ["Created", formatAbsoluteTime(session.createdAt)],
-                  ["Last activity", formatRelativeTime(session.lastActivityAt)],
-                  ["Worktree", session.worktree ? "isolated" : "shared"],
-                  ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
-                  ["Workspace", session.workspaceExists ? "present" : "missing"],
-                  ...tokenUsageRows(session),
-                  ...(wakeSummary && wakeCountdown
-                    ? ([
-                        ["Wake", wakeSummary.label],
-                        ["Next wake", wakeCountdown],
-                      ] as Array<[string, string]>)
-                    : []),
-                  ...(wakeSummary?.intervalMs
-                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
-                        [string, string]
-                      >)
-                    : []),
-                  ...(wakeSummary?.dailyAt
-                    ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
-                        [string, string]
-                      >)
-                    : []),
-                ].map(([label, value]) => (
+                {(
+                  [
+                    ["Created", formatAbsoluteTime(session.createdAt)],
+                    ["Last activity", formatRelativeTime(session.lastActivityAt)],
+                    ["Worktree", session.worktree ? "isolated" : "shared"],
+                    ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
+                    ["Workspace", session.workspaceExists ? "present" : "missing"],
+                    ["Tokens", <TokenCount key="tokens" session={session} sidebar />],
+                    ...(wakeSummary && wakeCountdown
+                      ? ([
+                          ["Wake", wakeSummary.label],
+                          ["Next wake", wakeCountdown],
+                        ] as Array<[string, string]>)
+                      : []),
+                    ...(wakeSummary?.intervalMs
+                      ? ([
+                          ["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)],
+                        ] as Array<[string, string]>)
+                      : []),
+                    ...(wakeSummary?.dailyAt
+                      ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
+                          [string, string]
+                        >)
+                      : []),
+                  ] as Array<[string, ReactNode]>
+                ).map(([label, value]) => (
                   <div
                     key={label}
                     className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"

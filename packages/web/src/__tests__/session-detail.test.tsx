@@ -5801,11 +5801,11 @@ describe("SessionDetail token usage", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     expect(await screen.findByText("Tokens")).toBeInTheDocument();
-    expect(screen.getByText("1,234 / 2,000")).toBeInTheDocument();
+    fireEvent.focus(screen.getByLabelText("Tokens: 1,234"));
+    expect(screen.getByText("1K / 2K")).toBeInTheDocument();
     expect(screen.getByText("Cache read")).toBeInTheDocument();
     expect(screen.getByText("300")).toBeInTheDocument();
-    expect(screen.getByText("Cache write 5m")).toBeInTheDocument();
-    expect(screen.getByText("50")).toBeInTheDocument();
+    expect(screen.queryByText("Cache write 5m")).not.toBeInTheDocument();
   });
 
   it("keeps pre-flight usage separate and shows the combined budget", async () => {
@@ -5839,11 +5839,10 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("Pre-flight tokens")).toBeInTheDocument();
-    expect(screen.getByText("20 · partial")).toBeInTheDocument();
-    expect(screen.getByText("Combined budget")).toBeInTheDocument();
-    expect(screen.getByText("At least 100 / 100 · limit hit")).toBeInTheDocument();
-    expect(screen.getByText("Unavailable · pre-flight usage unknown")).toBeInTheDocument();
+    fireEvent.focus(await screen.findByLabelText("Tokens: at least 100"));
+    expect(screen.getByText("≥100 / 100")).toBeInTheDocument();
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Total2080");
+    expect(screen.getByText("Stopped by token budget")).toBeInTheDocument();
   });
 
   it("shows pre-flight components, unknown fields, and combined-budget Restore gating", async () => {
@@ -5884,19 +5883,14 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("Pre-flight tokens")).toBeInTheDocument();
-    const row = (label: string) => screen.getByText(label).closest("div");
-    expect(row("Pre-flight input")).toHaveTextContent("15");
-    expect(row("Pre-flight output")).toHaveTextContent("5");
-    expect(row("Pre-flight cache read")).toHaveTextContent("0");
-    expect(row("Pre-flight cache write")).toHaveTextContent("5");
-    expect(row("Pre-flight reasoning")).toHaveTextContent("2");
-    expect(row("Pre-flight cache write 5m")).toHaveTextContent("5");
-    expect(row("Pre-flight cache write 1h")).toHaveTextContent("Not reported");
-    expect(row("Pre-flight Claude")).toHaveTextContent("20");
-    expect(row("Pre-flight attempts")).toHaveTextContent("2");
-    expect(row("Pre-flight unknown attempts")).toHaveTextContent("1");
-    expect(row("Pre-flight iterations")).toHaveTextContent("3");
+    fireEvent.focus(await screen.findByLabelText("Tokens: at least 100"));
+    const row = (label: string) =>
+      within(screen.getByRole("tooltip")).getByText(label).closest("tr");
+    expect(row("Input")).toHaveTextContent("1560");
+    expect(row("Output")).toHaveTextContent("520");
+    expect(row("Cache read")).toHaveTextContent("0?");
+    expect(row("Cache write")).toHaveTextContent("5?");
+    expect(row("Reasoning")).toHaveTextContent("2?");
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
@@ -5922,7 +5916,8 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
+    fireEvent.focus(await screen.findByLabelText("Tokens: at least 20"));
+    expect(screen.getByText("≥20 / 100")).toBeInTheDocument();
     expect(screen.getByText("Unavailable · main usage unavailable")).toBeInTheDocument();
   });
 
@@ -5941,7 +5936,7 @@ describe("SessionDetail token usage", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     expect(await screen.findByText("Tokens")).toBeInTheDocument();
-    expect(screen.getByText("Token usage unavailable · budget unenforced")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tokens: unavailable")).toHaveTextContent("—");
   });
 
   it.each([
@@ -5956,10 +5951,7 @@ describe("SessionDetail token usage", () => {
       } as const,
       "100",
     ],
-    [
-      { status: "waiting", provider: "codex", budget: 2000, exhausted: false } as const,
-      "Waiting for usage",
-    ],
+    [{ status: "waiting", provider: "codex", budget: 2000, exhausted: false } as const, "—"],
     [
       {
         status: "unavailable",
@@ -5969,7 +5961,7 @@ describe("SessionDetail token usage", () => {
         exhausted: false,
         unenforced: false,
       } as const,
-      "Token usage unavailable",
+      "—",
     ],
     [
       {
@@ -5980,7 +5972,7 @@ describe("SessionDetail token usage", () => {
         totalTokens: 1234,
         exhausted: false,
       } as const,
-      "1,234",
+      "1K",
     ],
   ])("renders token status %# without assuming a budget", async (tokenUsageView, label) => {
     stubFetch({ tokenUsageView });
@@ -6015,8 +6007,7 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("Combined budget")).toBeInTheDocument();
-    expect(screen.getAllByText("2,000 / 2,000 · limit hit")).toHaveLength(2);
+    expect(await screen.findByText("2K / 2K")).toBeInTheDocument();
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByText("Not accepting input. Restore to continue.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
@@ -6081,7 +6072,7 @@ describe("SessionDetail token usage", () => {
       },
     });
     render(<SessionDetail sessionId="api-a1" />);
-    expect(await screen.findByText("110 / 100 · limit ignored")).toBeInTheDocument();
+    expect(await screen.findByText("110 / 100")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
   });
@@ -6098,7 +6089,7 @@ describe("SessionDetail token usage", () => {
       },
     });
     render(<SessionDetail sessionId="api-a1" />);
-    expect(await screen.findByText("At least 20 / 100 · limit ignored")).toBeInTheDocument();
+    expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
   });
 
   it("keeps Restore blocked when only the main usage view reports exhaustion", async () => {
@@ -6119,7 +6110,7 @@ describe("SessionDetail token usage", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText("100 / 100 · limit hit")).toBeInTheDocument();
+    expect(await screen.findByText("100 / 100")).toBeInTheDocument();
     expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
@@ -6142,7 +6133,7 @@ describe("SessionDetail token usage", () => {
 
       render(<SessionDetail sessionId="api-a1" />);
 
-      expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
+      expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Restore" })).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     },
@@ -6161,7 +6152,7 @@ describe("SessionDetail token usage", () => {
         },
       });
       render(<SessionDetail sessionId="api-a1" />);
-      expect(await screen.findByText("At least 20 / 100")).toBeInTheDocument();
+      expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
       expect(screen.getByPlaceholderText("Message...")).toBeEnabled();
       expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
