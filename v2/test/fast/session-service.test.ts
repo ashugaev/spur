@@ -27861,8 +27861,9 @@ describe("SessionService", () => {
     // A10: reopen funnels through restoreLocked (session-service.ts reopenLocked's
     // tail), which clears the github poll-disable registry only once the restore
     // itself actually succeeds. A genuinely successful reopen, not a rejected one —
-    // see "does not clear the poll-disable registry on a rejected reopen" below for
-    // the negative case.
+    // the negative case lives at the restore level, since reopen funnels through
+    // the same restoreLocked gates: see "does not clear the github poll-disable
+    // registry when restore is rejected as not restorable".
     it("clears the github poll-disable registry on a successful reopen", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),

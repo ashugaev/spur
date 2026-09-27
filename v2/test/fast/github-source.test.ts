@@ -3322,22 +3322,27 @@ describe("github source", () => {
         vi.setSystemTime(new Date(Date.now() + 101));
         ghTransportMock.mockResolvedValue(notFoundEnvelope(42, { withPath: true }));
 
-        const stepMs = 10;
-        const timeoutMs = 4000;
-        let waited = 0;
-        while (ghTransportMock.mock.calls.length < 2) {
-          if (waited >= timeoutMs) {
-            throw new Error(
-              `timed out waiting for a real gated tick to re-arm and probe; saw ${ghTransportMock.mock.calls.length} calls`,
-            );
+        try {
+          const stepMs = 10;
+          const timeoutMs = 4000;
+          let waited = 0;
+          while (ghTransportMock.mock.calls.length < 2) {
+            if (waited >= timeoutMs) {
+              throw new Error(
+                `timed out waiting for a real gated tick to re-arm and probe; saw ${ghTransportMock.mock.calls.length} calls`,
+              );
+            }
+            await new Promise((resolve) => setTimeout(resolve, stepMs));
+            waited += stepMs;
           }
-          await new Promise((resolve) => setTimeout(resolve, stepMs));
-          waited += stepMs;
+
+          expect(ghTransportMock).toHaveBeenCalledTimes(2);
+        } finally {
+          // A thrown timeout above must still stop the real setInterval, or it
+          // keeps firing for the rest of the file and can cascade into unrelated
+          // tests' assertions.
+          handle.stop();
         }
-
-        expect(ghTransportMock).toHaveBeenCalledTimes(2);
-
-        handle.stop();
       });
     });
 
