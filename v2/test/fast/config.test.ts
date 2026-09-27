@@ -3220,6 +3220,7 @@ projects:
 
   it("keeps the root sp project free of a review fleet", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
@@ -3229,6 +3230,7 @@ projects:
 
   it("parses the root PR-merged send trigger", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
     const trigger = config.projects["sp"]?.triggers["gh-merged"];
     if (!trigger || !("send" in trigger)) {
@@ -3244,6 +3246,7 @@ projects:
 
   it("sets medium provider reasoning for the sp project", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
@@ -3253,6 +3256,7 @@ projects:
 
   it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);

@@ -62,6 +62,7 @@ projects:
       tg:
         type: telegram
         token: ${TELEGRAM_BOT_TOKEN}
+        chatId: ${TELEGRAM_CHAT_ID}
         allowedUsers: [444269670, 6211305103]
         autoSpawn:
           agent: opencode
