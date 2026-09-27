@@ -43,7 +43,6 @@ import {
 } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
-import { buildAgentLaunchPlan } from "../../src/agents/index.js";
 import {
   codexCommand,
   buildCodexPlan,
@@ -81,23 +80,6 @@ const mockSymlink = symlink as unknown as Mock<typeof symlink>;
 const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
   typeof resolveWorktreePathCandidates
 >;
-
-describe("Codex deferred controls", () => {
-  it("keeps controls out of image launch argv and ordinary initial text", () => {
-    const handle = `ap1_${"b".repeat(43)}`;
-    const plan = buildAgentLaunchPlan(
-      "codex",
-      "ordinary prompt",
-      { startupImagePaths: ["/tmp/image.png"] },
-      { text: handle, sensitive: true },
-    );
-    expect(plan.launchCommand).toContain("ordinary prompt");
-    expect(plan.launchCommand).toContain("/tmp/image.png");
-    expect(plan.launchCommand).not.toContain(handle);
-    expect(plan.initialMessage).not.toContain(handle);
-    expect(plan.deferredSensitiveInitialMessage).toEqual({ text: handle, sensitive: true });
-  });
-});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -981,6 +963,55 @@ describe("findCodexSessionId", () => {
 
     expect(result).toBe("session-thread");
     expect(mockCreateInterface).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores newer subagent rollout metadata when choosing a resume id", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockFlatJsonlDir("/custom/sessions", ["parent.jsonl", "child.jsonl"]);
+    mockStat.mockImplementation(async (filePath: unknown) => {
+      if (filePath === "/custom/sessions/parent.jsonl") {
+        return { mtimeMs: 1000 };
+      }
+      if (filePath === "/custom/sessions/child.jsonl") {
+        return { mtimeMs: 2000 };
+      }
+      return { mtimeMs: 0 };
+    });
+    mockStreamsForFiles({
+      "/custom/sessions/parent.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          source: "cli",
+          payload: {
+            id: "parent-thread",
+            cwd: "/worktree/path",
+          },
+        }),
+      ],
+      "/custom/sessions/child.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "child-thread",
+            cwd: "/worktree/path",
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: "parent-thread",
+                },
+              },
+            },
+            thread_source: "subagent",
+          },
+        }),
+      ],
+    });
+
+    const result = await findCodexSessionId("/worktree/path", {
+      sessionRootDir: "/custom/sessions",
+    });
+
+    expect(result).toBe("parent-thread");
   });
 });
 

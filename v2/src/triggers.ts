@@ -3,13 +3,7 @@ import { autoPingRouteFingerprint, type AutoPingService } from "./auto-ping.js";
 import { writeStderr } from "./io.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
-import {
-  createSendBatchParser,
-  isReviewEventData,
-  isTelegramMessageEventData,
-  restoreSendBatch,
-  type SendBatch,
-} from "./send-batches.js";
+import { createSendBatchParser, restoreSendBatch, type SendBatch } from "./send-batches.js";
 import {
   deletePendingSendBatch,
   deletePendingSendBatchConditional,
@@ -29,7 +23,6 @@ import {
   type AppConfig,
   type AutoPingDestination,
   type AutoPingRouteDescriptor,
-  type AutoPingThreadTarget,
   type SendTriggerConfig,
   type SendBatchRetryEntry,
   type SessionView,
@@ -158,25 +151,6 @@ function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean 
   return session.allowedTriggers.includes(triggerId);
 }
 
-function autoPingThreadTargets(data: unknown): AutoPingThreadTarget[] {
-  if (isReviewEventData(data)) {
-    const targets = data.signals.flatMap((signal) =>
-      signal.providerThreadTarget ? [signal.providerThreadTarget] : [],
-    );
-    return [...new Map(targets.map((target) => [JSON.stringify(target), target])).values()];
-  }
-  if (isTelegramMessageEventData(data) && data.messageThreadId !== undefined) {
-    return [
-      {
-        kind: "telegram-topic",
-        chatId: data.chatId,
-        messageThreadId: data.messageThreadId,
-      },
-    ];
-  }
-  return [];
-}
-
 function createWorkItemLifecycleBase(
   workItemData: WorkItemEventData,
   autoComplete: boolean,
@@ -211,6 +185,20 @@ function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
   );
 }
 
+type WorkItemSuppressReason =
+  | "work_item_pending"
+  | "work_item_completed"
+  | "owner_completed"
+  | "owner_active"
+  | "owner_not_replaceable"
+  | "owner_load_failed";
+
+interface WorkItemSuppressed {
+  reason: WorkItemSuppressReason;
+  ownerSessionId?: string;
+  error?: string;
+}
+
 async function shouldClaimWorkItemSpawn(
   dataDir: string,
   service: SessionService,
@@ -219,13 +207,15 @@ async function shouldClaimWorkItemSpawn(
   sourceId: string,
   workItemData: WorkItemEventData,
   autoComplete: boolean,
-  logger: TriggerLogger,
-): Promise<boolean> {
+): Promise<WorkItemSuppressed | null> {
   const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
     workItemData.externalId,
   );
-  if (existing?.state === "pending" || existing?.state === "completed") {
-    return false;
+  if (existing?.state === "pending") {
+    return { reason: "work_item_pending" };
+  }
+  if (existing?.state === "completed") {
+    return { reason: "work_item_completed", ownerSessionId: existing.sessionId };
   }
   if (existing?.state === "running") {
     try {
@@ -236,35 +226,25 @@ async function shouldClaimWorkItemSpawn(
           state: "completed",
           completedAt: new Date().toISOString(),
         });
-        return false;
+        return { reason: "owner_completed", ownerSessionId: existing.sessionId };
       }
       if (
         session.status === "running" &&
         (ACTIVE_WORK_ITEM_STATES.has(session.state) || isLiveServerErrorWedge(session))
       ) {
-        return false;
+        return { reason: "owner_active", ownerSessionId: existing.sessionId };
       }
       if (!sessionAllowsWorkItemReplacement(session)) {
-        return false;
+        return { reason: "owner_not_replaceable", ownerSessionId: existing.sessionId };
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!isSessionNotFoundError(message)) {
-        logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
-          level: "warn",
-          sessionId: existing.sessionId,
-          projectId,
-          sourceId,
-          triggerId,
-          message: `Suppressed work item ${workItemData.externalId}: failed to load owner ${existing.sessionId}: ${message}`,
-          details: {
-            externalId: workItemData.externalId,
-          },
-        });
-        logger.warn(
-          `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${message}`,
-        );
-        return false;
+        return {
+          reason: "owner_load_failed",
+          ownerSessionId: existing.sessionId,
+          error: message,
+        };
       }
     }
   }
@@ -273,7 +253,7 @@ async function shouldClaimWorkItemSpawn(
     ...createWorkItemLifecycleBase(workItemData, autoComplete),
     state: "pending",
   });
-  return true;
+  return null;
 }
 
 async function runSpawnTrigger(
@@ -290,10 +270,6 @@ async function runSpawnTrigger(
   deskGroup: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
-  autoPing: AutoPingService,
-  routeFingerprint: string,
-  destination: AutoPingDestination,
-  occurrenceId: string,
 ): Promise<void> {
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
     level: "info",
@@ -320,37 +296,8 @@ async function runSpawnTrigger(
     if (autoComplete && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
-    if (autoPing.isSuppressed(routeFingerprint, destination, occurrenceId)) {
-      return;
-    }
-    let filteredEventData = eventData;
-    if (isReviewEventData(eventData)) {
-      const signals = eventData.signals.filter(
-        (signal) =>
-          !signal.providerThreadTarget ||
-          !autoPing.isSuppressed(
-            routeFingerprint,
-            destination,
-            occurrenceId,
-            signal.providerThreadTarget,
-          ),
-      );
-      if (signals.length === 0) return;
-      filteredEventData = { ...eventData, signals };
-    } else {
-      const threadTargets = autoPingThreadTargets(eventData);
-      if (
-        threadTargets.length > 0 &&
-        threadTargets.every((target) =>
-          autoPing.isSuppressed(routeFingerprint, destination, occurrenceId, target),
-        )
-      ) {
-        return;
-      }
-    }
-    if (
-      workItemData &&
-      !(await shouldClaimWorkItemSpawn(
+    if (workItemData) {
+      const suppressed = await shouldClaimWorkItemSpawn(
         dataDir,
         service,
         projectId,
@@ -358,26 +305,34 @@ async function runSpawnTrigger(
         sourceId,
         workItemData,
         autoComplete === true,
-        logger,
-      ))
-    ) {
-      logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
-        level: "info",
-        projectId,
-        sourceId,
-        triggerId,
-        message: `Suppressed duplicate work item ${workItemData.externalId}`,
-        details: {
-          eventName,
-          externalId: workItemData.externalId,
-        },
-      });
-      return;
+      );
+      if (suppressed) {
+        logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
+          level: suppressed.reason === "owner_load_failed" ? "warn" : "info",
+          ...(suppressed.ownerSessionId !== undefined
+            ? { sessionId: suppressed.ownerSessionId }
+            : {}),
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Suppressed work item ${workItemData.externalId}: ${suppressed.reason}`,
+          details: {
+            eventName,
+            externalId: workItemData.externalId,
+            reason: suppressed.reason,
+            ...(suppressed.error !== undefined ? { error: suppressed.error } : {}),
+          },
+        });
+        if (suppressed.reason === "owner_load_failed") {
+          logger.warn(
+            `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${suppressed.error}`,
+          );
+        }
+        return;
+      }
     }
 
     let anchorSessionId: string | undefined;
-    let controlsAssigned = false;
-    const threadTargets = autoPingThreadTargets(filteredEventData);
     for (const [blockIndex, block] of blocks.entries()) {
       const isAnchorBlock = deskGroup === true && anchorSessionId === undefined;
       if (isAnchorBlock && blockIndex > 0) {
@@ -386,31 +341,7 @@ async function runSpawnTrigger(
         );
       }
       try {
-        const renderedPrompt = renderSpawnPrompt(block.prompt, filteredEventData);
-        const grants = controlsAssigned
-          ? []
-          : [
-              {
-                scope: "event" as const,
-                target: { kind: "occurrence" as const, occurrenceId },
-              },
-              ...threadTargets.map((target) => ({ scope: "thread" as const, target })),
-              { scope: "subscription" as const, target: { kind: "subscription" as const } },
-            ].map(({ scope, target }) => ({
-              scope,
-              ...autoPing.createGrant({ scope, routeFingerprint, destination, target }),
-            }));
-        const sensitivePromptSuffix =
-          grants.length > 0
-            ? [
-                "Automatic ping controls (handles are session credentials):",
-                ...grants.map(
-                  (grant) =>
-                    `- "$SPUR_SESSION_TOOL_DIR/spur" auto-ping unsubscribe --${grant.scope} ${grant.handle}`,
-                ),
-                "Grant activation is still finishing. If the command reports grant_not_ready, retry the same command.",
-              ].join("\n")
-            : undefined;
+        const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
         const blockRestrictWrites = block.restrictWrites ?? restrictWrites;
         const spawnRequest = {
           project: projectId,
@@ -429,17 +360,7 @@ async function runSpawnTrigger(
             ? { reuseWorkspaceSessionId: anchorSessionId }
             : {}),
         };
-        let session: SessionView;
-        try {
-          session = sensitivePromptSuffix
-            ? await service.spawn(spawnRequest, { sensitivePromptSuffix })
-            : await service.spawn(spawnRequest);
-        } catch (error) {
-          for (const grant of grants) autoPing.revokeGrant(grant.handleHash);
-          throw error;
-        }
-        for (const grant of grants) autoPing.bindGrant(grant.handleHash, session.id);
-        if (grants.length > 0) controlsAssigned = true;
+        const session = await service.spawn(spawnRequest);
         if (isAnchorBlock) {
           anchorSessionId = session.id;
         }
@@ -741,7 +662,7 @@ function buildAutoPingRoute(
   config: AppConfig,
   projectId: string,
   triggerId: string,
-  trigger: SpawnTriggerConfig | SendTriggerConfig,
+  trigger: SendTriggerConfig,
   destination: AutoPingDestination,
 ): AutoPingRouteDescriptor | null {
   const source = config.projects[projectId]?.sources[trigger.source];
@@ -753,9 +674,9 @@ function buildAutoPingRoute(
     sourceId: trigger.source,
     sourceType: source.type,
     eventName: trigger.event,
-    actionKind: isSendTrigger(trigger) ? "send" : "spawn",
+    actionKind: "send",
     destination,
-    spawnDeskGroup: "spawn" in trigger && trigger.spawnDeskGroup === true,
+    spawnDeskGroup: false,
   };
 }
 
@@ -1510,7 +1431,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       if (
         storedPolicy &&
         (storedPolicy.routeFingerprint !== routeFingerprint ||
-          storedPolicy.destination.kind !== "session" ||
           storedPolicy.destination.sessionId !== batch.sessionId)
       ) {
         deletePendingSendBatch(deps.config.dataDir, record.queueKey);
@@ -1592,16 +1512,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const configuredRouteAuthorities: AutoPingRouteDescriptor[] = [];
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
     for (const [triggerId, trigger] of Object.entries(project.triggers)) {
-      const route = buildAutoPingRoute(
-        deps.config,
-        projectId,
-        triggerId,
-        trigger,
-        isSendTrigger(trigger) ? { kind: "session", sessionId: "*" } : { kind: "trigger" },
-      );
+      if (!isSendTrigger(trigger)) continue;
+      const route = buildAutoPingRoute(deps.config, projectId, triggerId, trigger, {
+        kind: "session",
+        sessionId: "*",
+      });
       if (!route) continue;
       configuredRouteAuthorities.push(route);
-      if (!isSendTrigger(trigger)) leaseForRoute(autoPingRouteFingerprint(route), route);
     }
   }
   autoPing.setConfiguredRouteAuthorities(configuredRouteAuthorities);
@@ -1611,12 +1528,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     for (const [triggerId, trigger] of Object.entries(project.triggers)) {
       const source = project.sources[trigger.source];
       if (!source) continue;
-      const spawnDestination = { kind: "trigger" as const };
-      const spawnRoute = !isSendTrigger(trigger)
-        ? buildAutoPingRoute(deps.config, projectId, triggerId, trigger, spawnDestination)
-        : null;
-      const spawnRouteFingerprint = spawnRoute ? autoPingRouteFingerprint(spawnRoute) : null;
-      if (spawnRouteFingerprint && spawnRoute) leaseForRoute(spawnRouteFingerprint, spawnRoute);
       const parseSendBatch = createSendBatchParser(
         source.type,
         projectId,
@@ -1665,33 +1576,21 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             ? event.data
             : null;
         const runSpawn = async (): Promise<void> => {
-          if (!spawnRouteFingerprint) return;
-          autoPing.addOccurrenceReference(spawnRouteFingerprint, event.occurrenceId);
-          try {
-            await autoPing.withRouteLock(spawnRouteFingerprint, () =>
-              runSpawnTrigger(
-                deps.config.dataDir,
-                deps.sessionService,
-                projectId,
-                triggerId,
-                event.sourceId,
-                event.name,
-                trigger.spawn.blocks,
-                trigger.spawn.autoComplete,
-                trigger.spawn.restrictWrites,
-                trigger.spawn.allowedTriggers,
-                trigger.spawnDeskGroup,
-                event.data,
-                logger,
-                autoPing,
-                spawnRouteFingerprint,
-                spawnDestination,
-                event.occurrenceId,
-              ),
-            );
-          } finally {
-            autoPing.releaseOccurrenceReference(spawnRouteFingerprint, event.occurrenceId);
-          }
+          await runSpawnTrigger(
+            deps.config.dataDir,
+            deps.sessionService,
+            projectId,
+            triggerId,
+            event.sourceId,
+            event.name,
+            trigger.spawn.blocks,
+            trigger.spawn.autoComplete,
+            trigger.spawn.restrictWrites,
+            trigger.spawn.allowedTriggers,
+            trigger.spawnDeskGroup,
+            event.data,
+            logger,
+          );
         };
         if (workItemData) {
           const queueKey = `${projectId}:${triggerId}:${event.sourceId}:work-item:${workItemData.externalId}`;
