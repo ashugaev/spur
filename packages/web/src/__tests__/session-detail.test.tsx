@@ -2933,16 +2933,6 @@ describe("SessionDetail voice input", () => {
   });
 
   it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
-    const intervalCallbacks: Array<() => void | Promise<void>> = [];
-    const setIntervalSpy = vi
-      .spyOn(global, "setInterval")
-      .mockImplementation((handler: TimerHandler) => {
-        if (typeof handler === "function") {
-          intervalCallbacks.push(handler as () => void);
-        }
-        return 1 as unknown as ReturnType<typeof setInterval>;
-      });
-    const clearIntervalSpy = vi.spyOn(global, "clearInterval").mockImplementation(() => {});
     const scrollTo = vi.fn();
     const scrollToDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
     const scrollHeightDescriptor = Object.getOwnPropertyDescriptor(
@@ -2991,16 +2981,15 @@ describe("SessionDetail voice input", () => {
 
       await screen.findByRole("heading", { name: /dialog/i });
 
-      expect(intervalCallbacks.length).toBeGreaterThan(0);
-      await act(async () => {
-        await Promise.all(intervalCallbacks.map((callback) => callback()));
-      });
-
-      await waitFor(() => {
-        expect(screen.getByLabelText("Assistant is responding")).toBeInTheDocument();
-      });
+      // The next poll tick lands the working-state conversation.
+      await waitFor(
+        () => {
+          expect(screen.getByLabelText("Assistant is responding")).toBeInTheDocument();
+        },
+        { timeout: 6_000 },
+      );
       expect(scrollTo).toHaveBeenCalledWith({ top: 420, behavior: "smooth" });
-      expect(sessionRequests).toBeGreaterThan(1);
+      await waitFor(() => expect(sessionRequests).toBeGreaterThan(1), { timeout: 6_000 });
     } finally {
       if (scrollToDescriptor) {
         Object.defineProperty(HTMLElement.prototype, "scrollTo", scrollToDescriptor);
@@ -3008,8 +2997,6 @@ describe("SessionDetail voice input", () => {
       if (scrollHeightDescriptor) {
         Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDescriptor);
       }
-      setIntervalSpy.mockRestore();
-      clearIntervalSpy.mockRestore();
     }
   });
 
@@ -3640,6 +3627,121 @@ describe("SessionDetail queue controls", () => {
       expect(screen.getByLabelText("Send queued message #1 now")).not.toHaveAttribute("aria-busy");
     });
     fetchMock.mockRestore();
+  });
+});
+
+describe("SessionDetail polling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function titledSession(title: string, messages: string[] = []) {
+    return new Response(
+      JSON.stringify(
+        sessionFixture({
+          slots: { title, links: [] },
+          queuedMessages: { messages, awaitingPrompt: false },
+        }),
+      ),
+      { status: 200 },
+    );
+  }
+
+  function otherPollResponse(url: string): Response {
+    if (url === "/api/sessions/api-a1/conversation") {
+      return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+    }
+    if (url === "/api/runtime/voice") {
+      return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }
+
+  it("keeps one session poll in flight and applies a response slower than the poll interval", async () => {
+    let sessionRequests = 0;
+    let resolveSlow: ((response: Response) => void) | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionRequests += 1;
+        if (sessionRequests === 1) return titledSession("First title");
+        return new Promise<Response>((resolve) => {
+          resolveSlow = resolve;
+        });
+      }
+      return otherPollResponse(url);
+    });
+
+    vi.useFakeTimers();
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(document.title).toBe("First title");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    expect(sessionRequests).toBe(2);
+    // Five poll intervals pass while the second request hangs: no new request.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(sessionRequests).toBe(2);
+
+    resolveSlow?.(titledSession("Slow title"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(document.title).toBe("Slow title");
+  });
+
+  it("aborts an in-flight session poll and refreshes the queue right after a Queue send", async () => {
+    let sent = false;
+    let sessionRequests = 0;
+    let heldPollSignal: AbortSignal | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionRequests += 1;
+        if (sent) return titledSession("Session", ["Queued follow up"]);
+        if (sessionRequests === 1) return titledSession("Session");
+        const signal = init?.signal ?? undefined;
+        heldPollSignal = signal;
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        sent = true;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return otherPollResponse(url);
+    });
+
+    vi.useFakeTimers();
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    expect(heldPollSignal?.aborted).toBe(false);
+
+    fireEvent.change(screen.getByPlaceholderText(/^Message\.\.\./), {
+      target: { value: "Queued follow up" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(heldPollSignal?.aborted).toBe(true);
+    expect(
+      within(screen.getByRole("list", { name: "Queued messages list" })).getByText(
+        "Queued follow up",
+      ),
+    ).toBeInTheDocument();
   });
 });
 
@@ -6072,7 +6174,7 @@ describe("SessionDetail favicon", () => {
     });
 
     // Fake timers must be active before the component mounts so the polling
-    // `setInterval` it registers is one we can advance deterministically.
+    // timer it registers is one we can advance deterministically.
     vi.useFakeTimers();
     try {
       render(<SessionDetail sessionId="api-a1" />);

@@ -91,6 +91,7 @@ import {
 } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
+import { usePoll } from "@/hooks/usePoll";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -1713,11 +1714,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // means "follow the live tail" (the default, no `from` query param).
   const [fromIndex, setFromIndex] = useState<number | null>(null);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  // Monotonic id of the newest conversation request. A tail poll issued before
-  // a load-older can resolve after it; without this its stale payload lands in
-  // `conversation` and the [conversation] effect below clears the older-page
-  // spinner while the older page is still in flight.
-  const conversationRequestRef = useRef(0);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
@@ -1772,53 +1768,59 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setSession(next);
   }, []);
 
-  const loadSession = useCallback(async () => {
-    const requestedSessionId = sessionId;
-    const requestId = loadRequestIdRef.current + 1;
-    loadRequestIdRef.current = requestId;
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
-        cache: "no-store",
-      });
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
+  const fetchSession = useCallback(
+    async (signal: AbortSignal) => {
+      const requestedSessionId = sessionId;
+      const requestId = loadRequestIdRef.current + 1;
+      loadRequestIdRef.current = requestId;
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
+          cache: "no-store",
+          signal,
+        });
+        if (
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to load session"));
+        }
+        const payload = (await response.json()) as SpurSessionView;
+        if (
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        const nextSession = toDashboardSession(payload);
+        setSession(nextSession);
+        setError(null);
+        dismissLoadErrorToast();
+      } catch (loadError) {
+        if (
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        const message = errorMessage(loadError, "Failed to load session");
+        if (sessionRef.current?.id !== requestedSessionId) {
+          setSession(null);
+          setError(message);
+          return;
+        }
+        if (lastLoadErrorToastRef.current?.message === message) return;
+        dismissLoadErrorToast();
+        const id = showErrorToast(message);
+        lastLoadErrorToastRef.current = { id, message };
       }
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to load session"));
-      }
-      const payload = (await response.json()) as SpurSessionView;
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const nextSession = toDashboardSession(payload);
-      setSession(nextSession);
-      setError(null);
-      dismissLoadErrorToast();
-    } catch (loadError) {
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const message = errorMessage(loadError, "Failed to load session");
-      if (sessionRef.current?.id !== requestedSessionId) {
-        setSession(null);
-        setError(message);
-        return;
-      }
-      if (lastLoadErrorToastRef.current?.message === message) return;
-      dismissLoadErrorToast();
-      const id = showErrorToast(message);
-      lastLoadErrorToastRef.current = { id, message };
-    }
-  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
+    },
+    [dismissLoadErrorToast, sessionId, showErrorToast],
+  );
+  const loadSession = usePoll(fetchSession, POLL_INTERVAL_MS);
 
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
@@ -1843,14 +1845,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => ({ catalog: tagCatalog, applyTags }),
     [tagCatalog, applyTags],
   );
-
-  useEffect(() => {
-    void loadSession();
-    const timer = setInterval(() => {
-      void loadSession();
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadSession]);
 
   useEffect(() => {
     if (!session) return;
@@ -1878,36 +1872,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sessionId,
   ]);
 
-  const loadConversation = useCallback(async () => {
-    if (!session) {
-      setConversation(null);
-      return;
-    }
-    const query = fromIndex !== null ? `?from=${fromIndex}` : "";
-    const requestId = conversationRequestRef.current + 1;
-    conversationRequestRef.current = requestId;
-    const isNewest = () => conversationRequestRef.current === requestId;
-    try {
-      const res = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) {
-        if (isNewest()) setConversation(null);
+  const fetchConversation = useCallback(
+    async (signal: AbortSignal) => {
+      if (!session) {
+        setConversation(null);
         return;
       }
-      const payload = (await res.json()) as ConversationResponse;
-      if (isNewest()) setConversation(payload);
-    } catch {
-      if (isNewest()) setConversation(null);
-    }
-  }, [session?.agent, sessionId, fromIndex]);
-
-  useEffect(() => {
-    void loadConversation();
-    const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadConversation]);
+      const query = fromIndex !== null ? `?from=${fromIndex}` : "";
+      try {
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
+          { cache: "no-store", signal },
+        );
+        if (!res.ok) {
+          if (!signal.aborted) setConversation(null);
+          return;
+        }
+        const payload = (await res.json()) as ConversationResponse;
+        if (!signal.aborted) setConversation(payload);
+      } catch {
+        if (!signal.aborted) setConversation(null);
+      }
+    },
+    [session?.agent, sessionId, fromIndex],
+  );
+  const loadConversation = usePoll(fetchConversation, POLL_INTERVAL_MS);
 
   const handleLoadOlder = useCallback(() => {
     const startIndex = conversation?.startIndex ?? 0;
