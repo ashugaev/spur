@@ -192,6 +192,17 @@ describe("OpenCode adapter", () => {
     ).toEqual({ state: "waiting", reason: "assistant completed" });
     expect(
       parseOpenCodeState({
+        messages: [{ info: { role: "assistant", finish: "stop", time: { completed: 123 } } }],
+      }),
+    ).toEqual({ state: "waiting", reason: "assistant completed" });
+    // A step that ended in tool calls leaves the turn running.
+    expect(
+      parseOpenCodeState({
+        messages: [{ info: { role: "assistant", finish: "tool-calls", time: { completed: 123 } } }],
+      }),
+    ).toEqual({ state: "working", reason: "assistant step ended in tool calls" });
+    expect(
+      parseOpenCodeState({
         messages: [{ info: { role: "assistant", error: { name: "ApiError" } } }],
       }),
     ).toEqual({ state: "error", reason: "assistant error" });
@@ -909,6 +920,12 @@ describe("OpenCode adapter", () => {
         100,
         JSON.stringify({ role: "assistant", time: { created: 100, completed: 150 } }),
       );
+      insert.run(
+        "msg_5",
+        "ses_tools",
+        100,
+        JSON.stringify({ role: "assistant", finish: "tool-calls", time: { completed: 150 } }),
+      );
       database.close();
       const binPath = join(dataHome, "opencode-bin");
       const spawnedMarker = join(dataHome, "spawned");
@@ -928,6 +945,10 @@ describe("OpenCode adapter", () => {
         await expect(readOpenCodeState("ses_idle")).resolves.toEqual({
           state: "waiting",
           reason: "assistant completed",
+        });
+        await expect(readOpenCodeState("ses_tools")).resolves.toEqual({
+          state: "working",
+          reason: "assistant step ended in tool calls",
         });
         await expect(readOpenCodeState("ses_none")).resolves.toBeNull();
         await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();

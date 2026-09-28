@@ -400,6 +400,11 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
     time !== null &&
     typeof (time as Record<string, unknown>)["completed"] === "number"
   ) {
+    // A step that ended in tool calls is complete, but the turn is not: the
+    // agent runs the tools and writes the next step.
+    if (record["finish"] === "tool-calls") {
+      return { state: "working", reason: "assistant step ended in tool calls" };
+    }
     return { state: "waiting", reason: "assistant completed" };
   }
   return { state: "working", reason: "assistant incomplete" };
