@@ -118,6 +118,17 @@ describe("send CLI", () => {
     expect(outputText()).toContain("Delivered message to api-1.");
   });
 
+  it("prints a sent-not-confirmed line, never delivered, when the agent has not confirmed the send", async () => {
+    postJsonMock.mockResolvedValue(
+      baseSession({ submitUnconfirmedAt: "2026-03-18T10:05:00.000Z" }),
+    );
+
+    await parseSend(["send", "api-1", "hello"]);
+
+    expect(outputText()).toContain("Sent message to api-1; the agent has not confirmed it yet.");
+    expect(outputText()).not.toContain("Delivered");
+  });
+
   it("prints the delivered line, not a pending count, when only pipelineMessages is set (A3)", async () => {
     postJsonMock.mockResolvedValue(
       baseSession({

@@ -12498,7 +12498,7 @@ export class SessionService {
           level: "warn",
           sessionId,
           projectId: initialSession.project,
-          message: `Recovered a delivered message to ${sessionId} after a submit ack timeout`,
+          message: `Sent a message to ${sessionId}; submit ack timed out on a live agent, not confirmed`,
           details: {
             agent: recovered.agent,
             lastScannedFile: recovered.lastScannedFile,

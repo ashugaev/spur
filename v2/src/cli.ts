@@ -3456,8 +3456,9 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
         success: (session) => {
           const pending = queuedMessageCount(session);
-          return pending > 0
-            ? `Queued message for ${session.id} (${pending} pending).`
+          if (pending > 0) return `Queued message for ${session.id} (${pending} pending).`;
+          return session.submitUnconfirmedAt
+            ? `Sent message to ${session.id}; the agent has not confirmed it yet.`
             : `Delivered message to ${session.id}.`;
         },
         render: renderSessionCard,

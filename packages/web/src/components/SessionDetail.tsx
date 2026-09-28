@@ -2012,6 +2012,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         setMessage("");
         setAttachments([]);
+        // A 200 Send now the agent never acked: typed, not confirmed; the
+        // banner holds further sends until the agent shows activity.
+        if (
+          payload !== null &&
+          typeof payload === "object" &&
+          typeof (payload as { submitUnconfirmedAt?: unknown }).submitUnconfirmedAt === "string"
+        ) {
+          showErrorToast("Sent, agent hasn't confirmed yet");
+        }
       }
       await loadSession();
       return true;

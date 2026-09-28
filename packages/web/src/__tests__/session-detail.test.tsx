@@ -3235,6 +3235,36 @@ describe("SessionDetail voice input", () => {
     expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("First line");
   });
 
+  it("says a Send now the agent has not confirmed was sent, not delivered", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify(sessionFixture({ submitUnconfirmedAt: "2026-04-02T10:00:05.000Z" })),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+    fireEvent.change(textarea, { target: { value: "Maybe lost" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+
+    expect(await screen.findByText("Sent, agent hasn't confirmed yet")).toBeInTheDocument();
+  });
+
   it("sends immediately without queue when clicking Send now", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
