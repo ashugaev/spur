@@ -4907,6 +4907,57 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("logs a launch-pending suppression once per hold across flush ticks and a restart", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const { LaunchPromptPendingError } = await import("../../src/session-service.js");
+    let holdAt = "2026-03-18T10:04:00.000Z";
+    const deliverMock = vi.fn(async () => {
+      throw new LaunchPromptPendingError("Agent has not confirmed the last prompt", holdAt);
+    });
+    const deps = {
+      config: config() as never,
+      sessionService: { get: getMock, deliver: deliverMock } as never,
+      logger: { warn: vi.fn() },
+    };
+    const suppressions = (): number =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "trigger.send.suppressed_launch_pending",
+      ).length;
+    const bus = new EventBus();
+    let controller = startConfiguredTriggers({ ...deps, bus });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_001);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(deliverMock.mock.calls.length).toBeGreaterThan(3);
+      expect(suppressions()).toBe(1);
+
+      // Daemon restart: the persisted batch still names the logged hold.
+      await controller.stop();
+      const callsBeforeRestart = deliverMock.mock.calls.length;
+      controller = startConfiguredTriggers({ ...deps, bus: new EventBus() });
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(deliverMock.mock.calls.length).toBeGreaterThan(callsBeforeRestart);
+      expect(suppressions()).toBe(1);
+
+      // A new hold is a new instance: logged once more.
+      holdAt = "2026-03-18T10:30:00.000Z";
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(suppressions()).toBe(2);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("leaves the pending batch intact and logs a suppression event when delivery is rate limited", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",

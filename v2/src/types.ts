@@ -657,6 +657,8 @@ export interface PersistedPendingBatch {
   sourceId: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
+  /** Session hold (`submitUnconfirmedAt`) this batch already logged a suppression for. */
+  suppressedHoldAt?: string;
 }
 
 export interface SendBatchRetryEntry {

@@ -978,6 +978,13 @@ export class ForeignAgentProcessError extends Error {
 
 export class LaunchPromptPendingError extends Error {
   readonly statusCode = 409;
+  /** The hold that refused the send; absent when no hold is set. */
+  readonly submitUnconfirmedAt: string | undefined;
+
+  constructor(message: string, submitUnconfirmedAt?: string) {
+    super(message);
+    this.submitUnconfirmedAt = submitUnconfirmedAt;
+  }
 }
 
 export class WakeTargetMissingError extends Error {
@@ -12480,13 +12487,14 @@ export class SessionService {
         throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
       }
       // Classification clears the marker when the agent already took the prompt.
-      if (
-        submitPending(initialSession) &&
-        submitPending((await this.classifySessionRecord(initialSession)).session)
-      ) {
-        throw new LaunchPromptPendingError(
-          `Agent has not confirmed the last prompt: ${sessionId}. Submit it first.`,
-        );
+      if (submitPending(initialSession)) {
+        const held = (await this.classifySessionRecord(initialSession)).session;
+        if (submitPending(held)) {
+          throw new LaunchPromptPendingError(
+            `Agent has not confirmed the last prompt: ${sessionId}. Submit it first.`,
+            held.submitUnconfirmedAt,
+          );
+        }
       }
       const readySession = await this.ensureSessionReadyForSend(initialSession);
       let interrupt = options.interrupt === true;
