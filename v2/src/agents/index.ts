@@ -41,6 +41,7 @@ import {
   assertOpenCodeCompatibility,
   captureOpenCodeSubmitBaseline,
   findOpenCodeSessionId,
+  invalidateOpenCodeState,
   opencodeCommand,
   readOpenCodeConversation,
   scanOpenCodeForNewUserMessage,
@@ -223,6 +224,8 @@ interface AgentAdapter {
     ctx: AgentSubmitAckContext,
     persisted?: SubmitAckBaseline,
   ): Promise<SubmitAckBinding | null>;
+  /** Drops the agent's own cached state for a session after a pane write. */
+  invalidateState?(agentSessionId: string): void;
 }
 
 function claudePlanOptions(options?: AgentPlanOptions): {
@@ -617,6 +620,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
   },
   opencode: {
     command: opencodeCommand,
+    invalidateState: invalidateOpenCodeState,
     buildLaunchPlan: (prompt, options) => buildOpenCodePlan(prompt, openCodePlanOptions(options)),
     buildRestorePlan: (worktreePath, prompt, options) =>
       buildOpenCodeRestorePlan(worktreePath, prompt, openCodePlanOptions(options)),
@@ -821,6 +825,12 @@ export async function createAgentSubmitAckBinding(
     return null;
   }
   return adapter.submitAck(ctx);
+}
+
+// Only opencode caches its own state (the others read their transcript on
+// every classification); the session's cache there must not outlive a write.
+export function invalidateAgentState(agent: AgentName, agentSessionId?: string): void {
+  if (agentSessionId) agentAdapter(agent).invalidateState?.(agentSessionId);
 }
 
 // Rebinds a scan to a baseline persisted from an earlier binding of the same

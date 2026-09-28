@@ -27,6 +27,7 @@ import {
   DEFERRED_CONTROLS_ACK_WINDOW_MS,
   DEFERRED_CONTROLS_MAX_RESENDS,
   findAgentSessionId,
+  invalidateAgentState,
   parseAgentName,
   readAgentConversation,
   resumeAgentSubmitAckBinding,
@@ -12190,6 +12191,7 @@ export class SessionService {
           );
         }
         await sendSubmitKeyToTmux(session.tmuxSession);
+        this.recordPaneWrite(session);
       });
       this.logEvent("session.spawn.launch_submitted", {
         level: "info",
@@ -12214,6 +12216,16 @@ export class SessionService {
       throw new Error("optionIndex must be a non-negative integer");
     }
     await sendMenuSelectionKeys(session.tmuxSession, optionIndex);
+    this.recordPaneWrite(session);
+  }
+
+  // Every pane write that submits input to the agent: any state read before
+  // it (this service's classification cache, the agent's own state cache)
+  // predates the turn the write starts, so a queued message must never act on
+  // its "waiting".
+  private recordPaneWrite(session: Pick<SessionRecord, "id" | "agent" | "agentSessionId">): void {
+    this.stateCache.delete(session.id);
+    invalidateAgentState(session.agent, session.agentSessionId);
   }
 
   async deliver(
@@ -12763,6 +12775,7 @@ export class SessionService {
           })
         : null;
       await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+      this.recordPaneWrite(session);
       if (!binding) return "submitted" as const;
       // Bounded resend loop, short window on every agent: this callback holds
       // withPaneWriteLock, so a long window (claude/codex/opencode pacing is
@@ -12885,6 +12898,7 @@ export class SessionService {
       }
     }
     await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+    this.recordPaneWrite(session);
     options?.onPaneWritten?.(binding?.baseline ?? null);
     if (!binding) {
       return "submitted";
@@ -14834,6 +14848,7 @@ export class SessionService {
         await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
           agent: session.agent,
         });
+        this.recordPaneWrite(session);
       } else {
         // freshLaunch:true mirrors restore()'s equivalent call: it selects the
         // agent's launch-tuned ack pacing and — for agents with launch-send
@@ -15213,6 +15228,7 @@ export class SessionService {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
             agent: current.agent,
           });
+          this.recordPaneWrite(current);
         } else {
           // The fallback relaunched the agent instead of resuming it, so this is a
           // launch send with no transcript behind it, same as a spawn's. A resume

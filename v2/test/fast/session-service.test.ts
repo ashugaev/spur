@@ -96,6 +96,7 @@ const agentSubmitAckPacingMock = vi.fn();
 const agentHasLaunchSubmitAckMock = vi.fn();
 const createAgentSubmitAckBindingMock = vi.fn();
 const resumeAgentSubmitAckBindingMock = vi.fn();
+const invalidateAgentStateMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
 const captureOpenCodeSessionBaselineMock = vi.fn();
@@ -497,6 +498,7 @@ vi.mock("../../src/agents/index.js", () => ({
   agentHasLaunchSubmitAck: agentHasLaunchSubmitAckMock,
   createAgentSubmitAckBinding: createAgentSubmitAckBindingMock,
   resumeAgentSubmitAckBinding: resumeAgentSubmitAckBindingMock,
+  invalidateAgentState: invalidateAgentStateMock,
   parseAgentName: parseAgentNameMock,
   setupAgentHooks: setupAgentHooksMock,
 }));
@@ -10113,6 +10115,48 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(2, "api-1", "retry me", {
         agent: "claude",
+      });
+    });
+
+    it("never types a queued message into the turn a Send now just started, off a cached opencode 'waiting'", async () => {
+      agentStateStrategyMock.mockImplementation((agent: string) =>
+        agent === "opencode" ? "opencode" : "claude_jsonl",
+      );
+      // opencode's own state cache: filled on first read, emptied only by an
+      // invalidation or a TTL expiry.
+      let live: "waiting" | "working" = "waiting";
+      let cached: "waiting" | "working" | null = null;
+      readOpenCodeStateMock.mockImplementation(async () => {
+        cached ??= live;
+        return { state: cached, reason: "test" };
+      });
+      invalidateAgentStateMock.mockImplementation(() => {
+        cached = null;
+      });
+      // The Send now's pane write starts a turn.
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        if (message === "now") live = "working";
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ agent: "opencode", agentSessionId: "ses_1", launchCommand: "opencode" }),
+      );
+      const service = await liveService();
+
+      await service.send("api-1", { message: "now", queue: false, interrupt: true });
+      expect(invalidateAgentStateMock).toHaveBeenCalledWith("opencode", "ses_1");
+      await service.send("api-1", { message: "queued", queue: true });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual(["now"]);
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued"]);
+
+      // The turn finishes and the cache refreshes: the queued message follows.
+      live = "waiting";
+      cached = null;
+      await waitForRealTime(() => {
+        expect(typedMessages()).toEqual(["now", "queued"]);
       });
     });
 

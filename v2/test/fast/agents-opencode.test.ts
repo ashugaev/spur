@@ -8,6 +8,7 @@ import {
   readOpenCodeConversation,
   readOpenCodeJson,
   readOpenCodeState,
+  invalidateOpenCodeState,
   resetOpenCodeExportState,
   buildOpenCodePlan,
   buildOpenCodeConfig,
@@ -839,6 +840,40 @@ describe("OpenCode adapter", () => {
     afterEach(() => {
       resetOpenCodeExportState();
       vi.unstubAllEnvs();
+    });
+
+    it("drops a cached state on a pane write, and never caches a read that spans one", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const insert = database.prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)");
+      const completed = JSON.stringify({ role: "assistant", time: { completed: 1 } });
+      const user = JSON.stringify({ role: "user", time: { created: 1 } });
+      insert.run("msg_1", "ses_1", 100, completed);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("waiting");
+        // A Send now lands: the cached "waiting" must not survive it.
+        insert.run("msg_2", "ses_1", 200, user);
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("waiting");
+        invalidateOpenCodeState("ses_1");
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("working");
+
+        // A read started before a write returns to its caller but is not cached.
+        insert.run("msg_3", "ses_1", 300, completed);
+        invalidateOpenCodeState("ses_1");
+        const spanning = readOpenCodeState("ses_1");
+        invalidateOpenCodeState("ses_1");
+        expect((await spanning)?.state).toBe("waiting");
+        insert.run("msg_4", "ses_1", 400, user);
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("working");
+      } finally {
+        database.close();
+        await rm(dataHome, { recursive: true, force: true });
+      }
     });
 
     it("classifies from the session's last message row without spawning the CLI", async () => {

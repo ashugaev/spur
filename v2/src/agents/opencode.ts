@@ -633,11 +633,14 @@ type OpenCodeStateEntry = {
 };
 const openCodeStateCache = new Map<string, OpenCodeStateEntry>();
 const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredState | null>>();
+// Bumped per pane write (invalidateOpenCodeState); a read that spans a bump is not cached.
+const openCodeStateGeneration = new Map<string, number>();
 
 /** Drops every session's cached state and the export gate's counters. Test seam. */
 export function resetOpenCodeExportState(): void {
   openCodeStateCache.clear();
   openCodeStateInFlight.clear();
+  openCodeStateGeneration.clear();
   // The gate's counters are module state too. A slot still held when a test
   // ends shifts the peak concurrency every later test observes, so clear them
   // here as well — resuming queued waiters rather than dropping them, so a
@@ -724,8 +727,14 @@ export async function readOpenCodeState(
   })();
   openCodeStateInFlight.set(sessionId, pending);
   const startedAtMs = now;
+  const generation = openCodeStateGeneration.get(sessionId) ?? 0;
   try {
     const state = await pending;
+    // A pane write since this read started (invalidateOpenCodeState) makes
+    // its answer pre-write: return it to this caller, never cache it.
+    if ((openCodeStateGeneration.get(sessionId) ?? 0) !== generation) {
+      return state;
+    }
     openCodeStateCache.set(sessionId, {
       at: Date.now(),
       state,
@@ -744,8 +753,19 @@ export async function readOpenCodeState(
     }
     return state;
   } finally {
-    openCodeStateInFlight.delete(sessionId);
+    if (openCodeStateInFlight.get(sessionId) === pending) {
+      openCodeStateInFlight.delete(sessionId);
+    }
   }
+}
+
+// A message just typed into the session's pane: every cached or in-flight
+// state predates it, and a cached "waiting" would let a queued message type
+// straight into the turn the write started.
+export function invalidateOpenCodeState(sessionId: string): void {
+  openCodeStateCache.delete(sessionId);
+  openCodeStateInFlight.delete(sessionId);
+  openCodeStateGeneration.set(sessionId, (openCodeStateGeneration.get(sessionId) ?? 0) + 1);
 }
 
 // Same store and fallback contract as readOpenCodeLatestUserMessageFromDatabase:
