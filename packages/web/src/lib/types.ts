@@ -338,8 +338,8 @@ export interface SpurSessionView {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
-  /** Set while the agent has not confirmed the launch prompt; sends are held. */
-  launchUnconfirmedAt?: string;
+  /** Set while the agent has not confirmed the last prompt; sends are held. */
+  submitUnconfirmedAt?: string;
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -713,7 +713,7 @@ export interface DashboardSession {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
-  launchUnconfirmedAt?: string;
+  submitUnconfirmedAt?: string;
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -795,7 +795,7 @@ export function toDashboardSession(
     artifacts: session.artifacts ?? [],
     ...(session.artifactsTruncated ? { artifactsTruncated: true } : {}),
     queuedMessages,
-    ...(session.launchUnconfirmedAt ? { launchUnconfirmedAt: session.launchUnconfirmedAt } : {}),
+    ...(session.submitUnconfirmedAt ? { submitUnconfirmedAt: session.submitUnconfirmedAt } : {}),
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,

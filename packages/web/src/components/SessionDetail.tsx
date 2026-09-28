@@ -2491,9 +2491,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   // The daemon queues a send to a spawning session and refuses Send now (409).
   const sessionStarting = session?.status === "spawning";
-  // The daemon refuses every immediate send (409) while the launch prompt is
-  // pending; Queue stays, and PendingLaunchBanner submits the prompt.
-  const launchPending = Boolean(session?.launchUnconfirmedAt);
+  // The daemon refuses every immediate send (409) while the last prompt is
+  // unconfirmed; Queue stays, and PendingLaunchBanner submits the prompt.
+  const launchPending = Boolean(session?.submitUnconfirmedAt);
   const sendNowBlocked = sessionStarting || launchPending;
   const hasSession = Boolean(session);
   const faviconLinkRef = useRef<HTMLLinkElement | null>(null);

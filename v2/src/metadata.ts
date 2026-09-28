@@ -819,6 +819,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  // Records written before the rename carry the hold as launchUnconfirmedAt;
+  // read it once here so an existing hold survives, and write only the new name.
+  const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
+    .launchUnconfirmedAt;
+  const submitUnconfirmedAt =
+    normalizedSession.submitUnconfirmedAt ??
+    (typeof legacyUnconfirmed === "string" ? legacyUnconfirmed : undefined);
   const workspaceId = workspaceIdOf(normalizedSession);
   const closeoutOwner =
     typeof normalizedSession.closeoutOwner === "boolean"
@@ -884,9 +891,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),
-    ...(normalizedSession.launchUnconfirmedAt
-      ? { launchUnconfirmedAt: normalizedSession.launchUnconfirmedAt }
-      : {}),
+    ...(submitUnconfirmedAt ? { submitUnconfirmedAt } : {}),
     ...(normalizedSession.queuedMessageTyped &&
     typeof normalizedSession.queuedMessageTyped.message === "string" &&
     typeof normalizedSession.queuedMessageTyped.typedAt === "string"

@@ -10160,6 +10160,46 @@ describe("SessionService", () => {
       });
     });
 
+    it("holds every typed send after a Send now whose ack timed out on a live agent, until the transcript shows activity", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:00.000Z") });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: "/x.jsonl",
+      });
+
+      const sent = await service.send("api-1", { message: "now", queue: false });
+      expect(sent.submitUnconfirmedAt).toEqual(expect.any(String));
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.message.submit_unconfirmed",
+          sessionId: "api-1",
+        }),
+      );
+      await expect(service.send("api-1", { message: "again", queue: false })).rejects.toThrow(
+        /has not confirmed the last prompt/,
+      );
+      await service.send("api-1", { message: "queued", queue: true });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual(["now"]);
+
+      // The agent's transcript moves after the send: the hold clears.
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:05:01.000Z") });
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+      // Past the queued message's prompt grace (fake Date only, no ticks).
+      let now = Date.parse("2026-03-18T10:05:00.000Z");
+      await waitForRealTime(() => {
+        now += 30_000;
+        vi.setSystemTime(new Date(now));
+        expect(typedMessages()).toEqual(["now", "queued"]);
+      });
+    });
+
     it("re-arms the runner for a send that lands while a run is already exiting", async () => {
       mockClaudeJsonlState("waiting");
       const service = await liveService();
@@ -47254,7 +47294,7 @@ describe("SessionService", () => {
 
       expect(eventsNamed("session.spawn.launch_unconfirmed")).toHaveLength(1);
       expect(eventsNamed("session.submit.recovered")).toHaveLength(0);
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toEqual(expect.any(String));
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
       expect(tmuxTexts().filter((text) => text === "follow up")).toEqual([]);
       service.dispose();
     });
@@ -47282,7 +47322,7 @@ describe("SessionService", () => {
 
       expect(tmuxTexts().filter((text) => text === "follow up")).toEqual([]);
       expect(eventsNamed("session.spawn.launch_unconfirmed")).toHaveLength(1);
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toEqual(expect.any(String));
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
       const later = await service.send("api-1", { message: "sent later", queue: true });
       expect(later.queuedMessages?.messages).toEqual(["follow up", "sent later"]);
       expect(tmuxTexts().filter((text) => text === "sent later")).toEqual([]);
@@ -47292,7 +47332,7 @@ describe("SessionService", () => {
       const restarted = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       await vi.advanceTimersByTimeAsync(120_000);
       expect(tmuxTexts().filter((text) => text === "follow up")).toEqual([]);
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toEqual(expect.any(String));
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
 
       mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() });
       readAgentHookStateMock.mockReturnValue({
@@ -47305,7 +47345,7 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
       expect(tmuxTexts().filter((text) => text === "sent later")).toHaveLength(1);
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
       restarted.dispose();
     });
 
@@ -47339,7 +47379,7 @@ describe("SessionService", () => {
       sessions.set(
         "api-1",
         runningSession({
-          launchUnconfirmedAt: PENDING_LAUNCH_AT,
+          submitUnconfirmedAt: PENDING_LAUNCH_AT,
           queuedMessages: { messages: ["held"], awaitingPrompt: true },
           scheduledWake: { dueAt: "2026-03-18T11:00:00.000Z", message: "wake up" },
         }),
@@ -47362,13 +47402,13 @@ describe("SessionService", () => {
 
       expect(tmuxTexts()).toEqual([]);
       expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
       service.dispose();
     });
 
     it("sends no ToDo nudge while the launch prompt is pending", async () => {
       const sessions = createSessionStore();
-      const session = runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT });
+      const session = runningSession({ submitUnconfirmedAt: PENDING_LAUNCH_AT });
       sessions.set(session.id, session);
       mockClaudeJsonlState("waiting");
       await useRealTodoLedger();
@@ -47394,7 +47434,7 @@ describe("SessionService", () => {
       sessions.set(
         "api-1",
         runningSession({
-          launchUnconfirmedAt: PENDING_LAUNCH_AT,
+          submitUnconfirmedAt: PENDING_LAUNCH_AT,
           updatedAt: "2026-03-18T10:00:00.000Z",
           pipeline: {
             steps: ["research", "test"],
@@ -47414,32 +47454,32 @@ describe("SessionService", () => {
       await vi.waitFor(() => {
         expect(tmuxTexts().some((text) => text.includes("test"))).toBe(true);
       });
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
       service.dispose();
     });
 
     it("clears the pending-launch marker on the first transcript activity seen by any enrich", async () => {
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT }));
+      sessions.set("api-1", runningSession({ submitUnconfirmedAt: PENDING_LAUNCH_AT }));
       mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse(PENDING_LAUNCH_AT) - 1_000 });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
         deferBackgroundLoops: true,
       });
 
-      expect((await service.get("api-1")).launchUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+      expect((await service.get("api-1")).submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
       mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse(PENDING_LAUNCH_AT) + 1_000 });
       const view = await service.get("api-1");
-      expect(view.launchUnconfirmedAt).toBeUndefined();
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
-      expect(eventsNamed("session.spawn.launch_confirmed")).toHaveLength(1);
+      expect(view.submitUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+      expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
       service.dispose();
     });
 
     it("submits a pending launch prompt with the submit key, never by typing", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT }));
+      sessions.set("api-1", runningSession({ submitUnconfirmedAt: PENDING_LAUNCH_AT }));
       sessions.set("api-2", runningSession({ id: "api-2" }));
       const { SessionService, LaunchPromptPendingError, AgentExitedBeforeSendError } =
         await loadSessionServiceModule();
@@ -47467,10 +47507,10 @@ describe("SessionService", () => {
     it("drops the pending-launch marker on kill and on restore", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ launchUnconfirmedAt: PENDING_LAUNCH_AT }));
+      sessions.set("api-1", runningSession({ submitUnconfirmedAt: PENDING_LAUNCH_AT }));
       sessions.set(
         "api-2",
-        runningSession({ id: "api-2", status: "stopped", launchUnconfirmedAt: PENDING_LAUNCH_AT }),
+        runningSession({ id: "api-2", status: "stopped", submitUnconfirmedAt: PENDING_LAUNCH_AT }),
       );
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
@@ -47478,12 +47518,12 @@ describe("SessionService", () => {
       });
 
       await service.kill("api-1", { skipPrCheck: true, force: true });
-      expect(sessions.get("api-1")?.launchUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
 
       tmuxSessionExistsMock.mockResolvedValueOnce(false);
       await service.restore("api-2");
       expect(sessions.get("api-2")?.status).toBe("running");
-      expect(sessions.get("api-2")?.launchUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-2")?.submitUnconfirmedAt).toBeUndefined();
       service.dispose();
     });
 

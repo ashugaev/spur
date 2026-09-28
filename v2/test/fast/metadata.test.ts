@@ -1155,7 +1155,7 @@ describe("session metadata PR migration", () => {
     ]);
   });
 
-  it("keeps launchUnconfirmedAt across an unrelated later write and drops it once cleared", async () => {
+  it("keeps submitUnconfirmedAt across an unrelated later write and drops it once cleared", async () => {
     const dataDir = await newDataDir();
     writeSession(dataDir, {
       id: "api-1",
@@ -1170,18 +1170,43 @@ describe("session metadata PR migration", () => {
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
-      launchUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+      submitUnconfirmedAt: "2026-03-18T10:00:30.000Z",
     });
     const first = readSession(dataDir, "api-1");
     if (!first) throw new Error("record missing");
     writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
 
-    expect(readSession(dataDir, "api-1")?.launchUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
-    expect(listSessions(dataDir)[0]?.launchUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
 
-    const { launchUnconfirmedAt: _cleared, ...confirmed } = first;
+    const { submitUnconfirmedAt: _cleared, ...confirmed } = first;
     writeSession(dataDir, confirmed);
-    expect(readSession(dataDir, "api-1")?.launchUnconfirmedAt).toBeUndefined();
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBeUndefined();
+  });
+
+  it("migrates a hold persisted under the old launchUnconfirmedAt name, writing only the new one", async () => {
+    const dataDir = await newDataDir();
+    const legacy = {
+      id: "api-1",
+      project: "api",
+      agent: "codex" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      launchUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+    };
+    writeSession(dataDir, legacy as unknown as SessionRecord);
+
+    const migrated = readSession(dataDir, "api-1");
+    expect(migrated?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    expect(migrated).not.toHaveProperty("launchUnconfirmedAt");
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
   });
 
   it("keeps queuedMessageTyped across an unrelated later write and drops it once cleared", async () => {

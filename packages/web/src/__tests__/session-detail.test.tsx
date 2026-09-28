@@ -3286,7 +3286,7 @@ describe("SessionDetail voice input", () => {
               sessionFixture({
                 state: "waiting",
                 queuedMessages: { messages: ["Held follow-up"], awaitingPrompt: true },
-                ...(pending ? { launchUnconfirmedAt: "2026-04-02T10:00:05.000Z" } : {}),
+                ...(pending ? { submitUnconfirmedAt: "2026-04-02T10:00:05.000Z" } : {}),
               }),
             ),
             { status: 200 },
@@ -3317,7 +3317,7 @@ describe("SessionDetail voice input", () => {
       render(<SessionDetail sessionId="api-a1" />);
 
       expect(
-        await screen.findByText(/Agent has not confirmed the launch prompt/),
+        await screen.findByText(/Agent has not confirmed the last prompt/),
       ).toBeInTheDocument();
       const textarea = screen.getByPlaceholderText(/^Message\.\.\./);
       fireEvent.change(textarea, { target: { value: "Later" } });
@@ -3339,7 +3339,7 @@ describe("SessionDetail voice input", () => {
       const fetchMock = mockPendingLaunchFetch();
       render(<SessionDetail sessionId="api-a1" />);
 
-      fireEvent.click(await screen.findByRole("button", { name: "Submit launch prompt" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Submit prompt" }));
 
       await waitFor(() => {
         expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/launch/submit", {
@@ -3347,7 +3347,7 @@ describe("SessionDetail voice input", () => {
         });
       });
       await waitFor(() => {
-        expect(screen.queryByText(/Agent has not confirmed the launch prompt/)).toBeNull();
+        expect(screen.queryByText(/Agent has not confirmed the last prompt/)).toBeNull();
       });
       expect(
         fetchMock.mock.calls.some(([url]) => String(url) === "/api/sessions/api-a1/send"),

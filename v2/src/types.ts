@@ -1030,10 +1030,11 @@ export interface SessionRecord {
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   /**
-   * ISO time of a launch send whose submit never confirmed. Queued delivery
-   * holds while set; cleared on the first transcript activity after it.
+   * ISO time of a launch or Send now whose submit never confirmed. Every
+   * typed send holds while set; cleared on the first transcript activity
+   * after it. Read from the legacy `launchUnconfirmedAt` on older records.
    */
-  launchUnconfirmedAt?: string;
+  submitUnconfirmedAt?: string;
   /**
    * A queued message already typed into the pane (and so off the queue)
    * whose submit ack is still pending. `ackBaseline` is the ack scan's

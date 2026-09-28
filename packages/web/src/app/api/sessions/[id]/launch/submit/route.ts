@@ -15,7 +15,7 @@ export async function POST(_request: NextRequest, context: RouteContext) {
     );
     return NextResponse.json(await readResponsePayload(response), { status: response.status });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : "Failed to submit the launch prompt";
+    const msg = error instanceof Error ? error.message : "Failed to submit the prompt";
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }
