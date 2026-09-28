@@ -1051,9 +1051,10 @@ interface AgentMessageWriteOptions {
   interactive?: boolean;
   /**
    * Runs once the message and its submit key are in the pane, before the ack
-   * wait; gets the ack scan's baseline, null when the send waits on no ack.
+   * wait; gets the ack scan's baseline, null when the send waits on no ack,
+   * and the paste start time (after any interrupt), the unconfirmed-hold time.
    */
-  onPaneWritten?: (ackBaseline: SubmitAckBaseline | null) => void;
+  onPaneWritten?: (ackBaseline: SubmitAckBaseline | null, pastedAt: number) => void;
 }
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 
@@ -12503,9 +12504,16 @@ export class SessionService {
         interrupt = sendState !== "waiting";
       }
       let recovered: SubmitAckTimeoutError | null = null;
-      const sentAt = Date.now();
+      // Object, not a `let`: set inside the pane-write callback.
+      const pane: { pastedAt: number | null } = { pastedAt: null };
       try {
-        await this.sendAgentMessage(readySession, message, { interrupt, interactive });
+        await this.sendAgentMessage(readySession, message, {
+          interrupt,
+          interactive,
+          onPaneWritten: (_ackBaseline, pastedAt) => {
+            pane.pastedAt = pastedAt;
+          },
+        });
       } catch (error) {
         if (!interactive || !isRecoveredSubmitAckTimeout(error)) {
           throw error;
@@ -12515,7 +12523,7 @@ export class SessionService {
       const persisted = await this.commitDeliveredSend(
         sessionId,
         readySession,
-        recovered ? sentAt : null,
+        recovered ? (pane.pastedAt ?? Date.now()) : null,
       );
       if (recovered) {
         this.logEvent("session.message.delivery_recovered", {
@@ -12944,9 +12952,12 @@ export class SessionService {
           : `Agent process for ${session.id} is not running; message not sent`,
       );
     }
+    // After the interrupt and its settle: the interrupted turn's own record
+    // lands before this, so it never confirms the pasted text.
+    const pastedAt = Date.now();
     await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
     this.recordPaneWrite(session);
-    options?.onPaneWritten?.(binding?.baseline ?? null);
+    options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
     if (!binding) {
       return "submitted";
     }
@@ -16387,9 +16398,9 @@ export class SessionService {
     // flush would otherwise be erased by a blind whole-record write.
     // The persisted queuedMessageTyped marker covers a restart before the ack
     // (recoverTypedQueuedMessage).
-    const drain = (ackBaseline: SubmitAckBaseline | null): void => {
+    const drain = (ackBaseline: SubmitAckBaseline | null, pastedAt = Date.now()): void => {
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
-      const typedAt = nowIso();
+      const typedAt = new Date(pastedAt).toISOString();
       writeSession(
         this.config.dataDir,
         withQueuedMessages(

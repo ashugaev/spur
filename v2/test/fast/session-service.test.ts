@@ -10234,6 +10234,39 @@ describe("SessionService", () => {
       });
     });
 
+    it("stamps an unacked Send now's hold at the paste, so the interrupted turn's own record never clears it", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const t0 = Date.now();
+      mockClaudeJsonlState("working", { lastMtimeMs: t0 - 60_000 });
+      // The interrupt ends the running turn: the agent writes its record, then
+      // the settle passes before the paste.
+      sendInterruptKeysToTmuxMock.mockImplementation(async () => {
+        mockClaudeJsonlState("waiting", { lastMtimeMs: t0 + 100 });
+        vi.setSystemTime(new Date(t0 + 500));
+        return true;
+      });
+      const service = await liveService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: "/x.jsonl",
+      });
+
+      const sent = await service.send("api-1", {
+        message: "now",
+        queue: false,
+        interrupt: true,
+      });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sent.submitUnconfirmedAt).toBe(new Date(t0 + 500).toISOString());
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(new Date(t0 + 500).toISOString());
+
+      mockClaudeJsonlState("waiting", { lastMtimeMs: t0 + 1_000 });
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+    });
+
     it("holds the next queued message after a queued delivery whose ack timed out on a live agent, then types it once", async () => {
       mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:00.000Z") });
       const sessions = createSessionStore();
