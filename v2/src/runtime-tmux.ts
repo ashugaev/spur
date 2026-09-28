@@ -797,6 +797,21 @@ export interface TmuxProcessMatch {
 // same rationale as tmuxSessionExists's `fresh`: a session created after the
 // last fleet-pane snapshot is invisible to it until the cache naturally
 // expires, which would wrongly fail a post-create recovery/restore check.
+// Walks the parent chain from pid; true when it reaches one of the pane pids
+// (the pane pid itself counts). Bounded against a ps snapshot cycle.
+function descendsFromPane(
+  pid: number,
+  panePids: ReadonlySet<number>,
+  ppidByPid: ReadonlyMap<number, number>,
+): boolean {
+  let current: number | undefined = pid;
+  for (let depth = 0; current !== undefined && current > 1 && depth < 64; depth += 1) {
+    if (panePids.has(current)) return true;
+    current = ppidByPid.get(current);
+  }
+  return false;
+}
+
 export async function probeTmuxProcessMatch(
   sessionName: string,
   processMatchers: string[],
@@ -834,6 +849,7 @@ export async function probeTmuxProcessMatch(
         fgPgidByTty.set(row.tty, row.tpgid);
       }
     }
+    const ppidByPid = new Map(rows.map((row) => [row.pid, row.ppid]));
     for (const row of rows) {
       if (!ttySet.has(row.tty)) {
         continue;
@@ -845,6 +861,15 @@ export async function probeTmuxProcessMatch(
       // group (no pane-pid row, unparseable tpgid): name match alone.
       const fgPgid = fgPgidByTty.get(row.tty);
       if (fgPgid !== undefined && fgPgid > 0 && row.pgid !== fgPgid) {
+        continue;
+      }
+      // And only under the pane's own shell. When the wrapper dies, the
+      // orphaned binary keeps the job's process group, and the tty's
+      // foreground group stays that job until the shell takes the terminal
+      // back: it passed the check above while the pane already showed the
+      // shell, and a send typed into it. Reparented to init or a subreaper,
+      // it no longer descends from the pane pid.
+      if (panePids.size > 0 && !descendsFromPane(row.pid, panePids, ppidByPid)) {
         continue;
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {

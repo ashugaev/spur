@@ -1361,6 +1361,56 @@ describe("runtime-tmux", () => {
     expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
   });
 
+  it("reads a pane dead in the window before the shell takes the tty back from a dead codex wrapper", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The wrapper (pgid 2301303) is gone, but zsh has not reclaimed
+            // the terminal yet: the tty's foreground group is still the job's.
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            // The orphaned native binary keeps that pgid, so it passes the
+            // foreground check, but it was reparented to init.
+            "2301310 1 2301303 2301303 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
+  });
+
+  it("reads an agent reparented to a subreaper outside the pane as dead", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            // A user-level subreaper (systemd --user) adopted the orphan.
+            "1500 1 1500 -1 ? 9000 /usr/lib/systemd/systemd --user",
+            "2301310 1500 2301303 2301303 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
+  });
+
   it("keeps reading a foreground codex alive", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
