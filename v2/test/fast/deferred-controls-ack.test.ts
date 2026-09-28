@@ -412,6 +412,8 @@ vi.mock("../../src/claude-accounts.js", () => ({
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
   readCursorJsonlState: readCursorJsonlStateMock,
+  configureCursorTurnEndedStore: vi.fn(),
+  resolveCursorBuild: () => "test-build",
 }));
 
 vi.mock("../../src/agents/claude.js", async (importOriginal) => {

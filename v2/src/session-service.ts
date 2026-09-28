@@ -487,7 +487,13 @@ import {
   unfinishedTodo,
 } from "./todo.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
-import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
+import {
+  configureCursorTurnEndedStore,
+  readCursorJsonlState,
+  resolveCursorBuild,
+  type CursorJsonlReaderState,
+} from "./cursor-jsonl-state.js";
+import { resolveAgentExecutable } from "./agents/executable.js";
 import {
   formatNestedSidecarStartError,
   MAX_SIDECAR_DEPTH,
@@ -573,6 +579,7 @@ export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
 // Longest a queued send() waits for the delivery runner's pane write before
 // answering with the message still queued. Never covers the submit ack.
 export const QUEUED_SEND_PANE_WRITE_WAIT_MS = 3_000;
+const CURSOR_TURN_ENDED_STORE_FILE = "cursor-turn-ended.json";
 
 export function getIdleWaitBeforeFlushMs(): number {
   const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
@@ -3053,6 +3060,12 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    // Before any classification: a restart mid-command must already know
+    // whether this cursor build closes turns with turn_ended.
+    configureCursorTurnEndedStore(
+      join(this.config.dataDir, CURSOR_TURN_ENDED_STORE_FILE),
+      resolveCursorBuild(resolveAgentExecutable("cursor").path),
+    );
     this.applyConfig(scan.config, scan.configPaths);
     if (!options.deferBackgroundLoops) this.startBackgroundLoops();
   }

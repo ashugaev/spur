@@ -1,6 +1,7 @@
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { SessionState, TranscriptEntry } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
 import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
@@ -38,7 +39,8 @@ export interface CursorJsonlReaderState {
 // The file alone cannot prove it: every submit rewrites away the previous
 // turn_ended, so a transcript mid-command holds none. The marker is a property
 // of the installed cursor build, so any transcript on the host that ends in it
-// answers for all of them — which also covers a daemon restart mid-command.
+// answers for all of them; a daemon restart mid-command reads it back from the
+// on-disk store (configureCursorTurnEndedStore).
 let hostCursorWritesTurnEnded = false;
 let hostProbeAtMs = 0;
 const HOST_PROBE_INTERVAL_MS = 10 * 60_000;
@@ -47,11 +49,73 @@ const HOST_PROBE_TAIL_BYTES = 512;
 
 let hostProbeProjectsRoot: string | null = null;
 
+// The learned fact survives a daemon restart on disk, keyed by cursor build:
+// right after a restart mid-command the host probe can find no transcript
+// ending in turn_ended (every submit rewrites the marker away), the open turn
+// then read waiting, and a queued message typed into it. The probe only
+// covers the first learn for a build.
+let turnEndedStore: { filePath: string; build: string } | null = null;
+
+function readTurnEndedBuilds(filePath: string): Record<string, true> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(filePath, "utf8"));
+    const builds =
+      parsed !== null && typeof parsed === "object"
+        ? (parsed as { builds?: unknown }).builds
+        : undefined;
+    if (builds === null || typeof builds !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(builds).filter((entry): entry is [string, true] => entry[1] === true),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function learnHostCursorWritesTurnEnded(): void {
+  if (hostCursorWritesTurnEnded) return;
+  hostCursorWritesTurnEnded = true;
+  if (!turnEndedStore) return;
+  const builds = readTurnEndedBuilds(turnEndedStore.filePath);
+  builds[turnEndedStore.build] = true;
+  try {
+    mkdirSync(dirname(turnEndedStore.filePath), { recursive: true });
+    writeFileSync(turnEndedStore.filePath, `${JSON.stringify({ builds })}\n`, "utf8");
+  } catch {
+    // The in-memory fact still holds for this process.
+  }
+}
+
+/**
+ * Points the learned turn_ended fact at its on-disk store and loads it for
+ * `build` (the installed cursor build; "unknown" when it cannot be named).
+ */
+export function configureCursorTurnEndedStore(filePath: string, build: string): void {
+  turnEndedStore = { filePath, build };
+  if (readTurnEndedBuilds(filePath)[build]) hostCursorWritesTurnEnded = true;
+}
+
+/**
+ * The installed cursor build, from the versioned install path the launcher
+ * resolves to (`.../cursor-agent/versions/<build>/cursor-agent`).
+ */
+export function resolveCursorBuild(executablePath: string | null): string {
+  if (!executablePath) return "unknown";
+  try {
+    const resolved = realpathSync(executablePath);
+    const parent = dirname(resolved);
+    return basename(dirname(parent)) === "versions" ? basename(parent) : resolved;
+  } catch {
+    return "unknown";
+  }
+}
+
 /** Test seam: clears the learned flag and points the host probe at `projectsRoot`. */
 export function resetCursorTurnEndedProbe(projectsRoot: string | null = null): void {
   hostCursorWritesTurnEnded = false;
   hostProbeAtMs = 0;
   hostProbeProjectsRoot = projectsRoot;
+  turnEndedStore = null;
 }
 
 async function endsWithTurnEnded(filePath: string): Promise<boolean> {
@@ -98,7 +162,7 @@ async function cursorBuildWritesTurnEnded(projectsDir: string, nowMs: number): P
   for (const file of files.slice(0, HOST_PROBE_FILE_LIMIT)) {
     try {
       if (await endsWithTurnEnded(file.path)) {
-        hostCursorWritesTurnEnded = true;
+        learnHostCursorWritesTurnEnded();
         break;
       }
     } catch {
@@ -534,7 +598,7 @@ export async function readCursorJsonlState(
 
   const tailRecords = [...currentReader.tailRecords, ...stableRecords].slice(-TAIL_RECORD_LIMIT);
   const combined = [...tailRecords, ...trailingRecords].slice(-TAIL_RECORD_LIMIT);
-  if (turnEnded) hostCursorWritesTurnEnded = true;
+  if (turnEnded) learnHostCursorWritesTurnEnded();
   const nextReader: CursorJsonlReaderState = {
     filePath,
     lastOffset: readOffset + stableBytes,

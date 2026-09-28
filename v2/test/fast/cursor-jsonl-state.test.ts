@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { detectCursorRateLimit } from "../../src/rate-limit-detect.js";
 import {
   classifyCursorJsonlState,
+  configureCursorTurnEndedStore,
   CURSOR_JSONL_TOOL_USE_GRACE_MS,
   findCursorAckTranscriptFile,
   findLatestCursorTranscriptFile,
@@ -13,6 +14,7 @@ import {
   readCursorJsonlState,
   readCursorTranscriptEntries,
   resetCursorTurnEndedProbe,
+  resolveCursorBuild,
   resolveCursorPinnedTranscriptPath,
   toCursorProjectPath,
   type CursorParsedRecord,
@@ -630,6 +632,59 @@ describe("findLatestCursorTranscriptFile", () => {
 
     const state = await readCursorJsonlState(running, undefined, "chat");
     expect(state?.state).toBe("working");
+  });
+
+  // After a restart the host probe can find no transcript ending in
+  // turn_ended; the fact learned before the restart must come from disk.
+  it("remembers across a daemon restart that this cursor build writes turn_ended, per build", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "spur-cursor-store-"));
+    const storePath = join(storeDir, "cursor-turn-ended.json");
+    try {
+      configureCursorTurnEndedStore(storePath, "2026.09.26-dd393fe");
+      await writeProbeTranscript([
+        userLine,
+        assistantLine,
+        '{"type":"turn_ended","status":"success"}',
+      ]);
+      const first = await writeCursorChat("spur-cursor-jsonl-learn-", [userLine, assistantLine]);
+      expect((await readCursorJsonlState(first, undefined, "chat"))?.state).toBe("working");
+
+      // Restart: memory cleared, and the probe sees no closed transcript.
+      const emptyProbe = await mkdtemp(join(tmpdir(), "spur-cursor-probe-empty-"));
+      resetCursorTurnEndedProbe(emptyProbe);
+      configureCursorTurnEndedStore(storePath, "2026.09.26-dd393fe");
+      const running = await writeCursorChat("spur-cursor-jsonl-restart-", [
+        userLine,
+        assistantLine,
+      ]);
+      expect((await readCursorJsonlState(running, undefined, "chat"))?.state).toBe("working");
+
+      // Another cursor build learns for itself.
+      resetCursorTurnEndedProbe(emptyProbe);
+      configureCursorTurnEndedStore(storePath, "2026.10.01-aaaaaaa");
+      const other = await writeCursorChat("spur-cursor-jsonl-otherbuild-", [
+        userLine,
+        assistantLine,
+      ]);
+      expect((await readCursorJsonlState(other, undefined, "chat"))?.state).toBe("waiting");
+      await rm(emptyProbe, { recursive: true, force: true });
+    } finally {
+      await rm(storeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("names the cursor build from its versioned install path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-cursor-build-"));
+    try {
+      const binDir = join(root, "cursor-agent", "versions", "2026.09.26-dd393fe");
+      await mkdir(binDir, { recursive: true });
+      await writeFile(join(binDir, "cursor-agent"), "#!/bin/sh\n");
+      await symlink(join(binDir, "cursor-agent"), join(root, "agent"));
+      expect(resolveCursorBuild(join(root, "agent"))).toBe("2026.09.26-dd393fe");
+      expect(resolveCursorBuild(null)).toBe("unknown");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("stops reading an unclosed turn as working past the 15-minute tool-use grace", async () => {

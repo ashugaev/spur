@@ -352,6 +352,7 @@ function resetAccountStoreMocks(): void {
   swapSessionCredentialsMock.mockReset();
 }
 const readCursorJsonlStateMock = vi.fn();
+const configureCursorTurnEndedStoreMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
 const findLatestClaudeSessionFileMock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
@@ -451,6 +452,8 @@ vi.mock("../../src/claude-accounts.js", () => ({
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
   readCursorJsonlState: readCursorJsonlStateMock,
+  configureCursorTurnEndedStore: configureCursorTurnEndedStoreMock,
+  resolveCursorBuild: () => "test-build",
 }));
 
 vi.mock("../../src/agents/claude.js", async (importOriginal) => {
