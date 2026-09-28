@@ -116,15 +116,15 @@ Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 
 
 ## Events
 
-Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). Per-source control/thread support, retry/backoff, and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
 
 Event names by source:
 
 - `cron`: `cron:tick`.
-- `github`: `github:changes_requested`, `ci_failed`, `comment`, `merge_conflict`, `review_requested`, `ready_for_review`, `approved`, `merged`, `closed`, `work_item.new` (with `query`). PR URLs seed the native `session.pr` binding; other review URLs go to `slots.links`.
+- `github`: `github:changes_requested`, `ci_failed`, `comment`, `merge_conflict`, `review_requested`, `ready_for_review`, `approved`, `merged`, `closed`, `work_item.new` (with `query`). PR URLs seed the native `session.pr` binding; other review URLs go to `slots.links`. `work_item.new` spawn-prompt template: `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
-- `jira`: `jira:work_item.new` (with `query`; else connection-only, backs `projects.<id>.backlog`).
+- `jira`: `jira:work_item.new` (with `query`; else connection-only, backs `projects.<id>.backlog`). Template: `{{key}}` plus inherited `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>`.
 - `telegram`: `telegram:message`. Voice-note transcription: [voice.md](voice.md#telegram-voice-notes).

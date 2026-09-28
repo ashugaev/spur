@@ -14,7 +14,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## gc
 
-`spur gc [--execute --no-sizes --limit <n>]` reclaims stale worktrees, archives terminal session records. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
+`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
 
 ## disk
 
@@ -36,13 +36,17 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 `daemon start|stop|restart` refuse a non-default `--config` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`). Auto-start forks a detached daemon unless `$SPUR_SESSION`/`$SPUR_SIDECAR_NAME` is set or `$SPUR_DISABLE_AUTOSTART=1`. Registry: [config registry](configuration.md#config-registry).
 
+## init
+
+`spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs the `spur-daemon`/`spur-web` systemd user units and starts them. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup.
+
 ## spawn
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> ...]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]
 ```
 
-Empty `[prompt...]` runs default `spawn.steps`. Modes: [configuration.md#modes](configuration.md#modes).
+Empty `[prompt...]` runs default `spawn.steps`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. Modes: [configuration.md#modes](configuration.md#modes).
 
 ## shepherd, wake
 
@@ -52,7 +56,12 @@ Empty `[prompt...]` runs default `spawn.steps`. Modes: [configuration.md#modes](
 
 `spur list [--json]` reads `GET /sessions` ([daemon-api.md#session-routes](daemon-api.md#session-routes)). TTY: live selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill).
 
-`spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent), `spur respawn <sessionId>` (fresh id, no carryover).
+`spur pause <sessionId> [--json]` — keeps the worktree.
+`spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
+`spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
+`spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal.
+`spur respawn <sessionId> [--force] [--json]` (fresh id, no carryover).
+`spur handoff <sessionId> --agent <name> [--model <id>] [--notes <text>] [--json]` — hands off to another agent in the same workspace.
 
 ## todo
 
@@ -68,7 +77,7 @@ spur auto-ping list [--session <id>] [--json]
 spur auto-ping resume <suppressionId> [--session <id>] [--json]
 ```
 
-One scope flag required: `--event` (occurrence, 30d unredeemed / 24h post-work), `--thread` (provider thread), `--subscription` (route). `SPUR_SESSION` supplies the target inside a session; else pass `--session`. Error `grant_not_ready` means retry.
+One scope flag required: `--event` (one occurrence), `--thread` (provider thread), `--subscription` (route). Unredeemed handles expire after 30d; `--event` suppression lasts 24h post-work. `SPUR_SESSION` supplies the target inside a session; else pass `--session`. Error `grant_not_ready` means retry.
 
 Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source support: [configuration.md#events](configuration.md#events). Full rules: `v2/src/auto-ping.ts`.
 
@@ -82,11 +91,13 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 
 ## spur-slots
 
-`spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>` — session `PATH` helper for tmux title/links.
+`spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>`/`--unlink <label>`, `spur-slots --clear-title`, `spur-slots --tag <name>`/`--untag <name>`/`--list-tags` — session `PATH` helper for tmux title/links/tags.
+
+`spur actions [--session <id> | --global] [--limit <n>] [--json]` — logged mutating requests, one session or fleet-wide.
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
-`spur service run <id> --port <n> -- <command>` / `logs` / `status <id>` — session-bound tmux sidecar wrapper. `spur memory set|get|list|rm [key] [body] --scope task|project|global` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
+`spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` returns nothing today — no code path emits the `service.output`/`sidecar.output` events it filters on; read the tmux pane directly instead. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect.
 
@@ -96,9 +107,11 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 
 ## Sidecars
 
-Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
+Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
 
-Commands run through `sh -lc` (`dash` on Debian/Ubuntu, no `nvm`); use `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`.
+Commands run through `sh -lc` (`dash` on Debian/Ubuntu, no `nvm`); use `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A long-lived server must `exec` its process, or pid-based reaping misses it.
+
+Stop/`sidecar sweep` kill only the sidecar's own pane process tree; a detached resource (docker container, compose project) survives and is the sidecar's own job to tear down. Stop outcome: `reaped` (clean), `partial` (named survivor pids remain), `nothing-to-stop`.
 
 ### Built-in MCP sidecars
 

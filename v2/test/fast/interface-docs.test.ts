@@ -30,12 +30,17 @@ describe("published interface contracts", () => {
     expect(commands).toContain("spur auto-ping unsubscribe --event <handle>");
     expect(commands).toContain("spur auto-ping unsubscribe --thread <handle>");
     expect(commands).toContain("spur auto-ping unsubscribe --subscription <handle>");
-    expect(commands).toContain("`SPUR_SESSION` supplies the target inside a session");
+    expect(commands).toContain("SPUR_SESSION");
+    expect(commands).toContain("--session");
     expect(commands).toContain("grant_not_ready");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
+    expect(daemonApi).toMatch(/auto-ping-suppressions[^\n]*409/);
     expect(configuration).toContain("cron|github|github-ci|gitlab|jira|sentry|service|telegram");
+    expect(configuration).toMatch(
+      /github-ci[^\n]*no auto-ping controls|no auto-ping controls[^\n]*github-ci/,
+    );
     expect(agentSkill).toContain("Stop unwanted auto-pings with `spur auto-ping unsubscribe`");
     expect(agentSkill).toContain("Scopes and resume: `docs/commands.md#auto-ping`");
     expect(agentSkill).toContain("API: `docs/daemon-api.md`");
