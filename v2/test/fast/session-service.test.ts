@@ -10234,6 +10234,47 @@ describe("SessionService", () => {
       });
     });
 
+    it("holds the next queued message after a queued delivery whose ack timed out on a live agent, then types it once", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:00.000Z") });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: "/x.jsonl",
+      });
+
+      await service.send("api-1", { message: "first", queue: true });
+      await waitForRealTime(() => {
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
+      });
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "session.message.submit_unconfirmed",
+          sessionId: "api-1",
+        }),
+      );
+      // Counted as typed, not re-queued.
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      expect(sessions.get("api-1")?.queuedMessageTyped).toBeUndefined();
+      await service.send("api-1", { message: "second", queue: true });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual(["first"]);
+
+      // The agent's transcript moves after the typed message: the hold clears.
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:05:01.000Z") });
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+      let now = Date.parse("2026-03-18T10:05:00.000Z");
+      await waitForRealTime(() => {
+        now += 30_000;
+        vi.setSystemTime(new Date(now));
+        expect(typedMessages()).toEqual(["first", "second"]);
+      });
+    });
+
     it("re-arms the runner for a send that lands while a run is already exiting", async () => {
       mockClaudeJsonlState("waiting");
       const service = await liveService();
@@ -47374,12 +47415,24 @@ describe("SessionService", () => {
         updatedAt: new Date().toISOString(),
       });
       await vi.waitFor(() => {
+        expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+      });
+      // follow up's own ack times out on the live agent: it holds the next one.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
+      expect(tmuxTexts().filter((text) => text === "sent later")).toEqual([]);
+
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() });
+      readAgentHookStateMock.mockReturnValue({
+        state: "waiting",
+        updatedAt: new Date().toISOString(),
+      });
+      await vi.waitFor(() => {
         expect(tmuxTexts().filter((text) => text === "sent later")).toHaveLength(1);
       });
       await vi.advanceTimersByTimeAsync(60_000);
       expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
       expect(tmuxTexts().filter((text) => text === "sent later")).toHaveLength(1);
-      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
       restarted.dispose();
     });
 

@@ -12392,6 +12392,20 @@ export class SessionService {
   // `readySession` (taken before it): that read can be arbitrarily stale by
   // the time the send resolves, and blind-writing it would erase a
   // concurrent append or resurrect an already-drained message.
+  // An unacked write on a live agent may still sit in the composer: hold every
+  // pane writer, as for an unacked launch, until the transcript shows activity
+  // at or after sentAt; the banner's submit (Enter only) is the escape.
+  private withSubmitUnconfirmed(record: SessionRecord, sentAt: string): SessionRecord {
+    this.logEvent("session.message.submit_unconfirmed", {
+      level: "warn",
+      sessionId: record.id,
+      projectId: record.project,
+      message: `Sent a message to ${record.id} the agent has not confirmed; queued messages hold until the agent shows activity`,
+      details: { agent: record.agent },
+    });
+    return { ...record, submitUnconfirmedAt: sentAt };
+  }
+
   private async commitDeliveredSend(
     sessionId: string,
     readySession: SessionRecord,
@@ -12399,27 +12413,19 @@ export class SessionService {
   ): Promise<SessionRecord> {
     this.stateCache.delete(sessionId);
     const latest = readSession(this.config.dataDir, sessionId) ?? readySession;
-    const updated = withQueuedMessages(
+    const delivered = withQueuedMessages(
       {
         ...readySession,
         status: "running",
         updatedAt: nowIso(),
-        ...(unconfirmedSince !== null
-          ? { submitUnconfirmedAt: new Date(unconfirmedSince).toISOString() }
-          : {}),
       },
       queuedMessages(latest),
       latest.queuedMessages?.awaitingPrompt ?? false,
     );
-    if (unconfirmedSince !== null) {
-      this.logEvent("session.message.submit_unconfirmed", {
-        level: "warn",
-        sessionId,
-        projectId: readySession.project,
-        message: `Sent a message to ${sessionId} the agent has not confirmed; queued messages hold until the agent shows activity`,
-        details: { agent: readySession.agent },
-      });
-    }
+    const updated =
+      unconfirmedSince !== null
+        ? this.withSubmitUnconfirmed(delivered, new Date(unconfirmedSince).toISOString())
+        : delivered;
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     return persisted;
@@ -12498,9 +12504,6 @@ export class SessionService {
         }
         recovered = error;
       }
-      // An unacked write on a live agent may still sit in the composer: hold
-      // every pane writer, as for an unacked launch, until the transcript
-      // shows activity; the banner's submit (Enter only) is the escape.
       const persisted = await this.commitDeliveredSend(
         sessionId,
         readySession,
@@ -16427,8 +16430,11 @@ export class SessionService {
     // The drain above is already on disk, and the typed marker clears here:
     // captureAgentSessionId anchors its own internal write on a fresh
     // readSession and must never observe the pre-drain queue or the marker.
-    const { queuedMessageTyped: _acked, ...updated } =
+    const { queuedMessageTyped: typed, ...acked } =
       readSession(this.config.dataDir, sessionId) ?? session;
+    // Counted as typed, never re-queued (no duplicate): the hold keeps the
+    // next queued message's line clear off a prompt the agent never took.
+    const updated = recovered && typed ? this.withSubmitUnconfirmed(acked, typed.typedAt) : acked;
     writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
