@@ -189,18 +189,18 @@ describe("OpenCode adapter", () => {
       parseOpenCodeState({
         messages: [{ info: { role: "assistant", time: { completed: 123 } } }],
       }),
-    ).toEqual({ state: "waiting", reason: "assistant completed" });
+    ).toEqual({ state: "waiting", reason: "assistant completed", activityMs: 123 });
     expect(
       parseOpenCodeState({
         messages: [{ info: { role: "assistant", finish: "stop", time: { completed: 123 } } }],
       }),
-    ).toEqual({ state: "waiting", reason: "assistant completed" });
+    ).toEqual({ state: "waiting", reason: "assistant completed", activityMs: 123 });
     // A step that ended in tool calls leaves the turn running.
     expect(
       parseOpenCodeState({
         messages: [{ info: { role: "assistant", finish: "tool-calls", time: { completed: 123 } } }],
       }),
-    ).toEqual({ state: "working", reason: "assistant step ended in tool calls" });
+    ).toEqual({ state: "working", reason: "assistant step ended in tool calls", activityMs: 123 });
     expect(
       parseOpenCodeState({
         messages: [{ info: { role: "assistant", error: { name: "ApiError" } } }],
@@ -239,7 +239,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "waiting", reason: "assistant aborted" });
+    ).toEqual({ state: "waiting", reason: "assistant aborted", activityMs: 1787369901319 });
 
     // Rate limit takes priority over the abort classification.
     expect(
@@ -272,7 +272,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "error", reason: "assistant error" });
+    ).toEqual({ state: "error", reason: "assistant error", activityMs: 2 });
 
     // Near-miss on name: substring/case matches must NOT be treated as
     // aborted. The allowlist is exact-match only.
@@ -288,7 +288,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "error", reason: "assistant error" });
+    ).toEqual({ state: "error", reason: "assistant error", activityMs: 2 });
 
     // Near-miss on case: lower-cased name must NOT be treated as aborted.
     expect(
@@ -303,7 +303,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "error", reason: "assistant error" });
+    ).toEqual({ state: "error", reason: "assistant error", activityMs: 2 });
   });
 
   it("classifies real export shapes without inventing live-service state", () => {
@@ -416,9 +416,9 @@ describe("OpenCode adapter", () => {
         ]);
 
         expect(results).toEqual([
-          { state: "waiting", reason: "assistant completed" },
-          { state: "waiting", reason: "assistant completed" },
-          { state: "waiting", reason: "assistant completed" },
+          { state: "waiting", reason: "assistant completed", activityMs: 1 },
+          { state: "waiting", reason: "assistant completed", activityMs: 1 },
+          { state: "waiting", reason: "assistant completed", activityMs: 1 },
         ]);
         expect(await spawnCount(countPath)).toBe(1);
       } finally {
@@ -703,6 +703,7 @@ describe("OpenCode adapter", () => {
         expect(await readOpenCodeState("ses_ok")).toEqual({
           state: "waiting",
           reason: "assistant completed",
+          activityMs: 1,
         });
       } finally {
         await rm(failDir, { recursive: true, force: true });
@@ -941,14 +942,17 @@ describe("OpenCode adapter", () => {
         await expect(readOpenCodeState("ses_busy")).resolves.toEqual({
           state: "working",
           reason: "last role=user",
+          activityMs: 200,
         });
         await expect(readOpenCodeState("ses_idle")).resolves.toEqual({
           state: "waiting",
           reason: "assistant completed",
+          activityMs: 150,
         });
         await expect(readOpenCodeState("ses_tools")).resolves.toEqual({
           state: "working",
           reason: "assistant step ended in tool calls",
+          activityMs: 150,
         });
         await expect(readOpenCodeState("ses_none")).resolves.toBeNull();
         await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();

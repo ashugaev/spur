@@ -10275,6 +10275,55 @@ describe("SessionService", () => {
       });
     });
 
+    it("clears an opencode queued-delivery hold on later DB activity, then types the next message once", async () => {
+      agentStateStrategyMock.mockImplementation((agent: string) =>
+        agent === "opencode" ? "opencode" : "claude_jsonl",
+      );
+      agentWaitsForSubmitAckMock.mockImplementation((agent: string) => agent === "opencode");
+      createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+        agent === "opencode" ? { scan: vi.fn() } : null,
+      );
+      readOpenCodeStateMock.mockResolvedValue({
+        state: "waiting",
+        reason: "assistant completed",
+        activityMs: Date.parse("2026-03-18T10:04:00.000Z"),
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ agent: "opencode", agentSessionId: "ses_1", launchCommand: "opencode" }),
+      );
+      const service = await liveService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: null,
+      });
+
+      await service.send("api-1", { message: "first", queue: true });
+      await waitForRealTime(() => {
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toEqual(expect.any(String));
+      });
+      await service.send("api-1", { message: "second", queue: true });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual(["first"]);
+
+      // opencode.db records a message after the typed one: the hold clears.
+      readOpenCodeStateMock.mockResolvedValue({
+        state: "waiting",
+        reason: "assistant completed",
+        activityMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      });
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+      let now = Date.parse("2026-03-18T10:05:00.000Z");
+      await waitForRealTime(() => {
+        now += 30_000;
+        vi.setSystemTime(new Date(now));
+        expect(typedMessages()).toEqual(["first", "second"]);
+      });
+    });
+
     it("re-arms the runner for a send that lands while a run is already exiting", async () => {
       mockClaudeJsonlState("waiting");
       const service = await liveService();
@@ -47560,6 +47609,100 @@ describe("SessionService", () => {
       expect(view.submitUnconfirmedAt).toBeUndefined();
       expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
       expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
+      service.dispose();
+    });
+
+    // Every agent's classify path must set agentActivityAt: the hold clears
+    // only on it, and an agent that never sets it blocks the session for good.
+    function mockAgentActivity(agent: "claude" | "codex" | "cursor" | "opencode", atMs: number) {
+      agentStateStrategyMock.mockImplementation((name: string) =>
+        name === "codex"
+          ? "hook"
+          : name === "cursor"
+            ? "cursor_jsonl"
+            : name === "opencode"
+              ? "opencode"
+              : "claude_jsonl",
+      );
+      if (agent === "codex") {
+        readAgentHookStateMock.mockReturnValue({
+          state: "waiting",
+          updatedAt: new Date(atMs).toISOString(),
+        });
+      } else if (agent === "cursor") {
+        mockCursorJsonlState("waiting", { lastMtimeMs: atMs });
+      } else if (agent === "opencode") {
+        readOpenCodeStateMock.mockResolvedValue({
+          state: "waiting",
+          reason: "assistant completed",
+          activityMs: atMs,
+        });
+      } else {
+        mockClaudeJsonlState("waiting", { lastMtimeMs: atMs });
+      }
+    }
+
+    const agentLaunchCommands = {
+      claude: "claude --dangerously-skip-permissions",
+      codex: "codex --dangerously-bypass-approvals-and-sandbox",
+      cursor: "cursor-agent",
+      opencode: "opencode",
+    } as const;
+
+    it.each(["claude", "codex", "cursor", "opencode"] as const)(
+      "clears the unconfirmed-prompt hold on %s transcript activity after it, not before",
+      async (agent) => {
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            agent,
+            launchCommand: agentLaunchCommands[agent],
+            agentSessionId: "ses_1",
+            submitUnconfirmedAt: PENDING_LAUNCH_AT,
+          }),
+        );
+        mockAgentActivity(agent, Date.parse(PENDING_LAUNCH_AT) - 1_000);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+
+        expect((await service.get("api-1")).submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        mockAgentActivity(agent, Date.parse(PENDING_LAUNCH_AT) + 1_000);
+        expect((await service.get("api-1")).submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
+        service.dispose();
+      },
+    );
+
+    it("clears an opencode hold after the Submit prompt escape once the DB shows activity", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "opencode",
+          launchCommand: "opencode",
+          agentSessionId: "ses_1",
+          submitUnconfirmedAt: PENDING_LAUNCH_AT,
+        }),
+      );
+      mockAgentActivity("opencode", Date.parse(PENDING_LAUNCH_AT) - 1_000);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      await service.submitPendingLaunch("api-1");
+      expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+      expect(tmuxTexts()).toEqual([]);
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+
+      // The Enter reached opencode: its DB records the turn.
+      mockAgentActivity("opencode", Date.parse(PENDING_LAUNCH_AT) + 1_000);
+      expect((await service.get("api-1")).submitUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
       service.dispose();
     });
 

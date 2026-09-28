@@ -18195,6 +18195,10 @@ export class SessionService {
         );
         state = structuredState?.state ?? "working";
         stateSource = "jsonl";
+        agentActivityAt =
+          structuredState?.activityMs !== undefined
+            ? activityAtFromMs(structuredState.activityMs)
+            : null;
         classifiedDetail = structuredState
           ? `State: ${state} (opencode export, ${structuredState.reason})`
           : "State: working (opencode export unavailable)";

@@ -346,6 +346,8 @@ export function parseOpenCodeExport(value: unknown): TranscriptEntry[] {
 export interface OpenCodeStructuredState {
   state: "working" | "waiting" | "needs_input" | "rate_limited" | "error";
   reason: string;
+  /** Last message's time.completed, else time.created (epoch ms); absent when it carries neither. */
+  activityMs?: number;
 }
 
 function errorText(value: unknown): string {
@@ -375,12 +377,27 @@ function isAbortedError(value: unknown): boolean {
   return typeof name === "string" && OPENCODE_ABORTED_ERROR_NAMES.has(name);
 }
 
+function messageActivityMs(record: Record<string, unknown>): number | undefined {
+  const time = record["time"];
+  if (!isRecord(time)) return undefined;
+  const completed = time["completed"];
+  if (typeof completed === "number") return completed;
+  const created = time["created"];
+  return typeof created === "number" ? created : undefined;
+}
+
 export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | null {
   const messages = openCodeMessages(value);
   if (messages.length === 0) return null;
   const last = messages.at(-1);
   const record = last ? messageInfo(last) : null;
   if (!record) return null;
+  const state = classifyOpenCodeMessage(record);
+  const activityMs = messageActivityMs(record);
+  return state && activityMs !== undefined ? { ...state, activityMs } : state;
+}
+
+function classifyOpenCodeMessage(record: Record<string, unknown>): OpenCodeStructuredState | null {
   if (record["role"] === "user") {
     return { state: "working", reason: "last role=user" };
   }
