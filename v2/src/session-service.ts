@@ -12911,25 +12911,27 @@ export class SessionService {
         })
       : null;
     const startedAt = Date.now();
-    if (
+    const interrupted =
       options?.interrupt === true &&
-      (await sendInterruptKeysToTmux(session.tmuxSession, session.agent))
-    ) {
-      // fresh:true — the interrupt key is exactly what can end the agent, and a
-      // cached "alive" would paste the message into the pane's shell.
-      const alive = await agentProcessAlive(
-        {
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-          launchCommand: session.launchCommand,
-        },
-        { fresh: true },
+      (await sendInterruptKeysToTmux(session.tmuxSession, session.agent));
+    // Checked right before every paste, fresh:true: the interrupt key can end
+    // the agent, and an agent whose wrapper just died leaves the pane at the
+    // shell prompt while the session still reads running. A cached "alive"
+    // would paste the message into the shell.
+    const alive = await agentProcessAlive(
+      {
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: session.launchCommand,
+      },
+      { fresh: true },
+    );
+    if (!alive) {
+      throw new AgentExitedBeforeSendError(
+        interrupted
+          ? `Agent process for ${session.id} exited after the interrupt; message not sent`
+          : `Agent process for ${session.id} is not running; message not sent`,
       );
-      if (!alive) {
-        throw new AgentExitedBeforeSendError(
-          `Agent process for ${session.id} exited after the interrupt; message not sent`,
-        );
-      }
     }
     await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
     this.recordPaneWrite(session);

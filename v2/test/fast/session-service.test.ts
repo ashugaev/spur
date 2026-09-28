@@ -6877,9 +6877,9 @@ describe("SessionService", () => {
 
     expect(waitForAckMock).toHaveBeenCalledTimes(13);
     // Pins the knownDead reuse from the other side: a LIVE mid-loop probe must
-    // never be cached, so this live-but-unacked run makes 12 mid-loop probes
-    // (one per resend) plus the final post-loop probe — 13 total, never 12.
-    expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(13);
+    // never be cached, so this live-but-unacked run makes the pre-paste probe,
+    // 12 mid-loop probes (one per resend) and the final post-loop probe — 14.
+    expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(14);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -6903,6 +6903,32 @@ describe("SessionService", () => {
 
   // AC6: a genuinely dead cursor agent fails fast — one window, no resends,
   // driven by the mid-loop fresh:true liveness probe (change d).
+  it("never pastes when the agent is already gone at send time, even without an interrupt", async () => {
+    // A codex wrapper that just died: the session still reads running, the
+    // pane already shows the shell.
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    const { SessionService, AgentExitedBeforeSendError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "echo typed-into-zsh",
+      ),
+    ).rejects.toBeInstanceOf(AgentExitedBeforeSendError);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(isProcessRunningInTmuxMock).toHaveBeenCalledWith("api-1", expect.any(Array), {
+      fresh: true,
+    });
+  });
+
   it("fails fast for a dead cursor agent instead of exhausting all 13 windows", async () => {
     const cursorScanMock = vi
       .fn()
@@ -6910,7 +6936,8 @@ describe("SessionService", () => {
     createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
       agent === "cursor" ? { scan: cursorScanMock } : null,
     );
-    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    // Alive at the pre-paste check, dead from the first mid-loop probe on.
+    isProcessRunningInTmuxMock.mockResolvedValueOnce(true).mockResolvedValue(false);
 
     const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -6934,13 +6961,13 @@ describe("SessionService", () => {
 
     expect(waitForAckMock).toHaveBeenCalledTimes(1);
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
-    expect(isProcessRunningInTmuxMock).toHaveBeenNthCalledWith(1, "api-1", expect.any(Array), {
+    expect(isProcessRunningInTmuxMock).toHaveBeenNthCalledWith(2, "api-1", expect.any(Array), {
       fresh: true,
     });
-    // Pins the knownDead reuse: exactly one probe total, never a second
-    // post-loop re-probe. The dangerous inverse — caching a LIVE result — is
-    // pinned separately by the 13-count assertion in the recovery case above.
-    expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(1);
+    // Pins the knownDead reuse: the pre-paste probe and one mid-loop probe,
+    // never a second post-loop re-probe. The dangerous inverse — caching a
+    // LIVE result — is pinned separately by the 14-count assertion above.
+    expect(isProcessRunningInTmuxMock).toHaveBeenCalledTimes(2);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -6967,7 +6994,8 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     service.dispose();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
-    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    // Alive at the pre-paste check, dead after.
+    isProcessRunningInTmuxMock.mockResolvedValueOnce(true).mockResolvedValue(false);
     const waitForAckMock = vi
       .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
       .mockResolvedValue({ found: false, lastScannedFile: "/some/file.jsonl" });
@@ -7233,7 +7261,8 @@ describe("SessionService", () => {
     createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
       agent === "claude" ? { scan: vi.fn() } : null,
     );
-    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    // Alive at the pre-paste check, gone by the end of the ack window.
+    isProcessRunningInTmuxMock.mockResolvedValueOnce(true).mockResolvedValue(false);
 
     const service = await createDisposedSessionService();
     vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
@@ -9073,6 +9102,8 @@ describe("SessionService", () => {
     // before the drain even started.
     isProcessRunningInTmuxMock
       .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      // The pre-paste check.
       .mockResolvedValueOnce(true)
       .mockResolvedValue(false);
     vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
@@ -47574,7 +47605,8 @@ describe("SessionService", () => {
       mockClaudeJsonlState("waiting");
       createSessionStore();
       scanCodexRolloutForMessageMock.mockResolvedValue({ found: false, lastScannedFile: null });
-      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      // Alive at the pre-paste check, gone after.
+      isProcessRunningInTmuxMock.mockResolvedValueOnce(true).mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
